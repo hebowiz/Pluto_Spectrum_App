@@ -21,6 +21,21 @@ PLUTO_MIN_CENTER_FREQ_MHZ = 325.0
 PLUTO_MAX_CENTER_FREQ_MHZ = 3800.0
 MIN_SPAN_MHZ = 0.001
 MIN_RBW_KHZ = 0.0
+PLOT_WIDTH = 920
+PLOT_HEIGHT = 320
+PLOT_SPACING = 12
+DUAL_PLOT_TOTAL_HEIGHT = PLOT_HEIGHT * 2 + PLOT_SPACING
+CONTROL_PANEL_WIDTH = 240
+WINDOW_WIDTH = 1216
+WINDOW_HEIGHT = 762
+DISPLAY_MODE_WATERFALL_SPECTRUM = "Waterfall + Spectrum"
+DISPLAY_MODE_WATERFALL_ONLY = "Waterfall only"
+DISPLAY_MODE_SPECTRUM_ONLY = "Spectrum only"
+DISPLAY_MODE_OPTIONS = [
+    DISPLAY_MODE_WATERFALL_SPECTRUM,
+    DISPLAY_MODE_WATERFALL_ONLY,
+    DISPLAY_MODE_SPECTRUM_ONLY,
+]
 
 
 class FrequencyAxisItem(pg.AxisItem):
@@ -57,9 +72,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.receiver = receiver
         self.processor = processor
         self.calibration_offset_db = calibration_offset_db
+        self.display_mode = DISPLAY_MODE_WATERFALL_SPECTRUM
 
         self.setWindowTitle("PlutoSDR Real-Time Spectrum Prototype")
-        self.resize(1280, 800)
+        self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
 
         self.frame_count_total = 0
         self.frame_count_interval = 0
@@ -73,15 +89,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_received_samples_total = 0
         self.received_samples_interval = 0
 
+        self.y_min = -100
+        self.y_max = 0
+
         wf_width = len(self.processor.get_decimated_display_freq_axis_ghz())
         self.waterfall_buffer = np.full(
             (self.config.waterfall_history, wf_width),
-            0.0,
+            self.y_min,
             dtype=np.float32,
         )
-
-        self.y_min = -100
-        self.y_max = 0
 
         self.frame_period_s = (
             self.config.update_interval_ms / 1000.0
@@ -97,9 +113,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         outer_layout = QtWidgets.QHBoxLayout(central)
+        outer_layout.setContentsMargins(12, 12, 12, 12)
+        outer_layout.setSpacing(12)
 
         left_panel = QtWidgets.QWidget()
+        left_panel.setFixedWidth(PLOT_WIDTH)
+        self.left_panel = left_panel
         layout = QtWidgets.QVBoxLayout(left_panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(PLOT_SPACING)
 
         self.status_label = QtWidgets.QLabel()
         self.status_label.setStyleSheet("color: white; background-color: black;")
@@ -112,12 +134,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 avg_capture_ratio=0.0,
             )
         )
+        self.status_label.setFixedWidth(PLOT_WIDTH)
         layout.addWidget(self.status_label)
 
         pg.setConfigOptions(antialias=False)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        layout.addWidget(splitter)
 
         self.waterfall_plot = pg.PlotWidget(
             axisItems={
@@ -135,6 +155,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.waterfall_plot.getViewBox().invertY(True)
         self.waterfall_plot.getAxis("left").setPen("w")
         self.waterfall_plot.getAxis("bottom").setPen("w")
+        self.waterfall_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
 
         self.waterfall_img = pg.ImageItem()
         self.waterfall_plot.addItem(self.waterfall_img)
@@ -177,7 +198,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.waterfall_img.setLookupTable(lut)
         self.waterfall_img.setLevels((self.y_min, self.y_max))
 
-        splitter.addWidget(self.waterfall_plot)
+        layout.addWidget(self.waterfall_plot)
 
         self.spectrum_plot = pg.PlotWidget(
             axisItems={"bottom": FrequencyAxisItem(orientation="bottom")}
@@ -191,6 +212,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.spectrum_plot.setLabel("bottom", "Frequency [GHz]")
         self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
+        self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
 
         freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
         self.spectrum_plot.setXRange(
@@ -213,15 +235,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.peak_text = pg.TextItem(color="w", anchor=(0, 1))
         self.spectrum_plot.addItem(self.peak_text)
 
-        splitter.addWidget(self.spectrum_plot)
-        splitter.setSizes([500, 300])
+        layout.addWidget(self.spectrum_plot)
+        self._apply_display_mode()
 
         outer_layout.addWidget(left_panel, stretch=1)
         outer_layout.addWidget(self._build_control_panel())
 
     def _build_control_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QFrame()
-        panel.setFixedWidth(240)
+        panel.setFixedWidth(CONTROL_PANEL_WIDTH)
         panel.setStyleSheet(
             "QFrame { background-color: #1c1c1c; }"
             "QGroupBox { color: white; border: 1px solid #555; margin-top: 12px; }"
@@ -392,11 +414,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.receiver.stop()
 
     def _on_view_display_clicked(self) -> None:
-        QtWidgets.QMessageBox.information(
+        mode, accepted = QtWidgets.QInputDialog.getItem(
             self,
             "View / Display",
-            "Display settings panel is reserved for future expansion.",
+            "Display Mode",
+            DISPLAY_MODE_OPTIONS,
+            current=DISPLAY_MODE_OPTIONS.index(self.display_mode),
+            editable=False,
         )
+        if not accepted:
+            return
+
+        self.display_mode = mode
+        self._apply_display_mode()
 
     def _rebuild_receiver_and_processor(self) -> None:
         self.timer.stop()
@@ -424,7 +454,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         wf_width = len(freq_axis_display_ghz_dec)
         self.waterfall_buffer = np.full(
             (self.config.waterfall_history, wf_width),
-            0.0,
+            self.y_min,
             dtype=np.float32,
         )
 
@@ -462,6 +492,27 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.setYRange(self.y_min, self.y_max, padding=Y_AXIS_PADDING)
         self.waterfall_img.setLevels((self.y_min, self.y_max))
         self._update_fixed_ticks()
+
+    def _apply_display_mode(self) -> None:
+        if self.display_mode == DISPLAY_MODE_WATERFALL_ONLY:
+            self.waterfall_plot.setFixedSize(PLOT_WIDTH, DUAL_PLOT_TOTAL_HEIGHT)
+            self.waterfall_plot.show()
+            self.spectrum_plot.hide()
+        elif self.display_mode == DISPLAY_MODE_SPECTRUM_ONLY:
+            self.spectrum_plot.setFixedSize(PLOT_WIDTH, DUAL_PLOT_TOTAL_HEIGHT)
+            self.spectrum_plot.show()
+            self.waterfall_plot.hide()
+        else:
+            self.waterfall_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
+            self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
+            self.waterfall_plot.show()
+            self.spectrum_plot.show()
+            return
+
+        if self.display_mode != DISPLAY_MODE_WATERFALL_ONLY:
+            self.waterfall_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
+        if self.display_mode != DISPLAY_MODE_SPECTRUM_ONLY:
+            self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
 
     def _apply_center_frequency_update(self) -> None:
         freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
