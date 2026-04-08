@@ -13,6 +13,30 @@ from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.utils.calibration import apply_offset_db
 
+X_AXIS_PADDING = 0.02
+Y_AXIS_PADDING = 0.03
+LEFT_AXIS_WIDTH = 72
+BOTTOM_AXIS_HEIGHT = 42
+
+
+class FrequencyAxisItem(pg.AxisItem):
+    """Format frequency ticks with a fixed GHz precision."""
+
+    def tickStrings(self, values, scale, spacing):
+        return [f"{value:.3f}" for value in values]
+
+
+class WaterfallTimeAxisItem(pg.AxisItem):
+    """Show elapsed time labels with 0 at the bottom of the waterfall."""
+
+    def __init__(self, time_span_fn, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._time_span_fn = time_span_fn
+
+    def tickStrings(self, values, scale, spacing):
+        time_span_s = self._time_span_fn()
+        return [f"{max(0.0, time_span_s - value):.1f}" for value in values]
+
 
 class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     """Own GUI construction and rendering only."""
@@ -22,7 +46,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         config: SpectrumConfig,
         receiver: PlutoReceiver,
         processor: SpectrumProcessor,
-        calibration_offset_db: float = 0.0,
+        calibration_offset_db: float,
     ) -> None:
         super().__init__()
         self.config = config
@@ -52,8 +76,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             dtype=np.float32,
         )
 
-        self.y_min = 0.0
-        self.y_max = 140.0
+        self.y_min = -100
+        self.y_max = 0
 
         self.frame_period_s = (
             self.config.update_interval_ms / 1000.0
@@ -88,11 +112,22 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         layout.addWidget(splitter)
 
-        self.waterfall_plot = pg.PlotWidget()
+        self.waterfall_plot = pg.PlotWidget(
+            axisItems={
+                "bottom": FrequencyAxisItem(orientation="bottom"),
+                "left": WaterfallTimeAxisItem(
+                    lambda: self.waterfall_time_span_s,
+                    orientation="left",
+                ),
+            }
+        )
         self.waterfall_plot.setBackground("k")
+        self._configure_plot_chrome(self.waterfall_plot)
         self.waterfall_plot.setLabel("bottom", "Frequency [GHz]")
         self.waterfall_plot.setLabel("left", "Time [s]")
         self.waterfall_plot.getViewBox().invertY(True)
+        self.waterfall_plot.getAxis("left").setPen("w")
+        self.waterfall_plot.getAxis("bottom").setPen("w")
 
         self.waterfall_img = pg.ImageItem()
         self.waterfall_plot.addItem(self.waterfall_img)
@@ -116,32 +151,48 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
         )
 
-        self.waterfall_plot.setXRange(x_min, x_max, padding=0.0)
+        self.waterfall_plot.setXRange(x_min, x_max, padding=X_AXIS_PADDING)
         self.waterfall_plot.setYRange(0.0, self.waterfall_time_span_s, padding=0.0)
 
-        lut = pg.colormap.get("viridis").getLookupTable()
+        lut = pg.ColorMap(
+            pos=np.array([0.0, 0.25, 0.5, 0.75, 1.0]),
+            color=np.array(
+                [
+                    [0, 0, 128, 255],
+                    [0, 255, 255, 255],
+                    [0, 255, 0, 255],
+                    [255, 255, 0, 255],
+                    [255, 0, 0, 255],
+                ],
+                dtype=np.ubyte,
+            ),
+        ).getLookupTable(0.0, 1.0, 256)
         self.waterfall_img.setLookupTable(lut)
         self.waterfall_img.setLevels((self.y_min, self.y_max))
 
         splitter.addWidget(self.waterfall_plot)
 
-        self.spectrum_plot = pg.PlotWidget()
+        self.spectrum_plot = pg.PlotWidget(
+            axisItems={"bottom": FrequencyAxisItem(orientation="bottom")}
+        )
         self.spectrum_plot.setBackground("k")
+        self._configure_plot_chrome(self.spectrum_plot)
         self.spectrum_plot.showGrid(x=True, y=True, alpha=0.2)
 
         self.spectrum_plot.getAxis("left").setPen("w")
         self.spectrum_plot.getAxis("bottom").setPen("w")
 
         self.spectrum_plot.setLabel("bottom", "Frequency [GHz]")
-        self.spectrum_plot.setLabel("left", "Amplitude [dB]")
+        self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
 
         freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
         self.spectrum_plot.setXRange(
             freq_axis_display_ghz[0],
             freq_axis_display_ghz[-1],
-            padding=0.0,
+            padding=X_AXIS_PADDING,
         )
-        self.spectrum_plot.setYRange(self.y_min, self.y_max)
+        self.spectrum_plot.setYRange(self.y_min, self.y_max, padding=Y_AXIS_PADDING)
+        self._update_fixed_ticks()
 
         self.spectrum_curve = self.spectrum_plot.plot(
             freq_axis_display_ghz,
@@ -157,6 +208,28 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         splitter.addWidget(self.spectrum_plot)
         splitter.setSizes([500, 300])
+
+    def _configure_plot_chrome(self, plot_widget: pg.PlotWidget) -> None:
+        plot_item = plot_widget.getPlotItem()
+        plot_item.layout.setContentsMargins(12, 8, 12, 8)
+        plot_widget.getViewBox().setDefaultPadding(0.0)
+        plot_item.getAxis("bottom").setStyle(autoExpandTextSpace=True, tickTextOffset=8)
+        plot_item.getAxis("left").setStyle(autoExpandTextSpace=True, tickTextOffset=8)
+        plot_item.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
+        plot_item.getAxis("bottom").setHeight(BOTTOM_AXIS_HEIGHT)
+
+    def _update_fixed_ticks(self) -> None:
+        freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
+        x_min = freq_axis_display_ghz[0]
+        x_max = freq_axis_display_ghz[-1]
+
+        x_ticks = [(value, f"{value:.3f}") for value in np.linspace(x_min, x_max, 11)]
+        y_ticks = [
+            (value, f"{value:.0f}") for value in np.linspace(self.y_min, self.y_max, 11)
+        ]
+
+        self.spectrum_plot.getAxis("bottom").setTicks([x_ticks])
+        self.spectrum_plot.getAxis("left").setTicks([y_ticks])
 
     def _build_timer(self) -> None:
         self.timer = QtCore.QTimer(self)

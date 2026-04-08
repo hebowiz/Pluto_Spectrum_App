@@ -1,6 +1,7 @@
 """Spectrum analyzer configuration."""
 
 from dataclasses import dataclass
+from typing import Optional
 
 MAX_DISPLAY_SPAN_HZ = 55_000_000
 
@@ -10,9 +11,11 @@ class SpectrumConfig:
     """Configuration values migrated from the prototype."""
 
     center_freq_hz: int = 2_440_000_000
-    display_span_hz: int = 40_000_000
+    display_span_hz: int = 20_000_000
     guard_ratio: float = 0.04
-    fft_size: int = 8192
+    fft_size: int = 2048
+    rbw_hz: Optional[float] = 1e+6
+    calibration_offset_db: float = -72.0
     rx_gain_db: int = 40
     update_interval_ms: int = 0
     waterfall_history: int = 300
@@ -37,3 +40,7 @@ class SpectrumConfig:
     @property
     def rx_buffer_size(self) -> int:
         return self.fft_size
+
+    @property
+    def bin_width_hz(self) -> float:
+        return self.sample_rate_hz / self.fft_size

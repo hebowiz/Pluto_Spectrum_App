@@ -17,7 +17,12 @@ def build_app_components() -> tuple[
     config = SpectrumConfig()
     receiver = PlutoReceiver(config)
     processor = SpectrumProcessor(config)
-    window = RealtimeSpectrumWindow(config, receiver, processor, calibration_offset_db=0.0)
+    window = RealtimeSpectrumWindow(
+        config,
+        receiver,
+        processor,
+        calibration_offset_db=config.calibration_offset_db,
+    )
     return config, receiver, processor, window
 
 
