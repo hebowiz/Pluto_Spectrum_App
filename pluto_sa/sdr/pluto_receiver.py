@@ -17,25 +17,31 @@ class PlutoReceiver:
     def __init__(self, config: SpectrumConfig) -> None:
         self.config = config
         self.sdr = adi.Pluto()
-
-        self.sdr.rx_lo = config.center_freq_hz
-        self.sdr.sample_rate = config.sample_rate_hz
-        self.sdr.rx_rf_bandwidth = config.rx_bandwidth_hz
-        self.sdr.rx_buffer_size = config.rx_buffer_size
-        self.sdr.gain_control_mode_chan0 = "manual"
-        self.sdr.rx_hardwaregain_chan0 = config.rx_gain_db
-
         self._iq_lock = threading.Lock()
+        self._sdr_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._rx_thread = None
 
+        self.received_samples_total = 0
+        self._configure_sdr(config)
+        self._allocate_capture_buffers(config)
+
+    def _configure_sdr(self, config: SpectrumConfig) -> None:
+        self.config = config
+        with self._sdr_lock:
+            self.sdr.rx_lo = config.center_freq_hz
+            self.sdr.sample_rate = config.sample_rate_hz
+            self.sdr.rx_rf_bandwidth = config.rx_bandwidth_hz
+            self.sdr.rx_buffer_size = config.rx_buffer_size
+            self.sdr.gain_control_mode_chan0 = "manual"
+            self.sdr.rx_hardwaregain_chan0 = config.rx_gain_db
+
+    def _allocate_capture_buffers(self, config: SpectrumConfig) -> None:
         self._capture_block_size = config.rx_buffer_size
         self._capture_buffer_size = config.rx_buffer_size * config.capture_buffer_blocks
         self._iq_ring_buffer = np.zeros(self._capture_buffer_size, dtype=np.complex64)
         self._write_index = 0
         self._stored_samples = 0
-
-        self.received_samples_total = 0
 
     def start(self) -> None:
         if self._rx_thread is not None and self._rx_thread.is_alive():
@@ -78,13 +84,42 @@ class PlutoReceiver:
     def get_received_sample_count(self) -> int:
         return self.received_samples_total
 
+    def retune_lo(self, center_freq_hz: int) -> None:
+        with self._iq_lock:
+            with self._sdr_lock:
+                self.sdr.rx_lo = center_freq_hz
+            self.config.center_freq_hz = center_freq_hz
+
+    def reconfigure_span(self, config: SpectrumConfig) -> None:
+        with self._iq_lock:
+            with self._sdr_lock:
+                self.config = config
+                self.sdr.sample_rate = config.sample_rate_hz
+                self.sdr.rx_rf_bandwidth = config.rx_bandwidth_hz
+                self.sdr.rx_buffer_size = config.rx_buffer_size
+            self._allocate_capture_buffers(config)
+            self.received_samples_total = 0
+
+    def reconfigure(self, config: SpectrumConfig) -> None:
+        was_running = self._rx_thread is not None and self._rx_thread.is_alive()
+        self.stop()
+
+        with self._iq_lock:
+            self._configure_sdr(config)
+            self._allocate_capture_buffers(config)
+            self.received_samples_total = 0
+
+        if was_running:
+            self.start()
+
     def close(self) -> None:
         self.stop()
         del self.sdr
 
     def _rx_worker(self) -> None:
         while not self._stop_event.is_set():
-            iq = self.sdr.rx().astype(np.complex64, copy=False)
+            with self._sdr_lock:
+                iq = self.sdr.rx().astype(np.complex64, copy=False)
             n = len(iq)
 
             with self._iq_lock:

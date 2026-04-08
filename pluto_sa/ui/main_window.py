@@ -17,6 +17,10 @@ X_AXIS_PADDING = 0.02
 Y_AXIS_PADDING = 0.03
 LEFT_AXIS_WIDTH = 72
 BOTTOM_AXIS_HEIGHT = 42
+PLUTO_MIN_CENTER_FREQ_MHZ = 325.0
+PLUTO_MAX_CENTER_FREQ_MHZ = 3800.0
+MIN_SPAN_MHZ = 0.001
+MIN_RBW_KHZ = 0.0
 
 
 class FrequencyAxisItem(pg.AxisItem):
@@ -92,7 +96,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
+        outer_layout = QtWidgets.QHBoxLayout(central)
+
+        left_panel = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(left_panel)
 
         self.status_label = QtWidgets.QLabel()
         self.status_label.setStyleSheet("color: white; background-color: black;")
@@ -209,6 +216,66 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         splitter.addWidget(self.spectrum_plot)
         splitter.setSizes([500, 300])
 
+        outer_layout.addWidget(left_panel, stretch=1)
+        outer_layout.addWidget(self._build_control_panel())
+
+    def _build_control_panel(self) -> QtWidgets.QWidget:
+        panel = QtWidgets.QFrame()
+        panel.setFixedWidth(240)
+        panel.setStyleSheet(
+            "QFrame { background-color: #1c1c1c; }"
+            "QGroupBox { color: white; border: 1px solid #555; margin-top: 12px; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
+            "QPushButton { background-color: #303030; color: white; border: 1px solid #666; padding: 8px; }"
+            "QPushButton:hover { background-color: #3c3c3c; }"
+        )
+        panel_layout = QtWidgets.QVBoxLayout(panel)
+        panel_layout.setContentsMargins(10, 10, 10, 10)
+        panel_layout.setSpacing(10)
+
+        analyzer_group = QtWidgets.QGroupBox("Analyzer Setup")
+        analyzer_layout = QtWidgets.QVBoxLayout(analyzer_group)
+        self.freq_button = self._make_control_button("FREQ Channel")
+        self.span_button = self._make_control_button("SPAN X Scale")
+        self.rbw_button = self._make_control_button("RBW")
+        self.amplitude_button = self._make_control_button("AMPTD Y Scale")
+        analyzer_layout.addWidget(self.freq_button)
+        analyzer_layout.addWidget(self.span_button)
+        analyzer_layout.addWidget(self.rbw_button)
+        analyzer_layout.addWidget(self.amplitude_button)
+
+        sweep_group = QtWidgets.QGroupBox("Sweep Control")
+        sweep_layout = QtWidgets.QVBoxLayout(sweep_group)
+        self.start_button = self._make_control_button("Start")
+        self.stop_button = self._make_control_button("Stop")
+        sweep_layout.addWidget(self.start_button)
+        sweep_layout.addWidget(self.stop_button)
+
+        display_group = QtWidgets.QGroupBox("Display")
+        display_layout = QtWidgets.QVBoxLayout(display_group)
+        self.display_button = self._make_control_button("View / Display")
+        display_layout.addWidget(self.display_button)
+
+        panel_layout.addWidget(analyzer_group)
+        panel_layout.addWidget(sweep_group)
+        panel_layout.addWidget(display_group)
+        panel_layout.addStretch(1)
+
+        self.freq_button.clicked.connect(self._on_freq_channel_clicked)
+        self.span_button.clicked.connect(self._on_span_x_scale_clicked)
+        self.rbw_button.clicked.connect(self._on_rbw_clicked)
+        self.amplitude_button.clicked.connect(self._on_amptd_y_scale_clicked)
+        self.start_button.clicked.connect(self._on_start_clicked)
+        self.stop_button.clicked.connect(self._on_stop_clicked)
+        self.display_button.clicked.connect(self._on_view_display_clicked)
+
+        return panel
+
+    def _make_control_button(self, text: str) -> QtWidgets.QPushButton:
+        button = QtWidgets.QPushButton(text)
+        button.setMinimumHeight(42)
+        return button
+
     def _configure_plot_chrome(self, plot_widget: pg.PlotWidget) -> None:
         plot_item = plot_widget.getPlotItem()
         plot_item.layout.setContentsMargins(12, 8, 12, 8)
@@ -230,6 +297,202 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.spectrum_plot.getAxis("bottom").setTicks([x_ticks])
         self.spectrum_plot.getAxis("left").setTicks([y_ticks])
+
+    def _on_freq_channel_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "FREQ Channel",
+            "Center Frequency [MHz]",
+            value=self.config.center_freq_hz / 1e6,
+            min=PLUTO_MIN_CENTER_FREQ_MHZ,
+            max=PLUTO_MAX_CENTER_FREQ_MHZ,
+            decimals=3,
+        )
+        if not accepted:
+            return
+
+        center_freq_hz = int(round(value * 1e6))
+        if center_freq_hz <= 0:
+            return
+
+        self.config.center_freq_hz = center_freq_hz
+        self.receiver.retune_lo(center_freq_hz)
+        self.processor.update_center_frequency(center_freq_hz)
+        self._apply_center_frequency_update()
+
+    def _on_span_x_scale_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "SPAN X Scale",
+            "Display Span [MHz]",
+            value=self.config.display_span_hz / 1e6,
+            min=MIN_SPAN_MHZ,
+            decimals=3,
+        )
+        if not accepted:
+            return
+
+        display_span_hz = int(round(value * 1e6))
+        if display_span_hz <= 0:
+            return
+
+        self.config.display_span_hz = display_span_hz
+        self.config.__post_init__()
+        self.receiver.reconfigure_span(self.config)
+        self.processor.update_span_related(self.config)
+        self._apply_span_update()
+
+    def _on_rbw_clicked(self) -> None:
+        current_value = 0.0 if self.config.rbw_hz is None else self.config.rbw_hz / 1e3
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "RBW",
+            "RBW [kHz] (0 = Auto/None)",
+            value=current_value,
+            min=MIN_RBW_KHZ,
+            decimals=3,
+        )
+        if not accepted:
+            return
+
+        self.config.rbw_hz = None if value <= 0.0 else float(value * 1e3)
+        self._rebuild_processor_only()
+
+    def _on_amptd_y_scale_clicked(self) -> None:
+        min_value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "AMPTD Y Scale",
+            "Y Min [dBm]",
+            value=float(self.y_min),
+            decimals=1,
+        )
+        if not accepted:
+            return
+
+        max_value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "AMPTD Y Scale",
+            "Y Max [dBm]",
+            value=float(self.y_max),
+            decimals=1,
+        )
+        if not accepted or max_value <= min_value:
+            return
+
+        self.y_min = min_value
+        self.y_max = max_value
+        self._apply_display_scale()
+
+    def _on_start_clicked(self) -> None:
+        self.receiver.start()
+        self.timer.start(self.config.update_interval_ms)
+
+    def _on_stop_clicked(self) -> None:
+        self.timer.stop()
+        self.receiver.stop()
+
+    def _on_view_display_clicked(self) -> None:
+        QtWidgets.QMessageBox.information(
+            self,
+            "View / Display",
+            "Display settings panel is reserved for future expansion.",
+        )
+
+    def _rebuild_receiver_and_processor(self) -> None:
+        self.timer.stop()
+        self.receiver.reconfigure(self.config)
+        self.processor = SpectrumProcessor(self.config)
+        self._last_received_samples_total = 0
+        self.received_samples_interval = 0
+        self._reset_plot_state()
+        self.timer.start(self.config.update_interval_ms)
+
+    def _rebuild_processor_only(self) -> None:
+        self.processor = SpectrumProcessor(self.config)
+        self._reset_plot_state()
+
+    def _reset_plot_state(self) -> None:
+        self.frame_period_s = (
+            self.config.update_interval_ms / 1000.0
+            if self.config.update_interval_ms > 0
+            else 1.0 / 60.0
+        )
+        self.waterfall_time_span_s = self.config.waterfall_history * self.frame_period_s
+
+        freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
+        freq_axis_display_ghz_dec = self.processor.get_decimated_display_freq_axis_ghz()
+        wf_width = len(freq_axis_display_ghz_dec)
+        self.waterfall_buffer = np.full(
+            (self.config.waterfall_history, wf_width),
+            0.0,
+            dtype=np.float32,
+        )
+
+        self.waterfall_img.setImage(
+            self.waterfall_buffer,
+            autoLevels=False,
+            axisOrder="row-major",
+        )
+        self.waterfall_img.setRect(
+            QtCore.QRectF(
+                freq_axis_display_ghz_dec[0],
+                0.0,
+                freq_axis_display_ghz_dec[-1] - freq_axis_display_ghz_dec[0],
+                self.waterfall_time_span_s,
+            )
+        )
+        self.waterfall_plot.setXRange(
+            freq_axis_display_ghz_dec[0],
+            freq_axis_display_ghz_dec[-1],
+            padding=X_AXIS_PADDING,
+        )
+        self.waterfall_plot.setYRange(0.0, self.waterfall_time_span_s, padding=0.0)
+
+        self.spectrum_curve.setData(freq_axis_display_ghz, np.zeros(len(freq_axis_display_ghz)))
+        self.spectrum_plot.setXRange(
+            freq_axis_display_ghz[0],
+            freq_axis_display_ghz[-1],
+            padding=X_AXIS_PADDING,
+        )
+        self._apply_display_scale()
+        self.peak_marker.setData([], [])
+        self.peak_text.setText("")
+
+    def _apply_display_scale(self) -> None:
+        self.spectrum_plot.setYRange(self.y_min, self.y_max, padding=Y_AXIS_PADDING)
+        self.waterfall_img.setLevels((self.y_min, self.y_max))
+        self._update_fixed_ticks()
+
+    def _apply_center_frequency_update(self) -> None:
+        freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
+        freq_axis_display_ghz_dec = self.processor.get_decimated_display_freq_axis_ghz()
+
+        self.waterfall_img.setRect(
+            QtCore.QRectF(
+                freq_axis_display_ghz_dec[0],
+                0.0,
+                freq_axis_display_ghz_dec[-1] - freq_axis_display_ghz_dec[0],
+                self.waterfall_time_span_s,
+            )
+        )
+        self.waterfall_plot.setXRange(
+            freq_axis_display_ghz_dec[0],
+            freq_axis_display_ghz_dec[-1],
+            padding=X_AXIS_PADDING,
+        )
+        self.spectrum_plot.setXRange(
+            freq_axis_display_ghz[0],
+            freq_axis_display_ghz[-1],
+            padding=X_AXIS_PADDING,
+        )
+        self._update_fixed_ticks()
+        self.peak_marker.setData([], [])
+        self.peak_text.setText("")
+
+    def _apply_span_update(self) -> None:
+        self._last_received_samples_total = 0
+        self.received_samples_interval = 0
+        self._reset_plot_state()
 
     def _build_timer(self) -> None:
         self.timer = QtCore.QTimer(self)
