@@ -15,6 +15,8 @@ from pluto_sa.config.spectrum_config import (
     MIN_INTERNAL_GAIN_DB,
     SpectrumConfig,
 )
+from pluto_sa.modes.analyzer_mode import AnalyzerMode
+from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.utils.calibration import apply_display_power_correction
@@ -116,14 +118,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         config: SpectrumConfig,
         receiver: PlutoReceiver,
         processor: SpectrumProcessor,
+        sweep_controller: SweepController,
         calibration_offset_db: float,
     ) -> None:
         super().__init__()
         self.config = config
         self.receiver = receiver
         self.processor = processor
+        self.sweep_controller = sweep_controller
         self.calibration_offset_db = calibration_offset_db
         self.graph_view_mode = GRAPH_VIEW_BOTH
+        self._saved_realtime_graph_view_mode = GRAPH_VIEW_BOTH
         self.sweep_state = SWEEP_STATE_RUNNING
 
         self.setWindowTitle("PlutoSDR Real-Time Spectrum Prototype")
@@ -203,10 +208,68 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._build_timer()
+        self._apply_analyzer_mode_ui_constraints()
 
     def _sync_amplitude_scale_from_config(self) -> None:
         self.y_max = self.config.y_max_dbm
         self.y_min = self.config.y_min_dbm
+
+    def _reset_all_measurement_state(
+        self,
+        *,
+        stop_receiver: bool = False,
+        stop_sweep: bool = True,
+        reset_markers: bool = False,
+    ) -> None:
+        if stop_receiver and hasattr(self, "timer"):
+            self.timer.stop()
+            self.receiver.stop()
+
+        if stop_sweep:
+            self.sweep_controller.stop()
+            self.sweep_controller.reset()
+
+        self.frame_count_interval = 0
+        self._last_received_samples_total = 0
+        self.received_samples_interval = 0
+        self.prev_frame_time = None
+        self.frame_dt_history.clear()
+        self._reset_trace_runtime_buffers()
+
+        if reset_markers:
+            for marker_state in self.marker_states:
+                marker_state.is_enabled = False
+                marker_state.continuous_peak_enabled = False
+            self._update_all_marker_control_states()
+
+        if hasattr(self, "waterfall_plot"):
+            self._reset_plot_state()
+
+    def _reset_measurement_state_for_mode_change(self) -> None:
+        self._reset_all_measurement_state(
+            stop_receiver=True,
+            stop_sweep=True,
+            reset_markers=True,
+        )
+
+    def _apply_analyzer_mode_ui_constraints(self) -> None:
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self._saved_realtime_graph_view_mode = self.graph_view_mode
+            self.graph_view_mode = GRAPH_VIEW_SPECTRUM_ONLY
+        elif self.graph_view_mode == GRAPH_VIEW_SPECTRUM_ONLY:
+            self.graph_view_mode = self._saved_realtime_graph_view_mode
+
+        if hasattr(self, "waterfall_plot"):
+            self._apply_display_mode()
+
+    def _change_analyzer_mode(self, analyzer_mode: AnalyzerMode) -> None:
+        if self.config.analyzer_mode == analyzer_mode:
+            return
+
+        self.config.analyzer_mode = analyzer_mode
+        self._reset_measurement_state_for_mode_change()
+        self._apply_analyzer_mode_ui_constraints()
+        self._refresh_status_label()
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -1286,7 +1349,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.timer.start(self.config.update_interval_ms)
 
     def _on_reset_clicked(self) -> None:
-        self._reset_plot_state()
+        self._reset_all_measurement_state(
+            stop_receiver=False,
+            stop_sweep=True,
+            reset_markers=False,
+        )
         self._refresh_status_label()
 
     def _select_graph_view(self, mode: str) -> None:
