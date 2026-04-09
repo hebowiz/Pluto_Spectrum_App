@@ -84,11 +84,12 @@ class PlutoReceiver:
     def get_received_sample_count(self) -> int:
         return self.received_samples_total
 
-    def retune_lo(self, center_freq_hz: int) -> None:
+    def retune_lo(self, center_freq_hz: int, *, update_config: bool = True) -> None:
         with self._iq_lock:
             with self._sdr_lock:
                 self.sdr.rx_lo = center_freq_hz
-            self.config.center_freq_hz = center_freq_hz
+            if update_config:
+                self.config.center_freq_hz = center_freq_hz
 
     def reconfigure_span(self, config: SpectrumConfig) -> None:
         with self._iq_lock:
@@ -99,6 +100,29 @@ class PlutoReceiver:
                 self.sdr.rx_buffer_size = config.rx_buffer_size
             self._allocate_capture_buffers(config)
             self.received_samples_total = 0
+
+    def configure_for_sweep(self, config: SpectrumConfig) -> None:
+        """Apply the fixed SDR settings required by Sweep SA."""
+        with self._iq_lock:
+            with self._sdr_lock:
+                self.config = config
+                self.sdr.sample_rate = config.sweep_sample_rate_hz
+                self.sdr.rx_rf_bandwidth = config.sweep_rf_bandwidth_hz
+                self.sdr.gain_control_mode_chan0 = "manual"
+                self.sdr.rx_hardwaregain_chan0 = config.rx_gain_db
+
+    def capture_block(self, num_samples: int) -> np.ndarray:
+        """Capture one IQ block without starting the streaming worker."""
+        capture_size = max(1, int(num_samples))
+
+        with self._iq_lock:
+            with self._sdr_lock:
+                if self.sdr.rx_buffer_size != capture_size:
+                    self.sdr.rx_buffer_size = capture_size
+                iq = self.sdr.rx().astype(np.complex64, copy=True)
+            self.received_samples_total += len(iq)
+
+        return iq
 
     def set_gain_db(self, gain_db: int) -> None:
         with self._iq_lock:

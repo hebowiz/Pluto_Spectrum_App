@@ -130,6 +130,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.graph_view_mode = GRAPH_VIEW_BOTH
         self._saved_realtime_graph_view_mode = GRAPH_VIEW_BOTH
         self.sweep_state = SWEEP_STATE_RUNNING
+        self._pending_sweep_marker_update = False
+        self._last_sweep_drawn_completed_points = -1
 
         self.setWindowTitle("PlutoSDR Real-Time Spectrum Prototype")
         self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -209,6 +211,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._build_timer()
+        self.sweep_controller.set_sweep_complete_callback(self._on_sweep_complete)
         self._apply_analyzer_mode_ui_constraints()
 
     def _sync_amplitude_scale_from_config(self) -> None:
@@ -229,6 +232,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if stop_sweep:
             self.sweep_controller.stop()
             self.sweep_controller.reset()
+            self._pending_sweep_marker_update = False
+            self._last_sweep_drawn_completed_points = -1
 
         self.frame_count_interval = 0
         self._last_received_samples_total = 0
@@ -1097,7 +1102,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         plot_item.getAxis("bottom").setHeight(BOTTOM_AXIS_HEIGHT)
 
     def _update_fixed_ticks(self) -> None:
-        freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
+        freq_axis_display_ghz = self._get_active_spectrum_freq_axis_ghz()
         x_min = freq_axis_display_ghz[0]
         x_max = freq_axis_display_ghz[-1]
 
@@ -1393,12 +1398,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _on_cont_clicked(self) -> None:
         self.sweep_state = SWEEP_STATE_RUNNING
-        self.receiver.start()
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self.receiver.stop()
+            self.sweep_controller.request_continuous()
+        else:
+            self.receiver.start()
         self.timer.start(self.config.update_interval_ms)
 
     def _on_single_clicked(self) -> None:
         self.sweep_state = SWEEP_STATE_SINGLE
-        self.receiver.start()
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self.receiver.stop()
+            self.sweep_controller.request_single()
+        else:
+            self.receiver.start()
         self.timer.start(self.config.update_interval_ms)
 
     def _on_reset_clicked(self) -> None:
@@ -1407,6 +1420,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             stop_sweep=True,
             reset_markers=False,
         )
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self.timer.stop()
+            self.sweep_state = SWEEP_STATE_STOPPED
         self._refresh_status_label()
 
     def _select_graph_view(self, mode: str) -> None:
@@ -1544,6 +1560,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for trace_state in self.trace_states:
             trace_state.max_hold_power = None
             trace_state.average_power = None
+
+    def _get_active_spectrum_freq_axis_ghz(self) -> np.ndarray:
+        if self._last_display_freq_axis_ghz is not None:
+            return self._last_display_freq_axis_ghz
+
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            return self.sweep_controller.get_sweep_frequency_axis_hz() / 1e9
+
+        return self.processor.get_display_freq_axis_ghz()
 
     def _update_trace_curves(self) -> None:
         if self._last_display_freq_axis_ghz is None:
@@ -1744,6 +1769,115 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._reset_trace_runtime_buffers()
         self._reset_plot_state()
 
+    def _on_sweep_complete(self, frame_result) -> None:
+        self._pending_sweep_marker_update = True
+
+    def _detect_peak_on_axis(
+        self,
+        freq_axis_ghz: np.ndarray,
+        power_db: np.ndarray,
+    ) -> tuple[float, float] | None:
+        if len(freq_axis_ghz) == 0 or len(power_db) == 0:
+            return None
+
+        valid_mask = np.isfinite(power_db)
+        if not np.any(valid_mask):
+            return None
+
+        valid_indices = np.flatnonzero(valid_mask)
+        peak_local_index = int(np.argmax(power_db[valid_mask]))
+        peak_index = int(valid_indices[peak_local_index])
+        return float(freq_axis_ghz[peak_index]), float(power_db[peak_index])
+
+    def _update_markers_for_completed_sweep(self) -> None:
+        if self._last_display_freq_axis_ghz is None:
+            return
+
+        for marker_state in self.marker_states:
+            if marker_state.is_enabled and marker_state.continuous_peak_enabled:
+                trace_db = self._select_marker_trace_db(marker_state)
+                if trace_db is None:
+                    continue
+                peak_result = self._detect_peak_on_axis(
+                    self._last_display_freq_axis_ghz,
+                    trace_db,
+                )
+                if peak_result is None:
+                    continue
+                marker_peak_freq_ghz, _marker_peak_val = peak_result
+                marker_state.frequency_hz = int(round(marker_peak_freq_ghz * 1e9))
+
+        self._update_marker_items()
+
+    def _update_traces_from_power_linear(self, power_linear_display: np.ndarray) -> None:
+        current_power_db_display = np.full(len(power_linear_display), np.nan, dtype=float)
+        valid_mask = np.isfinite(power_linear_display)
+        current_power_db_display[valid_mask] = 10.0 * np.log10(
+            power_linear_display[valid_mask] + 1e-20
+        )
+        current_display_db = apply_display_power_correction(
+            current_power_db_display,
+            self.calibration_offset_db,
+            self.config.input_correction_db,
+        )
+        self._last_current_display_db = current_display_db
+
+        for trace_state in self.trace_states:
+            if trace_state.hold_enabled:
+                continue
+
+            if trace_state.trace_type == TRACE_TYPE_MAX_HOLD:
+                if (
+                    trace_state.max_hold_power is None
+                    or len(trace_state.max_hold_power) != len(power_linear_display)
+                ):
+                    trace_state.max_hold_power = power_linear_display.copy()
+                else:
+                    update_mask = np.isfinite(power_linear_display)
+                    replace_mask = update_mask & ~np.isfinite(trace_state.max_hold_power)
+                    max_mask = (
+                        update_mask
+                        & np.isfinite(trace_state.max_hold_power)
+                        & (power_linear_display > trace_state.max_hold_power)
+                    )
+                    trace_state.max_hold_power[replace_mask] = power_linear_display[replace_mask]
+                    trace_state.max_hold_power[max_mask] = power_linear_display[max_mask]
+                trace_linear = trace_state.max_hold_power
+            elif trace_state.trace_type == TRACE_TYPE_AVERAGE:
+                alpha = 1.0 / max(1, trace_state.average_count)
+                if (
+                    trace_state.average_power is None
+                    or len(trace_state.average_power) != len(power_linear_display)
+                ):
+                    trace_state.average_power = power_linear_display.copy()
+                else:
+                    update_mask = np.isfinite(power_linear_display)
+                    init_mask = update_mask & ~np.isfinite(trace_state.average_power)
+                    trace_state.average_power[init_mask] = power_linear_display[init_mask]
+                    avg_mask = update_mask & np.isfinite(trace_state.average_power)
+                    trace_state.average_power[avg_mask] = (
+                        alpha * power_linear_display[avg_mask]
+                        + (1.0 - alpha) * trace_state.average_power[avg_mask]
+                    )
+                trace_linear = trace_state.average_power
+            else:
+                trace_linear = power_linear_display
+
+            trace_db = np.full(len(trace_linear), np.nan, dtype=float)
+            trace_valid_mask = np.isfinite(trace_linear)
+            trace_db[trace_valid_mask] = 10.0 * np.log10(trace_linear[trace_valid_mask] + 1e-20)
+            trace_state.display_db = apply_display_power_correction(
+                trace_db,
+                self.calibration_offset_db,
+                self.config.input_correction_db,
+            )
+
+        self._last_display_power_db = (
+            self.trace_states[0].display_db
+            if self.trace_states[0].display_db is not None
+            else current_display_db
+        )
+
     def _reset_plot_state(self) -> None:
         self.frame_period_s = (
             self.config.update_interval_ms / 1000.0
@@ -1752,7 +1886,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.waterfall_time_span_s = self.config.waterfall_history * self.frame_period_s
 
-        freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
+        freq_axis_display_ghz = (
+            self.sweep_controller.get_sweep_frequency_axis_hz() / 1e9
+            if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
+            else self.processor.get_display_freq_axis_ghz()
+        )
         freq_axis_display_ghz_dec = self.processor.get_decimated_display_freq_axis_ghz()
         wf_width = len(freq_axis_display_ghz_dec)
         self.waterfall_buffer = np.full(
@@ -1823,7 +1961,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
 
     def _apply_center_frequency_update(self) -> None:
-        freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
+        freq_axis_display_ghz = self._get_active_spectrum_freq_axis_ghz()
         freq_axis_display_ghz_dec = self.processor.get_decimated_display_freq_axis_ghz()
 
         self.waterfall_img.setRect(
@@ -1853,6 +1991,29 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_received_samples_total = 0
         self.received_samples_interval = 0
         self._reset_plot_state()
+
+    def _format_sweep_point_profile(
+        self,
+        point_result,
+        *,
+        ui_draw_ms: float,
+        redraw_performed: bool,
+        step_sweep_total_ms: float,
+    ) -> str:
+        return (
+            f"SweepPoint "
+            f"idx={self.sweep_controller.get_latest_result().completed_points} "
+            f"f={point_result.frequency_hz / 1e6:.6f}MHz "
+            f"retune={point_result.retune_ms:.2f}ms "
+            f"settle={point_result.settle_wait_ms:.2f}ms "
+            f"flush={point_result.flush_ms:.2f}ms "
+            f"capture={point_result.capture_ms:.2f}ms "
+            f"process={point_result.process_ms:.2f}ms "
+            f"step={point_result.step_total_ms:.2f}ms "
+            f"step+ctrl={step_sweep_total_ms:.2f}ms "
+            f"ui={ui_draw_ms:.2f}ms "
+            f"redraw={'Y' if redraw_performed else 'N'}"
+        )
 
     def _build_timer(self) -> None:
         self.timer = QtCore.QTimer(self)
@@ -1943,6 +2104,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return f"{value_hz:.0f} Hz"
 
     def update_spectrum(self) -> None:
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self._update_sweep_spectrum()
+            return
+
         now_frame = time.perf_counter()
 
         if self.prev_frame_time is not None:
@@ -1991,44 +2156,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_display_freq_axis_ghz = self.processor.get_display_freq_axis_ghz()
         self._last_current_display_db = current_display_db
 
-        for trace_state in self.trace_states:
-            if trace_state.hold_enabled:
-                continue
-
-            if trace_state.trace_type == TRACE_TYPE_MAX_HOLD:
-                if (
-                    trace_state.max_hold_power is None
-                    or len(trace_state.max_hold_power) != len(power_linear_display)
-                ):
-                    trace_state.max_hold_power = power_linear_display.copy()
-                else:
-                    trace_state.max_hold_power = np.maximum(
-                        trace_state.max_hold_power,
-                        power_linear_display,
-                    )
-                trace_linear = trace_state.max_hold_power
-            elif trace_state.trace_type == TRACE_TYPE_AVERAGE:
-                alpha = 1.0 / max(1, trace_state.average_count)
-                if (
-                    trace_state.average_power is None
-                    or len(trace_state.average_power) != len(power_linear_display)
-                ):
-                    trace_state.average_power = power_linear_display.copy()
-                else:
-                    trace_state.average_power = (
-                        alpha * power_linear_display
-                        + (1.0 - alpha) * trace_state.average_power
-                    )
-                trace_linear = trace_state.average_power
-            else:
-                trace_linear = power_linear_display
-
-            trace_db = 10.0 * np.log10(trace_linear + 1e-20)
-            trace_state.display_db = apply_display_power_correction(
-                trace_db,
-                self.calibration_offset_db,
-                self.config.input_correction_db,
-            )
+        self._update_traces_from_power_linear(power_linear_display)
 
         self._last_display_power_db = (
             self.trace_states[0].display_db
@@ -2092,6 +2220,73 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
             self.frame_count_interval = 0
             self.last_report_time = now
+
+    def _update_sweep_spectrum(self) -> None:
+        step_start = time.perf_counter()
+        frame_result = self.sweep_controller.step_sweep()
+        step_sweep_total_ms = (time.perf_counter() - step_start) * 1000.0
+        if frame_result.freq_axis_hz is None or frame_result.display_db is None:
+            return
+
+        sweep_freq_axis_ghz = frame_result.freq_axis_hz / 1e9
+        axis_changed = (
+            self._last_display_freq_axis_ghz is None
+            or len(self._last_display_freq_axis_ghz) != len(sweep_freq_axis_ghz)
+            or not np.array_equal(self._last_display_freq_axis_ghz, sweep_freq_axis_ghz)
+        )
+        if axis_changed:
+            self._last_display_freq_axis_ghz = sweep_freq_axis_ghz
+            self.spectrum_plot.setXRange(
+                sweep_freq_axis_ghz[0],
+                sweep_freq_axis_ghz[-1],
+                padding=X_AXIS_PADDING,
+            )
+            self._update_fixed_ticks()
+
+        completed_points = frame_result.completed_points
+        redraw_interval = max(1, int(self.config.sweep_ui_update_interval_points))
+        redraw_performed = (
+            completed_points != self._last_sweep_drawn_completed_points
+            and (
+                completed_points <= 1
+                or frame_result.sweep_complete
+                or (completed_points % redraw_interval == 0)
+            )
+        )
+
+        ui_draw_ms = 0.0
+        if redraw_performed:
+            ui_start = time.perf_counter()
+            self._last_display_freq_axis_ghz = sweep_freq_axis_ghz
+
+            power_linear_display = np.full(len(frame_result.display_db), np.nan, dtype=float)
+            valid_mask = np.isfinite(frame_result.display_db)
+            power_linear_display[valid_mask] = 10.0 ** (
+                frame_result.display_db[valid_mask] / 10.0
+            )
+            self._update_traces_from_power_linear(power_linear_display)
+            self._update_trace_curves()
+            self._last_sweep_drawn_completed_points = completed_points
+            ui_draw_ms = (time.perf_counter() - ui_start) * 1000.0
+
+        latest_point_result = self.sweep_controller.get_latest_point_result()
+        if self.config.sweep_profile_logging and latest_point_result is not None:
+            print(
+                self._format_sweep_point_profile(
+                    latest_point_result,
+                    ui_draw_ms=ui_draw_ms,
+                    redraw_performed=redraw_performed,
+                    step_sweep_total_ms=step_sweep_total_ms,
+                )
+            )
+
+        if frame_result.sweep_complete and self._pending_sweep_marker_update:
+            self._pending_sweep_marker_update = False
+            self._update_markers_for_completed_sweep()
+
+        if self.sweep_state == SWEEP_STATE_SINGLE and not self.sweep_controller.is_running():
+            self.timer.stop()
+            self.sweep_state = SWEEP_STATE_STOPPED
 
     def closeEvent(self, event) -> None:
         self.timer.stop()

@@ -45,6 +45,10 @@ class SpectrumConfig:
     sweep_time_ms: float = 100.0
     sweep_detector_mode: str = "Sample"
     sweep_lo_settle_us: int = 200
+    sweep_retune_flush_reads: int = 4
+    sweep_capture_samples_override: Optional[int] = 1024
+    sweep_ui_update_interval_points: int = 4
+    sweep_profile_logging: bool = True
     sweep_sample_rate_hz: int = 10_000_000
     sweep_rf_bandwidth_hz: int = 20_000_000
 
