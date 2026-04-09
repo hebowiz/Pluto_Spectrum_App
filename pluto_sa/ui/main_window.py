@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 import numpy as np
 import pyqtgraph as pg
@@ -53,6 +54,39 @@ GRAPH_VIEW_OPTIONS = [
 SWEEP_STATE_RUNNING = "running"
 SWEEP_STATE_SINGLE = "single"
 SWEEP_STATE_STOPPED = "stopped"
+TRACE_DISPLAY = "Display Trace"
+TRACE_TYPE_LIVE = "Live"
+TRACE_TYPE_MAX_HOLD = "Max Hold"
+TRACE_TYPE_AVERAGE = "Average"
+TRACE_TYPE_OPTIONS = [TRACE_TYPE_LIVE, TRACE_TYPE_MAX_HOLD, TRACE_TYPE_AVERAGE]
+TRACE_COLORS = ["#FFFC12", "#78FFEC", "#FC05FF", "#00FF07"]
+
+
+@dataclass
+class MarkerState:
+    """Persisted marker configuration for future multi-marker expansion."""
+
+    name: str
+    is_enabled: bool = False
+    trace_name: str = TRACE_DISPLAY
+    frequency_hz: int = 2_440_000_000
+    step_hz: int = 1_000_000
+    continuous_peak_enabled: bool = False
+
+
+@dataclass
+class TraceState:
+    """Persisted trace configuration and runtime buffers."""
+
+    name: str
+    color_hex: str
+    is_visible: bool = True
+    trace_type: str = TRACE_TYPE_LIVE
+    hold_enabled: bool = False
+    average_count: int = 10
+    display_db: np.ndarray | None = None
+    max_hold_power: np.ndarray | None = None
+    average_power: np.ndarray | None = None
 
 
 class FrequencyAxisItem(pg.AxisItem):
@@ -106,6 +140,27 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self._last_received_samples_total = 0
         self.received_samples_interval = 0
+        self._page_history: list[tuple[str, QtWidgets.QWidget]] = []
+        self.trace_states = [
+            TraceState(name=f"Trace{index + 1}", color_hex=TRACE_COLORS[index])
+            for index in range(4)
+        ]
+        self.trace_states[1].trace_type = TRACE_TYPE_MAX_HOLD
+        self.trace_states[2].trace_type = TRACE_TYPE_AVERAGE
+        self.marker_states = [
+            MarkerState(name="Marker1", frequency_hz=self.config.center_freq_hz),
+            MarkerState(name="Marker2", frequency_hz=self.config.center_freq_hz),
+            MarkerState(name="Marker3", frequency_hz=self.config.center_freq_hz),
+            MarkerState(name="Marker4", frequency_hz=self.config.center_freq_hz),
+        ]
+        self.marker_trace_options = [trace_state.name for trace_state in self.trace_states]
+        self.marker_items: list[tuple[pg.ScatterPlotItem, pg.TextItem]] = []
+        self.marker_controls: list[dict[str, QtWidgets.QPushButton]] = []
+        self.trace_controls: list[dict[str, QtWidgets.QPushButton]] = []
+        self.spectrum_curves: list[pg.PlotCurveItem] = []
+        self._last_display_freq_axis_ghz: np.ndarray | None = None
+        self._last_display_power_db: np.ndarray | None = None
+        self._last_current_display_db: np.ndarray | None = None
 
         self._sync_amplitude_scale_from_config()
 
@@ -257,17 +312,24 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.setYRange(self.y_min, self.y_max, padding=Y_AXIS_PADDING)
         self._update_fixed_ticks()
 
-        self.spectrum_curve = self.spectrum_plot.plot(
-            freq_axis_display_ghz,
-            np.full(len(freq_axis_display_ghz), self.y_min, dtype=float),
-            pen=pg.mkPen("y", width=1.5),
-        )
+        initial_trace = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
+        for trace_state in self.trace_states:
+            trace_state.display_db = initial_trace.copy()
+            curve = self.spectrum_plot.plot(
+                freq_axis_display_ghz,
+                trace_state.display_db,
+                pen=self._make_trace_pen(trace_state),
+            )
+            self.spectrum_curves.append(curve)
 
-        self.peak_marker = pg.ScatterPlotItem(size=8, brush=pg.mkBrush("r"))
-        self.spectrum_plot.addItem(self.peak_marker)
-
-        self.peak_text = pg.TextItem(color="w", anchor=(0, 1))
-        self.spectrum_plot.addItem(self.peak_text)
+        marker_colors = ["r", "c", "m", "g"]
+        for index, color in enumerate(marker_colors):
+            marker_item = pg.ScatterPlotItem(size=8, brush=pg.mkBrush(color))
+            text_item = pg.TextItem(color="w", anchor=(0, 1))
+            text_item.setText(f"M{index + 1}")
+            self.spectrum_plot.addItem(marker_item)
+            self.spectrum_plot.addItem(text_item)
+            self.marker_items.append((marker_item, text_item))
 
         layout.addWidget(self.spectrum_plot)
         layout.setStretch(0, 0)
@@ -319,6 +381,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.input_page = self._build_input_page()
         self.bw_page = self._build_bw_page()
         self.display_page = self._build_display_page()
+        self.trace_detector_menu_page = self._build_trace_detector_menu_page()
+        self.trace_detail_pages = [
+            self._build_trace_detail_page(index) for index in range(len(self.trace_states))
+        ]
+        self.detector_page = self._build_detector_page()
+        self.marker_menu_page = self._build_marker_menu_page()
+        self.marker_detail_pages = [
+            self._build_marker_detail_page(index) for index in range(len(self.marker_states))
+        ]
         self.realtime_sa_page = self._build_realtime_sa_page()
         self.control_stack.addWidget(self.main_menu_page)
         self.control_stack.addWidget(self.freq_channel_page)
@@ -327,9 +398,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.control_stack.addWidget(self.input_page)
         self.control_stack.addWidget(self.bw_page)
         self.control_stack.addWidget(self.display_page)
+        self.control_stack.addWidget(self.trace_detector_menu_page)
+        for page in self.trace_detail_pages:
+            self.control_stack.addWidget(page)
+        self.control_stack.addWidget(self.detector_page)
+        self.control_stack.addWidget(self.marker_menu_page)
+        for page in self.marker_detail_pages:
+            self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.realtime_sa_page)
         self.back_button.clicked.connect(
-            lambda: self._show_control_page("Main Menu", self.main_menu_page)
+            self._navigate_back
         )
         self._show_control_page("Main Menu", self.main_menu_page)
 
@@ -403,7 +481,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             lambda: self._show_control_page("Display", self.display_page)
         )
         self.trace_detector_button.clicked.connect(
-            lambda: self._show_not_implemented("Trace/Detector")
+            lambda: self._show_control_page("Trace/Detector", self.trace_detector_menu_page)
         )
         self.realtime_sa_menu_button.clicked.connect(
             lambda: self._show_control_page("RealTime SA", self.realtime_sa_page)
@@ -412,7 +490,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.single_button.clicked.connect(self._on_single_clicked)
         self.reset_button.clicked.connect(self._on_reset_clicked)
         self.trigger_button.clicked.connect(lambda: self._show_not_implemented("Trigger"))
-        self.marker_button.clicked.connect(lambda: self._show_not_implemented("Marker"))
+        self.marker_button.clicked.connect(
+            lambda: self._show_control_page("Marker", self.marker_menu_page)
+        )
         return page
 
     def _build_freq_channel_page(self) -> QtWidgets.QWidget:
@@ -522,6 +602,167 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.graph_view_button.clicked.connect(self._on_graph_view_clicked)
         return page
 
+    def _build_trace_detector_menu_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for index, trace_state in enumerate(self.trace_states):
+            button = self._make_control_button(trace_state.name)
+            button.clicked.connect(
+                lambda _checked=False, idx=index: self._show_control_page(
+                    self.trace_states[idx].name,
+                    self.trace_detail_pages[idx],
+                )
+            )
+            page_layout.addWidget(button)
+
+        detector_button = self._make_control_button("Detector")
+        detector_button.clicked.connect(
+            lambda: self._show_control_page("Detector", self.detector_page)
+        )
+        page_layout.addWidget(detector_button)
+        page_layout.addStretch(1)
+        return page
+
+    def _build_trace_detail_page(self, trace_index: int) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        type_button = self._make_control_button("Type")
+        hold_button = self._make_control_button("Hold")
+        average_count_button = self._make_control_button("Average Count")
+
+        page_layout.addWidget(type_button)
+        page_layout.addWidget(hold_button)
+        page_layout.addWidget(average_count_button)
+        page_layout.addStretch(1)
+
+        type_button.clicked.connect(
+            lambda _checked=False, idx=trace_index: self._on_trace_type_clicked(idx)
+        )
+        hold_button.clicked.connect(
+            lambda _checked=False, idx=trace_index: self._on_trace_hold_clicked(idx)
+        )
+        average_count_button.clicked.connect(
+            lambda _checked=False, idx=trace_index: self._on_trace_average_count_clicked(idx)
+        )
+
+        self.trace_controls.append(
+            {
+                "type": type_button,
+                "hold": hold_button,
+                "average_count": average_count_button,
+            }
+        )
+        self._update_trace_control_state(trace_index)
+        return page
+
+    def _build_detector_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+        placeholder = self._make_control_button("Detector Reserved")
+        placeholder.clicked.connect(lambda: self._show_not_implemented("Detector"))
+        page_layout.addWidget(placeholder)
+        page_layout.addStretch(1)
+        return page
+
+    def _build_marker_menu_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for index, marker_state in enumerate(self.marker_states):
+            button = self._make_control_button(marker_state.name)
+            button.clicked.connect(
+                lambda _checked=False, idx=index: self._show_control_page(
+                    self.marker_states[idx].name,
+                    self.marker_detail_pages[idx],
+                )
+            )
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+        return page
+
+    def _build_marker_detail_page(self, marker_index: int) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        toggle_button = self._make_control_button("ON / OFF")
+        trace_button = self._make_control_button("Trace")
+        frequency_button = self._make_control_button("Frequency")
+        step_button = self._make_control_button("Step")
+        left_button = self._make_control_button("<-")
+        right_button = self._make_control_button("->")
+        peak_search_button = self._make_control_button("Peak Search")
+        continuous_peak_button = self._make_control_button("Continuous Peak")
+
+        for button in (
+            toggle_button,
+            trace_button,
+            frequency_button,
+            step_button,
+            left_button,
+            right_button,
+            peak_search_button,
+            continuous_peak_button,
+        ):
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+
+        toggle_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._on_marker_toggle_clicked(idx)
+        )
+        trace_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._on_marker_trace_clicked(idx)
+        )
+        frequency_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._on_marker_frequency_clicked(idx)
+        )
+        step_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._on_marker_step_clicked(idx)
+        )
+        left_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._nudge_marker_frequency(idx, -1)
+        )
+        right_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._nudge_marker_frequency(idx, 1)
+        )
+        peak_search_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._on_marker_peak_search_clicked(idx)
+        )
+        continuous_peak_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._on_marker_continuous_peak_clicked(
+                idx
+            )
+        )
+
+        self.marker_controls.append(
+            {
+                "toggle": toggle_button,
+                "trace": trace_button,
+                "frequency": frequency_button,
+                "step": step_button,
+                "left": left_button,
+                "right": right_button,
+                "peak_search": peak_search_button,
+                "continuous_peak": continuous_peak_button,
+            }
+        )
+        self._update_marker_control_state(marker_index)
+
+        return page
+
     def _build_realtime_sa_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         page_layout = QtWidgets.QVBoxLayout(page)
@@ -539,11 +780,28 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.history_button.clicked.connect(self._on_history_clicked)
         return page
 
-    def _show_control_page(self, title: str, page: QtWidgets.QWidget) -> None:
+    def _show_control_page(
+        self,
+        title: str,
+        page: QtWidgets.QWidget,
+        *,
+        push_history: bool = True,
+    ) -> None:
+        current_page = self.control_stack.currentWidget()
+        if push_history and current_page is not None and current_page is not page:
+            self._page_history.append((self.control_title_label.text(), current_page))
         self.control_title_label.setText(title)
         self.control_stack.setCurrentWidget(page)
-        self.back_button.setEnabled(page is not self.main_menu_page)
-        self.back_button.setVisible(page is not self.main_menu_page)
+        has_history = len(self._page_history) > 0
+        self.back_button.setEnabled(has_history)
+        self.back_button.setVisible(has_history)
+
+    def _navigate_back(self) -> None:
+        if not self._page_history:
+            return
+
+        title, page = self._page_history.pop()
+        self._show_control_page(title, page, push_history=False)
 
     def _apply_groupbox_title_font(self, group_box: QtWidgets.QGroupBox) -> None:
         group_font = QtGui.QFont(group_box.font())
@@ -562,8 +820,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _configure_plot_chrome(self, plot_widget: pg.PlotWidget) -> None:
         plot_item = plot_widget.getPlotItem()
+        view_box = plot_widget.getViewBox()
         plot_item.layout.setContentsMargins(12, 8, 12, 8)
-        plot_widget.getViewBox().setDefaultPadding(0.0)
+        view_box.setDefaultPadding(0.0)
+        plot_item.setMouseEnabled(x=False, y=False)
+        plot_item.enableAutoRange(False)
+        view_box.setMouseEnabled(x=False, y=False)
+        view_box.setMenuEnabled(False)
         plot_item.getAxis("bottom").setStyle(autoExpandTextSpace=True, tickTextOffset=8)
         plot_item.getAxis("left").setStyle(autoExpandTextSpace=True, tickTextOffset=8)
         plot_item.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
@@ -910,6 +1173,261 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self._apply_display_mode()
 
+    def _on_trace_type_clicked(self, trace_index: int) -> None:
+        trace_state = self._trace_state(trace_index)
+        value, accepted = QtWidgets.QInputDialog.getItem(
+            self,
+            trace_state.name,
+            "Type",
+            TRACE_TYPE_OPTIONS,
+            current=TRACE_TYPE_OPTIONS.index(trace_state.trace_type),
+            editable=False,
+        )
+        if not accepted:
+            return
+
+        trace_state.trace_type = value
+        trace_state.max_hold_power = None
+        trace_state.average_power = None
+        self._update_trace_control_state(trace_index)
+
+    def _on_trace_hold_clicked(self, trace_index: int) -> None:
+        trace_state = self._trace_state(trace_index)
+        trace_state.hold_enabled = not trace_state.hold_enabled
+        self._update_trace_control_state(trace_index)
+        self._set_trace_curve_visibility(trace_index)
+
+    def _on_trace_average_count_clicked(self, trace_index: int) -> None:
+        trace_state = self._trace_state(trace_index)
+        value, accepted = QtWidgets.QInputDialog.getInt(
+            self,
+            trace_state.name,
+            "Average Count",
+            value=trace_state.average_count,
+            min=1,
+        )
+        if not accepted:
+            return
+
+        trace_state.average_count = value
+        trace_state.average_power = None
+        self._update_trace_control_state(trace_index)
+
+    def _marker_state(self, marker_index: int) -> MarkerState:
+        return self.marker_states[marker_index]
+
+    def _trace_state(self, trace_index: int) -> TraceState:
+        return self.trace_states[trace_index]
+
+    def _make_trace_pen(self, trace_state: TraceState) -> pg.Pen:
+        color = QtGui.QColor(trace_state.color_hex)
+        if trace_state.hold_enabled:
+            color = color.darker(165)
+        return pg.mkPen(color, width=1.5)
+
+    def _set_trace_curve_visibility(self, trace_index: int) -> None:
+        trace_state = self._trace_state(trace_index)
+        curve = self.spectrum_curves[trace_index]
+        curve.setPen(self._make_trace_pen(trace_state))
+        curve.setVisible(trace_state.is_visible)
+
+    def _update_trace_control_state(self, trace_index: int) -> None:
+        if trace_index >= len(self.trace_controls):
+            return
+
+        trace_state = self._trace_state(trace_index)
+        controls = self.trace_controls[trace_index]
+        controls["type"].setText(f"Type: {trace_state.trace_type}")
+        controls["hold"].setText(
+            "Hold ON" if trace_state.hold_enabled else "Hold OFF"
+        )
+        controls["average_count"].setText(
+            f"Average Count: {trace_state.average_count}"
+        )
+        controls["average_count"].setEnabled(trace_state.trace_type == TRACE_TYPE_AVERAGE)
+
+    def _reset_trace_runtime_buffers(self) -> None:
+        for trace_state in self.trace_states:
+            trace_state.max_hold_power = None
+            trace_state.average_power = None
+
+    def _update_trace_curves(self) -> None:
+        if self._last_display_freq_axis_ghz is None:
+            return
+
+        for index, trace_state in enumerate(self.trace_states):
+            if trace_state.display_db is None:
+                trace_state.display_db = np.full(
+                    len(self._last_display_freq_axis_ghz),
+                    self.y_min,
+                    dtype=float,
+                )
+            self.spectrum_curves[index].setData(
+                self._last_display_freq_axis_ghz,
+                trace_state.display_db,
+            )
+            self._set_trace_curve_visibility(index)
+
+    def _select_marker_trace_db(self, marker_state: MarkerState) -> np.ndarray | None:
+        for trace_state in self.trace_states:
+            if trace_state.name == marker_state.trace_name:
+                return trace_state.display_db
+        return None
+
+    def _update_marker_control_state(self, marker_index: int) -> None:
+        if marker_index >= len(self.marker_controls):
+            return
+
+        marker_state = self._marker_state(marker_index)
+        controls = self.marker_controls[marker_index]
+
+        controls["toggle"].setText(
+            "Marker ON" if marker_state.is_enabled else "Marker OFF"
+        )
+        controls["continuous_peak"].setText(
+            "Continuous Peak ON"
+            if marker_state.continuous_peak_enabled
+            else "Continuous Peak OFF"
+        )
+
+        manual_move_enabled = not marker_state.continuous_peak_enabled
+        controls["frequency"].setEnabled(manual_move_enabled)
+        controls["left"].setEnabled(manual_move_enabled)
+        controls["right"].setEnabled(manual_move_enabled)
+        controls["peak_search"].setEnabled(manual_move_enabled)
+
+    def _update_all_marker_control_states(self) -> None:
+        for marker_index in range(len(self.marker_states)):
+            self._update_marker_control_state(marker_index)
+
+    def _on_marker_toggle_clicked(self, marker_index: int) -> None:
+        marker_state = self._marker_state(marker_index)
+        marker_state.is_enabled = not marker_state.is_enabled
+        self._update_marker_control_state(marker_index)
+        self._update_marker_items()
+
+    def _on_marker_trace_clicked(self, marker_index: int) -> None:
+        marker_state = self._marker_state(marker_index)
+        value, accepted = QtWidgets.QInputDialog.getItem(
+            self,
+            marker_state.name,
+            "Trace",
+            self.marker_trace_options,
+            current=self.marker_trace_options.index(marker_state.trace_name),
+            editable=False,
+        )
+        if not accepted:
+            return
+
+        marker_state.trace_name = value
+        self._update_marker_control_state(marker_index)
+        self._update_marker_items()
+
+    def _on_marker_frequency_clicked(self, marker_index: int) -> None:
+        marker_state = self._marker_state(marker_index)
+        if marker_state.continuous_peak_enabled:
+            return
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            marker_state.name,
+            "Frequency [MHz]",
+            value=marker_state.frequency_hz / 1e6,
+            min=PLUTO_MIN_CENTER_FREQ_MHZ,
+            max=PLUTO_MAX_CENTER_FREQ_MHZ,
+            decimals=3,
+        )
+        if not accepted:
+            return
+
+        marker_state.frequency_hz = int(round(value * 1e6))
+        marker_state.is_enabled = True
+        marker_state.continuous_peak_enabled = False
+        self._update_marker_control_state(marker_index)
+        self._update_marker_items()
+
+    def _on_marker_step_clicked(self, marker_index: int) -> None:
+        marker_state = self._marker_state(marker_index)
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            marker_state.name,
+            "Step [kHz]",
+            value=marker_state.step_hz / 1e3,
+            min=0.001,
+            decimals=3,
+        )
+        if not accepted or value <= 0.0:
+            return
+
+        marker_state.step_hz = int(round(value * 1e3))
+        self._update_marker_control_state(marker_index)
+
+    def _nudge_marker_frequency(self, marker_index: int, direction: int) -> None:
+        marker_state = self._marker_state(marker_index)
+        if marker_state.continuous_peak_enabled:
+            return
+        marker_state.frequency_hz += direction * marker_state.step_hz
+        marker_state.is_enabled = True
+        marker_state.continuous_peak_enabled = False
+        self._update_marker_control_state(marker_index)
+        self._update_marker_items()
+
+    def _on_marker_peak_search_clicked(self, marker_index: int) -> None:
+        marker_state = self._marker_state(marker_index)
+        if marker_state.continuous_peak_enabled:
+            return
+        trace_db = self._select_marker_trace_db(marker_state)
+        if trace_db is None:
+            return
+
+        peak_freq, _peak_val = self.processor.detect_peak(trace_db)
+        marker_state.frequency_hz = int(round(peak_freq * 1e9))
+        marker_state.is_enabled = True
+        marker_state.continuous_peak_enabled = False
+        self._update_marker_control_state(marker_index)
+        self._update_marker_items()
+
+    def _on_marker_continuous_peak_clicked(self, marker_index: int) -> None:
+        marker_state = self._marker_state(marker_index)
+        marker_state.continuous_peak_enabled = not marker_state.continuous_peak_enabled
+        if marker_state.continuous_peak_enabled:
+            marker_state.is_enabled = True
+        self._update_marker_control_state(marker_index)
+        self._update_marker_items()
+
+    def _update_marker_items(self) -> None:
+        if self._last_display_freq_axis_ghz is None or self._last_display_power_db is None:
+            for marker_item, text_item in self.marker_items:
+                marker_item.setData([], [])
+                text_item.setText("")
+            return
+
+        if len(self._last_display_freq_axis_ghz) == 0:
+            return
+
+        for index, marker_state in enumerate(self.marker_states):
+            marker_item, text_item = self.marker_items[index]
+            if not marker_state.is_enabled:
+                marker_item.setData([], [])
+                text_item.setText("")
+                continue
+
+            trace_db = self._select_marker_trace_db(marker_state)
+            if trace_db is None:
+                marker_item.setData([], [])
+                text_item.setText("")
+                continue
+
+            frequency_ghz = marker_state.frequency_hz / 1e9
+            nearest_index = int(
+                np.argmin(np.abs(self._last_display_freq_axis_ghz - frequency_ghz))
+            )
+            marker_freq = float(self._last_display_freq_axis_ghz[nearest_index])
+            marker_val = float(trace_db[nearest_index])
+
+            marker_item.setData([marker_freq], [marker_val])
+            text_item.setText(f"M{index + 1}\n{marker_freq:.6f} GHz\n{marker_val:.2f} dBm")
+            text_item.setPos(marker_freq, marker_val)
+
     def _show_not_implemented(self, feature_name: str) -> None:
         QtWidgets.QMessageBox.information(
             self,
@@ -919,6 +1437,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _rebuild_processor_only(self) -> None:
         self.processor = SpectrumProcessor(self.config)
+        self._reset_trace_runtime_buffers()
         self._reset_plot_state()
 
     def _reset_plot_state(self) -> None:
@@ -957,19 +1476,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             padding=X_AXIS_PADDING,
         )
         self.waterfall_plot.setYRange(0.0, self.waterfall_time_span_s, padding=0.0)
-
-        self.spectrum_curve.setData(
-            freq_axis_display_ghz,
-            np.full(len(freq_axis_display_ghz), self.y_min, dtype=float),
-        )
         self.spectrum_plot.setXRange(
             freq_axis_display_ghz[0],
             freq_axis_display_ghz[-1],
             padding=X_AXIS_PADDING,
         )
         self._apply_display_scale()
-        self.peak_marker.setData([], [])
-        self.peak_text.setText("")
+        self._last_display_freq_axis_ghz = freq_axis_display_ghz
+        self._last_display_power_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
+        self._last_current_display_db = self._last_display_power_db.copy()
+        self._reset_trace_runtime_buffers()
+        for trace_state in self.trace_states:
+            trace_state.display_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
+        self._update_trace_curves()
+        self._update_all_marker_control_states()
+        self._update_marker_items()
 
     def _apply_display_scale(self) -> None:
         self.spectrum_plot.setYRange(self.y_min, self.y_max, padding=Y_AXIS_PADDING)
@@ -1020,8 +1541,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             padding=X_AXIS_PADDING,
         )
         self._update_fixed_ticks()
-        self.peak_marker.setData([], [])
-        self.peak_text.setText("")
+        self._last_display_freq_axis_ghz = freq_axis_display_ghz
+        self._update_trace_curves()
+        self._update_marker_items()
 
     def _apply_span_update(self) -> None:
         self._last_received_samples_total = 0
@@ -1146,10 +1668,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if iq is None:
             return
 
-        power_db_full = self.processor.compute_spectrum(iq)
-        power_db_display = self.processor.extract_display_spectrum(power_db_full)
-        power_db_display = apply_display_power_correction(
-            power_db_display,
+        power_linear_full = self.processor.compute_filtered_power(iq)
+        power_linear_display = self.processor.extract_display_spectrum(power_linear_full)
+        current_power_db_display = 10.0 * np.log10(power_linear_display + 1e-20)
+        current_display_db = apply_display_power_correction(
+            current_power_db_display,
             self.calibration_offset_db,
             self.config.input_correction_db,
         )
@@ -1160,7 +1683,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self._last_received_samples_total = current_received_total
 
-        power_db_dec = power_db_display[:: self.config.waterfall_decimation]
+        power_db_dec = current_display_db[:: self.config.waterfall_decimation]
 
         self.waterfall_buffer[:-1] = self.waterfall_buffer[1:]
         self.waterfall_buffer[-1] = power_db_dec.astype(np.float32)
@@ -1171,16 +1694,63 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             axisOrder="row-major",
         )
 
-        self.spectrum_curve.setData(
-            self.processor.get_display_freq_axis_ghz(),
-            power_db_display,
+        self._last_display_freq_axis_ghz = self.processor.get_display_freq_axis_ghz()
+        self._last_current_display_db = current_display_db
+
+        for trace_state in self.trace_states:
+            if trace_state.hold_enabled:
+                continue
+
+            if trace_state.trace_type == TRACE_TYPE_MAX_HOLD:
+                if (
+                    trace_state.max_hold_power is None
+                    or len(trace_state.max_hold_power) != len(power_linear_display)
+                ):
+                    trace_state.max_hold_power = power_linear_display.copy()
+                else:
+                    trace_state.max_hold_power = np.maximum(
+                        trace_state.max_hold_power,
+                        power_linear_display,
+                    )
+                trace_linear = trace_state.max_hold_power
+            elif trace_state.trace_type == TRACE_TYPE_AVERAGE:
+                alpha = 1.0 / max(1, trace_state.average_count)
+                if (
+                    trace_state.average_power is None
+                    or len(trace_state.average_power) != len(power_linear_display)
+                ):
+                    trace_state.average_power = power_linear_display.copy()
+                else:
+                    trace_state.average_power = (
+                        alpha * power_linear_display
+                        + (1.0 - alpha) * trace_state.average_power
+                    )
+                trace_linear = trace_state.average_power
+            else:
+                trace_linear = power_linear_display
+
+            trace_db = 10.0 * np.log10(trace_linear + 1e-20)
+            trace_state.display_db = apply_display_power_correction(
+                trace_db,
+                self.calibration_offset_db,
+                self.config.input_correction_db,
+            )
+
+        self._last_display_power_db = (
+            self.trace_states[0].display_db
+            if self.trace_states[0].display_db is not None
+            else current_display_db
         )
+        for marker_state in self.marker_states:
+            if marker_state.is_enabled and marker_state.continuous_peak_enabled:
+                trace_db = self._select_marker_trace_db(marker_state)
+                if trace_db is None:
+                    continue
+                marker_peak_freq, _marker_peak_val = self.processor.detect_peak(trace_db)
+                marker_state.frequency_hz = int(round(marker_peak_freq * 1e9))
 
-        peak_freq, peak_val = self.processor.detect_peak(power_db_display)
-
-        self.peak_marker.setData([peak_freq], [peak_val])
-        self.peak_text.setText(f"{peak_freq:.6f} GHz\n{peak_val:.2f} dBm")
-        self.peak_text.setPos(peak_freq, peak_val)
+        self._update_trace_curves()
+        self._update_marker_items()
 
         self.frame_count_total += 1
         self.frame_count_interval += 1

@@ -24,7 +24,7 @@ class SpectrumProcessor:
         self.display_slice = slice(guard_bins_each_side, n - guard_bins_each_side)
         self.update_center_frequency(config.center_freq_hz)
 
-    def compute_spectrum(self, iq: np.ndarray) -> np.ndarray:
+    def compute_filtered_power(self, iq: np.ndarray) -> np.ndarray:
         iq = iq - np.mean(iq)
         iq_windowed = iq * self.window
         spectrum = np.fft.fftshift(np.fft.fft(iq_windowed))
@@ -34,6 +34,10 @@ class SpectrumProcessor:
         spectrum = spectrum / coherent_gain
         power_spectrum = np.abs(spectrum) ** 2
         filtered_power = np.convolve(power_spectrum, self.rbw_kernel, mode="same")
+        return filtered_power
+
+    def compute_spectrum(self, iq: np.ndarray) -> np.ndarray:
+        filtered_power = self.compute_filtered_power(iq)
         power_db = 10.0 * np.log10(filtered_power + 1e-20)
         return power_db
 
