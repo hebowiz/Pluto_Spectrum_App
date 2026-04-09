@@ -5,6 +5,11 @@ from __future__ import annotations
 import numpy as np
 
 from pluto_sa.config.spectrum_config import SpectrumConfig
+from pluto_sa.signal.rbw import (
+    apply_rbw_weighting,
+    make_gaussian_rbw_kernel,
+    resolve_rbw_hz,
+)
 
 
 class SpectrumProcessor:
@@ -33,7 +38,7 @@ class SpectrumProcessor:
         spectrum = spectrum / n
         spectrum = spectrum / coherent_gain
         power_spectrum = np.abs(spectrum) ** 2
-        filtered_power = np.convolve(power_spectrum, self.rbw_kernel, mode="same")
+        filtered_power = apply_rbw_weighting(power_spectrum, self.rbw_kernel)
         return filtered_power
 
     def compute_spectrum(self, iq: np.ndarray) -> np.ndarray:
@@ -42,25 +47,8 @@ class SpectrumProcessor:
         return power_db
 
     def make_rbw_kernel(self) -> np.ndarray:
-        if self.config.rbw_hz is None:
-            return np.array([1.0], dtype=np.float64)
-        else:
-            rbw_hz = max(self.config.bin_width_hz, self.config.rbw_hz)
-
-        return self.make_gaussian_rbw_kernel(rbw_hz, self.config.bin_width_hz)
-
-    @staticmethod
-    def make_gaussian_rbw_kernel(rbw_hz: float, bin_width_hz: float) -> np.ndarray:
-        sigma_hz = rbw_hz / 2.355
-        sigma_bins = sigma_hz / bin_width_hz
-
-        if sigma_bins <= 0.0:
-            return np.array([1.0], dtype=np.float64)
-
-        half_width = max(1, int(np.ceil(6.0 * sigma_bins)))
-        x = np.arange(-half_width, half_width + 1, dtype=np.float64)
-        kernel = np.exp(-0.5 * (x / sigma_bins) ** 2)
-        return kernel
+        rbw_hz = resolve_rbw_hz(self.config.rbw_hz, self.config.bin_width_hz)
+        return make_gaussian_rbw_kernel(rbw_hz, self.config.bin_width_hz)
 
     def extract_display_spectrum(self, power_db_full: np.ndarray) -> np.ndarray:
         return power_db_full[self.display_slice]
