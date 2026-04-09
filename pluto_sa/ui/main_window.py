@@ -26,22 +26,29 @@ PLUTO_MIN_CENTER_FREQ_MHZ = 325.0
 PLUTO_MAX_CENTER_FREQ_MHZ = 3800.0
 MIN_SPAN_MHZ = 0.001
 MIN_RBW_KHZ = 0.0
-PLOT_WIDTH = 920
 PLOT_SPACING = 12
 CONTROL_PANEL_WIDTH = 240
-WINDOW_WIDTH = 1280
+WINDOW_WIDTH = 1664
 WINDOW_HEIGHT = 980
+OUTER_MARGIN_TOTAL = 24
+OUTER_SPACING_TOTAL = 12
 SIDE_PANEL_HEIGHT = WINDOW_HEIGHT - 24
 STATUS_PANEL_HEIGHT = 76
+PLOT_WIDTH = WINDOW_WIDTH - CONTROL_PANEL_WIDTH - OUTER_MARGIN_TOTAL - OUTER_SPACING_TOTAL
 PLOT_HEIGHT = (SIDE_PANEL_HEIGHT - STATUS_PANEL_HEIGHT - (PLOT_SPACING * 2)) // 2
 DUAL_PLOT_TOTAL_HEIGHT = PLOT_HEIGHT * 2 + PLOT_SPACING
-DISPLAY_MODE_WATERFALL_SPECTRUM = "Waterfall + Spectrum"
-DISPLAY_MODE_WATERFALL_ONLY = "Waterfall only"
-DISPLAY_MODE_SPECTRUM_ONLY = "Spectrum only"
-DISPLAY_MODE_OPTIONS = [
-    DISPLAY_MODE_WATERFALL_SPECTRUM,
-    DISPLAY_MODE_WATERFALL_ONLY,
-    DISPLAY_MODE_SPECTRUM_ONLY,
+GRAPH_VIEW_BOTH = "both"
+GRAPH_VIEW_WATERFALL_ONLY = "waterfall_only"
+GRAPH_VIEW_SPECTRUM_ONLY = "spectrum_only"
+GRAPH_VIEW_LABELS = {
+    GRAPH_VIEW_BOTH: "Both",
+    GRAPH_VIEW_WATERFALL_ONLY: "Waterfall Only",
+    GRAPH_VIEW_SPECTRUM_ONLY: "Spectrum Only",
+}
+GRAPH_VIEW_OPTIONS = [
+    GRAPH_VIEW_BOTH,
+    GRAPH_VIEW_WATERFALL_ONLY,
+    GRAPH_VIEW_SPECTRUM_ONLY,
 ]
 SWEEP_STATE_RUNNING = "running"
 SWEEP_STATE_SINGLE = "single"
@@ -82,7 +89,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.receiver = receiver
         self.processor = processor
         self.calibration_offset_db = calibration_offset_db
-        self.display_mode = DISPLAY_MODE_WATERFALL_SPECTRUM
+        self.graph_view_mode = GRAPH_VIEW_BOTH
         self.sweep_state = SWEEP_STATE_RUNNING
 
         self.setWindowTitle("PlutoSDR Real-Time Spectrum Prototype")
@@ -311,6 +318,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.amptd_y_scale_page = self._build_amptd_y_scale_page()
         self.input_page = self._build_input_page()
         self.bw_page = self._build_bw_page()
+        self.display_page = self._build_display_page()
         self.realtime_sa_page = self._build_realtime_sa_page()
         self.control_stack.addWidget(self.main_menu_page)
         self.control_stack.addWidget(self.freq_channel_page)
@@ -318,6 +326,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.control_stack.addWidget(self.amptd_y_scale_page)
         self.control_stack.addWidget(self.input_page)
         self.control_stack.addWidget(self.bw_page)
+        self.control_stack.addWidget(self.display_page)
         self.control_stack.addWidget(self.realtime_sa_page)
         self.back_button.clicked.connect(
             lambda: self._show_control_page("Main Menu", self.main_menu_page)
@@ -340,6 +349,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.amplitude_menu_button = self._make_control_button("AMPTD Y Scale")
         self.input_menu_button = self._make_control_button("Input")
         self.bw_menu_button = self._make_control_button("BW")
+        self.display_menu_button = self._make_control_button("Display")
         self.trace_detector_button = self._make_control_button("Trace/Detector")
         self.realtime_sa_menu_button = self._make_control_button("RealTime SA")
         analyzer_layout.addWidget(self.freq_menu_button)
@@ -347,6 +357,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         analyzer_layout.addWidget(self.amplitude_menu_button)
         analyzer_layout.addWidget(self.input_menu_button)
         analyzer_layout.addWidget(self.bw_menu_button)
+        analyzer_layout.addWidget(self.display_menu_button)
         analyzer_layout.addWidget(self.trace_detector_button)
         analyzer_layout.addWidget(self.realtime_sa_menu_button)
 
@@ -387,6 +398,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.bw_menu_button.clicked.connect(
             lambda: self._show_control_page("BW", self.bw_page)
+        )
+        self.display_menu_button.clicked.connect(
+            lambda: self._show_control_page("Display", self.display_page)
         )
         self.trace_detector_button.clicked.connect(
             lambda: self._show_not_implemented("Trace/Detector")
@@ -492,6 +506,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.rbw_button.clicked.connect(self._on_rbw_clicked)
         self.vbw_button.clicked.connect(lambda: self._show_not_implemented("VBW"))
+        return page
+
+    def _build_display_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.graph_view_button = self._make_control_button("Graph View")
+
+        page_layout.addWidget(self.graph_view_button)
+        page_layout.addStretch(1)
+
+        self.graph_view_button.clicked.connect(self._on_graph_view_clicked)
         return page
 
     def _build_realtime_sa_page(self) -> QtWidgets.QWidget:
@@ -862,6 +890,26 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._reset_plot_state()
         self._refresh_status_label()
 
+    def _on_graph_view_clicked(self) -> None:
+        labels = [GRAPH_VIEW_LABELS[mode] for mode in GRAPH_VIEW_OPTIONS]
+        value, accepted = QtWidgets.QInputDialog.getItem(
+            self,
+            "Graph View",
+            "Graph View",
+            labels,
+            current=GRAPH_VIEW_OPTIONS.index(self.graph_view_mode),
+            editable=False,
+        )
+        if not accepted:
+            return
+
+        for mode, label in GRAPH_VIEW_LABELS.items():
+            if label == value:
+                self.graph_view_mode = mode
+                break
+
+        self._apply_display_mode()
+
     def _show_not_implemented(self, feature_name: str) -> None:
         QtWidgets.QMessageBox.information(
             self,
@@ -929,11 +977,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_fixed_ticks()
 
     def _apply_display_mode(self) -> None:
-        if self.display_mode == DISPLAY_MODE_WATERFALL_ONLY:
+        if self.graph_view_mode == GRAPH_VIEW_WATERFALL_ONLY:
             self.waterfall_plot.setFixedSize(PLOT_WIDTH, DUAL_PLOT_TOTAL_HEIGHT)
             self.waterfall_plot.show()
             self.spectrum_plot.hide()
-        elif self.display_mode == DISPLAY_MODE_SPECTRUM_ONLY:
+        elif self.graph_view_mode == GRAPH_VIEW_SPECTRUM_ONLY:
             self.spectrum_plot.setFixedSize(PLOT_WIDTH, DUAL_PLOT_TOTAL_HEIGHT)
             self.spectrum_plot.show()
             self.waterfall_plot.hide()
@@ -944,9 +992,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.spectrum_plot.show()
             return
 
-        if self.display_mode != DISPLAY_MODE_WATERFALL_ONLY:
+        if self.graph_view_mode != GRAPH_VIEW_WATERFALL_ONLY:
             self.waterfall_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
-        if self.display_mode != DISPLAY_MODE_SPECTRUM_ONLY:
+        if self.graph_view_mode != GRAPH_VIEW_SPECTRUM_ONLY:
             self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
 
     def _apply_center_frequency_update(self) -> None:
@@ -1030,7 +1078,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"FFT: {self.config.fft_size}   "
             f"Bin Width: {self.config.bin_width_hz:.1f} Hz"
         )
-        line2 = f"Gain: {self.config.rx_gain_db} dB"
+        line2 = (
+            f"Ref Level: {self.config.ref_level_dbm:.0f} dBm   "
+            f"Int Gain: {self.config.rx_gain_db} dB   "
+            f"Ext ATT: {self.config.ext_att_db:.0f} dB   "
+            f"Ext Gain: {self.config.ext_gain_db:.0f} dB"
+        )
         return f"{line1}\n{line2}"
 
     def _make_console_status_text(
