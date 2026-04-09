@@ -300,40 +300,85 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_graph_view_controls()
         if hasattr(self, "analyzer_mode_button"):
             self._update_analyzer_mode_controls()
-        if hasattr(self, "realtime_sa_menu_button") and hasattr(self, "sweep_menu_button"):
+        if hasattr(self, "mode_specific_menu_stack"):
             is_sweep_mode = self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
-            self.realtime_sa_menu_button.setVisible(not is_sweep_mode)
-            self.sweep_menu_button.setVisible(is_sweep_mode)
+            self.mode_specific_menu_stack.setCurrentIndex(1 if is_sweep_mode else 0)
 
     def _change_analyzer_mode(self, analyzer_mode: AnalyzerMode) -> None:
         if self.config.analyzer_mode == analyzer_mode:
             return
 
-        previous_mode = self.config.analyzer_mode
-        self.config.analyzer_mode = analyzer_mode
-        if analyzer_mode == AnalyzerMode.SWEEP_SA:
-            self.config.rbw_hz = self._clip_sweep_rbw(self.config.rbw_hz)
-            self.sweep_state = SWEEP_STATE_RUNNING
-        elif previous_mode == AnalyzerMode.SWEEP_SA:
-            self._apply_realtime_span_limit()
-        self._reset_measurement_state_for_mode_change()
-        if analyzer_mode == AnalyzerMode.REALTIME_SA:
-            self._rebuild_realtime_runtime_after_mode_change()
-        self._refresh_sweep_time_estimate()
-        self._apply_analyzer_mode_ui_constraints()
-        self._refresh_status_label()
-        self._page_history.clear()
-        self._show_control_page("Main Menu", self.main_menu_page, push_history=False)
-        if analyzer_mode == AnalyzerMode.SWEEP_SA:
-            self.receiver.invalidate_sweep_configuration()
-            self.sweep_controller.reset()
-            self._last_display_freq_axis_ghz = None
-            self._last_display_power_db = None
-            self._last_current_display_db = None
-            self._apply_span_update()
-            self._start_sweep_continuous()
-        else:
-            self._start_realtime_continuous()
+        freeze_overlays = self._freeze_mode_switch_panels()
+        self._set_left_display_updates_enabled(False)
+        try:
+            previous_mode = self.config.analyzer_mode
+            self.config.analyzer_mode = analyzer_mode
+            if analyzer_mode == AnalyzerMode.SWEEP_SA:
+                self.config.rbw_hz = self._clip_sweep_rbw(self.config.rbw_hz)
+                self.sweep_state = SWEEP_STATE_RUNNING
+            elif previous_mode == AnalyzerMode.SWEEP_SA:
+                self._apply_realtime_span_limit()
+            self._reset_measurement_state_for_mode_change()
+            if analyzer_mode == AnalyzerMode.REALTIME_SA:
+                self._rebuild_realtime_runtime_after_mode_change()
+            self._refresh_sweep_time_estimate()
+            self._apply_analyzer_mode_ui_constraints()
+            self._refresh_status_label()
+            self._page_history.clear()
+            self._show_control_page("Main Menu", self.main_menu_page, push_history=False)
+            if analyzer_mode == AnalyzerMode.SWEEP_SA:
+                self.receiver.invalidate_sweep_configuration()
+                self.sweep_controller.reset()
+                self._last_display_freq_axis_ghz = None
+                self._last_display_power_db = None
+                self._last_current_display_db = None
+                self._apply_span_update()
+                self._start_sweep_continuous()
+            else:
+                self._start_realtime_continuous()
+        finally:
+            self._set_left_display_updates_enabled(True)
+            self._thaw_mode_switch_panels(freeze_overlays)
+
+    def _set_left_display_updates_enabled(self, enabled: bool) -> None:
+        if hasattr(self, "left_panel"):
+            self.left_panel.setUpdatesEnabled(enabled)
+        if hasattr(self, "status_label"):
+            self.status_label.setUpdatesEnabled(enabled)
+        if hasattr(self, "waterfall_plot"):
+            self.waterfall_plot.setUpdatesEnabled(enabled)
+        if hasattr(self, "spectrum_plot"):
+            self.spectrum_plot.setUpdatesEnabled(enabled)
+
+    def _freeze_mode_switch_panels(self) -> list[QtWidgets.QLabel]:
+        overlays: list[QtWidgets.QLabel] = []
+        for widget in (
+            getattr(self, "left_panel", None),
+            getattr(self, "control_panel", None),
+        ):
+            if widget is None or not widget.isVisible():
+                continue
+            overlay = QtWidgets.QLabel(widget)
+            overlay.setPixmap(widget.grab())
+            overlay.setGeometry(widget.rect())
+            overlay.show()
+            overlay.raise_()
+            overlays.append(overlay)
+        return overlays
+
+    def _thaw_mode_switch_panels(self, overlays: list[QtWidgets.QLabel]) -> None:
+        if hasattr(self, "left_panel"):
+            self.left_panel.updateGeometry()
+            self.left_panel.repaint()
+        if hasattr(self, "control_panel"):
+            self.control_panel.updateGeometry()
+            self.control_panel.repaint()
+        QtWidgets.QApplication.processEvents(
+            QtCore.QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents
+        )
+        for overlay in overlays:
+            overlay.hide()
+            overlay.deleteLater()
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -502,6 +547,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _build_control_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QFrame()
+        self.control_panel = panel
         panel.setFixedWidth(CONTROL_PANEL_WIDTH)
         panel.setFixedHeight(WINDOW_HEIGHT - 24)
         panel.setStyleSheet(
@@ -618,8 +664,24 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         analyzer_layout.addWidget(self.bw_menu_button)
         analyzer_layout.addWidget(self.display_menu_button)
         analyzer_layout.addWidget(self.trace_detector_button)
-        analyzer_layout.addWidget(self.realtime_sa_menu_button)
-        analyzer_layout.addWidget(self.sweep_menu_button)
+        self.mode_specific_menu_stack = QtWidgets.QStackedWidget()
+        self.mode_specific_menu_stack.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        realtime_sa_menu_page = QtWidgets.QWidget()
+        realtime_sa_menu_layout = QtWidgets.QVBoxLayout(realtime_sa_menu_page)
+        realtime_sa_menu_layout.setContentsMargins(0, 0, 0, 0)
+        realtime_sa_menu_layout.setSpacing(0)
+        realtime_sa_menu_layout.addWidget(self.realtime_sa_menu_button)
+        sweep_menu_page = QtWidgets.QWidget()
+        sweep_menu_layout = QtWidgets.QVBoxLayout(sweep_menu_page)
+        sweep_menu_layout.setContentsMargins(0, 0, 0, 0)
+        sweep_menu_layout.setSpacing(0)
+        sweep_menu_layout.addWidget(self.sweep_menu_button)
+        self.mode_specific_menu_stack.addWidget(realtime_sa_menu_page)
+        self.mode_specific_menu_stack.addWidget(sweep_menu_page)
+        analyzer_layout.addWidget(self.mode_specific_menu_stack)
 
         sweep_group = QtWidgets.QGroupBox("SWEEP CONTROL")
         self._apply_groupbox_title_font(sweep_group)
@@ -1710,9 +1772,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _select_graph_view(self, mode: str) -> None:
-        self.graph_view_mode = mode
-        self._update_graph_view_controls()
-        self._apply_display_mode()
+        freeze_overlays = self._freeze_mode_switch_panels()
+        self._set_left_display_updates_enabled(False)
+        try:
+            self.graph_view_mode = mode
+            self._update_graph_view_controls()
+            self._apply_display_mode()
+        finally:
+            self._set_left_display_updates_enabled(True)
+            self._thaw_mode_switch_panels(freeze_overlays)
 
     def _on_trace_visible_clicked(self, trace_index: int) -> None:
         trace_state = self._trace_state(trace_index)
