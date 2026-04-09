@@ -26,6 +26,7 @@ class SweepFrameResult:
     display_db: np.ndarray | None = None
     completed_points: int = 0
     sweep_complete: bool = False
+    active_point_index: int | None = None
 
 
 @dataclass
@@ -83,6 +84,7 @@ class SweepController:
         self._restart_pending = False
         self._current_sweep_started_at = None
         self._next_sweep_start_time = None
+        self._partial_power_db = np.full(self.config.sweep_points, np.nan, dtype=np.float64)
         self._prepare_next_sweep_cycle()
 
     def stop(self) -> None:
@@ -294,12 +296,14 @@ class SweepController:
         self._current_point_index = 0
         self._latest_point_result = None
         self._sweep_freq_axis_hz = self._build_sweep_frequency_axis_hz()
-        self._partial_power_db = np.full(self.config.sweep_points, np.nan, dtype=np.float64)
+        if len(self._partial_power_db) != self.config.sweep_points:
+            self._partial_power_db = np.full(self.config.sweep_points, np.nan, dtype=np.float64)
         self._latest_result = SweepFrameResult(
             freq_axis_hz=self._sweep_freq_axis_hz.copy(),
             display_db=self._partial_power_db.copy(),
             completed_points=0,
             sweep_complete=False,
+            active_point_index=None,
         )
 
     def _publish_partial_result(self, sweep_complete: bool) -> None:
@@ -308,6 +312,7 @@ class SweepController:
             display_db=self._partial_power_db.copy(),
             completed_points=self._current_point_index,
             sweep_complete=sweep_complete,
+            active_point_index=None if sweep_complete else max(0, self._current_point_index - 1),
         )
 
     def _handle_sweep_complete(self) -> None:

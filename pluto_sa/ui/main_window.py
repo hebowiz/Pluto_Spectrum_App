@@ -30,6 +30,7 @@ PLUTO_MIN_CENTER_FREQ_MHZ = 325.0
 PLUTO_MAX_CENTER_FREQ_MHZ = 3800.0
 MIN_SPAN_MHZ = 0.001
 MIN_RBW_KHZ = 0.0
+MIN_SWEEP_RBW_HZ = 100.0
 MAX_SWEEP_RBW_HZ = 3_000_000.0
 PLOT_SPACING = 12
 CONTROL_PANEL_WIDTH = 240
@@ -192,6 +193,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         ]
         self.marker_trace_options = [trace_state.name for trace_state in self.trace_states]
         self.marker_items: list[tuple[pg.ScatterPlotItem, pg.TextItem]] = []
+        self.sweep_progress_item: pg.ScatterPlotItem | None = None
         self.marker_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_menu_buttons: list[QtWidgets.QPushButton] = []
@@ -260,6 +262,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._last_display_freq_axis_ghz = None
             self._last_display_power_db = None
             self._last_current_display_db = None
+            self._hide_sweep_progress_symbol()
 
         self.frame_count_interval = 0
         self._last_received_samples_total = 0
@@ -309,8 +312,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         previous_mode = self.config.analyzer_mode
         self.config.analyzer_mode = analyzer_mode
         if analyzer_mode == AnalyzerMode.SWEEP_SA:
-            if self.config.rbw_hz is not None and self.config.rbw_hz > MAX_SWEEP_RBW_HZ:
-                self.config.rbw_hz = MAX_SWEEP_RBW_HZ
+            self.config.rbw_hz = self._clip_sweep_rbw(self.config.rbw_hz)
             self.sweep_state = SWEEP_STATE_RUNNING
         elif previous_mode == AnalyzerMode.SWEEP_SA:
             self._apply_realtime_span_limit()
@@ -469,6 +471,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 pen=self._make_trace_pen(trace_state),
             )
             self.spectrum_curves.append(curve)
+
+        self.sweep_progress_item = pg.ScatterPlotItem(
+            size=10,
+            pen=pg.mkPen("w"),
+            brush=pg.mkBrush("w"),
+        )
+        self.sweep_progress_item.setVisible(False)
+        self.spectrum_plot.addItem(self.sweep_progress_item)
 
         marker_colors = ["r", "c", "m", "g"]
         for index, color in enumerate(marker_colors):
@@ -1534,16 +1544,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         rbw_hz = None if value <= 0.0 else float(value * 1e3)
-        if (
-            rbw_hz is not None
-            and self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
-            and rbw_hz > MAX_SWEEP_RBW_HZ
-        ):
-            rbw_hz = MAX_SWEEP_RBW_HZ
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            rbw_hz = self._clip_sweep_rbw(rbw_hz)
         self.config.rbw_hz = rbw_hz
         self._rebuild_processor_only()
         self._refresh_sweep_time_estimate()
         self._refresh_status_label()
+
+    def _clip_sweep_rbw(self, rbw_hz: float | None) -> float:
+        if rbw_hz is None or rbw_hz < MIN_SWEEP_RBW_HZ:
+            return MIN_SWEEP_RBW_HZ
+        return min(rbw_hz, MAX_SWEEP_RBW_HZ)
 
     def _select_fft_size(self, fft_size: int) -> None:
         self.config.fft_size = fft_size
@@ -1877,6 +1888,59 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 trace_state.display_db,
             )
             self._set_trace_curve_visibility(index)
+
+    def _active_sweep_progress_trace_state(self) -> TraceState | None:
+        for trace_state in self.trace_states:
+            if (
+                trace_state.is_visible
+                and not trace_state.hold_enabled
+                and trace_state.trace_type == TRACE_TYPE_LIVE
+            ):
+                return trace_state
+        return None
+
+    def _hide_sweep_progress_symbol(self) -> None:
+        if self.sweep_progress_item is None:
+            return
+        self.sweep_progress_item.setData([], [])
+        self.sweep_progress_item.setVisible(False)
+
+    def _update_sweep_progress_symbol(self, frame_result) -> None:
+        if (
+            self.sweep_progress_item is None
+            or self._last_display_freq_axis_ghz is None
+            or frame_result.sweep_complete
+            or frame_result.active_point_index is None
+        ):
+            self._hide_sweep_progress_symbol()
+            return
+
+        trace_state = self._active_sweep_progress_trace_state()
+        if trace_state is None or trace_state.display_db is None:
+            self._hide_sweep_progress_symbol()
+            return
+
+        point_index = int(frame_result.active_point_index)
+        if point_index < 0 or point_index >= len(self._last_display_freq_axis_ghz):
+            self._hide_sweep_progress_symbol()
+            return
+        if point_index >= len(trace_state.display_db):
+            self._hide_sweep_progress_symbol()
+            return
+
+        marker_y = trace_state.display_db[point_index]
+        if not np.isfinite(marker_y):
+            self._hide_sweep_progress_symbol()
+            return
+
+        color = QtGui.QColor(trace_state.color_hex)
+        self.sweep_progress_item.setPen(pg.mkPen(color))
+        self.sweep_progress_item.setBrush(pg.mkBrush(color))
+        self.sweep_progress_item.setData(
+            [self._last_display_freq_axis_ghz[point_index]],
+            [marker_y],
+        )
+        self.sweep_progress_item.setVisible(True)
 
     def _select_marker_trace_db(self, marker_state: MarkerState) -> np.ndarray | None:
         for trace_state in self.trace_states:
@@ -2242,6 +2306,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for trace_state in self.trace_states:
             trace_state.display_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
         self._update_trace_curves()
+        self._hide_sweep_progress_symbol()
         self._update_all_marker_control_states()
         self._update_marker_items()
 
@@ -2623,6 +2688,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_trace_curves()
             self._last_sweep_drawn_completed_points = completed_points
             ui_draw_ms = (time.perf_counter() - ui_start) * 1000.0
+
+        self._update_sweep_progress_symbol(frame_result)
 
         if frame_result.sweep_complete and self._pending_sweep_marker_update:
             marker_start = time.perf_counter()
