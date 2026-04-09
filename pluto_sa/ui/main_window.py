@@ -18,6 +18,7 @@ from pluto_sa.config.spectrum_config import (
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
+from pluto_sa.signal.detector import DetectorMode
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.utils.calibration import apply_display_power_correction
 
@@ -63,6 +64,13 @@ TRACE_TYPE_AVERAGE = "Average"
 TRACE_TYPE_OPTIONS = [TRACE_TYPE_LIVE, TRACE_TYPE_MAX_HOLD, TRACE_TYPE_AVERAGE]
 TRACE_COLORS = ["#FFFC12", "#78FFEC", "#FC05FF", "#00FF07"]
 FFT_SIZE_OPTIONS = [str(2**power) for power in range(6, 16)]
+SWEEP_DETECTOR_OPTIONS = [
+    DetectorMode.SAMPLE,
+    DetectorMode.PEAK,
+    DetectorMode.RMS,
+]
+SELECTED_BUTTON_PREFIX = "> "
+UNSELECTED_BUTTON_PREFIX = "  "
 
 
 @dataclass
@@ -195,6 +203,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.trace_type_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
         self.marker_trace_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
         self.fft_size_option_buttons: dict[str, QtWidgets.QPushButton] = {}
+        self.sweep_detector_option_buttons: dict[DetectorMode, QtWidgets.QPushButton] = {}
         self._last_display_freq_axis_ghz: np.ndarray | None = None
         self._last_display_power_db: np.ndarray | None = None
         self._last_current_display_db: np.ndarray | None = None
@@ -913,10 +922,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout = QtWidgets.QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(10)
-        placeholder = self._make_control_button("Detector Reserved")
-        placeholder.clicked.connect(lambda: self._show_not_implemented("Detector"))
-        page_layout.addWidget(placeholder)
+
+        for detector_mode in SWEEP_DETECTOR_OPTIONS:
+            button = self._make_control_button(detector_mode.value)
+            button.clicked.connect(
+                lambda _checked=False, selected_mode=detector_mode: self._select_sweep_detector(
+                    selected_mode
+                )
+            )
+            self.sweep_detector_option_buttons[detector_mode] = button
+            page_layout.addWidget(button)
+
         page_layout.addStretch(1)
+        self._update_sweep_detector_selection_page()
         return page
 
     def _build_marker_menu_page(self) -> QtWidgets.QWidget:
@@ -1575,6 +1593,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
         self._restore_sweep_state(previous_state)
 
+    def _select_sweep_detector(self, detector_mode: DetectorMode | str) -> None:
+        resolved_mode = DetectorMode(detector_mode)
+        if self.config.sweep_detector_mode == resolved_mode.value:
+            return
+
+        previous_state = self._current_sweep_state()
+        self.config.sweep_detector_mode = resolved_mode.value
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self._reset_sweep_display_and_restore_state(previous_state)
+        self._update_sweep_controls()
+        self._update_sweep_detector_selection_page()
+        self._refresh_status_label()
+
     def _on_history_clicked(self) -> None:
         value, accepted = QtWidgets.QInputDialog.getInt(
             self,
@@ -1719,7 +1750,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if trace_index >= len(self.trace_menu_buttons):
             return
         trace_state = self._trace_state(trace_index)
-        prefix = "\u2713 " if trace_state.is_visible else ""
+        prefix = SELECTED_BUTTON_PREFIX if trace_state.is_visible else ""
         self.trace_menu_buttons[trace_index].setText(f"{prefix}{trace_state.name}")
 
     def _update_trace_menu_buttons(self) -> None:
@@ -1739,7 +1770,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _update_graph_view_selection_page(self) -> None:
         for mode, button in self.graph_view_option_buttons.items():
-            prefix = "✓ " if mode == self.graph_view_mode else "  "
+            prefix = (
+                SELECTED_BUTTON_PREFIX
+                if mode == self.graph_view_mode
+                else UNSELECTED_BUTTON_PREFIX
+            )
             button.setText(f"{prefix}{GRAPH_VIEW_LABELS[mode]}")
             if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
                 button.setEnabled(mode == GRAPH_VIEW_SPECTRUM_ONLY)
@@ -1755,7 +1790,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _update_analyzer_mode_selection_page(self) -> None:
         for mode, button in self.analyzer_mode_option_buttons.items():
-            prefix = "✓ " if mode == self.config.analyzer_mode else "  "
+            prefix = (
+                SELECTED_BUTTON_PREFIX
+                if mode == self.config.analyzer_mode
+                else UNSELECTED_BUTTON_PREFIX
+            )
             button.setText(f"{prefix}{mode.value}")
 
     def _update_trace_type_selection_page(self, trace_index: int) -> None:
@@ -1765,7 +1804,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         trace_state = self._trace_state(trace_index)
         option_buttons = self.trace_type_option_buttons[trace_index]
         for trace_type, button in option_buttons.items():
-            prefix = "✓ " if trace_type == trace_state.trace_type else "  "
+            prefix = (
+                SELECTED_BUTTON_PREFIX
+                if trace_type == trace_state.trace_type
+                else UNSELECTED_BUTTON_PREFIX
+            )
             button.setText(f"{prefix}{trace_type}")
 
     def _update_fft_size_controls(self) -> None:
@@ -1776,11 +1819,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_time_button.setText(f"Swp Time\n{self.config.sweep_time_ms:.0f} ms")
         self.sweep_points_button.setText(f"Swp Pts\n{self.config.sweep_points}")
 
+    def _update_sweep_detector_selection_page(self) -> None:
+        for detector_mode, button in self.sweep_detector_option_buttons.items():
+            prefix = "笨・" if detector_mode.value == self.config.sweep_detector_mode else "  "
+            button.setText(f"{prefix}{detector_mode.value}")
+
     def _update_continuous_button(self) -> None:
         label = "Continuous"
         if self.sweep_state == SWEEP_STATE_RUNNING:
-            label = f"\u2713 {label}"
+            label = f"{SELECTED_BUTTON_PREFIX}{label}"
         self.cont_button.setText(label)
+
+    def _update_sweep_detector_selection_page(self) -> None:
+        for detector_mode, button in self.sweep_detector_option_buttons.items():
+            prefix = "> " if detector_mode.value == self.config.sweep_detector_mode else "  "
+            button.setText(f"{prefix}{detector_mode.value}")
 
     def _refresh_sweep_time_estimate(self) -> None:
         self.actual_sweep_time_s = self.sweep_controller.get_actual_sweep_time_s()
@@ -1790,7 +1843,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _update_fft_size_selection_page(self) -> None:
         current_fft_size = str(self.config.fft_size)
         for fft_size, button in self.fft_size_option_buttons.items():
-            prefix = "✓ " if fft_size == current_fft_size else "  "
+            prefix = (
+                SELECTED_BUTTON_PREFIX
+                if fft_size == current_fft_size
+                else UNSELECTED_BUTTON_PREFIX
+            )
             button.setText(f"{prefix}{fft_size}")
 
     def _reset_trace_runtime_buffers(self) -> None:
@@ -1869,7 +1926,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if marker_index >= len(self.marker_menu_buttons):
             return
         marker_state = self._marker_state(marker_index)
-        prefix = "\u2713 " if marker_state.is_enabled else ""
+        prefix = SELECTED_BUTTON_PREFIX if marker_state.is_enabled else ""
         self.marker_menu_buttons[marker_index].setText(f"{prefix}{marker_state.name}")
 
     def _update_marker_menu_buttons(self) -> None:
@@ -1896,7 +1953,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         marker_state = self._marker_state(marker_index)
         option_buttons = self.marker_trace_option_buttons[marker_index]
         for trace_name, button in option_buttons.items():
-            prefix = "✓ " if trace_name == marker_state.trace_name else "  "
+            prefix = (
+                SELECTED_BUTTON_PREFIX
+                if trace_name == marker_state.trace_name
+                else UNSELECTED_BUTTON_PREFIX
+            )
             button.setText(f"{prefix}{trace_name}")
 
     def _on_marker_frequency_clicked(self, marker_index: int) -> None:

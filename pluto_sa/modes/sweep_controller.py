@@ -10,7 +10,7 @@ import numpy as np
 
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
-from pluto_sa.signal.detector import apply_detector
+from pluto_sa.signal.detector import DetectorMode, apply_detector
 from pluto_sa.signal.rbw import (
     apply_rbw_weighting,
     make_gaussian_rbw_kernel,
@@ -356,12 +356,13 @@ class SweepController:
         iq: np.ndarray,
     ) -> tuple[float, float, float, int, int, float, int, float, np.ndarray]:
         iq = iq - np.mean(iq)
-        window = np.hanning(len(iq))
+        n = len(iq)
+
+        window = np.hanning(n)
         iq_windowed = iq * window
         spectrum_unshifted = np.fft.fft(iq_windowed)
         spectrum = np.fft.fftshift(spectrum_unshifted)
 
-        n = len(iq)
         coherent_gain = np.sum(window) / n
         spectrum_unshifted = spectrum_unshifted / n
         spectrum_unshifted = spectrum_unshifted / coherent_gain
@@ -377,7 +378,7 @@ class SweepController:
         filtered_power = apply_rbw_weighting(power_spectrum, rbw_kernel)
 
         center_idx = len(filtered_power) // 2
-        detector_input = np.array([filtered_power[center_idx]], dtype=np.float64)
+        detector_input = self._build_detector_observation_series(iq, effective_rbw_hz)
         measured_power_linear = apply_detector(detector_input, self.config.sweep_detector_mode)
         peak_bin_index_unshifted = int(np.argmax(power_spectrum_unshifted))
         peak_bin_index_shifted = int(np.argmax(power_spectrum))
@@ -395,3 +396,50 @@ class SweepController:
             rbw_center_frequency_hz,
             detector_input,
         )
+
+    def _build_detector_observation_series(
+        self,
+        iq: np.ndarray,
+        effective_rbw_hz: float,
+    ) -> np.ndarray:
+        """Build a time-direction observation series for detector reduction."""
+        total_samples = len(iq)
+        if total_samples < 2:
+            return np.asarray([0.0], dtype=np.float64)
+
+        segment_length = 1 << int(np.floor(np.log2(max(2, total_samples // 2))))
+        segment_length = max(256, segment_length)
+        segment_length = min(segment_length, total_samples)
+        if segment_length < 2:
+            segment_length = total_samples
+
+        step = max(1, segment_length // 2)
+        starts = list(range(0, max(1, total_samples - segment_length + 1), step))
+        if not starts:
+            starts = [0]
+        if starts[-1] != total_samples - segment_length:
+            starts.append(total_samples - segment_length)
+
+        observation_values: list[float] = []
+        for start in starts:
+            segment = iq[start : start + segment_length]
+            if len(segment) < segment_length:
+                continue
+
+            segment = segment - np.mean(segment)
+            window = np.hanning(segment_length)
+            coherent_gain = np.sum(window) / segment_length
+            spectrum = np.fft.fftshift(np.fft.fft(segment * window))
+            spectrum = spectrum / segment_length
+            spectrum = spectrum / coherent_gain
+
+            power_spectrum = np.abs(spectrum) ** 2
+            segment_bin_width_hz = self.config.sweep_sample_rate_hz / segment_length
+            rbw_kernel = make_gaussian_rbw_kernel(effective_rbw_hz, segment_bin_width_hz)
+            filtered_power = apply_rbw_weighting(power_spectrum, rbw_kernel)
+            center_idx = len(filtered_power) // 2
+            observation_values.append(float(filtered_power[center_idx]))
+
+        if not observation_values:
+            observation_values.append(0.0)
+        return np.asarray(observation_values, dtype=np.float64)
