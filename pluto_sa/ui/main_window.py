@@ -59,6 +59,7 @@ TRACE_TYPE_MAX_HOLD = "Max Hold"
 TRACE_TYPE_AVERAGE = "Average"
 TRACE_TYPE_OPTIONS = [TRACE_TYPE_LIVE, TRACE_TYPE_MAX_HOLD, TRACE_TYPE_AVERAGE]
 TRACE_COLORS = ["#FFFC12", "#78FFEC", "#FC05FF", "#00FF07"]
+FFT_SIZE_OPTIONS = [str(2**power) for power in range(6, 16)]
 
 
 @dataclass
@@ -176,6 +177,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.trace_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.spectrum_curves: list[pg.PlotCurveItem] = []
         self.page_title_colors: dict[QtWidgets.QWidget, str] = {}
+        self.graph_view_option_buttons: dict[str, QtWidgets.QPushButton] = {}
+        self.trace_type_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
+        self.marker_trace_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
+        self.fft_size_option_buttons: dict[str, QtWidgets.QPushButton] = {}
         self._last_display_freq_axis_ghz: np.ndarray | None = None
         self._last_display_power_db: np.ndarray | None = None
         self._last_current_display_db: np.ndarray | None = None
@@ -399,14 +404,22 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.input_page = self._build_input_page()
         self.bw_page = self._build_bw_page()
         self.display_page = self._build_display_page()
+        self.graph_view_select_page = self._build_graph_view_select_page()
         self.trace_detector_menu_page = self._build_trace_detector_menu_page()
         self.trace_detail_pages = [
             self._build_trace_detail_page(index) for index in range(len(self.trace_states))
+        ]
+        self.trace_type_pages = [
+            self._build_trace_type_page(index) for index in range(len(self.trace_states))
         ]
         self.detector_page = self._build_detector_page()
         self.marker_menu_page = self._build_marker_menu_page()
         self.marker_detail_pages = [
             self._build_marker_detail_page(index) for index in range(len(self.marker_states))
+        ]
+        self.fft_size_page = self._build_fft_size_page()
+        self.marker_trace_pages = [
+            self._build_marker_trace_page(index) for index in range(len(self.marker_states))
         ]
         self.realtime_sa_page = self._build_realtime_sa_page()
         self.control_stack.addWidget(self.main_menu_page)
@@ -416,12 +429,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.control_stack.addWidget(self.input_page)
         self.control_stack.addWidget(self.bw_page)
         self.control_stack.addWidget(self.display_page)
+        self.control_stack.addWidget(self.graph_view_select_page)
         self.control_stack.addWidget(self.trace_detector_menu_page)
         for page in self.trace_detail_pages:
+            self.control_stack.addWidget(page)
+        for page in self.trace_type_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.detector_page)
         self.control_stack.addWidget(self.marker_menu_page)
         for page in self.marker_detail_pages:
+            self.control_stack.addWidget(page)
+        self.control_stack.addWidget(self.fft_size_page)
+        for page in self.marker_trace_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.realtime_sa_page)
         self.back_button.clicked.connect(
@@ -615,11 +634,35 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setSpacing(10)
 
         self.graph_view_button = self._make_control_button("Graph View")
+        self.graph_view_button.setMinimumHeight(68)
 
         page_layout.addWidget(self.graph_view_button)
         page_layout.addStretch(1)
 
-        self.graph_view_button.clicked.connect(self._on_graph_view_clicked)
+        self.graph_view_button.clicked.connect(
+            lambda: self._show_control_page("Graph View", self.graph_view_select_page)
+        )
+        self._update_graph_view_controls()
+        return page
+
+    def _build_graph_view_select_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for mode in GRAPH_VIEW_OPTIONS:
+            button = self._make_control_button(GRAPH_VIEW_LABELS[mode])
+            button.clicked.connect(
+                lambda _checked=False, selected_mode=mode: self._select_graph_view(
+                    selected_mode
+                )
+            )
+            self.graph_view_option_buttons[mode] = button
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+        self._update_graph_view_selection_page()
         return page
 
     def _build_trace_detector_menu_page(self) -> QtWidgets.QWidget:
@@ -668,7 +711,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             lambda _checked=False, idx=trace_index: self._on_trace_visible_clicked(idx)
         )
         type_button.clicked.connect(
-            lambda _checked=False, idx=trace_index: self._on_trace_type_clicked(idx)
+            lambda _checked=False, idx=trace_index: self._show_control_page(
+                f"{self.trace_states[idx].name} Type",
+                self.trace_type_pages[idx],
+            )
         )
         hold_button.clicked.connect(
             lambda _checked=False, idx=trace_index: self._on_trace_hold_clicked(idx)
@@ -686,6 +732,29 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             }
         )
         self._update_trace_control_state(trace_index)
+        return page
+
+    def _build_trace_type_page(self, trace_index: int) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        option_buttons: dict[str, QtWidgets.QPushButton] = {}
+        for trace_type in TRACE_TYPE_OPTIONS:
+            button = self._make_control_button(trace_type)
+            button.clicked.connect(
+                lambda _checked=False, idx=trace_index, selected_type=trace_type: (
+                    self._select_trace_type(idx, selected_type)
+                )
+            )
+            option_buttons[trace_type] = button
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+        self.trace_type_option_buttons.append(option_buttons)
+        self.page_title_colors[page] = self.trace_states[trace_index].color_hex
+        self._update_trace_type_selection_page(trace_index)
         return page
 
     def _build_detector_page(self) -> QtWidgets.QWidget:
@@ -751,7 +820,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             lambda _checked=False, idx=marker_index: self._on_marker_toggle_clicked(idx)
         )
         trace_button.clicked.connect(
-            lambda _checked=False, idx=marker_index: self._on_marker_trace_clicked(idx)
+            lambda _checked=False, idx=marker_index: self._show_control_page(
+                f"{self.marker_states[idx].name} Trace",
+                self.marker_trace_pages[idx],
+            )
         )
         frequency_button.clicked.connect(
             lambda _checked=False, idx=marker_index: self._on_marker_frequency_clicked(idx)
@@ -790,6 +862,28 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         return page
 
+    def _build_marker_trace_page(self, marker_index: int) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        option_buttons: dict[str, QtWidgets.QPushButton] = {}
+        for trace_name in self.marker_trace_options:
+            button = self._make_control_button(trace_name)
+            button.clicked.connect(
+                lambda _checked=False, idx=marker_index, selected_trace=trace_name: (
+                    self._select_marker_trace(idx, selected_trace)
+                )
+            )
+            option_buttons[trace_name] = button
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+        self.marker_trace_option_buttons.append(option_buttons)
+        self._update_marker_trace_selection_page(marker_index)
+        return page
+
     def _build_realtime_sa_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         page_layout = QtWidgets.QVBoxLayout(page)
@@ -803,8 +897,31 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.addWidget(self.history_button)
         page_layout.addStretch(1)
 
-        self.fft_size_button.clicked.connect(self._on_fft_size_clicked)
+        self.fft_size_button.clicked.connect(
+            lambda: self._show_control_page("FFT size", self.fft_size_page)
+        )
         self.history_button.clicked.connect(self._on_history_clicked)
+        self._update_fft_size_controls()
+        return page
+
+    def _build_fft_size_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for fft_size in FFT_SIZE_OPTIONS:
+            button = self._make_control_button(fft_size)
+            button.clicked.connect(
+                lambda _checked=False, selected_fft_size=fft_size: self._select_fft_size(
+                    int(selected_fft_size)
+                )
+            )
+            self.fft_size_option_buttons[fft_size] = button
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+        self._update_fft_size_selection_page()
         return page
 
     def _show_control_page(
@@ -1135,24 +1252,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._rebuild_processor_only()
         self._refresh_status_label()
 
-    def _on_fft_size_clicked(self) -> None:
-        fft_options = [str(2**power) for power in range(6, 16)]
-        current_index = fft_options.index(str(self.config.fft_size))
-        value, accepted = QtWidgets.QInputDialog.getItem(
-            self,
-            "FFT size",
-            "FFT Size",
-            fft_options,
-            current=current_index,
-            editable=False,
-        )
-        if not accepted:
-            return
-
-        self.config.fft_size = int(value)
+    def _select_fft_size(self, fft_size: int) -> None:
+        self.config.fft_size = fft_size
         self.receiver.reconfigure_span(self.config)
         self.processor.update_span_related(self.config)
         self._apply_span_update()
+        self._update_fft_size_controls()
         self._refresh_status_label()
 
     def _on_history_clicked(self) -> None:
@@ -1184,24 +1289,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._reset_plot_state()
         self._refresh_status_label()
 
-    def _on_graph_view_clicked(self) -> None:
-        labels = [GRAPH_VIEW_LABELS[mode] for mode in GRAPH_VIEW_OPTIONS]
-        value, accepted = QtWidgets.QInputDialog.getItem(
-            self,
-            "Graph View",
-            "Graph View",
-            labels,
-            current=GRAPH_VIEW_OPTIONS.index(self.graph_view_mode),
-            editable=False,
-        )
-        if not accepted:
-            return
-
-        for mode, label in GRAPH_VIEW_LABELS.items():
-            if label == value:
-                self.graph_view_mode = mode
-                break
-
+    def _select_graph_view(self, mode: str) -> None:
+        self.graph_view_mode = mode
+        self._update_graph_view_controls()
         self._apply_display_mode()
 
     def _on_trace_visible_clicked(self, trace_index: int) -> None:
@@ -1212,23 +1302,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_all_marker_control_states()
         self._update_marker_items()
 
-    def _on_trace_type_clicked(self, trace_index: int) -> None:
+    def _select_trace_type(self, trace_index: int, trace_type: str) -> None:
         trace_state = self._trace_state(trace_index)
-        value, accepted = QtWidgets.QInputDialog.getItem(
-            self,
-            trace_state.name,
-            "Type",
-            TRACE_TYPE_OPTIONS,
-            current=TRACE_TYPE_OPTIONS.index(trace_state.trace_type),
-            editable=False,
-        )
-        if not accepted:
-            return
-
-        trace_state.trace_type = value
+        trace_state.trace_type = trace_type
         trace_state.max_hold_power = None
         trace_state.average_power = None
         self._update_trace_control_state(trace_index)
+        self._update_trace_type_selection_page(trace_index)
 
     def _on_trace_hold_clicked(self, trace_index: int) -> None:
         trace_state = self._trace_state(trace_index)
@@ -1287,6 +1367,37 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"Average Count: {trace_state.average_count}"
         )
         controls["average_count"].setEnabled(trace_state.trace_type == TRACE_TYPE_AVERAGE)
+
+    def _update_graph_view_controls(self) -> None:
+        self.graph_view_button.setText(
+            f"Graph View\n{GRAPH_VIEW_LABELS[self.graph_view_mode]}"
+        )
+        self._update_graph_view_selection_page()
+
+    def _update_graph_view_selection_page(self) -> None:
+        for mode, button in self.graph_view_option_buttons.items():
+            prefix = "✓ " if mode == self.graph_view_mode else "  "
+            button.setText(f"{prefix}{GRAPH_VIEW_LABELS[mode]}")
+
+    def _update_trace_type_selection_page(self, trace_index: int) -> None:
+        if trace_index >= len(self.trace_type_option_buttons):
+            return
+
+        trace_state = self._trace_state(trace_index)
+        option_buttons = self.trace_type_option_buttons[trace_index]
+        for trace_type, button in option_buttons.items():
+            prefix = "✓ " if trace_type == trace_state.trace_type else "  "
+            button.setText(f"{prefix}{trace_type}")
+
+    def _update_fft_size_controls(self) -> None:
+        self.fft_size_button.setText(f"FFT size: {self.config.fft_size}")
+        self._update_fft_size_selection_page()
+
+    def _update_fft_size_selection_page(self) -> None:
+        current_fft_size = str(self.config.fft_size)
+        for fft_size, button in self.fft_size_option_buttons.items():
+            prefix = "✓ " if fft_size == current_fft_size else "  "
+            button.setText(f"{prefix}{fft_size}")
 
     def _reset_trace_runtime_buffers(self) -> None:
         for trace_state in self.trace_states:
@@ -1352,22 +1463,22 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_marker_control_state(marker_index)
         self._update_marker_items()
 
-    def _on_marker_trace_clicked(self, marker_index: int) -> None:
+    def _select_marker_trace(self, marker_index: int, trace_name: str) -> None:
         marker_state = self._marker_state(marker_index)
-        value, accepted = QtWidgets.QInputDialog.getItem(
-            self,
-            marker_state.name,
-            "Trace",
-            self.marker_trace_options,
-            current=self.marker_trace_options.index(marker_state.trace_name),
-            editable=False,
-        )
-        if not accepted:
+        marker_state.trace_name = trace_name
+        self._update_marker_control_state(marker_index)
+        self._update_marker_trace_selection_page(marker_index)
+        self._update_marker_items()
+
+    def _update_marker_trace_selection_page(self, marker_index: int) -> None:
+        if marker_index >= len(self.marker_trace_option_buttons):
             return
 
-        marker_state.trace_name = value
-        self._update_marker_control_state(marker_index)
-        self._update_marker_items()
+        marker_state = self._marker_state(marker_index)
+        option_buttons = self.marker_trace_option_buttons[marker_index]
+        for trace_name, button in option_buttons.items():
+            prefix = "✓ " if trace_name == marker_state.trace_name else "  "
+            button.setText(f"{prefix}{trace_name}")
 
     def _on_marker_frequency_clicked(self, marker_index: int) -> None:
         marker_state = self._marker_state(marker_index)
