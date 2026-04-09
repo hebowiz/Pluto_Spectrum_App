@@ -8,7 +8,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from pluto_sa.config.spectrum_config import SpectrumConfig
+from pluto_sa.config.spectrum_config import MAX_DISPLAY_SPAN_HZ, SpectrumConfig
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.utils.calibration import apply_offset_db
@@ -36,6 +36,9 @@ DISPLAY_MODE_OPTIONS = [
     DISPLAY_MODE_WATERFALL_ONLY,
     DISPLAY_MODE_SPECTRUM_ONLY,
 ]
+SWEEP_STATE_RUNNING = "running"
+SWEEP_STATE_SINGLE = "single"
+SWEEP_STATE_STOPPED = "stopped"
 
 
 class FrequencyAxisItem(pg.AxisItem):
@@ -73,6 +76,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.processor = processor
         self.calibration_offset_db = calibration_offset_db
         self.display_mode = DISPLAY_MODE_WATERFALL_SPECTRUM
+        self.sweep_state = SWEEP_STATE_RUNNING
 
         self.setWindowTitle("PlutoSDR Real-Time Spectrum Prototype")
         self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -89,8 +93,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_received_samples_total = 0
         self.received_samples_interval = 0
 
-        self.y_min = -100
-        self.y_max = 0
+        self._sync_amplitude_scale_from_config()
 
         wf_width = len(self.processor.get_decimated_display_freq_axis_ghz())
         self.waterfall_buffer = np.full(
@@ -108,6 +111,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self._build_ui()
         self._build_timer()
+
+    def _sync_amplitude_scale_from_config(self) -> None:
+        self.y_max = self.config.y_max_dbm
+        self.y_min = self.config.y_min_dbm
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -281,8 +288,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.main_menu_page = self._build_main_menu_page()
         self.freq_channel_page = self._build_freq_channel_page()
+        self.span_x_scale_page = self._build_span_x_scale_page()
+        self.amptd_y_scale_page = self._build_amptd_y_scale_page()
+        self.input_page = self._build_input_page()
+        self.bw_page = self._build_bw_page()
+        self.realtime_sa_page = self._build_realtime_sa_page()
         self.control_stack.addWidget(self.main_menu_page)
         self.control_stack.addWidget(self.freq_channel_page)
+        self.control_stack.addWidget(self.span_x_scale_page)
+        self.control_stack.addWidget(self.amptd_y_scale_page)
+        self.control_stack.addWidget(self.input_page)
+        self.control_stack.addWidget(self.bw_page)
+        self.control_stack.addWidget(self.realtime_sa_page)
         self.back_button.clicked.connect(
             lambda: self._show_control_page("Main Menu", self.main_menu_page)
         )
@@ -296,46 +313,73 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(10)
 
-        analyzer_group = QtWidgets.QGroupBox("Analyzer Setup")
+        analyzer_group = QtWidgets.QGroupBox("ANALYZER SETUP")
         self._apply_groupbox_title_font(analyzer_group)
         analyzer_layout = QtWidgets.QVBoxLayout(analyzer_group)
         self.freq_menu_button = self._make_control_button("FREQ Channel")
-        self.span_button = self._make_control_button("SPAN X Scale")
-        self.rbw_button = self._make_control_button("RBW")
-        self.amplitude_button = self._make_control_button("AMPTD Y Scale")
+        self.span_menu_button = self._make_control_button("SPAN X Scale")
+        self.amplitude_menu_button = self._make_control_button("AMPTD Y Scale")
+        self.input_menu_button = self._make_control_button("Input")
+        self.bw_menu_button = self._make_control_button("BW")
+        self.trace_detector_button = self._make_control_button("Trace/Detector")
+        self.realtime_sa_menu_button = self._make_control_button("RealTime SA")
         analyzer_layout.addWidget(self.freq_menu_button)
-        analyzer_layout.addWidget(self.span_button)
-        analyzer_layout.addWidget(self.rbw_button)
-        analyzer_layout.addWidget(self.amplitude_button)
+        analyzer_layout.addWidget(self.span_menu_button)
+        analyzer_layout.addWidget(self.amplitude_menu_button)
+        analyzer_layout.addWidget(self.input_menu_button)
+        analyzer_layout.addWidget(self.bw_menu_button)
+        analyzer_layout.addWidget(self.trace_detector_button)
+        analyzer_layout.addWidget(self.realtime_sa_menu_button)
 
-        sweep_group = QtWidgets.QGroupBox("Sweep Control")
+        sweep_group = QtWidgets.QGroupBox("SWEEP CONTROL")
         self._apply_groupbox_title_font(sweep_group)
         sweep_layout = QtWidgets.QVBoxLayout(sweep_group)
-        self.start_button = self._make_control_button("Start")
-        self.stop_button = self._make_control_button("Stop")
-        sweep_layout.addWidget(self.start_button)
-        sweep_layout.addWidget(self.stop_button)
+        self.cont_button = self._make_control_button("Cont")
+        self.single_button = self._make_control_button("Single")
+        self.reset_button = self._make_control_button("Reset")
+        sweep_layout.addWidget(self.cont_button)
+        sweep_layout.addWidget(self.single_button)
+        sweep_layout.addWidget(self.reset_button)
 
-        display_group = QtWidgets.QGroupBox("Display")
-        self._apply_groupbox_title_font(display_group)
-        display_layout = QtWidgets.QVBoxLayout(display_group)
-        self.display_button = self._make_control_button("View / Display")
-        display_layout.addWidget(self.display_button)
+        trigger_group = QtWidgets.QGroupBox("TRIGGER / MARKER")
+        self._apply_groupbox_title_font(trigger_group)
+        trigger_layout = QtWidgets.QVBoxLayout(trigger_group)
+        self.trigger_button = self._make_control_button("Trigger")
+        self.marker_button = self._make_control_button("Marker")
+        trigger_layout.addWidget(self.trigger_button)
+        trigger_layout.addWidget(self.marker_button)
 
         panel_layout.addWidget(analyzer_group)
         panel_layout.addWidget(sweep_group)
-        panel_layout.addWidget(display_group)
+        panel_layout.addWidget(trigger_group)
         panel_layout.addStretch(1)
 
         self.freq_menu_button.clicked.connect(
             lambda: self._show_control_page("FREQ Channel", self.freq_channel_page)
         )
-        self.span_button.clicked.connect(self._on_span_x_scale_clicked)
-        self.rbw_button.clicked.connect(self._on_rbw_clicked)
-        self.amplitude_button.clicked.connect(self._on_amptd_y_scale_clicked)
-        self.start_button.clicked.connect(self._on_start_clicked)
-        self.stop_button.clicked.connect(self._on_stop_clicked)
-        self.display_button.clicked.connect(self._on_view_display_clicked)
+        self.span_menu_button.clicked.connect(
+            lambda: self._show_control_page("SPAN X Scale", self.span_x_scale_page)
+        )
+        self.amplitude_menu_button.clicked.connect(
+            lambda: self._show_control_page("AMPTD Y Scale", self.amptd_y_scale_page)
+        )
+        self.input_menu_button.clicked.connect(
+            lambda: self._show_control_page("Input", self.input_page)
+        )
+        self.bw_menu_button.clicked.connect(
+            lambda: self._show_control_page("BW", self.bw_page)
+        )
+        self.trace_detector_button.clicked.connect(
+            lambda: self._show_not_implemented("Trace/Detector")
+        )
+        self.realtime_sa_menu_button.clicked.connect(
+            lambda: self._show_control_page("RealTime SA", self.realtime_sa_page)
+        )
+        self.cont_button.clicked.connect(self._on_cont_clicked)
+        self.single_button.clicked.connect(self._on_single_clicked)
+        self.reset_button.clicked.connect(self._on_reset_clicked)
+        self.trigger_button.clicked.connect(lambda: self._show_not_implemented("Trigger"))
+        self.marker_button.clicked.connect(lambda: self._show_not_implemented("Marker"))
         return page
 
     def _build_freq_channel_page(self) -> QtWidgets.QWidget:
@@ -345,20 +389,107 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setSpacing(10)
 
         self.freq_center_button = self._make_control_button("Center")
-        self.freq_span_button = self._make_control_button("Span")
-        self.freq_start_button = self._make_control_button("Start")
-        self.freq_stop_button = self._make_control_button("Stop")
+        self.cf_step_button = self._make_control_button("CF Step")
+        self.freq_start_stop_button = self._make_control_button("Start/Stop")
 
         page_layout.addWidget(self.freq_center_button)
-        page_layout.addWidget(self.freq_span_button)
-        page_layout.addWidget(self.freq_start_button)
-        page_layout.addWidget(self.freq_stop_button)
+        page_layout.addWidget(self.cf_step_button)
+        page_layout.addWidget(self.freq_start_stop_button)
         page_layout.addStretch(1)
 
         self.freq_center_button.clicked.connect(self._on_freq_channel_clicked)
+        self.cf_step_button.clicked.connect(self._on_cf_step_clicked)
+        self.freq_start_stop_button.clicked.connect(self._on_freq_start_stop_clicked)
+        return page
+
+    def _build_span_x_scale_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.freq_span_button = self._make_control_button("Freq Span")
+        self.time_span_button = self._make_control_button("Time Span")
+
+        page_layout.addWidget(self.freq_span_button)
+        page_layout.addWidget(self.time_span_button)
+        page_layout.addStretch(1)
+
         self.freq_span_button.clicked.connect(self._on_span_x_scale_clicked)
-        self.freq_start_button.clicked.connect(self._on_start_clicked)
-        self.freq_stop_button.clicked.connect(self._on_stop_clicked)
+        self.time_span_button.clicked.connect(
+            lambda: self._show_not_implemented("Time Span")
+        )
+        return page
+
+    def _build_amptd_y_scale_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.ref_level_button = self._make_control_button("Ref Level")
+        self.range_button = self._make_control_button("Range")
+
+        page_layout.addWidget(self.ref_level_button)
+        page_layout.addWidget(self.range_button)
+        page_layout.addStretch(1)
+
+        self.ref_level_button.clicked.connect(self._on_ref_level_clicked)
+        self.range_button.clicked.connect(self._on_range_clicked)
+        return page
+
+    def _build_input_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.int_gain_button = self._make_control_button("Int Gain")
+        self.ext_att_button = self._make_control_button("Ext ATT")
+        self.ext_gain_button = self._make_control_button("Ext Gain")
+
+        page_layout.addWidget(self.int_gain_button)
+        page_layout.addWidget(self.ext_att_button)
+        page_layout.addWidget(self.ext_gain_button)
+        page_layout.addStretch(1)
+
+        self.int_gain_button.clicked.connect(self._on_int_gain_clicked)
+        self.ext_att_button.clicked.connect(self._on_ext_att_clicked)
+        self.ext_gain_button.clicked.connect(self._on_ext_gain_clicked)
+        return page
+
+    def _build_bw_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.rbw_button = self._make_control_button("RBW")
+        self.vbw_button = self._make_control_button("VBW")
+
+        page_layout.addWidget(self.rbw_button)
+        page_layout.addWidget(self.vbw_button)
+        page_layout.addStretch(1)
+
+        self.rbw_button.clicked.connect(self._on_rbw_clicked)
+        self.vbw_button.clicked.connect(lambda: self._show_not_implemented("VBW"))
+        return page
+
+    def _build_realtime_sa_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.fft_size_button = self._make_control_button("FFT size")
+        self.history_button = self._make_control_button("History")
+
+        page_layout.addWidget(self.fft_size_button)
+        page_layout.addWidget(self.history_button)
+        page_layout.addStretch(1)
+
+        self.fft_size_button.clicked.connect(self._on_fft_size_clicked)
+        self.history_button.clicked.connect(self._on_history_clicked)
         return page
 
     def _show_control_page(self, title: str, page: QtWidgets.QWidget) -> None:
@@ -404,15 +535,26 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.getAxis("bottom").setTicks([x_ticks])
         self.spectrum_plot.getAxis("left").setTicks([y_ticks])
 
+    def _clear_start_stop_display_mode(self) -> None:
+        self.config.use_start_stop_freq = False
+        self.config.display_start_freq_hz = None
+        self.config.display_stop_freq_hz = None
+
+    def _set_start_stop_display_mode(self, start_freq_hz: int, stop_freq_hz: int) -> None:
+        self.config.use_start_stop_freq = True
+        self.config.display_start_freq_hz = start_freq_hz
+        self.config.display_stop_freq_hz = stop_freq_hz
+
     def _on_freq_channel_clicked(self) -> None:
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
-            "FREQ Channel",
+            "Center",
             "Center Frequency [MHz]",
             value=self.config.center_freq_hz / 1e6,
             min=PLUTO_MIN_CENTER_FREQ_MHZ,
             max=PLUTO_MAX_CENTER_FREQ_MHZ,
             decimals=3,
+            step=self.config.center_freq_step_mhz,
         )
         if not accepted:
             return
@@ -422,18 +564,104 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         self.config.center_freq_hz = center_freq_hz
+        self._clear_start_stop_display_mode()
         self.receiver.retune_lo(center_freq_hz)
         self.processor.update_center_frequency(center_freq_hz)
         self._apply_center_frequency_update()
         self._refresh_status_label()
 
+    def _on_cf_step_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "CF Step",
+            "Center Step [MHz]",
+            value=self.config.center_freq_step_mhz,
+            min=0.001,
+            decimals=3,
+        )
+        if not accepted or value <= 0.0:
+            return
+
+        self.config.center_freq_step_mhz = value
+        self._refresh_status_label()
+
+    def _on_freq_start_stop_clicked(self) -> None:
+        if (
+            self.config.use_start_stop_freq
+            and self.config.display_start_freq_hz is not None
+            and self.config.display_stop_freq_hz is not None
+        ):
+            current_start_mhz = self.config.display_start_freq_hz / 1e6
+            current_stop_mhz = self.config.display_stop_freq_hz / 1e6
+        else:
+            current_start_mhz = (
+                self.config.center_freq_hz - self.config.display_span_hz // 2
+            ) / 1e6
+            current_stop_mhz = (
+                self.config.center_freq_hz + self.config.display_span_hz // 2
+            ) / 1e6
+
+        start_value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Start/Stop",
+            "Start Frequency [MHz]",
+            value=current_start_mhz,
+            min=PLUTO_MIN_CENTER_FREQ_MHZ,
+            max=PLUTO_MAX_CENTER_FREQ_MHZ,
+            decimals=3,
+        )
+        if not accepted:
+            return
+
+        stop_value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Start/Stop",
+            "Stop Frequency [MHz]",
+            value=current_stop_mhz,
+            min=PLUTO_MIN_CENTER_FREQ_MHZ,
+            max=PLUTO_MAX_CENTER_FREQ_MHZ,
+            decimals=3,
+        )
+        if not accepted:
+            return
+
+        if stop_value <= start_value:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Start/Stop",
+                "Stop frequency must be greater than start frequency.",
+            )
+            return
+
+        start_freq_hz = int(round(start_value * 1e6))
+        stop_freq_hz = int(round(stop_value * 1e6))
+        display_span_hz = stop_freq_hz - start_freq_hz
+        if display_span_hz > MAX_DISPLAY_SPAN_HZ:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Start/Stop",
+                f"Display span must be {MAX_DISPLAY_SPAN_HZ / 1e6:.1f} MHz or less.",
+            )
+            return
+
+        self.config.center_freq_hz = (start_freq_hz + stop_freq_hz) // 2
+        self.config.display_span_hz = display_span_hz
+        self.config.__post_init__()
+        self._set_start_stop_display_mode(start_freq_hz, stop_freq_hz)
+        self.receiver.reconfigure_span(self.config)
+        self.receiver.retune_lo(self.config.center_freq_hz)
+        self.processor.update_span_related(self.config)
+        self._apply_span_update()
+        self._refresh_status_label()
+
     def _on_span_x_scale_clicked(self) -> None:
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
-            "SPAN X Scale",
+            "Freq Span",
             "Display Span [MHz]",
             value=self.config.display_span_hz / 1e6,
             min=MIN_SPAN_MHZ,
+            max=MAX_DISPLAY_SPAN_HZ / 1e6,
             decimals=3,
         )
         if not accepted:
@@ -445,9 +673,85 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.config.display_span_hz = display_span_hz
         self.config.__post_init__()
+        self._clear_start_stop_display_mode()
         self.receiver.reconfigure_span(self.config)
         self.processor.update_span_related(self.config)
         self._apply_span_update()
+        self._refresh_status_label()
+
+    def _on_ref_level_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Ref Level",
+            "Ref Level [dBm]",
+            value=self.config.ref_level_dbm,
+            decimals=1,
+        )
+        if not accepted:
+            return
+
+        self.config.ref_level_dbm = value
+        self._sync_amplitude_scale_from_config()
+        self._apply_display_scale()
+        self._refresh_status_label()
+
+    def _on_range_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Range",
+            "Display Range [dB]",
+            value=self.config.display_range_db,
+            min=1.0,
+            decimals=1,
+        )
+        if not accepted or value <= 0.0:
+            return
+
+        self.config.display_range_db = value
+        self._sync_amplitude_scale_from_config()
+        self._apply_display_scale()
+        self._refresh_status_label()
+
+    def _on_int_gain_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getInt(
+            self,
+            "Int Gain",
+            "Internal Gain [dB]",
+            value=self.config.rx_gain_db,
+        )
+        if not accepted:
+            return
+
+        self.config.rx_gain_db = value
+        self.receiver.set_gain_db(value)
+        self._refresh_status_label()
+
+    def _on_ext_att_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Ext ATT",
+            "External ATT [dB]",
+            value=self.config.ext_att_db,
+            decimals=1,
+        )
+        if not accepted:
+            return
+
+        self.config.ext_att_db = value
+        self._refresh_status_label()
+
+    def _on_ext_gain_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Ext Gain",
+            "External Gain [dB]",
+            value=self.config.ext_gain_db,
+            decimals=1,
+        )
+        if not accepted:
+            return
+
+        self.config.ext_gain_db = value
         self._refresh_status_label()
 
     def _on_rbw_clicked(self) -> None:
@@ -455,7 +759,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "RBW",
-            "RBW [kHz] (0 = Auto/None)",
+            "RBW [kHz] (0 = None)",
             value=current_value,
             min=MIN_RBW_KHZ,
             decimals=3,
@@ -467,63 +771,61 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._rebuild_processor_only()
         self._refresh_status_label()
 
-    def _on_amptd_y_scale_clicked(self) -> None:
-        min_value, accepted = QtWidgets.QInputDialog.getDouble(
+    def _on_fft_size_clicked(self) -> None:
+        fft_options = [str(2**power) for power in range(6, 16)]
+        current_index = fft_options.index(str(self.config.fft_size))
+        value, accepted = QtWidgets.QInputDialog.getItem(
             self,
-            "AMPTD Y Scale",
-            "Y Min [dBm]",
-            value=float(self.y_min),
-            decimals=1,
-        )
-        if not accepted:
-            return
-
-        max_value, accepted = QtWidgets.QInputDialog.getDouble(
-            self,
-            "AMPTD Y Scale",
-            "Y Max [dBm]",
-            value=float(self.y_max),
-            decimals=1,
-        )
-        if not accepted or max_value <= min_value:
-            return
-
-        self.y_min = min_value
-        self.y_max = max_value
-        self._apply_display_scale()
-        self._refresh_status_label()
-
-    def _on_start_clicked(self) -> None:
-        self.receiver.start()
-        self.timer.start(self.config.update_interval_ms)
-
-    def _on_stop_clicked(self) -> None:
-        self.timer.stop()
-        self.receiver.stop()
-
-    def _on_view_display_clicked(self) -> None:
-        mode, accepted = QtWidgets.QInputDialog.getItem(
-            self,
-            "View / Display",
-            "Display Mode",
-            DISPLAY_MODE_OPTIONS,
-            current=DISPLAY_MODE_OPTIONS.index(self.display_mode),
+            "FFT size",
+            "FFT Size",
+            fft_options,
+            current=current_index,
             editable=False,
         )
         if not accepted:
             return
 
-        self.display_mode = mode
-        self._apply_display_mode()
+        self.config.fft_size = int(value)
+        self.receiver.reconfigure_span(self.config)
+        self.processor.update_span_related(self.config)
+        self._apply_span_update()
+        self._refresh_status_label()
 
-    def _rebuild_receiver_and_processor(self) -> None:
-        self.timer.stop()
-        self.receiver.reconfigure(self.config)
-        self.processor = SpectrumProcessor(self.config)
-        self._last_received_samples_total = 0
-        self.received_samples_interval = 0
+    def _on_history_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getInt(
+            self,
+            "History",
+            "Waterfall History",
+            value=self.config.waterfall_history,
+            min=1,
+        )
+        if not accepted:
+            return
+
+        self.config.waterfall_history = value
         self._reset_plot_state()
+        self._refresh_status_label()
+
+    def _on_cont_clicked(self) -> None:
+        self.sweep_state = SWEEP_STATE_RUNNING
+        self.receiver.start()
         self.timer.start(self.config.update_interval_ms)
+
+    def _on_single_clicked(self) -> None:
+        self.sweep_state = SWEEP_STATE_SINGLE
+        self.receiver.start()
+        self.timer.start(self.config.update_interval_ms)
+
+    def _on_reset_clicked(self) -> None:
+        self._reset_plot_state()
+        self._refresh_status_label()
+
+    def _show_not_implemented(self, feature_name: str) -> None:
+        QtWidgets.QMessageBox.information(
+            self,
+            feature_name,
+            f"{feature_name} is reserved for a future implementation.",
+        )
 
     def _rebuild_processor_only(self) -> None:
         self.processor = SpectrumProcessor(self.config)
@@ -654,14 +956,37 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _refresh_status_label(self) -> None:
         self.status_label.setText(self._make_header_status_text())
 
+    def _get_header_frequency_fields(self) -> tuple[str, str, str, str]:
+        if (
+            self.config.use_start_stop_freq
+            and self.config.display_start_freq_hz is not None
+            and self.config.display_stop_freq_hz is not None
+        ):
+            return (
+                "Start Freq",
+                f"{self.config.display_start_freq_hz / 1e6:.3f} MHz",
+                "Stop Freq",
+                f"{self.config.display_stop_freq_hz / 1e6:.3f} MHz",
+            )
+
+        return (
+            "Center",
+            f"{self.config.center_freq_hz / 1e6:.3f} MHz",
+            "Span",
+            f"{self.config.display_span_hz / 1e6:.3f} MHz",
+        )
+
     def _make_header_status_text(self) -> str:
+        freq_label_1, freq_value_1, freq_label_2, freq_value_2 = (
+            self._get_header_frequency_fields()
+        )
         rbw_text = self._format_rbw_text()
         line1 = (
-            f"Center: {self.config.center_freq_hz / 1e6:.3f} MHz   "
-            f"Span: {self.config.display_span_hz / 1e6:.3f} MHz   "
+            f"{freq_label_1}: {freq_value_1}   "
+            f"{freq_label_2}: {freq_value_2}   "
             f"RBW: {rbw_text}   "
             f"FFT: {self.config.fft_size}   "
-            f"Bin Width: {self.config.sample_rate_hz / self.config.rx_buffer_size:.1f} Hz"
+            f"Bin Width: {self.config.bin_width_hz:.1f} Hz"
         )
         line2 = f"Gain: {self.config.rx_gain_db} dB"
         return f"{line1}\n{line2}"
@@ -674,15 +999,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         interval_capture_ratio: float,
         avg_capture_ratio: float,
     ) -> str:
+        freq_label_1, freq_value_1, freq_label_2, freq_value_2 = (
+            self._get_header_frequency_fields()
+        )
         rbw_text = self._format_rbw_text()
         return (
-            f"Center: {self.config.center_freq_hz / 1e6:.3f} MHz    "
-            f"Span(display): {self.config.display_span_hz / 1e6:.3f} MHz    "
+            f"{freq_label_1}: {freq_value_1}    "
+            f"{freq_label_2}: {freq_value_2}    "
             f"Span(rx): {self.config.sample_rate_hz / 1e6:.3f} MHz    "
             f"RBW: {rbw_text}    "
             f"FFT: {self.config.fft_size}    "
             f"CaptureBuf: {self.config.capture_buffer_blocks} blk    "
-            f"Bin Width: {self.config.sample_rate_hz / self.config.rx_buffer_size:.1f} Hz    "
+            f"Bin Width: {self.config.bin_width_hz:.1f} Hz    "
             f"Gain: {self.config.rx_gain_db} dB    "
             f"Drops: {self.drop_count}    "
             f"Capture(interval): {interval_capture_ratio * 100:.2f}%    "
@@ -757,6 +1085,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.frame_count_total += 1
         self.frame_count_interval += 1
+
+        if self.sweep_state == SWEEP_STATE_SINGLE:
+            self.timer.stop()
+            self.receiver.stop()
+            self.sweep_state = SWEEP_STATE_STOPPED
 
         now = time.perf_counter()
         if now - self.last_report_time >= 1.0:

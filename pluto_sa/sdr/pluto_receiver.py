@@ -100,6 +100,12 @@ class PlutoReceiver:
             self._allocate_capture_buffers(config)
             self.received_samples_total = 0
 
+    def set_gain_db(self, gain_db: int) -> None:
+        with self._iq_lock:
+            with self._sdr_lock:
+                self.sdr.rx_hardwaregain_chan0 = gain_db
+            self.config.rx_gain_db = gain_db
+
     def reconfigure(self, config: SpectrumConfig) -> None:
         was_running = self._rx_thread is not None and self._rx_thread.is_alive()
         self.stop()
