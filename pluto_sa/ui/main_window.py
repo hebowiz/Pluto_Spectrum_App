@@ -182,6 +182,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.trace_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.spectrum_curves: list[pg.PlotCurveItem] = []
         self.page_title_colors: dict[QtWidgets.QWidget, str] = {}
+        self.analyzer_mode_option_buttons: dict[AnalyzerMode, QtWidgets.QPushButton] = {}
         self.graph_view_option_buttons: dict[str, QtWidgets.QPushButton] = {}
         self.trace_type_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
         self.marker_trace_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
@@ -261,6 +262,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         if hasattr(self, "waterfall_plot"):
             self._apply_display_mode()
+        if hasattr(self, "graph_view_button"):
+            self._update_graph_view_controls()
+        if hasattr(self, "analyzer_mode_button"):
+            self._update_analyzer_mode_controls()
 
     def _change_analyzer_mode(self, analyzer_mode: AnalyzerMode) -> None:
         if self.config.analyzer_mode == analyzer_mode:
@@ -270,6 +275,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._reset_measurement_state_for_mode_change()
         self._apply_analyzer_mode_ui_constraints()
         self._refresh_status_label()
+        self._page_history.clear()
+        self._show_control_page("Main Menu", self.main_menu_page, push_history=False)
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -461,6 +468,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         panel_layout.addLayout(footer_layout)
 
         self.main_menu_page = self._build_main_menu_page()
+        self.analyzer_mode_page = self._build_analyzer_mode_page()
         self.freq_channel_page = self._build_freq_channel_page()
         self.span_x_scale_page = self._build_span_x_scale_page()
         self.amptd_y_scale_page = self._build_amptd_y_scale_page()
@@ -486,6 +494,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         ]
         self.realtime_sa_page = self._build_realtime_sa_page()
         self.control_stack.addWidget(self.main_menu_page)
+        self.control_stack.addWidget(self.analyzer_mode_page)
         self.control_stack.addWidget(self.freq_channel_page)
         self.control_stack.addWidget(self.span_x_scale_page)
         self.control_stack.addWidget(self.amptd_y_scale_page)
@@ -524,6 +533,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         analyzer_group = QtWidgets.QGroupBox("ANALYZER SETUP")
         self._apply_groupbox_title_font(analyzer_group)
         analyzer_layout = QtWidgets.QVBoxLayout(analyzer_group)
+        self.analyzer_mode_button = self._make_value_control_button("Analyzer Mode")
         self.freq_menu_button = self._make_control_button("FREQ Channel")
         self.span_menu_button = self._make_control_button("SPAN X Scale")
         self.amplitude_menu_button = self._make_control_button("AMPTD Y Scale")
@@ -532,6 +542,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.display_menu_button = self._make_control_button("Display")
         self.trace_detector_button = self._make_control_button("Trace/Detector")
         self.realtime_sa_menu_button = self._make_control_button("RealTime SA")
+        analyzer_layout.addWidget(self.analyzer_mode_button)
         analyzer_layout.addWidget(self.freq_menu_button)
         analyzer_layout.addWidget(self.span_menu_button)
         analyzer_layout.addWidget(self.amplitude_menu_button)
@@ -564,6 +575,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         panel_layout.addWidget(trigger_group)
         panel_layout.addStretch(1)
 
+        self.analyzer_mode_button.clicked.connect(
+            lambda: self._show_control_page("Analyzer Mode", self.analyzer_mode_page)
+        )
         self.freq_menu_button.clicked.connect(
             lambda: self._show_control_page("FREQ Channel", self.freq_channel_page)
         )
@@ -595,6 +609,27 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.marker_button.clicked.connect(
             lambda: self._show_control_page("Marker", self.marker_menu_page)
         )
+        self._update_analyzer_mode_controls()
+        return page
+
+    def _build_analyzer_mode_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for mode in (AnalyzerMode.REALTIME_SA, AnalyzerMode.SWEEP_SA):
+            button = self._make_control_button(mode.value)
+            button.clicked.connect(
+                lambda _checked=False, selected_mode=mode: self._change_analyzer_mode(
+                    selected_mode
+                )
+            )
+            self.analyzer_mode_option_buttons[mode] = button
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+        self._update_analyzer_mode_selection_page()
         return page
 
     def _build_freq_channel_page(self) -> QtWidgets.QWidget:
@@ -696,8 +731,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(10)
 
-        self.graph_view_button = self._make_control_button("Graph View")
-        self.graph_view_button.setMinimumHeight(68)
+        self.graph_view_button = self._make_value_control_button("Graph View")
 
         page_layout.addWidget(self.graph_view_button)
         page_layout.addStretch(1)
@@ -1003,9 +1037,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"color: {title_color}; padding: 4px 2px;"
         )
         self.control_stack.setCurrentWidget(page)
-        has_history = len(self._page_history) > 0
-        self.back_button.setEnabled(has_history)
-        self.back_button.setVisible(has_history)
+        self._update_back_button_visibility()
 
     def _navigate_back(self) -> None:
         if not self._page_history:
@@ -1013,6 +1045,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         title, page = self._page_history.pop()
         self._show_control_page(title, page, push_history=False)
+
+    def _update_back_button_visibility(self) -> None:
+        current_page = self.control_stack.currentWidget()
+        show_back = current_page is not self.main_menu_page and len(self._page_history) > 0
+        self.back_button.setEnabled(show_back)
+        self.back_button.setVisible(show_back)
 
     def _apply_groupbox_title_font(self, group_box: QtWidgets.QGroupBox) -> None:
         group_font = QtGui.QFont(group_box.font())
@@ -1027,6 +1065,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         button_font.setBold(True)
         button.setFont(button_font)
         button.setMinimumHeight(50)
+        return button
+
+    def _make_value_control_button(self, label_text: str) -> QtWidgets.QPushButton:
+        button = self._make_control_button(label_text)
+        button.setMinimumHeight(72)
+        button.setStyleSheet(
+            "QPushButton {"
+            " background-color: #303030;"
+            " color: white;"
+            " border: 1px solid #666;"
+            " padding-top: 10px;"
+            " padding-bottom: 10px;"
+            "}"
+            "QPushButton:hover { background-color: #3c3c3c; }"
+        )
         return button
 
     def _configure_plot_chrome(self, plot_widget: pg.PlotWidget) -> None:
@@ -1436,15 +1489,36 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         controls["average_count"].setEnabled(trace_state.trace_type == TRACE_TYPE_AVERAGE)
 
     def _update_graph_view_controls(self) -> None:
-        self.graph_view_button.setText(
-            f"Graph View\n{GRAPH_VIEW_LABELS[self.graph_view_mode]}"
-        )
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self.graph_view_button.setText("Graph View\nSpectrum Only")
+            self.graph_view_button.setEnabled(False)
+        else:
+            self.graph_view_button.setText(
+                f"Graph View\n{GRAPH_VIEW_LABELS[self.graph_view_mode]}"
+            )
+            self.graph_view_button.setEnabled(True)
         self._update_graph_view_selection_page()
 
     def _update_graph_view_selection_page(self) -> None:
         for mode, button in self.graph_view_option_buttons.items():
             prefix = "✓ " if mode == self.graph_view_mode else "  "
             button.setText(f"{prefix}{GRAPH_VIEW_LABELS[mode]}")
+            if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+                button.setEnabled(mode == GRAPH_VIEW_SPECTRUM_ONLY)
+            else:
+                button.setEnabled(True)
+
+    def _update_analyzer_mode_controls(self) -> None:
+        self.analyzer_mode_button.setText(
+            f"Analyzer Mode\n{self.config.analyzer_mode.value}"
+        )
+        self.analyzer_mode_button.setMinimumHeight(68)
+        self._update_analyzer_mode_selection_page()
+
+    def _update_analyzer_mode_selection_page(self) -> None:
+        for mode, button in self.analyzer_mode_option_buttons.items():
+            prefix = "✓ " if mode == self.config.analyzer_mode else "  "
+            button.setText(f"{prefix}{mode.value}")
 
     def _update_trace_type_selection_page(self, trace_index: int) -> None:
         if trace_index >= len(self.trace_type_option_buttons):
