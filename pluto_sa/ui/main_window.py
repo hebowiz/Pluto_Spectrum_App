@@ -712,15 +712,30 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.freq_center_button = self._make_control_button("Center")
         self.cf_step_button = self._make_control_button("CF Step")
+        self.freq_center_left_button = self._make_control_button("<-")
+        self.freq_center_right_button = self._make_control_button("->")
         self.freq_start_stop_button = self._make_control_button("Start/Stop")
+
+        center_nudge_layout = QtWidgets.QHBoxLayout()
+        center_nudge_layout.setContentsMargins(0, 0, 0, 0)
+        center_nudge_layout.setSpacing(10)
+        center_nudge_layout.addWidget(self.freq_center_left_button)
+        center_nudge_layout.addWidget(self.freq_center_right_button)
 
         page_layout.addWidget(self.freq_center_button)
         page_layout.addWidget(self.cf_step_button)
+        page_layout.addLayout(center_nudge_layout)
         page_layout.addWidget(self.freq_start_stop_button)
         page_layout.addStretch(1)
 
         self.freq_center_button.clicked.connect(self._on_freq_channel_clicked)
         self.cf_step_button.clicked.connect(self._on_cf_step_clicked)
+        self.freq_center_left_button.clicked.connect(
+            lambda _checked=False: self._nudge_center_frequency(-1)
+        )
+        self.freq_center_right_button.clicked.connect(
+            lambda _checked=False: self._nudge_center_frequency(1)
+        )
         self.freq_start_stop_button.clicked.connect(self._on_freq_start_stop_clicked)
         return page
 
@@ -982,13 +997,23 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         peak_search_button = self._make_control_button("Peak Search")
         continuous_peak_button = self._make_control_button("Continuous Peak")
 
+        nudge_layout = QtWidgets.QHBoxLayout()
+        nudge_layout.setContentsMargins(0, 0, 0, 0)
+        nudge_layout.setSpacing(10)
+        nudge_layout.addWidget(left_button)
+        nudge_layout.addWidget(right_button)
+
         for button in (
             toggle_button,
             trace_button,
             frequency_button,
             step_button,
-            left_button,
-            right_button,
+        ):
+            page_layout.addWidget(button)
+
+        page_layout.addLayout(nudge_layout)
+
+        for button in (
             peak_search_button,
             continuous_peak_button,
         ):
@@ -1315,19 +1340,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         center_freq_hz = int(round(value * 1e6))
-        if center_freq_hz <= 0:
-            return
-
-        self.config.center_freq_hz = center_freq_hz
-        self._clear_start_stop_display_mode()
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
-            previous_sweep_state = self._current_sweep_state()
-            self._reset_sweep_display_and_restore_state(previous_sweep_state)
-        else:
-            self.receiver.retune_lo(center_freq_hz)
-            self.processor.update_center_frequency(center_freq_hz)
-            self._apply_center_frequency_update()
-        self._refresh_status_label()
+        self._apply_center_frequency_change(center_freq_hz)
 
     def _on_cf_step_clicked(self) -> None:
         value, accepted = QtWidgets.QInputDialog.getDouble(
@@ -1342,6 +1355,34 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         self.config.center_freq_step_mhz = value
+        self._refresh_status_label()
+
+    def _nudge_center_frequency(self, direction: int) -> None:
+        step_hz = int(round(self.config.center_freq_step_mhz * 1e6))
+        if step_hz <= 0:
+            return
+        center_freq_hz = self.config.center_freq_hz + (direction * step_hz)
+        self._apply_center_frequency_change(center_freq_hz)
+
+    def _apply_center_frequency_change(self, center_freq_hz: int) -> None:
+        clamped_center_freq_hz = int(
+            min(
+                max(center_freq_hz, int(round(PLUTO_MIN_CENTER_FREQ_MHZ * 1e6))),
+                int(round(PLUTO_MAX_CENTER_FREQ_MHZ * 1e6)),
+            )
+        )
+        if clamped_center_freq_hz <= 0:
+            return
+
+        self.config.center_freq_hz = clamped_center_freq_hz
+        self._clear_start_stop_display_mode()
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            previous_sweep_state = self._current_sweep_state()
+            self._reset_sweep_display_and_restore_state(previous_sweep_state)
+        else:
+            self.receiver.retune_lo(clamped_center_freq_hz)
+            self.processor.update_center_frequency(clamped_center_freq_hz)
+            self._apply_center_frequency_update()
         self._refresh_status_label()
 
     def _on_freq_start_stop_clicked(self) -> None:
@@ -1864,10 +1905,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trace_state.average_power = None
 
     def _get_active_spectrum_freq_axis_ghz(self) -> np.ndarray:
-        if self._last_display_freq_axis_ghz is not None:
-            return self._last_display_freq_axis_ghz
-
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            if self._last_display_freq_axis_ghz is not None:
+                return self._last_display_freq_axis_ghz
             return self.sweep_controller.get_sweep_frequency_axis_hz() / 1e9
 
         return self.processor.get_display_freq_axis_ghz()
@@ -2337,8 +2377,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
 
     def _apply_center_frequency_update(self) -> None:
-        freq_axis_display_ghz = self._get_active_spectrum_freq_axis_ghz()
+        freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
         freq_axis_display_ghz_dec = self.processor.get_decimated_display_freq_axis_ghz()
+
+        self._last_display_freq_axis_ghz = freq_axis_display_ghz
 
         self.waterfall_img.setRect(
             QtCore.QRectF(
@@ -2359,7 +2401,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             padding=X_AXIS_PADDING,
         )
         self._update_fixed_ticks()
-        self._last_display_freq_axis_ghz = freq_axis_display_ghz
         self._update_trace_curves()
         self._update_marker_items()
 
