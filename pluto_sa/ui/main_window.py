@@ -1598,10 +1598,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self.config.sweep_detector_mode == resolved_mode.value:
             return
 
-        previous_state = self._current_sweep_state()
         self.config.sweep_detector_mode = resolved_mode.value
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
-            self._reset_sweep_display_and_restore_state(previous_state)
         self._update_sweep_controls()
         self._update_sweep_detector_selection_page()
         self._refresh_status_label()
@@ -2080,8 +2077,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _rebuild_processor_only(self) -> None:
         self.processor = SpectrumProcessor(self.config)
-        self._reset_trace_runtime_buffers()
-        self._reset_plot_state()
         self._refresh_sweep_time_estimate()
 
     def _on_sweep_complete(self, frame_result) -> None:
