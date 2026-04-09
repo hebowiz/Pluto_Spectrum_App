@@ -27,12 +27,14 @@ PLUTO_MAX_CENTER_FREQ_MHZ = 3800.0
 MIN_SPAN_MHZ = 0.001
 MIN_RBW_KHZ = 0.0
 PLOT_WIDTH = 920
-PLOT_HEIGHT = 320
 PLOT_SPACING = 12
-DUAL_PLOT_TOTAL_HEIGHT = PLOT_HEIGHT * 2 + PLOT_SPACING
 CONTROL_PANEL_WIDTH = 240
-WINDOW_WIDTH = 1216
-WINDOW_HEIGHT = 762
+WINDOW_WIDTH = 1280
+WINDOW_HEIGHT = 980
+SIDE_PANEL_HEIGHT = WINDOW_HEIGHT - 24
+STATUS_PANEL_HEIGHT = 76
+PLOT_HEIGHT = (SIDE_PANEL_HEIGHT - STATUS_PANEL_HEIGHT - (PLOT_SPACING * 2)) // 2
+DUAL_PLOT_TOTAL_HEIGHT = PLOT_HEIGHT * 2 + PLOT_SPACING
 DISPLAY_MODE_WATERFALL_SPECTRUM = "Waterfall + Spectrum"
 DISPLAY_MODE_WATERFALL_ONLY = "Waterfall only"
 DISPLAY_MODE_SPECTRUM_ONLY = "Spectrum only"
@@ -130,6 +132,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         left_panel = QtWidgets.QWidget()
         left_panel.setFixedWidth(PLOT_WIDTH)
+        left_panel.setFixedHeight(SIDE_PANEL_HEIGHT)
         self.left_panel = left_panel
         layout = QtWidgets.QVBoxLayout(left_panel)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -154,6 +157,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
         )
         self.status_label.setFixedWidth(PLOT_WIDTH)
+        self.status_label.setFixedHeight(STATUS_PANEL_HEIGHT)
+        self.status_label.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         layout.addWidget(self.status_label)
 
         pg.setConfigOptions(antialias=False)
@@ -255,14 +263,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.addItem(self.peak_text)
 
         layout.addWidget(self.spectrum_plot)
+        layout.setStretch(0, 0)
+        layout.setStretch(1, 1)
+        layout.setStretch(2, 1)
         self._apply_display_mode()
 
         outer_layout.addWidget(left_panel, stretch=1)
         outer_layout.addWidget(self._build_control_panel())
+        outer_layout.setStretch(0, 1)
+        outer_layout.setStretch(1, 0)
 
     def _build_control_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QFrame()
         panel.setFixedWidth(CONTROL_PANEL_WIDTH)
+        panel.setFixedHeight(WINDOW_HEIGHT - 24)
         panel.setStyleSheet(
             "QFrame { background-color: #1c1c1c; }"
             "QGroupBox { color: white; border: 1px solid #555; margin-top: 12px; }"
