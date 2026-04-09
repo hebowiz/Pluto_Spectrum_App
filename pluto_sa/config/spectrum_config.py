@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 MAX_DISPLAY_SPAN_HZ = 55_000_000
+MIN_INTERNAL_GAIN_DB = 0
+MAX_INTERNAL_GAIN_DB = 40
 
 
 @dataclass
@@ -19,7 +21,7 @@ class SpectrumConfig:
     guard_ratio: float = 0.04
     fft_size: int = 4096
     rbw_hz: Optional[float] = 1e+6
-    calibration_offset_db: float = -72.0
+    calibration_offset_db: float = -62.0
     rx_gain_db: int = 30
     ref_level_dbm: float = 20.0
     display_range_db: float = 100.0
@@ -36,6 +38,12 @@ class SpectrumConfig:
         if self.display_span_hz > MAX_DISPLAY_SPAN_HZ:
             print(f"[WARN] display_span clipped to {MAX_DISPLAY_SPAN_HZ / 1e6:.1f} MHz")
             self.display_span_hz = MAX_DISPLAY_SPAN_HZ
+        if self.rx_gain_db < MIN_INTERNAL_GAIN_DB:
+            print(f"[WARN] rx_gain_db clipped to {MIN_INTERNAL_GAIN_DB} dB")
+            self.rx_gain_db = MIN_INTERNAL_GAIN_DB
+        if self.rx_gain_db > MAX_INTERNAL_GAIN_DB:
+            print(f"[WARN] rx_gain_db clipped to {MAX_INTERNAL_GAIN_DB} dB")
+            self.rx_gain_db = MAX_INTERNAL_GAIN_DB
 
     @property
     def sample_rate_hz(self) -> int:

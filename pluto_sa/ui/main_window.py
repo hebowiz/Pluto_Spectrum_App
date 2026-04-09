@@ -8,10 +8,15 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from pluto_sa.config.spectrum_config import MAX_DISPLAY_SPAN_HZ, SpectrumConfig
+from pluto_sa.config.spectrum_config import (
+    MAX_DISPLAY_SPAN_HZ,
+    MAX_INTERNAL_GAIN_DB,
+    MIN_INTERNAL_GAIN_DB,
+    SpectrumConfig,
+)
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
-from pluto_sa.utils.calibration import apply_offset_db
+from pluto_sa.utils.calibration import apply_display_power_correction
 
 X_AXIS_PADDING = 0.02
 Y_AXIS_PADDING = 0.03
@@ -545,18 +550,38 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.display_start_freq_hz = start_freq_hz
         self.config.display_stop_freq_hz = stop_freq_hz
 
-    def _on_freq_channel_clicked(self) -> None:
-        value, accepted = QtWidgets.QInputDialog.getDouble(
-            self,
-            "Center",
-            "Center Frequency [MHz]",
-            value=self.config.center_freq_hz / 1e6,
-            min=PLUTO_MIN_CENTER_FREQ_MHZ,
-            max=PLUTO_MAX_CENTER_FREQ_MHZ,
-            decimals=3,
-            step=self.config.center_freq_step_mhz,
+    def _show_center_frequency_dialog(self) -> float | None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Center")
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+
+        form_layout = QtWidgets.QFormLayout()
+        spin_box = QtWidgets.QDoubleSpinBox(dialog)
+        spin_box.setRange(PLUTO_MIN_CENTER_FREQ_MHZ, PLUTO_MAX_CENTER_FREQ_MHZ)
+        spin_box.setDecimals(3)
+        spin_box.setSingleStep(self.config.center_freq_step_mhz)
+        spin_box.setValue(self.config.center_freq_hz / 1e6)
+        spin_box.setSuffix(" MHz")
+        form_layout.addRow("Center Frequency", spin_box)
+        layout.addLayout(form_layout)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
+            parent=dialog,
         )
-        if not accepted:
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return None
+
+        return spin_box.value()
+
+    def _on_freq_channel_clicked(self) -> None:
+        value = self._show_center_frequency_dialog()
+        if value is None:
             return
 
         center_freq_hz = int(round(value * 1e6))
@@ -718,12 +743,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Int Gain",
             "Internal Gain [dB]",
             value=self.config.rx_gain_db,
+            min=MIN_INTERNAL_GAIN_DB,
+            max=MAX_INTERNAL_GAIN_DB,
         )
         if not accepted:
             return
 
         self.config.rx_gain_db = value
-        self.receiver.set_gain_db(value)
+        self.config.__post_init__()
+        self.receiver.set_gain_db(self.config.rx_gain_db)
         self._refresh_status_label()
 
     def _on_ext_att_clicked(self) -> None:
@@ -1053,7 +1081,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         power_db_full = self.processor.compute_spectrum(iq)
         power_db_display = self.processor.extract_display_spectrum(power_db_full)
-        power_db_display = apply_offset_db(power_db_display, self.calibration_offset_db)
+        power_db_display = apply_display_power_correction(
+            power_db_display,
+            self.calibration_offset_db,
+            self.config.input_correction_db,
+        )
 
         current_received_total = self.receiver.get_received_sample_count()
         self.received_samples_interval = (
