@@ -44,6 +44,10 @@ class SweepPointResult:
     rbw_center_bin_index: int
     rbw_center_frequency_hz: float
     detector_input_values: np.ndarray
+    flush_reads: int = 0
+    flush_samples: int = 0
+    flush_actual_samples_total: int = 0
+    flush_actual_samples_per_read: int = 0
     configure_ms: float = 0.0
     retune_ms: float = 0.0
     settle_wait_ms: float = 0.0
@@ -68,6 +72,8 @@ class SweepController:
         self._sweep_complete_callback: Callable[[SweepFrameResult], None] | None = None
         self._sweep_freq_axis_hz = self._build_sweep_frequency_axis_hz()
         self._partial_power_db = np.full(config.sweep_points, np.nan, dtype=np.float64)
+        self._current_sweep_started_at: float | None = None
+        self._next_sweep_start_time: float | None = None
         self.reset()
 
     def reset(self) -> None:
@@ -75,6 +81,8 @@ class SweepController:
         self._run_requested = False
         self._single_requested = False
         self._restart_pending = False
+        self._current_sweep_started_at = None
+        self._next_sweep_start_time = None
         self._prepare_next_sweep_cycle()
 
     def stop(self) -> None:
@@ -82,6 +90,8 @@ class SweepController:
         self._run_requested = False
         self._single_requested = False
         self._restart_pending = False
+        self._current_sweep_started_at = None
+        self._next_sweep_start_time = None
 
     def request_continuous(self) -> None:
         """Request continuous sweep execution."""
@@ -90,6 +100,8 @@ class SweepController:
         self._run_requested = True
         self._single_requested = False
         self._restart_pending = False
+        self._current_sweep_started_at = None
+        self._next_sweep_start_time = None
 
     def request_single(self) -> None:
         """Request one complete sweep execution."""
@@ -98,6 +110,8 @@ class SweepController:
         self._run_requested = True
         self._single_requested = True
         self._restart_pending = False
+        self._current_sweep_started_at = None
+        self._next_sweep_start_time = None
 
     def is_running(self) -> bool:
         """Return whether sweep execution is currently requested."""
@@ -135,8 +149,13 @@ class SweepController:
         settle_wait_ms = (time.perf_counter() - settle_start) * 1000.0
 
         capture_samples = self._resolve_capture_samples()
+        flush_samples = min(self.config.sweep_flush_samples, capture_samples)
         flush_start = time.perf_counter()
-        self._flush_post_retune_buffers(capture_samples)
+        (
+            flush_reads,
+            flush_actual_samples_total,
+            flush_actual_samples_per_read,
+        ) = self._flush_post_retune_buffers(capture_samples)
         flush_ms = (time.perf_counter() - flush_start) * 1000.0
 
         capture_start = time.perf_counter()
@@ -172,6 +191,10 @@ class SweepController:
             rbw_center_bin_index=rbw_center_bin_index,
             rbw_center_frequency_hz=rbw_center_frequency_hz,
             detector_input_values=detector_input_values.copy(),
+            flush_reads=flush_reads,
+            flush_samples=int(flush_samples),
+            flush_actual_samples_total=flush_actual_samples_total,
+            flush_actual_samples_per_read=flush_actual_samples_per_read,
             configure_ms=configure_ms,
             retune_ms=retune_ms,
             settle_wait_ms=settle_wait_ms,
@@ -195,12 +218,17 @@ class SweepController:
         if self._restart_pending:
             self._prepare_next_sweep_cycle()
             self._restart_pending = False
+            self._current_sweep_started_at = time.perf_counter()
+            self._next_sweep_start_time = None
 
         if self._current_point_index >= len(self._sweep_freq_axis_hz):
             if self._single_requested:
                 self.stop()
                 return self._latest_result
             self._prepare_next_sweep_cycle()
+
+        if self._current_point_index == 0 and self._current_sweep_started_at is None:
+            self._current_sweep_started_at = time.perf_counter()
 
         frequency_hz = int(self._sweep_freq_axis_hz[self._current_point_index])
         point_result = self.measure_point(frequency_hz)
@@ -225,6 +253,34 @@ class SweepController:
     def get_sweep_frequency_axis_hz(self) -> np.ndarray:
         """Return the configured sweep frequency axis."""
         return self._sweep_freq_axis_hz.copy()
+
+    def estimate_capture_samples(self) -> int:
+        """Return the current capture-size estimate used by Sweep SA."""
+        return self._resolve_capture_samples()
+
+    def estimate_point_time_s(self) -> float:
+        """Estimate one sweep-point duration from the current configuration."""
+        capture_samples = self._resolve_capture_samples()
+        flush_samples = max(1, int(min(self.config.sweep_flush_samples, capture_samples)))
+        discard_samples_per_read = max(flush_samples, int(self.config.fft_size))
+        retune_s = 0.0015
+        settle_s = max(0.0, self.config.sweep_lo_settle_us) / 1_000_000.0
+        flush_s = (
+            self.config.sweep_retune_flush_reads
+            * discard_samples_per_read
+            / self.config.sweep_sample_rate_hz
+        )
+        capture_s = capture_samples / self.config.sweep_sample_rate_hz
+        process_s = 0.001
+        return retune_s + settle_s + flush_s + capture_s + process_s
+
+    def estimate_minimum_sweep_time_s(self) -> float:
+        """Estimate the minimum realizable sweep time for the current configuration."""
+        return self.config.sweep_points * self.estimate_point_time_s()
+
+    def get_actual_sweep_time_s(self) -> float:
+        """Return the current minimum realizable sweep time used for UI display."""
+        return self.estimate_minimum_sweep_time_s()
 
     def _build_sweep_frequency_axis_hz(self) -> np.ndarray:
         return np.linspace(
@@ -262,22 +318,28 @@ class SweepController:
             self.stop()
         else:
             self._restart_pending = True
+            self._next_sweep_start_time = None
+            self._current_sweep_started_at = None
 
     def _wait_for_lo_settle(self) -> None:
         time.sleep(max(0.0, self.config.sweep_lo_settle_us) / 1_000_000.0)
 
-    def _flush_post_retune_buffers(self, capture_samples: int) -> None:
+    def _flush_post_retune_buffers(self, capture_samples: int) -> tuple[int, int, int]:
         flush_reads = max(0, int(self.config.sweep_retune_flush_reads))
+        flush_samples = max(1, int(min(self.config.sweep_flush_samples, capture_samples)))
+        flushed_total = 0
+        actual_per_read = 0
         for _ in range(flush_reads):
-            self.receiver.capture_block(capture_samples)
+            actual_per_read = self.receiver.discard_block(flush_samples)
+            flushed_total += actual_per_read
+        return flush_reads, flushed_total, actual_per_read
 
     def _resolve_capture_samples(self) -> int:
-        if self.config.sweep_capture_samples_override is not None:
-            return max(1, int(self.config.sweep_capture_samples_override))
-
         effective_rbw_hz = self._resolve_effective_rbw_hz()
         observation_ratio = self.config.sweep_sample_rate_hz / effective_rbw_hz
         min_samples = max(256, int(np.ceil(observation_ratio * 8.0)))
+        if self.config.sweep_capture_samples_override is not None:
+            min_samples = max(min_samples, int(self.config.sweep_capture_samples_override))
         capture_samples = 1 << int(np.ceil(np.log2(min_samples)))
         return int(capture_samples)
 

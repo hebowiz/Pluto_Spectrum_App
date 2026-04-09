@@ -49,6 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of post-retune capture flush reads before measurement",
     )
     parser.add_argument(
+        "--flush-samples",
+        type=int,
+        default=256,
+        help="Requested discard size for each post-retune flush read",
+    )
+    parser.add_argument(
         "--capture-samples",
         type=int,
         default=0,
@@ -83,6 +89,13 @@ def format_debug_block(result) -> list[str]:
         f"  peak rel freq:        {result.peak_frequency_relative_hz / 1e3:10.3f} kHz",
         f"  RBW center bin:       {result.rbw_center_bin_index}",
         f"  RBW center freq:      {result.rbw_center_frequency_hz / 1e3:10.3f} kHz",
+        (
+            "  flush detail:        "
+            f"reads={result.flush_reads}, "
+            f"req={result.flush_samples}, "
+            f"act={result.flush_actual_samples_per_read}, "
+            f"total={result.flush_actual_samples_total}"
+        ),
         f"  detector input:       [{detector_values}]",
     ]
 
@@ -104,6 +117,7 @@ def main() -> int:
         sweep_points=max(1, args.points),
         sweep_detector_mode=args.detector,
         sweep_retune_flush_reads=max(0, args.flush_reads),
+        sweep_flush_samples=max(1, args.flush_samples),
         sweep_capture_samples_override=(
             None if args.capture_samples <= 0 else int(args.capture_samples)
         ),
@@ -126,6 +140,7 @@ def main() -> int:
 
         print(
             f"flush_reads={config.sweep_retune_flush_reads}, "
+            f"flush_samples={config.sweep_flush_samples}, "
             f"detector={config.sweep_detector_mode}, "
             f"rbw={config.rbw_hz if config.rbw_hz is not None else 'None'} Hz, "
             f"capture_override={config.sweep_capture_samples_override}"

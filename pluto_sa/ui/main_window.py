@@ -29,6 +29,7 @@ PLUTO_MIN_CENTER_FREQ_MHZ = 325.0
 PLUTO_MAX_CENTER_FREQ_MHZ = 3800.0
 MIN_SPAN_MHZ = 0.001
 MIN_RBW_KHZ = 0.0
+MAX_SWEEP_RBW_HZ = 3_000_000.0
 PLOT_SPACING = 12
 CONTROL_PANEL_WIDTH = 240
 WINDOW_WIDTH = 1664
@@ -36,7 +37,7 @@ WINDOW_HEIGHT = 980
 OUTER_MARGIN_TOTAL = 24
 OUTER_SPACING_TOTAL = 12
 SIDE_PANEL_HEIGHT = WINDOW_HEIGHT - 24
-STATUS_PANEL_HEIGHT = 76
+STATUS_PANEL_HEIGHT = 108
 PLOT_WIDTH = WINDOW_WIDTH - CONTROL_PANEL_WIDTH - OUTER_MARGIN_TOTAL - OUTER_SPACING_TOTAL
 PLOT_HEIGHT = (SIDE_PANEL_HEIGHT - STATUS_PANEL_HEIGHT - (PLOT_SPACING * 2)) // 2
 DUAL_PLOT_TOTAL_HEIGHT = PLOT_HEIGHT * 2 + PLOT_SPACING
@@ -130,6 +131,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.graph_view_mode = GRAPH_VIEW_BOTH
         self._saved_realtime_graph_view_mode = GRAPH_VIEW_BOTH
         self.sweep_state = SWEEP_STATE_RUNNING
+        self.actual_sweep_time_s = 0.0
         self._pending_sweep_marker_update = False
         self._last_sweep_drawn_completed_points = -1
         self._last_sweep_callback_time: float | None = None
@@ -184,7 +186,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.marker_items: list[tuple[pg.ScatterPlotItem, pg.TextItem]] = []
         self.marker_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_controls: list[dict[str, QtWidgets.QPushButton]] = []
+        self.trace_menu_buttons: list[QtWidgets.QPushButton] = []
         self.spectrum_curves: list[pg.PlotCurveItem] = []
+        self.marker_menu_buttons: list[QtWidgets.QPushButton] = []
         self.page_title_colors: dict[QtWidgets.QWidget, str] = {}
         self.analyzer_mode_option_buttons: dict[AnalyzerMode, QtWidgets.QPushButton] = {}
         self.graph_view_option_buttons: dict[str, QtWidgets.QPushButton] = {}
@@ -214,7 +218,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._build_timer()
         self.sweep_controller.set_sweep_complete_callback(self._on_sweep_complete)
+        self._refresh_sweep_time_estimate()
         self._apply_analyzer_mode_ui_constraints()
+        self._update_continuous_button()
+        self._update_trace_menu_buttons()
+        self._update_marker_menu_buttons()
+        self._refresh_status_label()
 
     def _sync_amplitude_scale_from_config(self) -> None:
         self.y_max = self.config.y_max_dbm
@@ -234,10 +243,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if stop_sweep:
             self.sweep_controller.stop()
             self.sweep_controller.reset()
+            self.receiver.invalidate_sweep_configuration()
             self._pending_sweep_marker_update = False
             self._last_sweep_drawn_completed_points = -1
             self._last_sweep_callback_time = None
             self._sweep_callback_sequence = 0
+            self._last_display_freq_axis_ghz = None
+            self._last_display_power_db = None
+            self._last_current_display_db = None
 
         self.frame_count_interval = 0
         self._last_received_samples_total = 0
@@ -275,17 +288,41 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_graph_view_controls()
         if hasattr(self, "analyzer_mode_button"):
             self._update_analyzer_mode_controls()
+        if hasattr(self, "realtime_sa_menu_button") and hasattr(self, "sweep_menu_button"):
+            is_sweep_mode = self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
+            self.realtime_sa_menu_button.setVisible(not is_sweep_mode)
+            self.sweep_menu_button.setVisible(is_sweep_mode)
 
     def _change_analyzer_mode(self, analyzer_mode: AnalyzerMode) -> None:
         if self.config.analyzer_mode == analyzer_mode:
             return
 
+        previous_mode = self.config.analyzer_mode
         self.config.analyzer_mode = analyzer_mode
+        if analyzer_mode == AnalyzerMode.SWEEP_SA:
+            if self.config.rbw_hz is not None and self.config.rbw_hz > MAX_SWEEP_RBW_HZ:
+                self.config.rbw_hz = MAX_SWEEP_RBW_HZ
+            self.sweep_state = SWEEP_STATE_RUNNING
+        elif previous_mode == AnalyzerMode.SWEEP_SA:
+            self._apply_realtime_span_limit()
         self._reset_measurement_state_for_mode_change()
+        if analyzer_mode == AnalyzerMode.REALTIME_SA:
+            self._rebuild_realtime_runtime_after_mode_change()
+        self._refresh_sweep_time_estimate()
         self._apply_analyzer_mode_ui_constraints()
         self._refresh_status_label()
         self._page_history.clear()
         self._show_control_page("Main Menu", self.main_menu_page, push_history=False)
+        if analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self.receiver.invalidate_sweep_configuration()
+            self.sweep_controller.reset()
+            self._last_display_freq_axis_ghz = None
+            self._last_display_power_db = None
+            self._last_current_display_db = None
+            self._apply_span_update()
+            self._start_sweep_continuous()
+        else:
+            self._start_realtime_continuous()
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -502,6 +539,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._build_marker_trace_page(index) for index in range(len(self.marker_states))
         ]
         self.realtime_sa_page = self._build_realtime_sa_page()
+        self.sweep_page = self._build_sweep_page()
         self.control_stack.addWidget(self.main_menu_page)
         self.control_stack.addWidget(self.analyzer_mode_page)
         self.control_stack.addWidget(self.freq_channel_page)
@@ -524,6 +562,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for page in self.marker_trace_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.realtime_sa_page)
+        self.control_stack.addWidget(self.sweep_page)
         self.back_button.clicked.connect(
             self._navigate_back
         )
@@ -551,6 +590,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.display_menu_button = self._make_control_button("Display")
         self.trace_detector_button = self._make_control_button("Trace/Detector")
         self.realtime_sa_menu_button = self._make_control_button("RealTime SA")
+        self.sweep_menu_button = self._make_control_button("Sweep")
         analyzer_layout.addWidget(self.analyzer_mode_button)
         analyzer_layout.addWidget(self.freq_menu_button)
         analyzer_layout.addWidget(self.span_menu_button)
@@ -560,11 +600,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         analyzer_layout.addWidget(self.display_menu_button)
         analyzer_layout.addWidget(self.trace_detector_button)
         analyzer_layout.addWidget(self.realtime_sa_menu_button)
+        analyzer_layout.addWidget(self.sweep_menu_button)
 
         sweep_group = QtWidgets.QGroupBox("SWEEP CONTROL")
         self._apply_groupbox_title_font(sweep_group)
         sweep_layout = QtWidgets.QVBoxLayout(sweep_group)
-        self.cont_button = self._make_control_button("Cont")
+        self.cont_button = self._make_control_button("Continuous")
         self.single_button = self._make_control_button("Single")
         self.reset_button = self._make_control_button("Reset")
         sweep_layout.addWidget(self.cont_button)
@@ -610,6 +651,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.realtime_sa_menu_button.clicked.connect(
             lambda: self._show_control_page("RealTime SA", self.realtime_sa_page)
+        )
+        self.sweep_menu_button.clicked.connect(
+            lambda: self._show_control_page("Sweep", self.sweep_page)
         )
         self.cont_button.clicked.connect(self._on_cont_clicked)
         self.single_button.clicked.connect(self._on_single_clicked)
@@ -786,6 +830,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     self.trace_detail_pages[idx],
                 )
             )
+            self.trace_menu_buttons.append(button)
             page_layout.addWidget(button)
 
         detector_button = self._make_control_button("Detector")
@@ -888,6 +933,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     self.marker_detail_pages[idx],
                 )
             )
+            self.marker_menu_buttons.append(button)
             page_layout.addWidget(button)
 
         page_layout.addStretch(1)
@@ -977,6 +1023,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         option_buttons: dict[str, QtWidgets.QPushButton] = {}
         for trace_name in self.marker_trace_options:
             button = self._make_control_button(trace_name)
+            trace_state = self._trace_state_by_name(trace_name)
+            if trace_state is not None:
+                button.setStyleSheet(f"color: {trace_state.color_hex};")
             button.clicked.connect(
                 lambda _checked=False, idx=marker_index, selected_trace=trace_name: (
                     self._select_marker_trace(idx, selected_trace)
@@ -1008,6 +1057,24 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.history_button.clicked.connect(self._on_history_clicked)
         self._update_fft_size_controls()
+        return page
+
+    def _build_sweep_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.sweep_time_button = self._make_value_control_button("Swp Time")
+        self.sweep_points_button = self._make_value_control_button("Swp Pts")
+
+        page_layout.addWidget(self.sweep_time_button)
+        page_layout.addWidget(self.sweep_points_button)
+        page_layout.addStretch(1)
+
+        self.sweep_time_button.clicked.connect(self._on_sweep_time_clicked)
+        self.sweep_points_button.clicked.connect(self._on_sweep_points_clicked)
+        self._update_sweep_controls()
         return page
 
     def _build_fft_size_page(self) -> QtWidgets.QWidget:
@@ -1118,6 +1185,63 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.getAxis("bottom").setTicks([x_ticks])
         self.spectrum_plot.getAxis("left").setTicks([y_ticks])
 
+    def _current_sweep_state(self) -> str:
+        return self.sweep_state
+
+    def _restore_sweep_state(self, previous_state: str) -> None:
+        if self.config.analyzer_mode != AnalyzerMode.SWEEP_SA:
+            self._update_continuous_button()
+            return
+        if previous_state == SWEEP_STATE_RUNNING:
+            self._start_sweep_continuous()
+        elif previous_state == SWEEP_STATE_SINGLE:
+            self.sweep_state = SWEEP_STATE_SINGLE
+            self.receiver.stop()
+            self.sweep_controller.request_single()
+            self._restart_timer_for_current_mode()
+        else:
+            self.timer.stop()
+            self.sweep_controller.stop()
+            self.sweep_state = SWEEP_STATE_STOPPED
+        self._update_continuous_button()
+
+    def _reset_sweep_display_and_restore_state(self, previous_sweep_state: str) -> None:
+        """Reset sweep runtime/display state and resume the prior sweep mode."""
+        self.sweep_controller.reset()
+        # Clear cached axes/data so tick regeneration uses the new sweep axis immediately.
+        self._last_display_freq_axis_ghz = None
+        self._last_display_power_db = None
+        self._last_current_display_db = None
+        self._apply_span_update()
+        self._restore_sweep_state(previous_sweep_state)
+
+    def _start_realtime_continuous(self) -> None:
+        self.sweep_state = SWEEP_STATE_RUNNING
+        self.sweep_controller.stop()
+        self.receiver.start()
+        self._restart_timer_for_current_mode()
+        self._update_continuous_button()
+
+    def _apply_realtime_span_limit(self) -> None:
+        if self.config.display_span_hz <= MAX_DISPLAY_SPAN_HZ:
+            return
+
+        self.config.display_span_hz = MAX_DISPLAY_SPAN_HZ
+        self.config.center_freq_hz = int(self.config.center_freq_hz)
+        if self.config.use_start_stop_freq:
+            half_span_hz = self.config.display_span_hz // 2
+            start_freq_hz = self.config.center_freq_hz - half_span_hz
+            stop_freq_hz = self.config.center_freq_hz + half_span_hz
+            self._set_start_stop_display_mode(start_freq_hz, stop_freq_hz)
+
+    def _rebuild_realtime_runtime_after_mode_change(self) -> None:
+        self.config.__post_init__()
+        self.receiver.reconfigure_span(self.config)
+        self.receiver.retune_lo(self.config.center_freq_hz)
+        self.processor.update_span_related(self.config)
+        self.processor.update_center_frequency(self.config.center_freq_hz)
+        self._reset_plot_state()
+
     def _clear_start_stop_display_mode(self) -> None:
         self.config.use_start_stop_freq = False
         self.config.display_start_freq_hz = None
@@ -1168,9 +1292,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.config.center_freq_hz = center_freq_hz
         self._clear_start_stop_display_mode()
-        self.receiver.retune_lo(center_freq_hz)
-        self.processor.update_center_frequency(center_freq_hz)
-        self._apply_center_frequency_update()
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            previous_sweep_state = self._current_sweep_state()
+            self._reset_sweep_display_and_restore_state(previous_sweep_state)
+        else:
+            self.receiver.retune_lo(center_freq_hz)
+            self.processor.update_center_frequency(center_freq_hz)
+            self._apply_center_frequency_update()
         self._refresh_status_label()
 
     def _on_cf_step_clicked(self) -> None:
@@ -1189,6 +1317,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_freq_start_stop_clicked(self) -> None:
+        previous_sweep_state = self._current_sweep_state()
         if (
             self.config.use_start_stop_freq
             and self.config.display_start_freq_hz is not None
@@ -1239,7 +1368,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         start_freq_hz = int(round(start_value * 1e6))
         stop_freq_hz = int(round(stop_value * 1e6))
         display_span_hz = stop_freq_hz - start_freq_hz
-        if display_span_hz > MAX_DISPLAY_SPAN_HZ:
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA and display_span_hz > MAX_DISPLAY_SPAN_HZ:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Start/Stop",
@@ -1251,20 +1380,29 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.display_span_hz = display_span_hz
         self.config.__post_init__()
         self._set_start_stop_display_mode(start_freq_hz, stop_freq_hz)
-        self.receiver.reconfigure_span(self.config)
-        self.receiver.retune_lo(self.config.center_freq_hz)
-        self.processor.update_span_related(self.config)
-        self._apply_span_update()
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self._reset_sweep_display_and_restore_state(previous_sweep_state)
+        else:
+            self.receiver.reconfigure_span(self.config)
+            self.receiver.retune_lo(self.config.center_freq_hz)
+            self.processor.update_span_related(self.config)
+            self._apply_span_update()
         self._refresh_status_label()
 
     def _on_span_x_scale_clicked(self) -> None:
+        previous_sweep_state = self._current_sweep_state()
+        max_span_mhz = (
+            MAX_DISPLAY_SPAN_HZ / 1e6
+            if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA
+            else (PLUTO_MAX_CENTER_FREQ_MHZ - PLUTO_MIN_CENTER_FREQ_MHZ)
+        )
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Freq Span",
             "Display Span [MHz]",
             value=self.config.display_span_hz / 1e6,
             min=MIN_SPAN_MHZ,
-            max=MAX_DISPLAY_SPAN_HZ / 1e6,
+            max=max_span_mhz,
             decimals=3,
         )
         if not accepted:
@@ -1277,9 +1415,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.display_span_hz = display_span_hz
         self.config.__post_init__()
         self._clear_start_stop_display_mode()
-        self.receiver.reconfigure_span(self.config)
-        self.processor.update_span_related(self.config)
-        self._apply_span_update()
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self._reset_sweep_display_and_restore_state(previous_sweep_state)
+        else:
+            self.receiver.reconfigure_span(self.config)
+            self.processor.update_span_related(self.config)
+            self._apply_span_update()
+        self._refresh_sweep_time_estimate()
         self._refresh_status_label()
 
     def _on_ref_level_clicked(self) -> None:
@@ -1373,8 +1515,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if not accepted:
             return
 
-        self.config.rbw_hz = None if value <= 0.0 else float(value * 1e3)
+        rbw_hz = None if value <= 0.0 else float(value * 1e3)
+        if (
+            rbw_hz is not None
+            and self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
+            and rbw_hz > MAX_SWEEP_RBW_HZ
+        ):
+            rbw_hz = MAX_SWEEP_RBW_HZ
+        self.config.rbw_hz = rbw_hz
         self._rebuild_processor_only()
+        self._refresh_sweep_time_estimate()
         self._refresh_status_label()
 
     def _select_fft_size(self, fft_size: int) -> None:
@@ -1383,7 +1533,47 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.processor.update_span_related(self.config)
         self._apply_span_update()
         self._update_fft_size_controls()
+        self._refresh_sweep_time_estimate()
         self._refresh_status_label()
+
+    def _on_sweep_time_clicked(self) -> None:
+        previous_state = self._current_sweep_state()
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Swp Time",
+            "Sweep Time [ms]",
+            value=self.config.sweep_time_ms,
+            min=0.001,
+            decimals=3,
+        )
+        if not accepted or value <= 0.0:
+            return
+
+        self.config.sweep_time_ms = float(value)
+        self._refresh_sweep_time_estimate()
+        self._update_sweep_controls()
+        self._refresh_status_label()
+        self._restore_sweep_state(previous_state)
+
+    def _on_sweep_points_clicked(self) -> None:
+        previous_state = self._current_sweep_state()
+        value, accepted = QtWidgets.QInputDialog.getInt(
+            self,
+            "Swp Pts",
+            "Sweep Points",
+            value=self.config.sweep_points,
+            min=1,
+        )
+        if not accepted or value <= 0:
+            return
+
+        self.config.sweep_points = int(value)
+        self.sweep_controller.reset()
+        self._reset_plot_state()
+        self._refresh_sweep_time_estimate()
+        self._update_sweep_controls()
+        self._refresh_status_label()
+        self._restore_sweep_state(previous_state)
 
     def _on_history_clicked(self) -> None:
         value, accepted = QtWidgets.QInputDialog.getInt(
@@ -1401,13 +1591,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_cont_clicked(self) -> None:
-        self.sweep_state = SWEEP_STATE_RUNNING
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
-            self.receiver.stop()
-            self.sweep_controller.request_continuous()
-        else:
-            self.receiver.start()
+            self._start_sweep_continuous()
+            return
+
+        self.sweep_state = SWEEP_STATE_RUNNING
+        self.receiver.start()
         self._restart_timer_for_current_mode()
+        self._update_continuous_button()
 
     def _on_single_clicked(self) -> None:
         self.sweep_state = SWEEP_STATE_SINGLE
@@ -1417,16 +1608,25 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         else:
             self.receiver.start()
         self._restart_timer_for_current_mode()
+        self._update_continuous_button()
+
+    def _start_sweep_continuous(self) -> None:
+        self.sweep_state = SWEEP_STATE_RUNNING
+        self.receiver.stop()
+        self.sweep_controller.request_continuous()
+        self._restart_timer_for_current_mode()
+        self._update_continuous_button()
 
     def _on_reset_clicked(self) -> None:
+        previous_state = self._current_sweep_state()
         self._reset_all_measurement_state(
             stop_receiver=False,
             stop_sweep=True,
             reset_markers=False,
         )
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
-            self.timer.stop()
-            self.sweep_state = SWEEP_STATE_STOPPED
+            self._restore_sweep_state(previous_state)
+        self._update_continuous_button()
         self._refresh_status_label()
 
     def _select_graph_view(self, mode: str) -> None:
@@ -1478,6 +1678,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _trace_state(self, trace_index: int) -> TraceState:
         return self.trace_states[trace_index]
 
+    def _trace_state_by_name(self, trace_name: str) -> TraceState | None:
+        for trace_state in self.trace_states:
+            if trace_state.name == trace_name:
+                return trace_state
+        return None
+
     def _make_trace_pen(self, trace_state: TraceState) -> pg.Pen:
         color = QtGui.QColor(trace_state.color_hex)
         if trace_state.hold_enabled:
@@ -1507,6 +1713,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"Average Count: {trace_state.average_count}"
         )
         controls["average_count"].setEnabled(trace_state.trace_type == TRACE_TYPE_AVERAGE)
+        self._update_trace_menu_button(trace_index)
+
+    def _update_trace_menu_button(self, trace_index: int) -> None:
+        if trace_index >= len(self.trace_menu_buttons):
+            return
+        trace_state = self._trace_state(trace_index)
+        prefix = "\u2713 " if trace_state.is_visible else ""
+        self.trace_menu_buttons[trace_index].setText(f"{prefix}{trace_state.name}")
+
+    def _update_trace_menu_buttons(self) -> None:
+        for trace_index in range(len(self.trace_states)):
+            self._update_trace_menu_button(trace_index)
 
     def _update_graph_view_controls(self) -> None:
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
@@ -1553,6 +1771,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _update_fft_size_controls(self) -> None:
         self.fft_size_button.setText(f"FFT size: {self.config.fft_size}")
         self._update_fft_size_selection_page()
+
+    def _update_sweep_controls(self) -> None:
+        self.sweep_time_button.setText(f"Swp Time\n{self.config.sweep_time_ms:.0f} ms")
+        self.sweep_points_button.setText(f"Swp Pts\n{self.config.sweep_points}")
+
+    def _update_continuous_button(self) -> None:
+        label = "Continuous"
+        if self.sweep_state == SWEEP_STATE_RUNNING:
+            label = f"\u2713 {label}"
+        self.cont_button.setText(label)
+
+    def _refresh_sweep_time_estimate(self) -> None:
+        self.actual_sweep_time_s = self.sweep_controller.get_actual_sweep_time_s()
+        if hasattr(self, "sweep_time_button") and hasattr(self, "sweep_points_button"):
+            self._update_sweep_controls()
 
     def _update_fft_size_selection_page(self) -> None:
         current_fft_size = str(self.config.fft_size)
@@ -1605,10 +1838,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         marker_state = self._marker_state(marker_index)
         controls = self.marker_controls[marker_index]
+        selected_trace_state = self._trace_state_by_name(marker_state.trace_name)
 
         controls["toggle"].setText(
             "Marker ON" if marker_state.is_enabled else "Marker OFF"
         )
+        controls["trace"].setText(marker_state.trace_name)
+        if selected_trace_state is not None:
+            controls["trace"].setStyleSheet(f"color: {selected_trace_state.color_hex};")
         controls["continuous_peak"].setText(
             "Continuous Peak ON"
             if marker_state.continuous_peak_enabled
@@ -1622,10 +1859,22 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         controls["left"].setEnabled(manual_move_enabled)
         controls["right"].setEnabled(manual_move_enabled)
         controls["peak_search"].setEnabled(manual_move_enabled and trace_available)
+        self._update_marker_menu_button(marker_index)
 
     def _update_all_marker_control_states(self) -> None:
         for marker_index in range(len(self.marker_states)):
             self._update_marker_control_state(marker_index)
+
+    def _update_marker_menu_button(self, marker_index: int) -> None:
+        if marker_index >= len(self.marker_menu_buttons):
+            return
+        marker_state = self._marker_state(marker_index)
+        prefix = "\u2713 " if marker_state.is_enabled else ""
+        self.marker_menu_buttons[marker_index].setText(f"{prefix}{marker_state.name}")
+
+    def _update_marker_menu_buttons(self) -> None:
+        for marker_index in range(len(self.marker_states)):
+            self._update_marker_menu_button(marker_index)
 
     def _on_marker_toggle_clicked(self, marker_index: int) -> None:
         marker_state = self._marker_state(marker_index)
@@ -1772,6 +2021,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.processor = SpectrumProcessor(self.config)
         self._reset_trace_runtime_buffers()
         self._reset_plot_state()
+        self._refresh_sweep_time_estimate()
 
     def _on_sweep_complete(self, frame_result) -> None:
         self._pending_sweep_marker_update = True
@@ -1927,8 +2177,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             freq_axis_display_ghz[-1],
             padding=X_AXIS_PADDING,
         )
-        self._apply_display_scale()
+        # Store the active axis before tick generation so Sweep SA reticks immediately.
         self._last_display_freq_axis_ghz = freq_axis_display_ghz
+        self._apply_display_scale()
         self._last_display_power_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
         self._last_current_display_db = self._last_display_power_db.copy()
         self._reset_trace_runtime_buffers()
@@ -2018,7 +2269,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"config={point_result.configure_ms:.2f}ms "
             f"retune={point_result.retune_ms:.2f}ms "
             f"settle={point_result.settle_wait_ms:.2f}ms "
-            f"flush={point_result.flush_ms:.2f}ms "
+            f"flush={point_result.flush_ms:.2f}ms("
+            f"r={point_result.flush_reads} "
+            f"req={point_result.flush_samples}s "
+            f"act={point_result.flush_actual_samples_per_read}s "
+            f"total={point_result.flush_actual_samples_total}s) "
             f"capture={point_result.capture_ms:.2f}ms "
             f"process={point_result.process_ms:.2f}ms "
             f"step={point_result.step_total_ms:.2f}ms "
@@ -2055,6 +2310,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return self._make_header_status_text()
 
     def _refresh_status_label(self) -> None:
+        self._refresh_sweep_time_estimate()
         self.status_label.setText(self._make_header_status_text())
 
     def _get_header_frequency_fields(self) -> tuple[str, str, str, str]:
@@ -2082,20 +2338,29 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._get_header_frequency_fields()
         )
         rbw_text = self._format_rbw_text()
-        line1 = (
-            f"{freq_label_1}: {freq_value_1}   "
-            f"{freq_label_2}: {freq_value_2}   "
-            f"RBW: {rbw_text}   "
-            f"FFT: {self.config.fft_size}   "
-            f"Bin Width: {self.config.bin_width_hz:.1f} Hz"
-        )
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            line1 = (
+                f"{freq_label_1}: {freq_value_1}   "
+                f"{freq_label_2}: {freq_value_2}   "
+                f"RBW: {rbw_text}   "
+                f"Actual Swp: {self.actual_sweep_time_s:.1f} s"
+            )
+        else:
+            line1 = (
+                f"{freq_label_1}: {freq_value_1}   "
+                f"{freq_label_2}: {freq_value_2}   "
+                f"RBW: {rbw_text}   "
+                f"FFT: {self.config.fft_size}   "
+                f"Bin Width: {self.config.bin_width_hz:.1f} Hz"
+            )
         line2 = (
             f"Ref Level: {self.config.ref_level_dbm:.0f} dBm   "
             f"Int Gain: {self.config.rx_gain_db} dB   "
             f"Ext ATT: {self.config.ext_att_db:.0f} dB   "
             f"Ext Gain: {self.config.ext_gain_db:.0f} dB"
         )
-        return f"{line1}\n{line2}"
+        line3 = f"Detector: {self.config.sweep_detector_mode}"
+        return f"{line1}\n{line2}\n{line3}"
 
     def _make_console_status_text(
         self,
@@ -2205,6 +2470,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.timer.stop()
             self.receiver.stop()
             self.sweep_state = SWEEP_STATE_STOPPED
+            self._update_continuous_button()
 
         now = time.perf_counter()
         if now - self.last_report_time >= 1.0:
@@ -2311,6 +2577,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self.sweep_state == SWEEP_STATE_SINGLE and not self.sweep_controller.is_running():
             self.timer.stop()
             self.sweep_state = SWEEP_STATE_STOPPED
+            self._update_continuous_button()
 
         callback_total_ms = (time.perf_counter() - callback_start) * 1000.0
         latest_point_result = self.sweep_controller.get_latest_point_result()

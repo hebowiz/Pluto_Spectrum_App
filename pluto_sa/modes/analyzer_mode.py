@@ -8,5 +8,5 @@ from enum import Enum
 class AnalyzerMode(str, Enum):
     """Supported analyzer operation modes."""
 
-    REALTIME_SA = "Real-Time SA"
+    REALTIME_SA = "RealTime SA"
     SWEEP_SA = "Sweep SA"
