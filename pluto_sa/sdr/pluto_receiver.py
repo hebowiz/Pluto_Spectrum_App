@@ -21,6 +21,7 @@ class PlutoReceiver:
         self._sdr_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._rx_thread = None
+        self._sweep_config_signature: tuple[int, int, int] | None = None
 
         self.received_samples_total = 0
         self._configure_sdr(config)
@@ -28,6 +29,7 @@ class PlutoReceiver:
 
     def _configure_sdr(self, config: SpectrumConfig) -> None:
         self.config = config
+        self._sweep_config_signature = None
         with self._sdr_lock:
             self.sdr.rx_lo = config.center_freq_hz
             self.sdr.sample_rate = config.sample_rate_hz
@@ -103,13 +105,21 @@ class PlutoReceiver:
 
     def configure_for_sweep(self, config: SpectrumConfig) -> None:
         """Apply the fixed SDR settings required by Sweep SA."""
+        sweep_signature = (
+            int(config.sweep_sample_rate_hz),
+            int(config.sweep_rf_bandwidth_hz),
+            int(config.rx_gain_db),
+        )
         with self._iq_lock:
+            self.config = config
+            if self._sweep_config_signature == sweep_signature:
+                return
             with self._sdr_lock:
-                self.config = config
                 self.sdr.sample_rate = config.sweep_sample_rate_hz
                 self.sdr.rx_rf_bandwidth = config.sweep_rf_bandwidth_hz
                 self.sdr.gain_control_mode_chan0 = "manual"
                 self.sdr.rx_hardwaregain_chan0 = config.rx_gain_db
+            self._sweep_config_signature = sweep_signature
 
     def capture_block(self, num_samples: int) -> np.ndarray:
         """Capture one IQ block without starting the streaming worker."""
@@ -129,6 +139,7 @@ class PlutoReceiver:
             with self._sdr_lock:
                 self.sdr.rx_hardwaregain_chan0 = gain_db
             self.config.rx_gain_db = gain_db
+            self._sweep_config_signature = None
 
     def reconfigure(self, config: SpectrumConfig) -> None:
         was_running = self._rx_thread is not None and self._rx_thread.is_alive()

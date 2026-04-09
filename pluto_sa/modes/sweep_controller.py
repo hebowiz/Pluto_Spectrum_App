@@ -44,6 +44,7 @@ class SweepPointResult:
     rbw_center_bin_index: int
     rbw_center_frequency_hz: float
     detector_input_values: np.ndarray
+    configure_ms: float = 0.0
     retune_ms: float = 0.0
     settle_wait_ms: float = 0.0
     flush_ms: float = 0.0
@@ -119,10 +120,13 @@ class SweepController:
 
     def measure_point(self, frequency_hz: int) -> SweepPointResult:
         """Measure one sweep point using the fixed Sweep SA signal path."""
-        self.receiver.configure_for_sweep(self.config)
         point_start = time.perf_counter()
 
-        retune_start = point_start
+        configure_start = point_start
+        self.receiver.configure_for_sweep(self.config)
+        configure_ms = (time.perf_counter() - configure_start) * 1000.0
+
+        retune_start = time.perf_counter()
         self.receiver.retune_lo(int(frequency_hz), update_config=False)
         retune_ms = (time.perf_counter() - retune_start) * 1000.0
 
@@ -168,6 +172,7 @@ class SweepController:
             rbw_center_bin_index=rbw_center_bin_index,
             rbw_center_frequency_hz=rbw_center_frequency_hz,
             detector_input_values=detector_input_values.copy(),
+            configure_ms=configure_ms,
             retune_ms=retune_ms,
             settle_wait_ms=settle_wait_ms,
             flush_ms=flush_ms,

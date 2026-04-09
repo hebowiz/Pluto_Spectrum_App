@@ -132,6 +132,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_state = SWEEP_STATE_RUNNING
         self._pending_sweep_marker_update = False
         self._last_sweep_drawn_completed_points = -1
+        self._last_sweep_callback_time: float | None = None
+        self._sweep_callback_sequence = 0
 
         self.setWindowTitle("PlutoSDR Real-Time Spectrum Prototype")
         self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -234,6 +236,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.sweep_controller.reset()
             self._pending_sweep_marker_update = False
             self._last_sweep_drawn_completed_points = -1
+            self._last_sweep_callback_time = None
+            self._sweep_callback_sequence = 0
 
         self.frame_count_interval = 0
         self._last_received_samples_total = 0
@@ -1403,7 +1407,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.sweep_controller.request_continuous()
         else:
             self.receiver.start()
-        self.timer.start(self.config.update_interval_ms)
+        self._restart_timer_for_current_mode()
 
     def _on_single_clicked(self) -> None:
         self.sweep_state = SWEEP_STATE_SINGLE
@@ -1412,7 +1416,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.sweep_controller.request_single()
         else:
             self.receiver.start()
-        self.timer.start(self.config.update_interval_ms)
+        self._restart_timer_for_current_mode()
 
     def _on_reset_clicked(self) -> None:
         self._reset_all_measurement_state(
@@ -1996,14 +2000,22 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self,
         point_result,
         *,
+        callback_sequence: int,
+        callback_start_time: float,
         ui_draw_ms: float,
+        marker_update_ms: float,
         redraw_performed: bool,
         step_sweep_total_ms: float,
+        callback_gap_ms: float,
+        callback_total_ms: float,
     ) -> str:
         return (
             f"SweepPoint "
+            f"cb={callback_sequence} "
+            f"t={callback_start_time:.6f}s "
             f"idx={self.sweep_controller.get_latest_result().completed_points} "
             f"f={point_result.frequency_hz / 1e6:.6f}MHz "
+            f"config={point_result.configure_ms:.2f}ms "
             f"retune={point_result.retune_ms:.2f}ms "
             f"settle={point_result.settle_wait_ms:.2f}ms "
             f"flush={point_result.flush_ms:.2f}ms "
@@ -2011,14 +2023,26 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"process={point_result.process_ms:.2f}ms "
             f"step={point_result.step_total_ms:.2f}ms "
             f"step+ctrl={step_sweep_total_ms:.2f}ms "
+            f"gap={callback_gap_ms:.2f}ms "
+            f"timer={self._current_timer_interval_ms()}ms "
             f"ui={ui_draw_ms:.2f}ms "
+            f"marker={marker_update_ms:.2f}ms "
+            f"cb_total={callback_total_ms:.2f}ms "
             f"redraw={'Y' if redraw_performed else 'N'}"
         )
 
     def _build_timer(self) -> None:
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update_spectrum)
-        self.timer.start(self.config.update_interval_ms)
+        self._restart_timer_for_current_mode()
+
+    def _current_timer_interval_ms(self) -> int:
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            return self.config.sweep_update_interval_ms
+        return self.config.update_interval_ms
+
+    def _restart_timer_for_current_mode(self) -> None:
+        self.timer.start(self._current_timer_interval_ms())
 
     def _make_status_text(
         self,
@@ -2222,6 +2246,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.last_report_time = now
 
     def _update_sweep_spectrum(self) -> None:
+        callback_start = time.perf_counter()
+        self._sweep_callback_sequence += 1
+        if self._last_sweep_callback_time is None:
+            callback_gap_ms = 0.0
+        else:
+            callback_gap_ms = (callback_start - self._last_sweep_callback_time) * 1000.0
+        self._last_sweep_callback_time = callback_start
+
         step_start = time.perf_counter()
         frame_result = self.sweep_controller.step_sweep()
         step_sweep_total_ms = (time.perf_counter() - step_start) * 1000.0
@@ -2255,6 +2287,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
 
         ui_draw_ms = 0.0
+        marker_update_ms = 0.0
         if redraw_performed:
             ui_start = time.perf_counter()
             self._last_display_freq_axis_ghz = sweep_freq_axis_ghz
@@ -2269,24 +2302,32 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._last_sweep_drawn_completed_points = completed_points
             ui_draw_ms = (time.perf_counter() - ui_start) * 1000.0
 
+        if frame_result.sweep_complete and self._pending_sweep_marker_update:
+            marker_start = time.perf_counter()
+            self._pending_sweep_marker_update = False
+            self._update_markers_for_completed_sweep()
+            marker_update_ms = (time.perf_counter() - marker_start) * 1000.0
+
+        if self.sweep_state == SWEEP_STATE_SINGLE and not self.sweep_controller.is_running():
+            self.timer.stop()
+            self.sweep_state = SWEEP_STATE_STOPPED
+
+        callback_total_ms = (time.perf_counter() - callback_start) * 1000.0
         latest_point_result = self.sweep_controller.get_latest_point_result()
         if self.config.sweep_profile_logging and latest_point_result is not None:
             print(
                 self._format_sweep_point_profile(
                     latest_point_result,
+                    callback_sequence=self._sweep_callback_sequence,
+                    callback_start_time=callback_start,
                     ui_draw_ms=ui_draw_ms,
+                    marker_update_ms=marker_update_ms,
                     redraw_performed=redraw_performed,
                     step_sweep_total_ms=step_sweep_total_ms,
+                    callback_gap_ms=callback_gap_ms,
+                    callback_total_ms=callback_total_ms,
                 )
             )
-
-        if frame_result.sweep_complete and self._pending_sweep_marker_update:
-            self._pending_sweep_marker_update = False
-            self._update_markers_for_completed_sweep()
-
-        if self.sweep_state == SWEEP_STATE_SINGLE and not self.sweep_controller.is_running():
-            self.timer.stop()
-            self.sweep_state = SWEEP_STATE_STOPPED
 
     def closeEvent(self, event) -> None:
         self.timer.stop()

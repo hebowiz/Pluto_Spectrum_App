@@ -44,6 +44,7 @@ class SpectrumConfig:
     sweep_points: int = 201
     sweep_time_ms: float = 100.0
     sweep_detector_mode: str = "Sample"
+    sweep_update_interval_ms: int = 1
     sweep_lo_settle_us: int = 200
     sweep_retune_flush_reads: int = 4
     sweep_capture_samples_override: Optional[int] = 1024
