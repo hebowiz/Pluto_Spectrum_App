@@ -26,12 +26,39 @@ X_AXIS_PADDING = 0.02
 Y_AXIS_PADDING = 0.03
 LEFT_AXIS_WIDTH = 72
 BOTTOM_AXIS_HEIGHT = 42
-PLUTO_MIN_CENTER_FREQ_MHZ = 325.0
-PLUTO_MAX_CENTER_FREQ_MHZ = 3800.0
+PLUTO_MIN_CENTER_FREQ_MHZ = 70.0
+PLUTO_MAX_CENTER_FREQ_MHZ = 6000.0
 MIN_SPAN_MHZ = 0.001
 MIN_RBW_KHZ = 0.0
 MIN_SWEEP_RBW_HZ = 100.0
 MAX_SWEEP_RBW_HZ = 3_000_000.0
+MAX_REALTIME_RBW_HZ = 55_000_000.0
+MIN_CENTER_FREQ_STEP_MHZ = 0.001
+MAX_CENTER_FREQ_STEP_MHZ = 1_000.0
+MIN_REF_LEVEL_DBM = -100.0
+MAX_REF_LEVEL_DBM = 100.0
+MIN_DISPLAY_RANGE_DB = 1.0
+MAX_DISPLAY_RANGE_DB = 200.0
+MIN_EXT_ATT_DB = 0.0
+MAX_EXT_ATT_DB = 100.0
+MIN_EXT_GAIN_DB = 0.0
+MAX_EXT_GAIN_DB = 100.0
+MIN_SWEEP_TIME_MS = 0.001
+MAX_SWEEP_TIME_MS = 10_000.0
+MIN_SWEEP_POINTS = 11
+MAX_SWEEP_POINTS = 1001
+MIN_WATERFALL_HISTORY = 1
+MAX_WATERFALL_HISTORY = 1000
+MIN_TRACE_AVERAGE_COUNT = 1
+MAX_TRACE_AVERAGE_COUNT = 1000
+MIN_MARKER_FREQUENCY_HZ = 70
+MAX_MARKER_FREQUENCY_HZ = 6_000_000_000
+MIN_MARKER_STEP_HZ = 1
+MAX_MARKER_STEP_HZ = 1_000_000_000
+UNBOUNDED_DOUBLE_MIN = -1_000_000_000_000.0
+UNBOUNDED_DOUBLE_MAX = 1_000_000_000_000.0
+UNBOUNDED_INT_MIN = -2_147_483_648
+UNBOUNDED_INT_MAX = 2_147_483_647
 PLOT_SPACING = 12
 CONTROL_PANEL_WIDTH = 240
 WINDOW_WIDTH = 1664
@@ -1367,6 +1394,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.display_start_freq_hz = start_freq_hz
         self.config.display_stop_freq_hz = stop_freq_hz
 
+    @staticmethod
+    def _clamp_float(value: float, minimum: float, maximum: float) -> float:
+        return min(max(value, minimum), maximum)
+
+    @staticmethod
+    def _clamp_int(value: int, minimum: int, maximum: int) -> int:
+        return min(max(value, minimum), maximum)
+
     def _show_center_frequency_dialog(self) -> float | None:
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Center")
@@ -1375,7 +1410,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         form_layout = QtWidgets.QFormLayout()
         spin_box = QtWidgets.QDoubleSpinBox(dialog)
-        spin_box.setRange(PLUTO_MIN_CENTER_FREQ_MHZ, PLUTO_MAX_CENTER_FREQ_MHZ)
+        spin_box.setRange(UNBOUNDED_DOUBLE_MIN, UNBOUNDED_DOUBLE_MAX)
         spin_box.setDecimals(3)
         spin_box.setSingleStep(self.config.center_freq_step_mhz)
         spin_box.setValue(self.config.center_freq_hz / 1e6)
@@ -1410,13 +1445,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "CF Step",
             "Center Step [MHz]",
             value=self.config.center_freq_step_mhz,
-            min=0.001,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
-        if not accepted or value <= 0.0:
+        if not accepted:
             return
 
-        self.config.center_freq_step_mhz = value
+        self.config.center_freq_step_mhz = self._clamp_float(
+            value,
+            MIN_CENTER_FREQ_STEP_MHZ,
+            MAX_CENTER_FREQ_STEP_MHZ,
+        )
         self._refresh_status_label()
 
     def _nudge_center_frequency(self, direction: int) -> None:
@@ -1469,24 +1509,34 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Start/Stop",
             "Start Frequency [MHz]",
             value=current_start_mhz,
-            min=PLUTO_MIN_CENTER_FREQ_MHZ,
-            max=PLUTO_MAX_CENTER_FREQ_MHZ,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
             return
+        start_value = self._clamp_float(
+            start_value,
+            PLUTO_MIN_CENTER_FREQ_MHZ,
+            PLUTO_MAX_CENTER_FREQ_MHZ,
+        )
 
         stop_value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Start/Stop",
             "Stop Frequency [MHz]",
             value=current_stop_mhz,
-            min=PLUTO_MIN_CENTER_FREQ_MHZ,
-            max=PLUTO_MAX_CENTER_FREQ_MHZ,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
             return
+        stop_value = self._clamp_float(
+            stop_value,
+            PLUTO_MIN_CENTER_FREQ_MHZ,
+            PLUTO_MAX_CENTER_FREQ_MHZ,
+        )
 
         if stop_value <= start_value:
             QtWidgets.QMessageBox.warning(
@@ -1561,12 +1611,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Ref Level",
             "Ref Level [dBm]",
             value=self.config.ref_level_dbm,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=1,
         )
         if not accepted:
             return
 
-        self.config.ref_level_dbm = value
+        self.config.ref_level_dbm = self._clamp_float(
+            value,
+            MIN_REF_LEVEL_DBM,
+            MAX_REF_LEVEL_DBM,
+        )
         self._sync_amplitude_scale_from_config()
         self._apply_display_scale()
         self._refresh_status_label()
@@ -1577,13 +1633,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Range",
             "Display Range [dB]",
             value=self.config.display_range_db,
-            min=1.0,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=1,
         )
-        if not accepted or value <= 0.0:
+        if not accepted:
             return
 
-        self.config.display_range_db = value
+        self.config.display_range_db = self._clamp_float(
+            value,
+            MIN_DISPLAY_RANGE_DB,
+            MAX_DISPLAY_RANGE_DB,
+        )
         self._sync_amplitude_scale_from_config()
         self._apply_display_scale()
         self._refresh_status_label()
@@ -1611,12 +1672,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Ext ATT",
             "External ATT [dB]",
             value=self.config.ext_att_db,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=1,
         )
         if not accepted:
             return
 
-        self.config.ext_att_db = value
+        self.config.ext_att_db = self._clamp_float(
+            value,
+            MIN_EXT_ATT_DB,
+            MAX_EXT_ATT_DB,
+        )
         self._refresh_status_label()
 
     def _on_ext_gain_clicked(self) -> None:
@@ -1625,12 +1692,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Ext Gain",
             "External Gain [dB]",
             value=self.config.ext_gain_db,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=1,
         )
         if not accepted:
             return
 
-        self.config.ext_gain_db = value
+        self.config.ext_gain_db = self._clamp_float(
+            value,
+            MIN_EXT_GAIN_DB,
+            MAX_EXT_GAIN_DB,
+        )
         self._refresh_status_label()
 
     def _on_rbw_clicked(self) -> None:
@@ -1640,7 +1713,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "RBW",
             "RBW [kHz] (0 = None)",
             value=current_value,
-            min=MIN_RBW_KHZ,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -1649,6 +1723,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         rbw_hz = None if value <= 0.0 else float(value * 1e3)
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             rbw_hz = self._clip_sweep_rbw(rbw_hz)
+        else:
+            rbw_hz = self._clip_realtime_rbw(rbw_hz)
         self.config.rbw_hz = rbw_hz
         self._rebuild_processor_only()
         self._refresh_sweep_time_estimate()
@@ -1658,6 +1734,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if rbw_hz is None or rbw_hz < MIN_SWEEP_RBW_HZ:
             return MIN_SWEEP_RBW_HZ
         return min(rbw_hz, MAX_SWEEP_RBW_HZ)
+
+    def _clip_realtime_rbw(self, rbw_hz: float | None) -> float | None:
+        if rbw_hz is None:
+            return None
+        return min(max(rbw_hz, 0.0), MAX_REALTIME_RBW_HZ)
 
     def _select_fft_size(self, fft_size: int) -> None:
         self.config.fft_size = fft_size
@@ -1675,13 +1756,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Swp Time",
             "Sweep Time [ms]",
             value=self.config.sweep_time_ms,
-            min=0.001,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
-        if not accepted or value <= 0.0:
+        if not accepted:
             return
 
-        self.config.sweep_time_ms = float(value)
+        self.config.sweep_time_ms = self._clamp_float(
+            float(value),
+            MIN_SWEEP_TIME_MS,
+            MAX_SWEEP_TIME_MS,
+        )
         self._refresh_sweep_time_estimate()
         self._update_sweep_controls()
         self._refresh_status_label()
@@ -1694,12 +1780,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Swp Pts",
             "Sweep Points",
             value=self.config.sweep_points,
-            min=1,
+            min=UNBOUNDED_INT_MIN,
+            max=UNBOUNDED_INT_MAX,
         )
-        if not accepted or value <= 0:
+        if not accepted:
             return
 
-        self.config.sweep_points = int(value)
+        self.config.sweep_points = self._clamp_int(
+            int(value),
+            MIN_SWEEP_POINTS,
+            MAX_SWEEP_POINTS,
+        )
         self.sweep_controller.reset()
         self._reset_plot_state()
         self._refresh_sweep_time_estimate()
@@ -1723,12 +1814,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "History",
             "Waterfall History",
             value=self.config.waterfall_history,
-            min=1,
+            min=UNBOUNDED_INT_MIN,
+            max=UNBOUNDED_INT_MAX,
         )
         if not accepted:
             return
 
-        self.config.waterfall_history = value
+        self.config.waterfall_history = self._clamp_int(
+            int(value),
+            MIN_WATERFALL_HISTORY,
+            MAX_WATERFALL_HISTORY,
+        )
         self._reset_plot_state()
         self._refresh_status_label()
 
@@ -1811,12 +1907,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trace_state.name,
             "Average Count",
             value=trace_state.average_count,
-            min=1,
+            min=UNBOUNDED_INT_MIN,
+            max=UNBOUNDED_INT_MAX,
         )
         if not accepted:
             return
 
-        trace_state.average_count = value
+        trace_state.average_count = self._clamp_int(
+            int(value),
+            MIN_TRACE_AVERAGE_COUNT,
+            MAX_TRACE_AVERAGE_COUNT,
+        )
         trace_state.average_power = None
         self._update_trace_control_state(trace_index)
 
@@ -2138,14 +2239,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             marker_state.name,
             "Frequency [MHz]",
             value=marker_state.frequency_hz / 1e6,
-            min=PLUTO_MIN_CENTER_FREQ_MHZ,
-            max=PLUTO_MAX_CENTER_FREQ_MHZ,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
             return
 
-        marker_state.frequency_hz = int(round(value * 1e6))
+        marker_state.frequency_hz = self._clamp_int(
+            int(round(value * 1e6)),
+            MIN_MARKER_FREQUENCY_HZ,
+            MAX_MARKER_FREQUENCY_HZ,
+        )
         marker_state.is_enabled = True
         marker_state.continuous_peak_enabled = False
         self._update_marker_control_state(marker_index)
@@ -2158,20 +2263,29 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             marker_state.name,
             "Step [kHz]",
             value=marker_state.step_hz / 1e3,
-            min=0.001,
+            min=UNBOUNDED_DOUBLE_MIN,
+            max=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
-        if not accepted or value <= 0.0:
+        if not accepted:
             return
 
-        marker_state.step_hz = int(round(value * 1e3))
+        marker_state.step_hz = self._clamp_int(
+            int(round(value * 1e3)),
+            MIN_MARKER_STEP_HZ,
+            MAX_MARKER_STEP_HZ,
+        )
         self._update_marker_control_state(marker_index)
 
     def _nudge_marker_frequency(self, marker_index: int, direction: int) -> None:
         marker_state = self._marker_state(marker_index)
         if marker_state.continuous_peak_enabled:
             return
-        marker_state.frequency_hz += direction * marker_state.step_hz
+        marker_state.frequency_hz = self._clamp_int(
+            marker_state.frequency_hz + direction * marker_state.step_hz,
+            MIN_MARKER_FREQUENCY_HZ,
+            MAX_MARKER_FREQUENCY_HZ,
+        )
         marker_state.is_enabled = True
         marker_state.continuous_peak_enabled = False
         self._update_marker_control_state(marker_index)
