@@ -1480,6 +1480,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         right_button = self._make_control_button("->")
         peak_search_button = self._make_control_button("Peak Search")
         continuous_peak_button = self._make_control_button("Continuous Peak")
+        marker_to_center_button = self._make_control_button("Mkr->CF")
 
         nudge_layout = QtWidgets.QHBoxLayout()
         nudge_layout.setContentsMargins(0, 0, 0, 0)
@@ -1500,6 +1501,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for button in (
             peak_search_button,
             continuous_peak_button,
+            marker_to_center_button,
         ):
             page_layout.addWidget(button)
 
@@ -1534,6 +1536,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 idx
             )
         )
+        marker_to_center_button.clicked.connect(
+            lambda _checked=False, idx=marker_index: self._on_marker_to_center_clicked(idx)
+        )
 
         self.marker_controls.append(
             {
@@ -1545,6 +1550,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 "right": right_button,
                 "peak_search": peak_search_button,
                 "continuous_peak": continuous_peak_button,
+                "to_center": marker_to_center_button,
             }
         )
         self._update_marker_control_state(marker_index)
@@ -3218,6 +3224,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._clear_marker_sweep_snapshot(marker_state)
         self._update_marker_control_state(marker_index)
         self._update_marker_items()
+
+    def _on_marker_to_center_clicked(self, marker_index: int) -> None:
+        marker_state = self._marker_state(marker_index)
+        self._apply_center_frequency_change(int(marker_state.frequency_hz))
 
     def _update_marker_items(self) -> None:
         if self._last_display_freq_axis_ghz is None or self._last_display_power_db is None:
