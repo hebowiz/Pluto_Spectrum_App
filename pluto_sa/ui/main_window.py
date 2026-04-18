@@ -1730,13 +1730,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self.config.display_span_hz <= MAX_DISPLAY_SPAN_HZ:
             return
 
-        self.config.display_span_hz = MAX_DISPLAY_SPAN_HZ
-        self.config.center_freq_hz = int(self.config.center_freq_hz)
-        if self.config.use_start_stop_freq:
-            half_span_hz = self.config.display_span_hz // 2
-            start_freq_hz = self.config.center_freq_hz - half_span_hz
-            stop_freq_hz = self.config.center_freq_hz + half_span_hz
-            self._set_start_stop_display_mode(start_freq_hz, stop_freq_hz)
+        half_span_hz = MAX_DISPLAY_SPAN_HZ // 2
+        start_freq_hz = int(self.config.center_freq_hz) - half_span_hz
+        stop_freq_hz = int(self.config.center_freq_hz) + half_span_hz
+        self._apply_frequency_window(start_freq_hz, stop_freq_hz, use_start_stop_display=self.config.use_start_stop_freq)
 
     def _rebuild_realtime_runtime_after_mode_change(self) -> None:
         self.config.__post_init__()
@@ -1748,13 +1745,55 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _clear_start_stop_display_mode(self) -> None:
         self.config.use_start_stop_freq = False
-        self.config.display_start_freq_hz = None
-        self.config.display_stop_freq_hz = None
 
     def _set_start_stop_display_mode(self, start_freq_hz: int, stop_freq_hz: int) -> None:
-        self.config.use_start_stop_freq = True
-        self.config.display_start_freq_hz = start_freq_hz
-        self.config.display_stop_freq_hz = stop_freq_hz
+        self._apply_frequency_window(start_freq_hz, stop_freq_hz, use_start_stop_display=True)
+
+    def _frequency_bounds_hz(self) -> tuple[int, int]:
+        if self._is_wideband_mode():
+            return MIN_WIDEBAND_START_HZ, MAX_WIDEBAND_STOP_HZ
+        return int(round(PLUTO_MIN_CENTER_FREQ_MHZ * 1e6)), int(round(PLUTO_MAX_CENTER_FREQ_MHZ * 1e6))
+
+    def _minimum_display_span_hz(self) -> int:
+        return MIN_WIDEBAND_SPAN_HZ if self._is_wideband_mode() else int(round(MIN_SPAN_MHZ * 1e6))
+
+    def _maximum_display_span_hz(self) -> int:
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA:
+            return MAX_DISPLAY_SPAN_HZ
+        lower_hz, upper_hz = self._frequency_bounds_hz()
+        return upper_hz - lower_hz
+
+    def _apply_frequency_window(
+        self,
+        start_freq_hz: int,
+        stop_freq_hz: int,
+        *,
+        use_start_stop_display: bool,
+    ) -> None:
+        lower_bound_hz, upper_bound_hz = self._frequency_bounds_hz()
+        minimum_span_hz = self._minimum_display_span_hz()
+        maximum_span_hz = self._maximum_display_span_hz()
+
+        start_freq_hz = int(start_freq_hz)
+        stop_freq_hz = int(stop_freq_hz)
+        span_hz = max(stop_freq_hz - start_freq_hz, minimum_span_hz)
+        span_hz = min(span_hz, maximum_span_hz)
+
+        start_freq_hz = self._clamp_int(start_freq_hz, lower_bound_hz, upper_bound_hz)
+        stop_freq_hz = start_freq_hz + span_hz
+        if stop_freq_hz > upper_bound_hz:
+            stop_freq_hz = upper_bound_hz
+            start_freq_hz = max(lower_bound_hz, stop_freq_hz - span_hz)
+
+        if stop_freq_hz - start_freq_hz < minimum_span_hz:
+            stop_freq_hz = min(upper_bound_hz, start_freq_hz + minimum_span_hz)
+            start_freq_hz = max(lower_bound_hz, stop_freq_hz - minimum_span_hz)
+
+        self.config.display_start_freq_hz = int(start_freq_hz)
+        self.config.display_stop_freq_hz = int(stop_freq_hz)
+        self.config.center_freq_hz = (self.config.display_start_freq_hz + self.config.display_stop_freq_hz) // 2
+        self.config.display_span_hz = self.config.display_stop_freq_hz - self.config.display_start_freq_hz
+        self.config.use_start_stop_freq = use_start_stop_display
 
     @staticmethod
     def _clamp_float(value: float, minimum: float, maximum: float) -> float:
@@ -1829,35 +1868,23 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._apply_center_frequency_change(center_freq_hz)
 
     def _apply_center_frequency_change(self, center_freq_hz: int) -> None:
-        minimum_center_hz = (
-            MIN_WIDEBAND_START_HZ + WIDEBAND_EDGE_OFFSET_HZ
-            if self._is_wideband_mode()
-            else int(round(PLUTO_MIN_CENTER_FREQ_MHZ * 1e6))
+        half_span_hz = int(round(self.config.display_span_hz / 2.0))
+        self._apply_frequency_window(
+            int(center_freq_hz) - half_span_hz,
+            int(center_freq_hz) + half_span_hz,
+            use_start_stop_display=False,
         )
-        maximum_center_hz = (
-            MAX_WIDEBAND_STOP_HZ - WIDEBAND_EDGE_OFFSET_HZ
-            if self._is_wideband_mode()
-            else int(round(PLUTO_MAX_CENTER_FREQ_MHZ * 1e6))
-        )
-        clamped_center_freq_hz = int(
-            min(
-                max(center_freq_hz, minimum_center_hz),
-                maximum_center_hz,
-            )
-        )
-        if clamped_center_freq_hz <= 0:
+        if self.config.center_freq_hz <= 0:
             return
 
-        self.config.center_freq_hz = clamped_center_freq_hz
-        self._clear_start_stop_display_mode()
         if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
             previous_sweep_state = self._current_sweep_state()
             if self._is_wideband_mode():
                 self._invalidate_wideband_runtime()
             self._reset_sweep_display_and_restore_state(previous_sweep_state)
         else:
-            self.receiver.retune_lo(clamped_center_freq_hz)
-            self.processor.update_center_frequency(clamped_center_freq_hz)
+            self.receiver.retune_lo(self.config.center_freq_hz)
+            self.processor.update_center_frequency(self.config.center_freq_hz)
             self._apply_center_frequency_update()
         self._refresh_status_label()
 
@@ -1922,25 +1949,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         start_freq_hz = int(round(start_value * 1e6))
         stop_freq_hz = int(round(stop_value * 1e6))
-        display_span_hz = stop_freq_hz - start_freq_hz
-        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA and display_span_hz > MAX_DISPLAY_SPAN_HZ:
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA and stop_freq_hz - start_freq_hz > MAX_DISPLAY_SPAN_HZ:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Start/Stop",
                 f"Display span must be {MAX_DISPLAY_SPAN_HZ / 1e6:.1f} MHz or less.",
             )
             return
-        if self._is_wideband_mode() and display_span_hz < MIN_WIDEBAND_SPAN_HZ:
-            stop_freq_hz = min(
-                start_freq_hz + MIN_WIDEBAND_SPAN_HZ,
-                MAX_WIDEBAND_STOP_HZ,
-            )
-            display_span_hz = stop_freq_hz - start_freq_hz
-
-        self.config.center_freq_hz = (start_freq_hz + stop_freq_hz) // 2
-        self.config.display_span_hz = display_span_hz
-        self.config.__post_init__()
-        self._set_start_stop_display_mode(start_freq_hz, stop_freq_hz)
+        self._apply_frequency_window(start_freq_hz, stop_freq_hz, use_start_stop_display=True)
         if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
             if self._is_wideband_mode():
                 self._invalidate_wideband_runtime()
@@ -1975,9 +1991,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if display_span_hz <= 0:
             return
 
-        self.config.display_span_hz = display_span_hz
-        self.config.__post_init__()
-        self._clear_start_stop_display_mode()
+        half_span_hz = int(round(display_span_hz / 2.0))
+        self._apply_frequency_window(
+            self.config.center_freq_hz - half_span_hz,
+            self.config.center_freq_hz + half_span_hz,
+            use_start_stop_display=False,
+        )
         if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
             if self._is_wideband_mode():
                 self._invalidate_wideband_runtime()
