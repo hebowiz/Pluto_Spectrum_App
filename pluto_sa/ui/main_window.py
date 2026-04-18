@@ -849,10 +849,34 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         outer_layout.setStretch(1, 0)
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.MouseButtonPress and isinstance(event, QtGui.QMouseEvent):
+            if (
+                event.button() == QtCore.Qt.MouseButton.RightButton
+                and self._is_control_panel_target(watched)
+            ):
+                if self._can_navigate_back():
+                    self._navigate_back()
+                event.accept()
+                return True
         if event.type() == QtCore.QEvent.Type.Wheel and isinstance(event, QtGui.QWheelEvent):
             if self._handle_active_marker_wheel(event):
                 return True
         return super().eventFilter(watched, event)
+
+    def _is_control_panel_target(self, watched: QtCore.QObject) -> bool:
+        if not hasattr(self, "control_panel"):
+            return False
+        if not isinstance(watched, QtWidgets.QWidget):
+            return False
+        return watched is self.control_panel or self.control_panel.isAncestorOf(watched)
+
+    def _can_navigate_back(self) -> bool:
+        if not hasattr(self, "control_stack") or not hasattr(self, "main_menu_page"):
+            return False
+        return (
+            self.control_stack.currentWidget() is not self.main_menu_page
+            and len(self._page_history) > 0
+        )
 
     def _active_marker_index_for_wheel(self) -> int | None:
         if not hasattr(self, "control_stack"):
@@ -1014,8 +1038,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for index, page in enumerate(self.trace_detail_pages):
             self.page_title_colors[page] = TRACE_COLORS[index]
         self._show_control_page("Main Menu", self.main_menu_page)
+        self._install_control_panel_event_filters()
 
         return panel
+
+    def _install_control_panel_event_filters(self) -> None:
+        if not hasattr(self, "control_panel"):
+            return
+        self.control_panel.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.NoContextMenu)
+        self.control_panel.installEventFilter(self)
+        for widget in self.control_panel.findChildren(QtWidgets.QWidget):
+            widget.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.NoContextMenu)
+            widget.installEventFilter(self)
 
     def _build_main_menu_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
