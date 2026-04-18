@@ -256,6 +256,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_detector_option_buttons: dict[DetectorMode, QtWidgets.QPushButton] = {}
         self.persistence_decay_option_buttons: dict[str, QtWidgets.QPushButton] = {}
         self._last_display_freq_axis_ghz: np.ndarray | None = None
+        self._last_waterfall_freq_axis_ghz: np.ndarray | None = None
         self._last_display_power_db: np.ndarray | None = None
         self._last_current_display_db: np.ndarray | None = None
         self._last_completed_sweep_freq_axis_ghz: np.ndarray | None = None
@@ -353,6 +354,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._wideband_chunk_processor = SpectrumProcessor(chunk_config)
         print(
             "WideBandInit "
+            f"start={start_hz} "
+            f"stop={stop_hz} "
+            f"chunk_count={len(chunk_centers_hz)} "
             f"config_fft={self.config.fft_size} "
             f"chunk_fft={chunk_config.fft_size} "
             f"wideband_chunk_fft={self._wideband_chunk_config.fft_size}"
@@ -443,6 +447,39 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if trace_state.hold_enabled:
                 continue
             trace_state.display_db = composite_display_db.copy()
+        composite_peak_idx = int(np.nanargmax(composite_display_db))
+        composite_peak_freq = float(composite_axis_ghz[composite_peak_idx])
+        print(
+            "WideBandCompositeLine "
+            f"line_len={len(composite_display_db)} "
+            f"peak_idx={composite_peak_idx} "
+            f"peak_freq={composite_peak_freq:.6f}"
+        )
+        self._append_waterfall_line(composite_display_db)
+        waterfall_x_min = runtime.start_hz / 1e9
+        waterfall_x_max = runtime.stop_hz / 1e9
+        self.waterfall_img.setRect(
+            QtCore.QRectF(
+                waterfall_x_min,
+                0.0,
+                waterfall_x_max - waterfall_x_min,
+                float(self.config.waterfall_history),
+            )
+        )
+        self.waterfall_plot.setXRange(
+            waterfall_x_min,
+            waterfall_x_max,
+            padding=X_AXIS_PADDING,
+        )
+        waterfall_view_range = self.waterfall_plot.getViewBox().viewRange()[0]
+        spectrum_view_range = self.spectrum_plot.getViewBox().viewRange()[0]
+        print(
+            "WideBandWaterfallRange "
+            f"spectrum=({spectrum_view_range[0]:.6f},{spectrum_view_range[1]:.6f}) "
+            f"waterfall=({waterfall_view_range[0]:.6f},{waterfall_view_range[1]:.6f}) "
+            f"rect=({waterfall_x_min:.6f},{waterfall_x_max:.6f}) "
+            f"axis=({self._last_display_freq_axis_ghz[0]:.6f},{self._last_display_freq_axis_ghz[-1]:.6f})"
+        )
         self._update_trace_curves()
         self._update_marker_items()
 
@@ -453,6 +490,23 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         runtime = self._wideband_runtime_state
+        chunk_count = len(runtime.chunk_centers_hz)
+        print(
+            "WideBandState "
+            f"idx={runtime.current_chunk_index} "
+            f"chunk_count={chunk_count}"
+        )
+        if chunk_count == 0:
+            runtime.current_chunk_index = 0
+            return
+        if runtime.current_chunk_index >= chunk_count:
+            print(
+                "WideBandStateRecover "
+                f"idx={runtime.current_chunk_index} "
+                f"chunk_count={chunk_count} "
+                "action=reset_index"
+            )
+            runtime.current_chunk_index = 0
         chunk_index = runtime.current_chunk_index
         center_hz = int(runtime.chunk_centers_hz[chunk_index])
         actual_lo_before_retune_hz = self.receiver.get_current_lo_hz()
@@ -597,7 +651,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
 
     def _apply_analyzer_mode_ui_constraints(self) -> None:
-        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             self._saved_realtime_graph_view_mode = self.graph_view_mode
             self.graph_view_mode = GRAPH_VIEW_SPECTRUM_ONLY
         elif self.graph_view_mode == GRAPH_VIEW_SPECTRUM_ONLY:
@@ -1650,24 +1704,213 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         plot_item.getAxis("left").setWidth(LEFT_AXIS_WIDTH)
         plot_item.getAxis("bottom").setHeight(BOTTOM_AXIS_HEIGHT)
 
-    def _update_fixed_ticks(self) -> None:
+    def _resolve_display_start_stop_hz(self) -> tuple[float, float]:
+        if self._is_wideband_mode():
+            start_hz, stop_hz = self._get_wideband_start_stop_hz()
+            return float(start_hz), float(stop_hz)
+        if (
+            self.config.display_start_freq_hz is not None
+            and self.config.display_stop_freq_hz is not None
+            and self.config.display_stop_freq_hz > self.config.display_start_freq_hz
+        ):
+            return float(self.config.display_start_freq_hz), float(self.config.display_stop_freq_hz)
         freq_axis_display_ghz = self._get_active_spectrum_freq_axis_ghz()
-        x_min = freq_axis_display_ghz[0]
-        x_max = freq_axis_display_ghz[-1]
+        return float(freq_axis_display_ghz[0] * 1e9), float(freq_axis_display_ghz[-1] * 1e9)
 
-        x_ticks = [(value, f"{value:.3f}") for value in np.linspace(x_min, x_max, 11)]
+    def _frequency_tick_precision(self, span_hz: float) -> int:
+        if span_hz >= 100_000_000.0:
+            return 2
+        if span_hz >= 10_000_000.0:
+            return 3
+        if span_hz >= 1_000_000.0:
+            return 4
+        return 6
+
+    def _build_frequency_ticks_ghz(self, start_hz: float, stop_hz: float) -> list[tuple[float, str]]:
+        start_ghz = start_hz / 1e9
+        stop_ghz = stop_hz / 1e9
+        span_hz = max(1.0, stop_hz - start_hz)
+        precision = self._frequency_tick_precision(span_hz)
+        tick_values = np.linspace(start_ghz, stop_ghz, 11)
+        return [(value, f"{value:.{precision}f}") for value in tick_values]
+
+    def _update_fixed_ticks(self) -> None:
+        start_hz, stop_hz = self._resolve_display_start_stop_hz()
+        x_ticks = self._build_frequency_ticks_ghz(start_hz, stop_hz)
         y_ticks = [
             (value, f"{value:.0f}") for value in np.linspace(self.y_min, self.y_max, 11)
         ]
 
         self.spectrum_plot.getAxis("bottom").setTicks([x_ticks])
         self.spectrum_plot.getAxis("left").setTicks([y_ticks])
+        self.waterfall_plot.getAxis("bottom").setTicks([x_ticks])
 
     def _update_waterfall_ticks(self) -> None:
+        start_hz, stop_hz = self._resolve_display_start_stop_hz()
+        x_ticks = self._build_frequency_ticks_ghz(start_hz, stop_hz)
         history_max = float(self.config.waterfall_history)
-        tick_values = np.linspace(0.0, history_max, 11)
-        ticks = [(value, f"{int(round(value))}") for value in tick_values]
-        self.waterfall_plot.getAxis("left").setTicks([ticks])
+        y_values = np.linspace(0.0, history_max, 11)
+        y_ticks = [(value, f"{int(round(value))}") for value in y_values]
+        self.waterfall_plot.getAxis("bottom").setTicks([x_ticks])
+        self.waterfall_plot.getAxis("left").setTicks([y_ticks])
+
+    def _get_active_waterfall_freq_axis_ghz(self) -> np.ndarray:
+        if self._is_wideband_mode():
+            return self._wideband_waterfall_display_axis_ghz()
+        return self.processor.get_decimated_display_freq_axis_ghz()
+
+    def _wideband_waterfall_x_bounds_ghz(self) -> tuple[float, float] | None:
+        if not self._is_wideband_mode() or self._wideband_runtime_state is None:
+            return None
+        return (
+            self._wideband_runtime_state.start_hz / 1e9,
+            self._wideband_runtime_state.stop_hz / 1e9,
+        )
+
+    def _wideband_waterfall_display_axis_ghz(self, line_length: int | None = None) -> np.ndarray:
+        bounds = self._wideband_waterfall_x_bounds_ghz()
+        if bounds is None:
+            start_hz, stop_hz = self._get_wideband_start_stop_hz()
+            bounds = (start_hz / 1e9, stop_hz / 1e9)
+        start_ghz, stop_ghz = bounds
+        if line_length is None:
+            if self._wideband_runtime_state is not None:
+                line_length = len(self._wideband_runtime_state.composite_display_db)
+            elif self._last_display_freq_axis_ghz is not None:
+                line_length = len(self._last_display_freq_axis_ghz)
+            else:
+                line_length = 2
+        if line_length <= 1:
+            return np.array([start_ghz, stop_ghz], dtype=float)
+        return np.linspace(start_ghz, stop_ghz, int(line_length), endpoint=False, dtype=float)
+
+    def _rebuild_waterfall_buffer_for_axis(
+        self,
+        freq_axis_display_ghz_dec: np.ndarray,
+        *,
+        x_min: float | None = None,
+        x_max: float | None = None,
+    ) -> None:
+        wf_width = len(freq_axis_display_ghz_dec)
+        self.waterfall_buffer = np.full(
+            (self.config.waterfall_history, wf_width),
+            self.y_min,
+            dtype=np.float32,
+        )
+        self.waterfall_img.setImage(
+            np.flipud(self.waterfall_buffer),
+            autoLevels=False,
+            axisOrder="row-major",
+        )
+        wideband_bounds = self._wideband_waterfall_x_bounds_ghz()
+        if wideband_bounds is not None and x_min is None and x_max is None:
+            rect_x_min, rect_x_max = wideband_bounds
+        else:
+            rect_x_min = freq_axis_display_ghz_dec[0] if x_min is None else x_min
+            rect_x_max = freq_axis_display_ghz_dec[-1] if x_max is None else x_max
+        self.waterfall_img.setRect(
+            QtCore.QRectF(
+                rect_x_min,
+                0.0,
+                rect_x_max - rect_x_min,
+                float(self.config.waterfall_history),
+            )
+        )
+        self.waterfall_plot.setXRange(
+            rect_x_min,
+            rect_x_max,
+            padding=X_AXIS_PADDING,
+        )
+        self.waterfall_plot.setYRange(0.0, float(self.config.waterfall_history), padding=0.0)
+        self._last_waterfall_freq_axis_ghz = freq_axis_display_ghz_dec.copy()
+        self._update_waterfall_ticks()
+
+    def _append_waterfall_line(self, power_db_line: np.ndarray) -> None:
+        if power_db_line.size == 0:
+            return
+        if self._is_wideband_mode():
+            source_axis_ghz = (
+                self._wideband_runtime_state.composite_freq_axis_ghz
+                if self._wideband_runtime_state is not None
+                else self._last_display_freq_axis_ghz
+            )
+            target_axis_ghz = self._wideband_waterfall_display_axis_ghz(len(power_db_line))
+            if (
+                source_axis_ghz is not None
+                and len(source_axis_ghz) == len(power_db_line)
+                and len(target_axis_ghz) == len(power_db_line)
+            ):
+                power_db_dec = np.interp(
+                    target_axis_ghz,
+                    source_axis_ghz,
+                    power_db_line,
+                ).astype(np.float32, copy=False)
+            else:
+                power_db_dec = power_db_line.astype(np.float32, copy=False)
+            freq_axis_display_ghz_dec = target_axis_ghz
+        else:
+            power_db_dec = power_db_line[:: self.config.waterfall_decimation]
+            freq_axis_display_ghz_dec = self._get_active_waterfall_freq_axis_ghz()
+        if self._is_wideband_mode():
+            axis_len = (
+                len(self._last_display_freq_axis_ghz)
+                if self._last_display_freq_axis_ghz is not None
+                else 0
+            )
+            line_peak_idx = int(np.nanargmax(power_db_line))
+            line_peak_freq = (
+                float(self._last_display_freq_axis_ghz[line_peak_idx])
+                if self._last_display_freq_axis_ghz is not None
+                and line_peak_idx < len(self._last_display_freq_axis_ghz)
+                else float("nan")
+            )
+            print(
+                "WideBandWaterfallLine "
+                f"line_len={len(power_db_dec)} "
+                f"buffer_shape={self.waterfall_buffer.shape} "
+                f"axis_len={axis_len} "
+                f"peak_idx={line_peak_idx} "
+                f"peak_freq={line_peak_freq:.6f}"
+            )
+        axis_mismatch = (
+            self._last_waterfall_freq_axis_ghz is None
+            or len(self._last_waterfall_freq_axis_ghz) != len(freq_axis_display_ghz_dec)
+            or not np.array_equal(self._last_waterfall_freq_axis_ghz, freq_axis_display_ghz_dec)
+        )
+        if self.waterfall_buffer.shape[1] != len(power_db_dec) or axis_mismatch:
+            wideband_bounds = self._wideband_waterfall_x_bounds_ghz()
+            if wideband_bounds is not None:
+                self._rebuild_waterfall_buffer_for_axis(
+                    freq_axis_display_ghz_dec,
+                    x_min=wideband_bounds[0],
+                    x_max=wideband_bounds[1],
+                )
+            else:
+                self._rebuild_waterfall_buffer_for_axis(freq_axis_display_ghz_dec)
+        self.waterfall_buffer[:-1] = self.waterfall_buffer[1:]
+        self.waterfall_buffer[-1] = power_db_dec.astype(np.float32)
+        if self._is_wideband_mode():
+            buffer_peak_idx = int(np.nanargmax(self.waterfall_buffer[-1]))
+            buffer_peak_freq = (
+                float(self._last_display_freq_axis_ghz[buffer_peak_idx])
+                if self._last_display_freq_axis_ghz is not None
+                and buffer_peak_idx < len(self._last_display_freq_axis_ghz)
+                else float("nan")
+            )
+            display_image = np.flipud(self.waterfall_buffer)
+            print(
+                "WideBandWaterfallBuffer "
+                f"last_row_peak_idx={buffer_peak_idx} "
+                f"last_row_peak_freq={buffer_peak_freq:.6f} "
+                f"image_shape={display_image.shape}"
+            )
+        else:
+            display_image = np.flipud(self.waterfall_buffer)
+        self.waterfall_img.setImage(
+            display_image,
+            autoLevels=False,
+            axisOrder="row-major",
+        )
 
     def _current_sweep_state(self) -> str:
         return self.sweep_state
@@ -3147,34 +3390,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 )
         else:
             freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
-        freq_axis_display_ghz_dec = self.processor.get_decimated_display_freq_axis_ghz()
-        wf_width = len(freq_axis_display_ghz_dec)
-        self.waterfall_buffer = np.full(
-            (self.config.waterfall_history, wf_width),
-            self.y_min,
-            dtype=np.float32,
-        )
-
-        self.waterfall_img.setImage(
-            np.flipud(self.waterfall_buffer),
-            autoLevels=False,
-            axisOrder="row-major",
-        )
-        self.waterfall_img.setRect(
-            QtCore.QRectF(
-                freq_axis_display_ghz_dec[0],
-                0.0,
-                freq_axis_display_ghz_dec[-1] - freq_axis_display_ghz_dec[0],
-                float(self.config.waterfall_history),
-            )
-        )
-        self.waterfall_plot.setXRange(
-            freq_axis_display_ghz_dec[0],
-            freq_axis_display_ghz_dec[-1],
-            padding=X_AXIS_PADDING,
-        )
-        self.waterfall_plot.setYRange(0.0, float(self.config.waterfall_history), padding=0.0)
-        self._update_waterfall_ticks()
+        freq_axis_display_ghz_dec = self._get_active_waterfall_freq_axis_ghz()
+        self._rebuild_waterfall_buffer_for_axis(freq_axis_display_ghz_dec)
         self.spectrum_plot.setXRange(
             freq_axis_display_ghz[0],
             freq_axis_display_ghz[-1],
@@ -3478,16 +3695,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self._last_received_samples_total = current_received_total
 
-        power_db_dec = current_display_db[:: self.config.waterfall_decimation]
-
-        self.waterfall_buffer[:-1] = self.waterfall_buffer[1:]
-        self.waterfall_buffer[-1] = power_db_dec.astype(np.float32)
-
-        self.waterfall_img.setImage(
-            np.flipud(self.waterfall_buffer),
-            autoLevels=False,
-            axisOrder="row-major",
-        )
+        self._append_waterfall_line(current_display_db)
 
         self._last_display_freq_axis_ghz = self.processor.get_display_freq_axis_ghz()
         self._last_current_display_db = current_display_db
