@@ -142,18 +142,6 @@ class FrequencyAxisItem(pg.AxisItem):
         return [f"{value:.3f}" for value in values]
 
 
-class WaterfallTimeAxisItem(pg.AxisItem):
-    """Show elapsed time labels with 0 at the bottom of the waterfall."""
-
-    def __init__(self, time_span_fn, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._time_span_fn = time_span_fn
-
-    def tickStrings(self, values, scale, spacing):
-        time_span_s = self._time_span_fn()
-        return [f"{max(0.0, time_span_s - value):.1f}" for value in values]
-
-
 class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     """Own GUI construction and rendering only."""
 
@@ -262,8 +250,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.config.update_interval_ms > 0
             else 1.0 / 60.0
         )
-        self.waterfall_time_span_s = self.config.waterfall_history * self.frame_period_s
-
         self._build_ui()
         self._build_timer()
         self.sweep_controller.set_sweep_complete_callback(self._on_sweep_complete)
@@ -468,17 +454,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.waterfall_plot = pg.PlotWidget(
             axisItems={
                 "bottom": FrequencyAxisItem(orientation="bottom"),
-                "left": WaterfallTimeAxisItem(
-                    lambda: self.waterfall_time_span_s,
-                    orientation="left",
-                ),
+                "left": pg.AxisItem(orientation="left"),
             }
         )
         self.waterfall_plot.setBackground("k")
         self._configure_plot_chrome(self.waterfall_plot)
         self.waterfall_plot.setLabel("bottom", "Frequency [GHz]")
-        self.waterfall_plot.setLabel("left", "Time [s]")
-        self.waterfall_plot.getViewBox().invertY(True)
+        self.waterfall_plot.setLabel("left", "History")
+        self.waterfall_plot.getViewBox().invertY(False)
         self.waterfall_plot.getAxis("left").setPen("w")
         self.waterfall_plot.getAxis("bottom").setPen("w")
         self.waterfall_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
@@ -487,7 +470,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.waterfall_plot.addItem(self.waterfall_img)
 
         self.waterfall_img.setImage(
-            self.waterfall_buffer,
+            np.flipud(self.waterfall_buffer),
             autoLevels=False,
             axisOrder="row-major",
         )
@@ -501,12 +484,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 x_min,
                 0.0,
                 x_max - x_min,
-                self.waterfall_time_span_s,
+                float(self.config.waterfall_history),
             )
         )
 
         self.waterfall_plot.setXRange(x_min, x_max, padding=X_AXIS_PADDING)
-        self.waterfall_plot.setYRange(0.0, self.waterfall_time_span_s, padding=0.0)
+        self.waterfall_plot.setYRange(0.0, float(self.config.waterfall_history), padding=0.0)
+        self._update_waterfall_ticks()
 
         lut = pg.ColorMap(
             pos=np.array([0.0, 0.25, 0.5, 0.75, 1.0]),
@@ -1378,6 +1362,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.spectrum_plot.getAxis("bottom").setTicks([x_ticks])
         self.spectrum_plot.getAxis("left").setTicks([y_ticks])
+
+    def _update_waterfall_ticks(self) -> None:
+        history_max = float(self.config.waterfall_history)
+        tick_values = np.linspace(0.0, history_max, 11)
+        ticks = [(value, f"{int(round(value))}") for value in tick_values]
+        self.waterfall_plot.getAxis("left").setTicks([ticks])
 
     def _current_sweep_state(self) -> str:
         return self.sweep_state
@@ -2706,8 +2696,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.config.update_interval_ms > 0
             else 1.0 / 60.0
         )
-        self.waterfall_time_span_s = self.config.waterfall_history * self.frame_period_s
-
         freq_axis_display_ghz = (
             self.sweep_controller.get_sweep_frequency_axis_hz() / 1e9
             if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
@@ -2722,7 +2710,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
 
         self.waterfall_img.setImage(
-            self.waterfall_buffer,
+            np.flipud(self.waterfall_buffer),
             autoLevels=False,
             axisOrder="row-major",
         )
@@ -2731,7 +2719,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 freq_axis_display_ghz_dec[0],
                 0.0,
                 freq_axis_display_ghz_dec[-1] - freq_axis_display_ghz_dec[0],
-                self.waterfall_time_span_s,
+                float(self.config.waterfall_history),
             )
         )
         self.waterfall_plot.setXRange(
@@ -2739,7 +2727,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             freq_axis_display_ghz_dec[-1],
             padding=X_AXIS_PADDING,
         )
-        self.waterfall_plot.setYRange(0.0, self.waterfall_time_span_s, padding=0.0)
+        self.waterfall_plot.setYRange(0.0, float(self.config.waterfall_history), padding=0.0)
+        self._update_waterfall_ticks()
         self.spectrum_plot.setXRange(
             freq_axis_display_ghz[0],
             freq_axis_display_ghz[-1],
@@ -2797,7 +2786,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 freq_axis_display_ghz_dec[0],
                 0.0,
                 freq_axis_display_ghz_dec[-1] - freq_axis_display_ghz_dec[0],
-                self.waterfall_time_span_s,
+                float(self.config.waterfall_history),
             )
         )
         self.waterfall_plot.setXRange(
@@ -2805,6 +2794,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             freq_axis_display_ghz_dec[-1],
             padding=X_AXIS_PADDING,
         )
+        self.waterfall_plot.setYRange(0.0, float(self.config.waterfall_history), padding=0.0)
+        self._update_waterfall_ticks()
         self.spectrum_plot.setXRange(
             freq_axis_display_ghz[0],
             freq_axis_display_ghz[-1],
@@ -2919,12 +2910,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 f"Actual Swp: {self.actual_sweep_time_s:.1f} s"
             )
         else:
+            realtime_suffix = self._make_realtime_status_suffix()
             line1 = (
                 f"{freq_label_1}: {freq_value_1}   "
                 f"{freq_label_2}: {freq_value_2}   "
                 f"RBW: {rbw_text}   "
                 f"FFT: {self.config.fft_size}   "
                 f"Bin Width: {self.config.bin_width_hz:.1f} Hz"
+                f"{realtime_suffix}"
             )
         line2 = (
             f"Ref Level: {self.config.ref_level_dbm:.0f} dBm   "
@@ -2934,6 +2927,35 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         line3 = f"Detector: {self.config.sweep_detector_mode}"
         return f"{line1}\n{line2}\n{line3}"
+
+    def _make_realtime_status_suffix(self) -> str:
+        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
+            return ""
+
+        fps_value = self._estimate_realtime_fps()
+        history_frames = self.config.waterfall_history
+        if fps_value <= 0.0:
+            time_text = "--"
+            fps_text = "0"
+        else:
+            time_text = f"{history_frames / fps_value:.1f}"
+            fps_text = f"{int(round(fps_value))}"
+
+        return (
+            f"   FPS: {fps_text}"
+            f"   History: {history_frames} (≈ {time_text} s)"
+        )
+
+    def _estimate_realtime_fps(self) -> float:
+        if not self.frame_dt_history:
+            return 0.0
+
+        window_size = min(30, len(self.frame_dt_history))
+        recent_dts = self.frame_dt_history[-window_size:]
+        avg_dt = float(np.mean(recent_dts)) if recent_dts else 0.0
+        if avg_dt <= 0.0:
+            return 0.0
+        return 1.0 / avg_dt
 
     def _make_console_status_text(
         self,
@@ -3010,7 +3032,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.waterfall_buffer[-1] = power_db_dec.astype(np.float32)
 
         self.waterfall_img.setImage(
-            self.waterfall_buffer,
+            np.flipud(self.waterfall_buffer),
             autoLevels=False,
             axisOrder="row-major",
         )
