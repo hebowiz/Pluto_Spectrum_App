@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from copy import deepcopy
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +34,17 @@ MIN_RBW_KHZ = 0.0
 MIN_SWEEP_RBW_HZ = 100.0
 MAX_SWEEP_RBW_HZ = 3_000_000.0
 MAX_REALTIME_RBW_HZ = 55_000_000.0
+MAX_REALTIME_FFT_SIZE = 16_384
+MIN_WIDEBAND_SPAN_HZ = 10_000_000
+MAX_WIDEBAND_SPAN_HZ = 6_000_000_000
+MIN_WIDEBAND_START_HZ = 80_000_000
+MAX_WIDEBAND_STOP_HZ = 5_990_000_000
+WIDEBAND_EFFECTIVE_SPAN_HZ = 10_000_000
+WIDEBAND_CHUNK_CAPTURE_SPAN_HZ = 20_000_000
+WIDEBAND_CHUNK_STEP_HZ = 10_000_000
+WIDEBAND_EDGE_OFFSET_HZ = 5_000_000
+WIDEBAND_LO_SETTLE_US = 200
+WIDEBAND_FLUSH_READS = 5
 MIN_CENTER_FREQ_STEP_MHZ = 0.001
 MAX_CENTER_FREQ_STEP_MHZ = 1_000.0
 MIN_REF_LEVEL_DBM = -100.0
@@ -91,7 +103,7 @@ TRACE_TYPE_MAX_HOLD = "Max Hold"
 TRACE_TYPE_AVERAGE = "Average"
 TRACE_TYPE_OPTIONS = [TRACE_TYPE_LIVE, TRACE_TYPE_MAX_HOLD, TRACE_TYPE_AVERAGE]
 TRACE_COLORS = ["#FFFC12", "#78FFEC", "#FC05FF", "#00FF07"]
-FFT_SIZE_OPTIONS = [str(2**power) for power in range(6, 16)]
+FFT_SIZE_OPTIONS = [str(2**power) for power in range(6, 15)]
 SWEEP_DETECTOR_OPTIONS = [
     DetectorMode.SAMPLE,
     DetectorMode.PEAK,
@@ -134,6 +146,19 @@ class TraceState:
     display_db: np.ndarray | None = None
     max_hold_power: np.ndarray | None = None
     average_power: np.ndarray | None = None
+
+
+@dataclass
+class WidebandRuntimeState:
+    start_hz: int
+    stop_hz: int
+    chunk_centers_hz: np.ndarray
+    chunk_freq_ranges_hz: list[tuple[int, int]]
+    chunk_source_ranges: list[tuple[int, int]]
+    chunk_slice_ranges: list[tuple[int, int]]
+    composite_freq_axis_ghz: np.ndarray
+    composite_display_db: np.ndarray
+    current_chunk_index: int = 0
 
 
 class FrequencyAxisItem(pg.AxisItem):
@@ -235,6 +260,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_current_display_db: np.ndarray | None = None
         self._last_completed_sweep_freq_axis_ghz: np.ndarray | None = None
         self._last_completed_sweep_trace_db: dict[str, np.ndarray] = {}
+        self._wideband_chunk_config: SpectrumConfig | None = None
+        self._wideband_chunk_processor: SpectrumProcessor | None = None
+        self._wideband_runtime_state: WidebandRuntimeState | None = None
         self.persistence_enabled = False
         self.persistence_image: pg.ImageItem | None = None
         self.persistence_histogram = np.zeros((PERSISTENCE_AMPLITUDE_BINS, 0), dtype=np.float32)
@@ -267,6 +295,257 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.y_max = self.config.y_max_dbm
         self.y_min = self.config.y_min_dbm
 
+    def _is_wideband_mode(self) -> bool:
+        return self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA
+
+    def _get_wideband_start_stop_hz(self) -> tuple[int, int]:
+        if (
+            self.config.use_start_stop_freq
+            and self.config.display_start_freq_hz is not None
+            and self.config.display_stop_freq_hz is not None
+        ):
+            start_hz = self.config.display_start_freq_hz
+            stop_hz = self.config.display_stop_freq_hz
+        else:
+            half_span_hz = self.config.display_span_hz // 2
+            start_hz = self.config.center_freq_hz - half_span_hz
+            stop_hz = self.config.center_freq_hz + half_span_hz
+
+        start_hz = self._clamp_int(
+            int(start_hz),
+            MIN_WIDEBAND_START_HZ,
+            MAX_WIDEBAND_STOP_HZ,
+        )
+        stop_hz = self._clamp_int(
+            int(stop_hz),
+            MIN_WIDEBAND_START_HZ,
+            MAX_WIDEBAND_STOP_HZ,
+        )
+        if stop_hz - start_hz < MIN_WIDEBAND_SPAN_HZ:
+            stop_hz = min(
+                start_hz + MIN_WIDEBAND_SPAN_HZ,
+                MAX_WIDEBAND_STOP_HZ,
+            )
+        return start_hz, stop_hz
+
+    def _initialize_wideband_runtime(self) -> None:
+        start_hz, stop_hz = self._get_wideband_start_stop_hz()
+        chunk_start_hz_values = np.arange(
+            start_hz,
+            stop_hz,
+            WIDEBAND_CHUNK_STEP_HZ,
+            dtype=np.int64,
+        )
+        if chunk_start_hz_values.size == 0:
+            chunk_start_hz_values = np.array([int(start_hz)], dtype=np.int64)
+        chunk_centers_hz = chunk_start_hz_values + WIDEBAND_EDGE_OFFSET_HZ
+
+        chunk_config = deepcopy(self.config)
+        chunk_config.analyzer_mode = AnalyzerMode.REALTIME_SA
+        chunk_config.display_span_hz = WIDEBAND_CHUNK_CAPTURE_SPAN_HZ
+        chunk_config.center_freq_hz = int(chunk_centers_hz[0])
+        chunk_config.use_start_stop_freq = False
+        chunk_config.display_start_freq_hz = None
+        chunk_config.display_stop_freq_hz = None
+        chunk_config.__post_init__()
+
+        self._wideband_chunk_config = chunk_config
+        self._wideband_chunk_processor = SpectrumProcessor(chunk_config)
+        print(
+            "WideBandInit "
+            f"config_fft={self.config.fft_size} "
+            f"chunk_fft={chunk_config.fft_size} "
+            f"wideband_chunk_fft={self._wideband_chunk_config.fft_size}"
+        )
+        self.receiver.reconfigure_span(chunk_config)
+        self.receiver.retune_lo(int(chunk_centers_hz[0]), update_config=False)
+
+        self._wideband_chunk_processor.update_center_frequency(int(chunk_centers_hz[0]))
+        first_chunk_axis_ghz = self._wideband_chunk_processor.get_display_freq_axis_ghz().copy()
+        full_chunk_bin_count = len(first_chunk_axis_ghz)
+        if full_chunk_bin_count > 1:
+            bin_step_ghz = float(first_chunk_axis_ghz[1] - first_chunk_axis_ghz[0])
+        else:
+            bin_step_ghz = WIDEBAND_CHUNK_SPAN_HZ / 1e9
+
+        chunk_slice_ranges: list[tuple[int, int]] = []
+        chunk_freq_ranges_hz: list[tuple[int, int]] = []
+        chunk_source_ranges: list[tuple[int, int]] = []
+        global_axis_start_ghz = float(first_chunk_axis_ghz[0])
+        max_end_index = 0
+        for index, chunk_start_hz in enumerate(chunk_start_hz_values):
+            chunk_stop_hz = (
+                stop_hz
+                if index == len(chunk_start_hz_values) - 1
+                else min(int(chunk_start_hz) + WIDEBAND_EFFECTIVE_SPAN_HZ, stop_hz)
+            )
+            self._wideband_chunk_processor.update_center_frequency(int(chunk_centers_hz[index]))
+            chunk_axis_ghz = self._wideband_chunk_processor.get_display_freq_axis_ghz().copy()
+            chunk_axis_hz = chunk_axis_ghz * 1e9
+
+            source_start_idx = int(np.searchsorted(chunk_axis_hz, int(chunk_start_hz), side="left"))
+            source_end_idx = int(np.searchsorted(chunk_axis_hz, int(chunk_stop_hz), side="left"))
+            if source_start_idx >= len(chunk_axis_hz):
+                source_start_idx = len(chunk_axis_hz) - 1
+            if source_end_idx <= source_start_idx:
+                source_end_idx = min(len(chunk_axis_hz), source_start_idx + 1)
+
+            dest_start_idx = int(
+                round(((int(chunk_start_hz) / 1e9) - global_axis_start_ghz) / bin_step_ghz)
+            )
+            use_count = source_end_idx - source_start_idx
+            dest_end_idx = dest_start_idx + use_count
+
+            chunk_freq_ranges_hz.append((chunk_start_hz, chunk_stop_hz))
+            chunk_source_ranges.append((source_start_idx, source_end_idx))
+            chunk_slice_ranges.append((dest_start_idx, dest_end_idx))
+            max_end_index = max(max_end_index, dest_end_idx)
+
+        composite_axis_ghz = global_axis_start_ghz + np.arange(max_end_index, dtype=float) * bin_step_ghz
+        composite_display_db = np.full(len(composite_axis_ghz), np.nan, dtype=float)
+        self._wideband_runtime_state = WidebandRuntimeState(
+            start_hz=start_hz,
+            stop_hz=stop_hz,
+            chunk_centers_hz=chunk_centers_hz,
+            chunk_freq_ranges_hz=chunk_freq_ranges_hz,
+            chunk_source_ranges=chunk_source_ranges,
+            chunk_slice_ranges=chunk_slice_ranges,
+            composite_freq_axis_ghz=composite_axis_ghz,
+            composite_display_db=composite_display_db,
+            current_chunk_index=0,
+        )
+
+    def _invalidate_wideband_runtime(self) -> None:
+        self._wideband_runtime_state = None
+        self._wideband_chunk_config = None
+        self._wideband_chunk_processor = None
+
+    def _publish_wideband_composite(self) -> None:
+        if self._wideband_runtime_state is None:
+            return
+        runtime = self._wideband_runtime_state
+        composite_axis_ghz = self._wideband_runtime_state.composite_freq_axis_ghz
+        composite_display_db = self._wideband_runtime_state.composite_display_db
+        if len(composite_axis_ghz) == 0:
+            return
+
+        self._last_display_freq_axis_ghz = composite_axis_ghz.copy()
+        self._last_current_display_db = composite_display_db.copy()
+        self._last_display_power_db = composite_display_db.copy()
+        self.spectrum_plot.setXRange(
+            runtime.start_hz / 1e9,
+            runtime.stop_hz / 1e9,
+            padding=X_AXIS_PADDING,
+        )
+        self._update_fixed_ticks()
+
+        for trace_state in self.trace_states:
+            if trace_state.hold_enabled:
+                continue
+            trace_state.display_db = composite_display_db.copy()
+        self._update_trace_curves()
+        self._update_marker_items()
+
+    def _update_wideband_spectrum(self) -> None:
+        if self._wideband_runtime_state is None or self._wideband_chunk_processor is None or self._wideband_chunk_config is None:
+            self._initialize_wideband_runtime()
+        if self._wideband_runtime_state is None or self._wideband_chunk_processor is None or self._wideband_chunk_config is None:
+            return
+
+        runtime = self._wideband_runtime_state
+        chunk_index = runtime.current_chunk_index
+        center_hz = int(runtime.chunk_centers_hz[chunk_index])
+        actual_lo_before_retune_hz = self.receiver.get_current_lo_hz()
+        self.receiver.retune_lo(center_hz, update_config=False)
+        actual_lo_after_retune_hz = self.receiver.get_current_lo_hz()
+        if WIDEBAND_LO_SETTLE_US > 0:
+            time.sleep(WIDEBAND_LO_SETTLE_US / 1_000_000.0)
+        flush_actual_total = 0
+        capture_size = int(self.config.fft_size)
+        print(
+            "WideBandCaptureRequest "
+            f"idx={chunk_index} "
+            f"config_fft={self.config.fft_size} "
+            f"chunk_fft={self._wideband_chunk_config.fft_size} "
+            f"capture_size={capture_size}"
+        )
+        for _ in range(WIDEBAND_FLUSH_READS):
+            flush_actual_total += self.receiver.discard_block(capture_size)
+        actual_lo_before_capture_hz = self.receiver.get_current_lo_hz()
+        iq = self.receiver.capture_block(capture_size)
+        actual_lo_during_capture_hz = self.receiver.get_current_lo_hz()
+        processor_window_len = len(self._wideband_chunk_processor.window)
+        print(
+            "WideBandCapture "
+            f"idx={chunk_index} "
+            f"iq_len={len(iq)} "
+            f"window_len={processor_window_len} "
+            f"config_fft={self.config.fft_size} "
+            f"chunk_fft={self._wideband_chunk_config.fft_size}"
+        )
+        if len(iq) != processor_window_len:
+            print(
+                "WideBandRecover "
+                f"idx={chunk_index} "
+                f"iq_len={len(iq)} "
+                f"window_len={processor_window_len} "
+                "action=reinitialize"
+            )
+            self._invalidate_wideband_runtime()
+            return
+        self._wideband_chunk_processor.update_center_frequency(center_hz)
+        power_linear_full = self._wideband_chunk_processor.compute_filtered_power(iq)
+        power_linear_display = self._wideband_chunk_processor.extract_display_spectrum(power_linear_full)
+        current_power_db_display = 10.0 * np.log10(power_linear_display + 1e-20)
+        current_display_db = apply_display_power_correction(
+            current_power_db_display,
+            self.calibration_offset_db,
+            self.config.input_correction_db,
+        )
+
+        chunk_axis_ghz = self._wideband_chunk_processor.get_display_freq_axis_ghz()
+        source_start_idx, source_end_idx = runtime.chunk_source_ranges[chunk_index]
+        start_idx, end_idx = runtime.chunk_slice_ranges[chunk_index]
+        runtime.composite_display_db[start_idx:end_idx] = current_display_db[source_start_idx:source_end_idx]
+
+        if chunk_index in {0, 1, len(runtime.chunk_centers_hz) - 1}:
+            chunk_start_hz, chunk_stop_hz = runtime.chunk_freq_ranges_hz[chunk_index]
+            source_freq_start_hz = chunk_axis_ghz[source_start_idx] * 1e9
+            source_freq_stop_hz = chunk_axis_ghz[source_end_idx - 1] * 1e9
+            global_freq_start_hz = runtime.composite_freq_axis_ghz[start_idx] * 1e9
+            global_freq_stop_hz = runtime.composite_freq_axis_ghz[end_idx - 1] * 1e9
+            local_peak_index = int(np.nanargmax(current_display_db[source_start_idx:source_end_idx]))
+            local_peak_freq_hz = chunk_axis_ghz[source_start_idx + local_peak_index] * 1e9
+            print(
+                "WideBandChunk "
+                f"start={runtime.start_hz} "
+                f"stop={runtime.stop_hz} "
+                f"idx={chunk_index} "
+                f"center={center_hz} "
+                f"lo_before={actual_lo_before_retune_hz} "
+                f"lo_after={actual_lo_after_retune_hz} "
+                f"lo_precap={actual_lo_before_capture_hz} "
+                f"lo_cap={actual_lo_during_capture_hz} "
+                f"chunk_range=({chunk_start_hz},{chunk_stop_hz}) "
+                f"src_bins=({source_start_idx},{source_end_idx}) "
+                f"dst_bins=({start_idx},{end_idx}) "
+                f"src_freq=({source_freq_start_hz:.1f},{source_freq_stop_hz:.1f}) "
+                f"dst_freq=({global_freq_start_hz:.1f},{global_freq_stop_hz:.1f}) "
+                f"flush_reads={WIDEBAND_FLUSH_READS} "
+                f"flush_samples={flush_actual_total} "
+                f"local_peak={local_peak_freq_hz:.1f}"
+            )
+        runtime.current_chunk_index += 1
+
+        if runtime.current_chunk_index >= len(runtime.chunk_centers_hz):
+            self._publish_wideband_composite()
+            if self.sweep_state == SWEEP_STATE_SINGLE:
+                self.timer.stop()
+                self.sweep_state = SWEEP_STATE_STOPPED
+                self._update_continuous_button()
+            else:
+                runtime.current_chunk_index = 0
+
     def _reset_all_measurement_state(
         self,
         *,
@@ -282,6 +561,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.sweep_controller.stop()
             self.sweep_controller.reset()
             self.receiver.invalidate_sweep_configuration()
+            self._invalidate_wideband_runtime()
             self._pending_sweep_marker_update = False
             self._last_sweep_drawn_completed_points = -1
             self._last_sweep_callback_time = None
@@ -317,7 +597,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
 
     def _apply_analyzer_mode_ui_constraints(self) -> None:
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
             self._saved_realtime_graph_view_mode = self.graph_view_mode
             self.graph_view_mode = GRAPH_VIEW_SPECTRUM_ONLY
         elif self.graph_view_mode == GRAPH_VIEW_SPECTRUM_ONLY:
@@ -349,8 +629,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if analyzer_mode == AnalyzerMode.SWEEP_SA:
                 self.config.rbw_hz = self._clip_sweep_rbw(self.config.rbw_hz)
                 self.sweep_state = SWEEP_STATE_RUNNING
-            elif previous_mode == AnalyzerMode.SWEEP_SA:
+            elif analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
+                self.config.fft_size = min(int(self.config.fft_size), MAX_REALTIME_FFT_SIZE)
+                if self.config.display_span_hz < MIN_WIDEBAND_SPAN_HZ:
+                    self.config.display_span_hz = MIN_WIDEBAND_SPAN_HZ
+                self.sweep_state = SWEEP_STATE_RUNNING
+            elif previous_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
                 self._apply_realtime_span_limit()
+            if analyzer_mode == AnalyzerMode.REALTIME_SA:
+                self.config.fft_size = min(int(self.config.fft_size), MAX_REALTIME_FFT_SIZE)
             self._reset_measurement_state_for_mode_change()
             if analyzer_mode == AnalyzerMode.REALTIME_SA:
                 self._rebuild_realtime_runtime_after_mode_change()
@@ -367,6 +654,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._last_current_display_db = None
                 self._apply_span_update()
                 self._start_sweep_continuous()
+            elif analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
+                self._invalidate_wideband_runtime()
+                self._reset_plot_state()
+                self._start_wideband_continuous()
             else:
                 self._start_realtime_continuous()
         finally:
@@ -791,7 +1082,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(10)
 
-        for mode in (AnalyzerMode.REALTIME_SA, AnalyzerMode.SWEEP_SA):
+        for mode in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+            AnalyzerMode.SWEEP_SA,
+        ):
             button = self._make_control_button(mode.value)
             button.clicked.connect(
                 lambda _checked=False, selected_mode=mode: self._change_analyzer_mode(
@@ -1378,6 +1673,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return self.sweep_state
 
     def _restore_sweep_state(self, previous_state: str) -> None:
+        if self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
+            if previous_state == SWEEP_STATE_RUNNING:
+                self._start_wideband_continuous()
+            elif previous_state == SWEEP_STATE_SINGLE:
+                self.sweep_state = SWEEP_STATE_SINGLE
+                self.receiver.stop()
+                self._restart_timer_for_current_mode()
+            else:
+                self.timer.stop()
+                self.sweep_state = SWEEP_STATE_STOPPED
+            self._update_continuous_button()
+            return
         if self.config.analyzer_mode != AnalyzerMode.SWEEP_SA:
             self._update_continuous_button()
             return
@@ -1408,6 +1715,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_state = SWEEP_STATE_RUNNING
         self.sweep_controller.stop()
         self.receiver.start()
+        self._restart_timer_for_current_mode()
+        self._update_continuous_button()
+
+    def _start_wideband_continuous(self) -> None:
+        self.sweep_state = SWEEP_STATE_RUNNING
+        self.sweep_controller.stop()
+        self.receiver.stop()
+        self._invalidate_wideband_runtime()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
@@ -1514,10 +1829,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._apply_center_frequency_change(center_freq_hz)
 
     def _apply_center_frequency_change(self, center_freq_hz: int) -> None:
+        minimum_center_hz = (
+            MIN_WIDEBAND_START_HZ + WIDEBAND_EDGE_OFFSET_HZ
+            if self._is_wideband_mode()
+            else int(round(PLUTO_MIN_CENTER_FREQ_MHZ * 1e6))
+        )
+        maximum_center_hz = (
+            MAX_WIDEBAND_STOP_HZ - WIDEBAND_EDGE_OFFSET_HZ
+            if self._is_wideband_mode()
+            else int(round(PLUTO_MAX_CENTER_FREQ_MHZ * 1e6))
+        )
         clamped_center_freq_hz = int(
             min(
-                max(center_freq_hz, int(round(PLUTO_MIN_CENTER_FREQ_MHZ * 1e6))),
-                int(round(PLUTO_MAX_CENTER_FREQ_MHZ * 1e6)),
+                max(center_freq_hz, minimum_center_hz),
+                maximum_center_hz,
             )
         )
         if clamped_center_freq_hz <= 0:
@@ -1525,8 +1850,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.config.center_freq_hz = clamped_center_freq_hz
         self._clear_start_stop_display_mode()
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
             previous_sweep_state = self._current_sweep_state()
+            if self._is_wideband_mode():
+                self._invalidate_wideband_runtime()
             self._reset_sweep_display_and_restore_state(previous_sweep_state)
         else:
             self.receiver.retune_lo(clamped_center_freq_hz)
@@ -1564,8 +1891,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
         start_value = self._clamp_float(
             start_value,
-            PLUTO_MIN_CENTER_FREQ_MHZ,
-            PLUTO_MAX_CENTER_FREQ_MHZ,
+            (MIN_WIDEBAND_START_HZ / 1e6) if self._is_wideband_mode() else PLUTO_MIN_CENTER_FREQ_MHZ,
+            (MAX_WIDEBAND_STOP_HZ / 1e6) if self._is_wideband_mode() else PLUTO_MAX_CENTER_FREQ_MHZ,
         )
 
         stop_value, accepted = QtWidgets.QInputDialog.getDouble(
@@ -1581,8 +1908,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
         stop_value = self._clamp_float(
             stop_value,
-            PLUTO_MIN_CENTER_FREQ_MHZ,
-            PLUTO_MAX_CENTER_FREQ_MHZ,
+            (MIN_WIDEBAND_START_HZ / 1e6) if self._is_wideband_mode() else PLUTO_MIN_CENTER_FREQ_MHZ,
+            (MAX_WIDEBAND_STOP_HZ / 1e6) if self._is_wideband_mode() else PLUTO_MAX_CENTER_FREQ_MHZ,
         )
 
         if stop_value <= start_value:
@@ -1603,12 +1930,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 f"Display span must be {MAX_DISPLAY_SPAN_HZ / 1e6:.1f} MHz or less.",
             )
             return
+        if self._is_wideband_mode() and display_span_hz < MIN_WIDEBAND_SPAN_HZ:
+            stop_freq_hz = min(
+                start_freq_hz + MIN_WIDEBAND_SPAN_HZ,
+                MAX_WIDEBAND_STOP_HZ,
+            )
+            display_span_hz = stop_freq_hz - start_freq_hz
 
         self.config.center_freq_hz = (start_freq_hz + stop_freq_hz) // 2
         self.config.display_span_hz = display_span_hz
         self.config.__post_init__()
         self._set_start_stop_display_mode(start_freq_hz, stop_freq_hz)
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
+            if self._is_wideband_mode():
+                self._invalidate_wideband_runtime()
             self._reset_sweep_display_and_restore_state(previous_sweep_state)
         else:
             self.receiver.reconfigure_span(self.config)
@@ -1622,14 +1957,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         max_span_mhz = (
             MAX_DISPLAY_SPAN_HZ / 1e6
             if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA
-            else (PLUTO_MAX_CENTER_FREQ_MHZ - PLUTO_MIN_CENTER_FREQ_MHZ)
+            else ((MAX_WIDEBAND_STOP_HZ - MIN_WIDEBAND_START_HZ) / 1e6)
         )
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Freq Span",
             "Display Span [MHz]",
             value=self.config.display_span_hz / 1e6,
-            min=MIN_SPAN_MHZ,
+            min=(MIN_WIDEBAND_SPAN_HZ / 1e6) if self._is_wideband_mode() else MIN_SPAN_MHZ,
             max=max_span_mhz,
             decimals=3,
         )
@@ -1643,7 +1978,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.display_span_hz = display_span_hz
         self.config.__post_init__()
         self._clear_start_stop_display_mode()
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
+            if self._is_wideband_mode():
+                self._invalidate_wideband_runtime()
             self._reset_sweep_display_and_restore_state(previous_sweep_state)
         else:
             self.receiver.reconfigure_span(self.config)
@@ -1788,13 +2125,35 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return min(max(rbw_hz, 0.0), MAX_REALTIME_RBW_HZ)
 
     def _select_fft_size(self, fft_size: int) -> None:
-        self.config.fft_size = fft_size
+        previous_state = self._current_sweep_state()
+        print(f"FFTSelect before={self.config.fft_size} requested={fft_size}")
+        is_wideband_mode = self._is_wideband_mode()
+        if self.config.analyzer_mode in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        ):
+            fft_size = min(int(fft_size), MAX_REALTIME_FFT_SIZE)
+        should_resume_wideband = (
+            is_wideband_mode and previous_state == SWEEP_STATE_RUNNING and self.timer.isActive()
+        )
+        if is_wideband_mode:
+            self.timer.stop()
+        self.config.fft_size = int(fft_size)
+        print(f"FFTSelect after={self.config.fft_size}")
+        if is_wideband_mode:
+            self._invalidate_wideband_runtime()
         self.receiver.reconfigure_span(self.config)
         self.processor.update_span_related(self.config)
         self._apply_span_update()
         self._update_realtime_sa_controls()
         self._refresh_sweep_time_estimate()
         self._refresh_status_label()
+        if is_wideband_mode:
+            if should_resume_wideband:
+                self._start_wideband_continuous()
+            else:
+                self.sweep_state = SWEEP_STATE_STOPPED
+                self._update_continuous_button()
 
     def _on_sweep_time_clicked(self) -> None:
         previous_state = self._current_sweep_state()
@@ -1879,6 +2238,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             self._start_sweep_continuous()
             return
+        if self._is_wideband_mode():
+            self._start_wideband_continuous()
+            return
 
         self.sweep_state = SWEEP_STATE_RUNNING
         self.receiver.start()
@@ -1890,6 +2252,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             self.receiver.stop()
             self.sweep_controller.request_single()
+        elif self._is_wideband_mode():
+            self.receiver.stop()
+            self._invalidate_wideband_runtime()
         else:
             self.receiver.start()
         self._restart_timer_for_current_mode()
@@ -1910,7 +2275,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             reset_markers=False,
         )
         self._clear_persistence()
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
             self._restore_sweep_state(previous_state)
         self._update_continuous_button()
         self._refresh_status_label()
@@ -2048,7 +2413,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 button.setEnabled(True)
 
     def _update_persistence_controls(self) -> None:
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
             self.persistence_button.setText("Persistence OFF")
             self.persistence_button.setEnabled(False)
         else:
@@ -2241,7 +2606,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _update_realtime_sa_controls(self) -> None:
         self.fft_size_button.setText(f"FFT size: {self.config.fft_size}")
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
             self.persistence_decay_button.setText(
                 f"Persistence Decay\n{self.config.persistence_decay_mode}"
             )
@@ -2299,6 +2664,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self._last_display_freq_axis_ghz is not None:
                 return self._last_display_freq_axis_ghz
             return self.sweep_controller.get_sweep_frequency_axis_hz() / 1e9
+        if self._is_wideband_mode():
+            if self._last_display_freq_axis_ghz is not None:
+                return self._last_display_freq_axis_ghz
+            start_hz, stop_hz = self._get_wideband_start_stop_hz()
+            return np.array([start_hz / 1e9, stop_hz / 1e9], dtype=float)
 
         return self.processor.get_display_freq_axis_ghz()
 
@@ -2745,11 +3115,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.config.update_interval_ms > 0
             else 1.0 / 60.0
         )
-        freq_axis_display_ghz = (
-            self.sweep_controller.get_sweep_frequency_axis_hz() / 1e9
-            if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
-            else self.processor.get_display_freq_axis_ghz()
-        )
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            freq_axis_display_ghz = self.sweep_controller.get_sweep_frequency_axis_hz() / 1e9
+        elif self._is_wideband_mode():
+            if self._wideband_runtime_state is not None:
+                freq_axis_display_ghz = self._wideband_runtime_state.composite_freq_axis_ghz
+            else:
+                start_hz, stop_hz = self._get_wideband_start_stop_hz()
+                freq_axis_display_ghz = np.array(
+                    [start_hz / 1e9, stop_hz / 1e9],
+                    dtype=float,
+                )
+        else:
+            freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
         freq_axis_display_ghz_dec = self.processor.get_decimated_display_freq_axis_ghz()
         wf_width = len(freq_axis_display_ghz_dec)
         self.waterfall_buffer = np.full(
@@ -2905,7 +3283,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._restart_timer_for_current_mode()
 
     def _current_timer_interval_ms(self) -> int:
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (
+            AnalyzerMode.SWEEP_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        ):
             return self.config.sweep_update_interval_ms
         return self.config.update_interval_ms
 
@@ -3039,6 +3420,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def update_spectrum(self) -> None:
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             self._update_sweep_spectrum()
+            return
+        if self._is_wideband_mode():
+            self._update_wideband_spectrum()
             return
 
         now_frame = time.perf_counter()

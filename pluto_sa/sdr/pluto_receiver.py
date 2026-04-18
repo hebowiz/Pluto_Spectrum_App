@@ -93,6 +93,11 @@ class PlutoReceiver:
             if update_config:
                 self.config.center_freq_hz = center_freq_hz
 
+    def get_current_lo_hz(self) -> int:
+        with self._iq_lock:
+            with self._sdr_lock:
+                return int(self.sdr.rx_lo)
+
     def reconfigure_span(self, config: SpectrumConfig) -> None:
         with self._iq_lock:
             self._sweep_config_signature = None
@@ -134,10 +139,27 @@ class PlutoReceiver:
             with self._sdr_lock:
                 if self.sdr.rx_buffer_size != discard_size:
                     self.sdr.rx_buffer_size = discard_size
-                iq = self.sdr.rx()
-            self.received_samples_total += len(iq)
+                chunks = []
+                total_samples = 0
+                raw_lengths: list[int] = []
+                while total_samples < discard_size:
+                    chunk = self.sdr.rx()
+                    raw_lengths.append(len(chunk))
+                    chunks.append(chunk)
+                    total_samples += len(chunk)
+            raw_returned = total_samples
+            final_returned = discard_size
+            self.received_samples_total += final_returned
 
-        return len(iq)
+        print(
+            "ReceiverDiscard "
+            f"requested={discard_size} "
+            f"configured={discard_size} "
+            f"raw_returned={raw_returned} "
+            f"final_returned={final_returned} "
+            f"chunks={raw_lengths}"
+        )
+        return final_returned
 
     def capture_block(self, num_samples: int) -> np.ndarray:
         """Capture one IQ block without starting the streaming worker."""
@@ -147,9 +169,27 @@ class PlutoReceiver:
             with self._sdr_lock:
                 if self.sdr.rx_buffer_size != capture_size:
                     self.sdr.rx_buffer_size = capture_size
-                iq = self.sdr.rx().astype(np.complex64, copy=True)
-            self.received_samples_total += len(iq)
+                chunks = []
+                total_samples = 0
+                raw_lengths: list[int] = []
+                while total_samples < capture_size:
+                    chunk = self.sdr.rx()
+                    raw_lengths.append(len(chunk))
+                    chunks.append(chunk)
+                    total_samples += len(chunk)
+                iq = np.concatenate(chunks)[:capture_size].astype(np.complex64, copy=True)
+            raw_returned = total_samples
+            final_returned = len(iq)
+            self.received_samples_total += final_returned
 
+        print(
+            "ReceiverCapture "
+            f"requested={capture_size} "
+            f"configured={capture_size} "
+            f"raw_returned={raw_returned} "
+            f"final_returned={final_returned} "
+            f"chunks={raw_lengths}"
+        )
         return iq
 
     def set_gain_db(self, gain_db: int) -> None:
