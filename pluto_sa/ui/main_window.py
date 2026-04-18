@@ -352,15 +352,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self._wideband_chunk_config = chunk_config
         self._wideband_chunk_processor = SpectrumProcessor(chunk_config)
-        print(
-            "WideBandInit "
-            f"start={start_hz} "
-            f"stop={stop_hz} "
-            f"chunk_count={len(chunk_centers_hz)} "
-            f"config_fft={self.config.fft_size} "
-            f"chunk_fft={chunk_config.fft_size} "
-            f"wideband_chunk_fft={self._wideband_chunk_config.fft_size}"
-        )
         self.receiver.reconfigure_span(chunk_config)
         self.receiver.retune_lo(int(chunk_centers_hz[0]), update_config=False)
 
@@ -447,14 +438,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if trace_state.hold_enabled:
                 continue
             trace_state.display_db = composite_display_db.copy()
-        composite_peak_idx = int(np.nanargmax(composite_display_db))
-        composite_peak_freq = float(composite_axis_ghz[composite_peak_idx])
-        print(
-            "WideBandCompositeLine "
-            f"line_len={len(composite_display_db)} "
-            f"peak_idx={composite_peak_idx} "
-            f"peak_freq={composite_peak_freq:.6f}"
-        )
         self._append_waterfall_line(composite_display_db)
         waterfall_x_min = runtime.start_hz / 1e9
         waterfall_x_max = runtime.stop_hz / 1e9
@@ -471,15 +454,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             waterfall_x_max,
             padding=X_AXIS_PADDING,
         )
-        waterfall_view_range = self.waterfall_plot.getViewBox().viewRange()[0]
-        spectrum_view_range = self.spectrum_plot.getViewBox().viewRange()[0]
-        print(
-            "WideBandWaterfallRange "
-            f"spectrum=({spectrum_view_range[0]:.6f},{spectrum_view_range[1]:.6f}) "
-            f"waterfall=({waterfall_view_range[0]:.6f},{waterfall_view_range[1]:.6f}) "
-            f"rect=({waterfall_x_min:.6f},{waterfall_x_max:.6f}) "
-            f"axis=({self._last_display_freq_axis_ghz[0]:.6f},{self._last_display_freq_axis_ghz[-1]:.6f})"
-        )
         self._update_trace_curves()
         self._update_marker_items()
 
@@ -491,21 +465,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         runtime = self._wideband_runtime_state
         chunk_count = len(runtime.chunk_centers_hz)
-        print(
-            "WideBandState "
-            f"idx={runtime.current_chunk_index} "
-            f"chunk_count={chunk_count}"
-        )
         if chunk_count == 0:
             runtime.current_chunk_index = 0
             return
         if runtime.current_chunk_index >= chunk_count:
-            print(
-                "WideBandStateRecover "
-                f"idx={runtime.current_chunk_index} "
-                f"chunk_count={chunk_count} "
-                "action=reset_index"
-            )
             runtime.current_chunk_index = 0
         chunk_index = runtime.current_chunk_index
         center_hz = int(runtime.chunk_centers_hz[chunk_index])
@@ -516,35 +479,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             time.sleep(WIDEBAND_LO_SETTLE_US / 1_000_000.0)
         flush_actual_total = 0
         capture_size = int(self.config.fft_size)
-        print(
-            "WideBandCaptureRequest "
-            f"idx={chunk_index} "
-            f"config_fft={self.config.fft_size} "
-            f"chunk_fft={self._wideband_chunk_config.fft_size} "
-            f"capture_size={capture_size}"
-        )
         for _ in range(WIDEBAND_FLUSH_READS):
             flush_actual_total += self.receiver.discard_block(capture_size)
         actual_lo_before_capture_hz = self.receiver.get_current_lo_hz()
         iq = self.receiver.capture_block(capture_size)
         actual_lo_during_capture_hz = self.receiver.get_current_lo_hz()
         processor_window_len = len(self._wideband_chunk_processor.window)
-        print(
-            "WideBandCapture "
-            f"idx={chunk_index} "
-            f"iq_len={len(iq)} "
-            f"window_len={processor_window_len} "
-            f"config_fft={self.config.fft_size} "
-            f"chunk_fft={self._wideband_chunk_config.fft_size}"
-        )
         if len(iq) != processor_window_len:
-            print(
-                "WideBandRecover "
-                f"idx={chunk_index} "
-                f"iq_len={len(iq)} "
-                f"window_len={processor_window_len} "
-                "action=reinitialize"
-            )
             self._invalidate_wideband_runtime()
             return
         self._wideband_chunk_processor.update_center_frequency(center_hz)
@@ -561,34 +502,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         source_start_idx, source_end_idx = runtime.chunk_source_ranges[chunk_index]
         start_idx, end_idx = runtime.chunk_slice_ranges[chunk_index]
         runtime.composite_display_db[start_idx:end_idx] = current_display_db[source_start_idx:source_end_idx]
-
-        if chunk_index in {0, 1, len(runtime.chunk_centers_hz) - 1}:
-            chunk_start_hz, chunk_stop_hz = runtime.chunk_freq_ranges_hz[chunk_index]
-            source_freq_start_hz = chunk_axis_ghz[source_start_idx] * 1e9
-            source_freq_stop_hz = chunk_axis_ghz[source_end_idx - 1] * 1e9
-            global_freq_start_hz = runtime.composite_freq_axis_ghz[start_idx] * 1e9
-            global_freq_stop_hz = runtime.composite_freq_axis_ghz[end_idx - 1] * 1e9
-            local_peak_index = int(np.nanargmax(current_display_db[source_start_idx:source_end_idx]))
-            local_peak_freq_hz = chunk_axis_ghz[source_start_idx + local_peak_index] * 1e9
-            print(
-                "WideBandChunk "
-                f"start={runtime.start_hz} "
-                f"stop={runtime.stop_hz} "
-                f"idx={chunk_index} "
-                f"center={center_hz} "
-                f"lo_before={actual_lo_before_retune_hz} "
-                f"lo_after={actual_lo_after_retune_hz} "
-                f"lo_precap={actual_lo_before_capture_hz} "
-                f"lo_cap={actual_lo_during_capture_hz} "
-                f"chunk_range=({chunk_start_hz},{chunk_stop_hz}) "
-                f"src_bins=({source_start_idx},{source_end_idx}) "
-                f"dst_bins=({start_idx},{end_idx}) "
-                f"src_freq=({source_freq_start_hz:.1f},{source_freq_stop_hz:.1f}) "
-                f"dst_freq=({global_freq_start_hz:.1f},{global_freq_stop_hz:.1f}) "
-                f"flush_reads={WIDEBAND_FLUSH_READS} "
-                f"flush_samples={flush_actual_total} "
-                f"local_peak={local_peak_freq_hz:.1f}"
-            )
         runtime.current_chunk_index += 1
 
         if runtime.current_chunk_index >= len(runtime.chunk_centers_hz):
@@ -921,11 +834,91 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         layout.setStretch(1, 1)
         layout.setStretch(2, 1)
         self._apply_display_mode()
+        self.installEventFilter(self)
+        self.spectrum_plot.installEventFilter(self)
+        self.spectrum_plot.viewport().installEventFilter(self)
+        self.waterfall_plot.installEventFilter(self)
+        self.waterfall_plot.viewport().installEventFilter(self)
 
         outer_layout.addWidget(left_panel, stretch=1)
         outer_layout.addWidget(self._build_control_panel())
         outer_layout.setStretch(0, 1)
         outer_layout.setStretch(1, 0)
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.Wheel and isinstance(event, QtGui.QWheelEvent):
+            if self._handle_active_marker_wheel(event):
+                return True
+        return super().eventFilter(watched, event)
+
+    def _active_marker_index_for_wheel(self) -> int | None:
+        if not hasattr(self, "control_stack"):
+            return None
+        current_page = self.control_stack.currentWidget()
+        if current_page in self.marker_detail_pages:
+            return self.marker_detail_pages.index(current_page)
+        if current_page in self.marker_trace_pages:
+            return self.marker_trace_pages.index(current_page)
+        return None
+
+    def _marker_wheel_step_hz(self, *, coarse: bool) -> int:
+        start_hz, stop_hz = self._resolve_display_start_stop_hz()
+        span_hz = max(1.0, stop_hz - start_hz)
+        divisor = 100.0 if coarse else 1000.0
+        step_hz = max(1, int(round(span_hz / divisor)))
+        return step_hz
+
+    def _shift_marker_frequency_hz(self, marker_index: int, delta_hz: int) -> bool:
+        marker_state = self._marker_state(marker_index)
+        if marker_state.continuous_peak_enabled:
+            return False
+        display_start_hz, display_stop_hz = self._resolve_display_start_stop_hz()
+        target_frequency_hz = self._clamp_int(
+            marker_state.frequency_hz + int(delta_hz),
+            int(display_start_hz),
+            int(display_stop_hz),
+        )
+        marker_state.frequency_hz = target_frequency_hz
+        marker_state.is_enabled = True
+        marker_state.continuous_peak_enabled = False
+        self._clear_marker_sweep_snapshot(marker_state)
+        self._update_marker_control_state(marker_index)
+        self._update_marker_items()
+        return True
+
+    def _handle_active_marker_wheel(self, event: QtGui.QWheelEvent) -> bool:
+        marker_index = self._active_marker_index_for_wheel()
+        if marker_index is None:
+            return False
+
+        marker_state = self._marker_state(marker_index)
+        if marker_state.continuous_peak_enabled:
+            event.accept()
+            return True
+
+        wheel_delta = event.angleDelta().y()
+        if wheel_delta == 0:
+            event.accept()
+            return True
+
+        coarse = bool(event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier)
+        span_start_hz, span_stop_hz = self._resolve_display_start_stop_hz()
+        span_used_hz = max(1, int(round(span_stop_hz - span_start_hz)))
+        step_hz = self._marker_wheel_step_hz(coarse=coarse)
+        print(
+            "MarkerWheel "
+            f"mode={self.config.analyzer_mode.value} "
+            f"span_used={span_used_hz} "
+            f"display_span={self.config.display_span_hz} "
+            f"start={self.config.display_start_freq_hz} "
+            f"stop={self.config.display_stop_freq_hz} "
+            f"step={step_hz}"
+        )
+        direction = 1 if wheel_delta > 0 else -1
+        moved = self._shift_marker_frequency_hz(marker_index, direction * step_hz)
+        if moved:
+            event.accept()
+        return True
 
     def _build_control_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QFrame()
@@ -1851,27 +1844,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         else:
             power_db_dec = power_db_line[:: self.config.waterfall_decimation]
             freq_axis_display_ghz_dec = self._get_active_waterfall_freq_axis_ghz()
-        if self._is_wideband_mode():
-            axis_len = (
-                len(self._last_display_freq_axis_ghz)
-                if self._last_display_freq_axis_ghz is not None
-                else 0
-            )
-            line_peak_idx = int(np.nanargmax(power_db_line))
-            line_peak_freq = (
-                float(self._last_display_freq_axis_ghz[line_peak_idx])
-                if self._last_display_freq_axis_ghz is not None
-                and line_peak_idx < len(self._last_display_freq_axis_ghz)
-                else float("nan")
-            )
-            print(
-                "WideBandWaterfallLine "
-                f"line_len={len(power_db_dec)} "
-                f"buffer_shape={self.waterfall_buffer.shape} "
-                f"axis_len={axis_len} "
-                f"peak_idx={line_peak_idx} "
-                f"peak_freq={line_peak_freq:.6f}"
-            )
         axis_mismatch = (
             self._last_waterfall_freq_axis_ghz is None
             or len(self._last_waterfall_freq_axis_ghz) != len(freq_axis_display_ghz_dec)
@@ -1889,23 +1861,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._rebuild_waterfall_buffer_for_axis(freq_axis_display_ghz_dec)
         self.waterfall_buffer[:-1] = self.waterfall_buffer[1:]
         self.waterfall_buffer[-1] = power_db_dec.astype(np.float32)
-        if self._is_wideband_mode():
-            buffer_peak_idx = int(np.nanargmax(self.waterfall_buffer[-1]))
-            buffer_peak_freq = (
-                float(self._last_display_freq_axis_ghz[buffer_peak_idx])
-                if self._last_display_freq_axis_ghz is not None
-                and buffer_peak_idx < len(self._last_display_freq_axis_ghz)
-                else float("nan")
-            )
-            display_image = np.flipud(self.waterfall_buffer)
-            print(
-                "WideBandWaterfallBuffer "
-                f"last_row_peak_idx={buffer_peak_idx} "
-                f"last_row_peak_freq={buffer_peak_freq:.6f} "
-                f"image_shape={display_image.shape}"
-            )
-        else:
-            display_image = np.flipud(self.waterfall_buffer)
+        display_image = np.flipud(self.waterfall_buffer)
         self.waterfall_img.setImage(
             display_image,
             autoLevels=False,
@@ -2388,7 +2344,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _select_fft_size(self, fft_size: int) -> None:
         previous_state = self._current_sweep_state()
-        print(f"FFTSelect before={self.config.fft_size} requested={fft_size}")
         is_wideband_mode = self._is_wideband_mode()
         if self.config.analyzer_mode in (
             AnalyzerMode.REALTIME_SA,
@@ -2401,7 +2356,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if is_wideband_mode:
             self.timer.stop()
         self.config.fft_size = int(fft_size)
-        print(f"FFTSelect after={self.config.fft_size}")
         if is_wideband_mode:
             self._invalidate_wideband_runtime()
         self.receiver.reconfigure_span(self.config)

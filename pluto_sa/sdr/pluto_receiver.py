@@ -141,24 +141,13 @@ class PlutoReceiver:
                     self.sdr.rx_buffer_size = discard_size
                 chunks = []
                 total_samples = 0
-                raw_lengths: list[int] = []
                 while total_samples < discard_size:
                     chunk = self.sdr.rx()
-                    raw_lengths.append(len(chunk))
                     chunks.append(chunk)
                     total_samples += len(chunk)
-            raw_returned = total_samples
             final_returned = discard_size
             self.received_samples_total += final_returned
 
-        print(
-            "ReceiverDiscard "
-            f"requested={discard_size} "
-            f"configured={discard_size} "
-            f"raw_returned={raw_returned} "
-            f"final_returned={final_returned} "
-            f"chunks={raw_lengths}"
-        )
         return final_returned
 
     def capture_block(self, num_samples: int) -> np.ndarray:
@@ -171,25 +160,14 @@ class PlutoReceiver:
                     self.sdr.rx_buffer_size = capture_size
                 chunks = []
                 total_samples = 0
-                raw_lengths: list[int] = []
                 while total_samples < capture_size:
                     chunk = self.sdr.rx()
-                    raw_lengths.append(len(chunk))
                     chunks.append(chunk)
                     total_samples += len(chunk)
                 iq = np.concatenate(chunks)[:capture_size].astype(np.complex64, copy=True)
-            raw_returned = total_samples
             final_returned = len(iq)
             self.received_samples_total += final_returned
 
-        print(
-            "ReceiverCapture "
-            f"requested={capture_size} "
-            f"configured={capture_size} "
-            f"raw_returned={raw_returned} "
-            f"final_returned={final_returned} "
-            f"chunks={raw_lengths}"
-        )
         return iq
 
     def set_gain_db(self, gain_db: int) -> None:
