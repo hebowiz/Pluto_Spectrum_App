@@ -118,6 +118,7 @@ class MarkerState:
     frequency_hz: int = 2_440_000_000
     step_hz: int = 1_000_000
     continuous_peak_enabled: bool = False
+    sweep_snapshot_power_db: float | None = None
 
 
 @dataclass
@@ -232,6 +233,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_display_freq_axis_ghz: np.ndarray | None = None
         self._last_display_power_db: np.ndarray | None = None
         self._last_current_display_db: np.ndarray | None = None
+        self._last_completed_sweep_freq_axis_ghz: np.ndarray | None = None
+        self._last_completed_sweep_trace_db: dict[str, np.ndarray] = {}
         self.persistence_enabled = False
         self.persistence_image: pg.ImageItem | None = None
         self.persistence_histogram = np.zeros((PERSISTENCE_AMPLITUDE_BINS, 0), dtype=np.float32)
@@ -286,6 +289,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._last_display_freq_axis_ghz = None
             self._last_display_power_db = None
             self._last_current_display_db = None
+            self._last_completed_sweep_freq_axis_ghz = None
+            self._last_completed_sweep_trace_db = {}
             self._hide_sweep_progress_symbol()
 
         self.frame_count_interval = 0
@@ -2375,6 +2380,27 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 return trace_state.display_db
         return None
 
+    @staticmethod
+    def _clear_marker_sweep_snapshot(marker_state: MarkerState) -> None:
+        marker_state.sweep_snapshot_power_db = None
+
+    def _get_marker_peak_source(
+        self,
+        marker_state: MarkerState,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            if self._last_completed_sweep_freq_axis_ghz is None:
+                return None
+            trace_db = self._last_completed_sweep_trace_db.get(marker_state.trace_name)
+            if trace_db is None:
+                return None
+            return self._last_completed_sweep_freq_axis_ghz, trace_db
+
+        trace_db = self._select_marker_trace_db(marker_state)
+        if trace_db is None or self._last_display_freq_axis_ghz is None:
+            return None
+        return self._last_display_freq_axis_ghz, trace_db
+
     def _update_marker_control_state(self, marker_index: int) -> None:
         if marker_index >= len(self.marker_controls):
             return
@@ -2428,6 +2454,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _select_marker_trace(self, marker_index: int, trace_name: str) -> None:
         marker_state = self._marker_state(marker_index)
         marker_state.trace_name = trace_name
+        self._clear_marker_sweep_snapshot(marker_state)
         self._update_marker_control_state(marker_index)
         self._update_marker_trace_selection_page(marker_index)
         self._update_marker_items()
@@ -2469,6 +2496,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         marker_state.is_enabled = True
         marker_state.continuous_peak_enabled = False
+        self._clear_marker_sweep_snapshot(marker_state)
         self._update_marker_control_state(marker_index)
         self._update_marker_items()
 
@@ -2504,6 +2532,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         marker_state.is_enabled = True
         marker_state.continuous_peak_enabled = False
+        self._clear_marker_sweep_snapshot(marker_state)
         self._update_marker_control_state(marker_index)
         self._update_marker_items()
 
@@ -2511,12 +2540,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         marker_state = self._marker_state(marker_index)
         if marker_state.continuous_peak_enabled:
             return
-        trace_db = self._select_marker_trace_db(marker_state)
-        if trace_db is None:
+        peak_source = self._get_marker_peak_source(marker_state)
+        if peak_source is None:
             return
 
-        peak_freq, _peak_val = self.processor.detect_peak(trace_db)
-        marker_state.frequency_hz = int(round(peak_freq * 1e9))
+        peak_result = self._detect_peak_on_axis(*peak_source)
+        if peak_result is None:
+            return
+
+        peak_freq_ghz, peak_val = peak_result
+        marker_state.frequency_hz = int(round(peak_freq_ghz * 1e9))
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            marker_state.sweep_snapshot_power_db = float(peak_val)
+        else:
+            self._clear_marker_sweep_snapshot(marker_state)
         marker_state.is_enabled = True
         marker_state.continuous_peak_enabled = False
         self._update_marker_control_state(marker_index)
@@ -2527,6 +2564,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         marker_state.continuous_peak_enabled = not marker_state.continuous_peak_enabled
         if marker_state.continuous_peak_enabled:
             marker_state.is_enabled = True
+        else:
+            self._clear_marker_sweep_snapshot(marker_state)
         self._update_marker_control_state(marker_index)
         self._update_marker_items()
 
@@ -2559,7 +2598,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 np.argmin(np.abs(self._last_display_freq_axis_ghz - frequency_ghz))
             )
             marker_freq = float(self._last_display_freq_axis_ghz[nearest_index])
-            marker_val = float(trace_db[nearest_index])
+            if (
+                self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
+                and marker_state.sweep_snapshot_power_db is not None
+            ):
+                marker_val = float(marker_state.sweep_snapshot_power_db)
+            else:
+                marker_val = float(trace_db[nearest_index])
             trace_suffix = marker_state.trace_name.replace("Trace", "Tr")
 
             marker_item.setData([marker_freq], [marker_val])
@@ -2602,24 +2647,28 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return float(freq_axis_ghz[peak_index]), float(power_db[peak_index])
 
     def _update_markers_for_completed_sweep(self) -> None:
-        if self._last_display_freq_axis_ghz is None:
-            return
-
         for marker_state in self.marker_states:
             if marker_state.is_enabled and marker_state.continuous_peak_enabled:
-                trace_db = self._select_marker_trace_db(marker_state)
-                if trace_db is None:
+                peak_source = self._get_marker_peak_source(marker_state)
+                if peak_source is None:
                     continue
-                peak_result = self._detect_peak_on_axis(
-                    self._last_display_freq_axis_ghz,
-                    trace_db,
-                )
+                peak_result = self._detect_peak_on_axis(*peak_source)
                 if peak_result is None:
                     continue
-                marker_peak_freq_ghz, _marker_peak_val = peak_result
+                marker_peak_freq_ghz, marker_peak_val = peak_result
                 marker_state.frequency_hz = int(round(marker_peak_freq_ghz * 1e9))
+                marker_state.sweep_snapshot_power_db = float(marker_peak_val)
 
         self._update_marker_items()
+
+    def _capture_completed_sweep_snapshot(self) -> None:
+        if self._last_display_freq_axis_ghz is None:
+            return
+        self._last_completed_sweep_freq_axis_ghz = self._last_display_freq_axis_ghz.copy()
+        self._last_completed_sweep_trace_db = {}
+        for trace_state in self.trace_states:
+            if trace_state.display_db is not None:
+                self._last_completed_sweep_trace_db[trace_state.name] = trace_state.display_db.copy()
 
     def _update_traces_from_power_linear(self, power_linear_display: np.ndarray) -> None:
         current_power_db_display = np.full(len(power_linear_display), np.nan, dtype=float)
@@ -3093,16 +3142,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 median_dt_ms = 0.0
 
             header_text = self._make_header_status_text()
-            console_text = self._make_console_status_text(
-                interval_fps=interval_fps,
-                avg_fps=avg_fps,
-                median_dt_ms=median_dt_ms,
-                interval_capture_ratio=interval_capture_ratio,
-                avg_capture_ratio=avg_capture_ratio,
-            )
-
             self.status_label.setText(header_text)
-            print(console_text)
 
             self.frame_count_interval = 0
             self.last_report_time = now
@@ -3160,6 +3200,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 frame_result.display_db[valid_mask] / 10.0
             )
             self._update_traces_from_power_linear(power_linear_display)
+            if frame_result.sweep_complete:
+                self._capture_completed_sweep_snapshot()
             self._update_trace_curves()
             self._last_sweep_drawn_completed_points = completed_points
             ui_draw_ms = (time.perf_counter() - ui_start) * 1000.0
@@ -3179,20 +3221,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         callback_total_ms = (time.perf_counter() - callback_start) * 1000.0
         latest_point_result = self.sweep_controller.get_latest_point_result()
-        if self.config.sweep_profile_logging and latest_point_result is not None:
-            print(
-                self._format_sweep_point_profile(
-                    latest_point_result,
-                    callback_sequence=self._sweep_callback_sequence,
-                    callback_start_time=callback_start,
-                    ui_draw_ms=ui_draw_ms,
-                    marker_update_ms=marker_update_ms,
-                    redraw_performed=redraw_performed,
-                    step_sweep_total_ms=step_sweep_total_ms,
-                    callback_gap_ms=callback_gap_ms,
-                    callback_total_ms=callback_total_ms,
-                )
-            )
 
     def closeEvent(self, event) -> None:
         self.timer.stop()

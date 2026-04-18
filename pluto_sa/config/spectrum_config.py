@@ -51,19 +51,16 @@ class SpectrumConfig:
     sweep_flush_samples: int = 256
     sweep_capture_samples_override: Optional[int] = 1024
     sweep_ui_update_interval_points: int = 4
-    sweep_profile_logging: bool = True
+    sweep_profile_logging: bool = False
     sweep_sample_rate_hz: int = 10_000_000
     sweep_rf_bandwidth_hz: int = 20_000_000
 
     def __post_init__(self) -> None:
         if self.analyzer_mode == AnalyzerMode.REALTIME_SA and self.display_span_hz > MAX_DISPLAY_SPAN_HZ:
-            print(f"[WARN] display_span clipped to {MAX_DISPLAY_SPAN_HZ / 1e6:.1f} MHz")
             self.display_span_hz = MAX_DISPLAY_SPAN_HZ
         if self.rx_gain_db < MIN_INTERNAL_GAIN_DB:
-            print(f"[WARN] rx_gain_db clipped to {MIN_INTERNAL_GAIN_DB} dB")
             self.rx_gain_db = MIN_INTERNAL_GAIN_DB
         if self.rx_gain_db > MAX_INTERNAL_GAIN_DB:
-            print(f"[WARN] rx_gain_db clipped to {MAX_INTERNAL_GAIN_DB} dB")
             self.rx_gain_db = MAX_INTERNAL_GAIN_DB
 
     @property
