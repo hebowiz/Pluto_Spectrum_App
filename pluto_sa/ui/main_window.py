@@ -433,11 +433,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             padding=X_AXIS_PADDING,
         )
         self._update_fixed_ticks()
-
-        for trace_state in self.trace_states:
-            if trace_state.hold_enabled:
-                continue
-            trace_state.display_db = composite_display_db.copy()
+        self._accumulate_persistence(composite_display_db)
+        self._update_wideband_traces_from_display_db(composite_display_db)
+        self._last_display_power_db = (
+            self.trace_states[0].display_db
+            if self.trace_states[0].display_db is not None
+            else composite_display_db
+        )
         self._append_waterfall_line(composite_display_db)
         waterfall_x_min = runtime.start_hz / 1e9
         waterfall_x_max = runtime.stop_hz / 1e9
@@ -2629,7 +2631,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 button.setEnabled(True)
 
     def _update_persistence_controls(self) -> None:
-        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
+        persistence_supported = self.config.analyzer_mode in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        )
+        if not persistence_supported:
             self.persistence_button.setText("Persistence OFF")
             self.persistence_button.setEnabled(False)
         else:
@@ -2639,7 +2645,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._apply_persistence_visibility()
 
     def _toggle_persistence_enabled(self) -> None:
-        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
+        if self.config.analyzer_mode not in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        ):
             return
         self.persistence_enabled = not self.persistence_enabled
         if self.persistence_enabled:
@@ -2662,10 +2671,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 else UNSELECTED_BUTTON_PREFIX
             )
             button.setText(f"{prefix}{decay_mode}")
-            button.setEnabled(self.config.analyzer_mode == AnalyzerMode.REALTIME_SA)
+            button.setEnabled(
+                self.config.analyzer_mode
+                in (AnalyzerMode.REALTIME_SA, AnalyzerMode.WIDEBAND_REALTIME_SA)
+            )
 
     def _select_persistence_decay_mode(self, decay_mode: str) -> None:
-        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
+        if self.config.analyzer_mode not in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        ):
             return
         if decay_mode not in PERSISTENCE_DECAY_VALUES:
             return
@@ -2750,13 +2765,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _apply_persistence_visibility(self) -> None:
         if self.persistence_image is None:
             return
-        visible = self.persistence_enabled and self.config.analyzer_mode == AnalyzerMode.REALTIME_SA
+        visible = self.persistence_enabled and self.config.analyzer_mode in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        )
         self.persistence_image.setVisible(visible)
 
     def _accumulate_persistence(self, current_display_db: np.ndarray) -> None:
         if (
             not self.persistence_enabled
-            or self.config.analyzer_mode != AnalyzerMode.REALTIME_SA
+            or self.config.analyzer_mode
+            not in (AnalyzerMode.REALTIME_SA, AnalyzerMode.WIDEBAND_REALTIME_SA)
             or self.persistence_image is None
             or self._last_display_freq_axis_ghz is None
         ):
@@ -2822,7 +2841,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _update_realtime_sa_controls(self) -> None:
         self.fft_size_button.setText(f"FFT size: {self.config.fft_size}")
-        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
+        if self.config.analyzer_mode not in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        ):
             self.persistence_decay_button.setText(
                 f"Persistence Decay\n{self.config.persistence_decay_mode}"
             )
@@ -3324,6 +3346,50 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.trace_states[0].display_db is not None
             else current_display_db
         )
+
+    def _update_wideband_traces_from_display_db(self, composite_display_db: np.ndarray) -> None:
+        self._last_current_display_db = composite_display_db.copy()
+
+        for trace_state in self.trace_states:
+            if trace_state.hold_enabled:
+                continue
+
+            if trace_state.trace_type == TRACE_TYPE_MAX_HOLD:
+                if (
+                    trace_state.max_hold_power is None
+                    or len(trace_state.max_hold_power) != len(composite_display_db)
+                ):
+                    trace_state.max_hold_power = composite_display_db.copy()
+                else:
+                    update_mask = np.isfinite(composite_display_db)
+                    replace_mask = update_mask & ~np.isfinite(trace_state.max_hold_power)
+                    max_mask = (
+                        update_mask
+                        & np.isfinite(trace_state.max_hold_power)
+                        & (composite_display_db > trace_state.max_hold_power)
+                    )
+                    trace_state.max_hold_power[replace_mask] = composite_display_db[replace_mask]
+                    trace_state.max_hold_power[max_mask] = composite_display_db[max_mask]
+                trace_state.display_db = trace_state.max_hold_power.copy()
+            elif trace_state.trace_type == TRACE_TYPE_AVERAGE:
+                alpha = 1.0 / max(1, trace_state.average_count)
+                if (
+                    trace_state.average_power is None
+                    or len(trace_state.average_power) != len(composite_display_db)
+                ):
+                    trace_state.average_power = composite_display_db.copy()
+                else:
+                    update_mask = np.isfinite(composite_display_db)
+                    init_mask = update_mask & ~np.isfinite(trace_state.average_power)
+                    trace_state.average_power[init_mask] = composite_display_db[init_mask]
+                    avg_mask = update_mask & np.isfinite(trace_state.average_power)
+                    trace_state.average_power[avg_mask] = (
+                        alpha * composite_display_db[avg_mask]
+                        + (1.0 - alpha) * trace_state.average_power[avg_mask]
+                    )
+                trace_state.display_db = trace_state.average_power.copy()
+            else:
+                trace_state.display_db = composite_display_db.copy()
 
     def _reset_plot_state(self) -> None:
         self.frame_period_s = (
