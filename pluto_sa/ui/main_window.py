@@ -348,6 +348,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         chunk_config.use_start_stop_freq = False
         chunk_config.display_start_freq_hz = None
         chunk_config.display_stop_freq_hz = None
+        chunk_config.rbw_hz = self.config.rbw_hz
         chunk_config.__post_init__()
 
         self._wideband_chunk_config = chunk_config
@@ -2311,6 +2312,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_rbw_clicked(self) -> None:
+        previous_state = self._current_sweep_state()
+        is_wideband_mode = self._is_wideband_mode()
         current_value = 0.0 if self.config.rbw_hz is None else self.config.rbw_hz / 1e3
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
@@ -2331,6 +2334,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             rbw_hz = self._clip_realtime_rbw(rbw_hz)
         self.config.rbw_hz = rbw_hz
         self._rebuild_processor_only()
+        if is_wideband_mode:
+            self.timer.stop()
+            self._invalidate_wideband_runtime()
+            self._apply_span_update()
+            self._restore_sweep_state(previous_state)
         self._refresh_sweep_time_estimate()
         self._refresh_status_label()
 
