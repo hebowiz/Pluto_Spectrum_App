@@ -35,6 +35,7 @@ class SpectrumConfig:
     fft_size: int = 4096
     update_interval_ms: int = 0
     waterfall_history: int = 300
+    persistence_decay_mode: str = "Medium"
     waterfall_decimation: int = 4
     capture_buffer_blocks: int = 512
     drop_threshold_factor: float = 2.5

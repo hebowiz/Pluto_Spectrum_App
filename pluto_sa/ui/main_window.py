@@ -97,6 +97,13 @@ SWEEP_DETECTOR_OPTIONS = [
     DetectorMode.PEAK,
     DetectorMode.RMS,
 ]
+PERSISTENCE_AMPLITUDE_BINS = 256
+PERSISTENCE_HIT_INCREMENT = 5.0
+PERSISTENCE_DECAY_VALUES = {
+    "Fast": 0.96,
+    "Medium": 0.985,
+    "Slow": 0.995,
+}
 SELECTED_BUTTON_PREFIX = "> "
 UNSELECTED_BUTTON_PREFIX = "  "
 
@@ -233,9 +240,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.marker_trace_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
         self.fft_size_option_buttons: dict[str, QtWidgets.QPushButton] = {}
         self.sweep_detector_option_buttons: dict[DetectorMode, QtWidgets.QPushButton] = {}
+        self.persistence_decay_option_buttons: dict[str, QtWidgets.QPushButton] = {}
         self._last_display_freq_axis_ghz: np.ndarray | None = None
         self._last_display_power_db: np.ndarray | None = None
         self._last_current_display_db: np.ndarray | None = None
+        self.persistence_enabled = False
+        self.persistence_image: pg.ImageItem | None = None
+        self.persistence_histogram = np.zeros((PERSISTENCE_AMPLITUDE_BINS, 0), dtype=np.float32)
 
         self._sync_amplitude_scale_from_config()
 
@@ -325,6 +336,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._apply_display_mode()
         if hasattr(self, "graph_view_button"):
             self._update_graph_view_controls()
+        if hasattr(self, "persistence_button"):
+            self._update_persistence_controls()
+        if hasattr(self, "persistence_decay_button"):
+            self._update_realtime_sa_controls()
         if hasattr(self, "analyzer_mode_button"):
             self._update_analyzer_mode_controls()
         if hasattr(self, "mode_specific_menu_stack"):
@@ -534,6 +549,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.setYRange(self.y_min, self.y_max, padding=Y_AXIS_PADDING)
         self._update_fixed_ticks()
 
+        self.persistence_image = pg.ImageItem()
+        self.persistence_image.setZValue(-20)
+        self.persistence_image.setVisible(False)
+        self.persistence_image.setLookupTable(self._build_persistence_lut())
+        self.spectrum_plot.addItem(self.persistence_image)
+
         initial_trace = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
         for trace_state in self.trace_states:
             trace_state.display_db = initial_trace.copy()
@@ -631,6 +652,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._build_marker_trace_page(index) for index in range(len(self.marker_states))
         ]
         self.realtime_sa_page = self._build_realtime_sa_page()
+        self.persistence_decay_page = self._build_persistence_decay_page()
         self.sweep_page = self._build_sweep_page()
         self.control_stack.addWidget(self.main_menu_page)
         self.control_stack.addWidget(self.analyzer_mode_page)
@@ -654,6 +676,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for page in self.marker_trace_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.realtime_sa_page)
+        self.control_stack.addWidget(self.persistence_decay_page)
         self.control_stack.addWidget(self.sweep_page)
         self.back_button.clicked.connect(
             self._navigate_back
@@ -908,14 +931,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setSpacing(10)
 
         self.graph_view_button = self._make_value_control_button("Graph View")
+        self.persistence_button = self._make_control_button("Persistence OFF")
 
         page_layout.addWidget(self.graph_view_button)
+        page_layout.addWidget(self.persistence_button)
         page_layout.addStretch(1)
 
         self.graph_view_button.clicked.connect(
             lambda: self._show_control_page("Graph View", self.graph_view_select_page)
         )
+        self.persistence_button.clicked.connect(self._toggle_persistence_enabled)
         self._update_graph_view_controls()
+        self._update_persistence_controls()
         return page
 
     def _build_graph_view_select_page(self) -> QtWidgets.QWidget:
@@ -1189,16 +1216,41 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.fft_size_button = self._make_control_button("FFT size")
         self.history_button = self._make_control_button("History")
+        self.persistence_decay_button = self._make_value_control_button("Persistence Decay")
 
         page_layout.addWidget(self.fft_size_button)
         page_layout.addWidget(self.history_button)
+        page_layout.addWidget(self.persistence_decay_button)
         page_layout.addStretch(1)
 
         self.fft_size_button.clicked.connect(
             lambda: self._show_control_page("FFT size", self.fft_size_page)
         )
         self.history_button.clicked.connect(self._on_history_clicked)
-        self._update_fft_size_controls()
+        self.persistence_decay_button.clicked.connect(
+            lambda: self._show_control_page("Persistence Decay", self.persistence_decay_page)
+        )
+        self._update_realtime_sa_controls()
+        return page
+
+    def _build_persistence_decay_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for decay_mode in PERSISTENCE_DECAY_VALUES:
+            button = self._make_control_button(decay_mode)
+            button.clicked.connect(
+                lambda _checked=False, selected_mode=decay_mode: self._select_persistence_decay_mode(
+                    selected_mode
+                )
+            )
+            self.persistence_decay_option_buttons[decay_mode] = button
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+        self._update_persistence_decay_selection_page()
         return page
 
     def _build_sweep_page(self) -> QtWidgets.QWidget:
@@ -1745,7 +1797,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.receiver.reconfigure_span(self.config)
         self.processor.update_span_related(self.config)
         self._apply_span_update()
-        self._update_fft_size_controls()
+        self._update_realtime_sa_controls()
         self._refresh_sweep_time_estimate()
         self._refresh_status_label()
 
@@ -1862,6 +1914,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             stop_sweep=True,
             reset_markers=False,
         )
+        self._clear_persistence()
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             self._restore_sweep_state(previous_state)
         self._update_continuous_button()
@@ -1999,6 +2052,168 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             else:
                 button.setEnabled(True)
 
+    def _update_persistence_controls(self) -> None:
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self.persistence_button.setText("Persistence OFF")
+            self.persistence_button.setEnabled(False)
+        else:
+            state_label = "ON" if self.persistence_enabled else "OFF"
+            self.persistence_button.setText(f"Persistence {state_label}")
+            self.persistence_button.setEnabled(True)
+        self._apply_persistence_visibility()
+
+    def _toggle_persistence_enabled(self) -> None:
+        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
+            return
+        self.persistence_enabled = not self.persistence_enabled
+        if self.persistence_enabled:
+            self._initialize_persistence_buffer()
+        else:
+            self._apply_persistence_visibility()
+        self._update_persistence_controls()
+
+    def _current_persistence_decay(self) -> float:
+        return PERSISTENCE_DECAY_VALUES.get(
+            self.config.persistence_decay_mode,
+            PERSISTENCE_DECAY_VALUES["Medium"],
+        )
+
+    def _update_persistence_decay_selection_page(self) -> None:
+        for decay_mode, button in self.persistence_decay_option_buttons.items():
+            prefix = (
+                SELECTED_BUTTON_PREFIX
+                if decay_mode == self.config.persistence_decay_mode
+                else UNSELECTED_BUTTON_PREFIX
+            )
+            button.setText(f"{prefix}{decay_mode}")
+            button.setEnabled(self.config.analyzer_mode == AnalyzerMode.REALTIME_SA)
+
+    def _select_persistence_decay_mode(self, decay_mode: str) -> None:
+        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
+            return
+        if decay_mode not in PERSISTENCE_DECAY_VALUES:
+            return
+        self.config.persistence_decay_mode = decay_mode
+        self._update_realtime_sa_controls()
+
+    def _build_persistence_lut(self) -> np.ndarray:
+        color_map = pg.ColorMap(
+            pos=np.array([0.0, 0.2, 0.45, 0.7, 0.88, 1.0]),
+            color=np.array(
+                [
+                    [0, 0, 0, 0],
+                    [0, 0, 120, 110],
+                    [0, 180, 255, 150],
+                    [0, 255, 96, 180],
+                    [255, 220, 0, 220],
+                    [255, 48, 0, 255],
+                ],
+                dtype=np.ubyte,
+            ),
+        )
+        return color_map.getLookupTable(nPts=256, alpha=True)
+
+    def _initialize_persistence_buffer(self) -> None:
+        axis = self._get_active_spectrum_freq_axis_ghz()
+        width = len(axis) if axis is not None else 0
+        self.persistence_histogram = np.zeros(
+            (PERSISTENCE_AMPLITUDE_BINS, width),
+            dtype=np.float32,
+        )
+        self._update_persistence_image()
+        self._update_persistence_rect()
+
+    def _clear_persistence(self) -> None:
+        self._initialize_persistence_buffer()
+
+    def _update_persistence_rect(self) -> None:
+        if self.persistence_image is None or self._last_display_freq_axis_ghz is None:
+            return
+        if (
+            self.persistence_image.image is None
+            or self.persistence_image.width() is None
+            or self.persistence_image.height() is None
+        ):
+            return
+        if len(self._last_display_freq_axis_ghz) == 0:
+            return
+        x_min = float(self._last_display_freq_axis_ghz[0])
+        x_max = float(self._last_display_freq_axis_ghz[-1])
+        self.persistence_image.setRect(
+            QtCore.QRectF(
+                x_min,
+                self.y_min,
+                x_max - x_min,
+                self.y_max - self.y_min,
+            )
+        )
+
+    def _update_persistence_image(self) -> None:
+        if self.persistence_image is None:
+            return
+        display_image = np.log1p(self.persistence_histogram)
+        self.persistence_image.setImage(
+            display_image,
+            autoLevels=False,
+            axisOrder="row-major",
+        )
+        if display_image.size:
+            high_level = float(np.percentile(display_image, 99.5))
+            max_level = float(np.max(display_image))
+            high_level = min(max_level, max(1.5, high_level))
+            low_level = 0.15
+            if high_level <= low_level:
+                high_level = low_level + 1.0
+        else:
+            low_level = 0.0
+            high_level = 1.0
+        self.persistence_image.setLevels((low_level, high_level))
+        self._update_persistence_rect()
+        self._apply_persistence_visibility()
+
+    def _apply_persistence_visibility(self) -> None:
+        if self.persistence_image is None:
+            return
+        visible = self.persistence_enabled and self.config.analyzer_mode == AnalyzerMode.REALTIME_SA
+        self.persistence_image.setVisible(visible)
+
+    def _accumulate_persistence(self, current_display_db: np.ndarray) -> None:
+        if (
+            not self.persistence_enabled
+            or self.config.analyzer_mode != AnalyzerMode.REALTIME_SA
+            or self.persistence_image is None
+            or self._last_display_freq_axis_ghz is None
+        ):
+            return
+
+        if self.persistence_histogram.shape[1] != len(current_display_db):
+            self._initialize_persistence_buffer()
+        if self.persistence_histogram.shape[1] != len(current_display_db):
+            return
+
+        self.persistence_histogram *= self._current_persistence_decay()
+
+        valid_mask = np.isfinite(current_display_db)
+        if not np.any(valid_mask):
+            self._update_persistence_image()
+            return
+
+        clipped_db = np.clip(current_display_db[valid_mask], self.y_min, self.y_max)
+        y_span = max(1e-9, self.y_max - self.y_min)
+        normalized = (clipped_db - self.y_min) / y_span
+        row_indices = np.clip(
+            np.rint(normalized * (PERSISTENCE_AMPLITUDE_BINS - 1)).astype(np.int32),
+            0,
+            PERSISTENCE_AMPLITUDE_BINS - 1,
+        )
+        column_indices = np.flatnonzero(valid_mask)
+        np.add.at(
+            self.persistence_histogram,
+            (row_indices, column_indices),
+            PERSISTENCE_HIT_INCREMENT,
+        )
+        self._update_persistence_image()
+
     def _update_analyzer_mode_controls(self) -> None:
         self.analyzer_mode_button.setText(
             f"Analyzer Mode\n{self.config.analyzer_mode.value}"
@@ -2029,9 +2244,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
             button.setText(f"{prefix}{trace_type}")
 
-    def _update_fft_size_controls(self) -> None:
+    def _update_realtime_sa_controls(self) -> None:
         self.fft_size_button.setText(f"FFT size: {self.config.fft_size}")
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            self.persistence_decay_button.setText(
+                f"Persistence Decay\n{self.config.persistence_decay_mode}"
+            )
+            self.persistence_decay_button.setEnabled(False)
+        else:
+            self.persistence_decay_button.setText(
+                f"Persistence Decay\n{self.config.persistence_decay_mode}"
+            )
+            self.persistence_decay_button.setEnabled(True)
         self._update_fft_size_selection_page()
+        self._update_persistence_decay_selection_page()
 
     def _update_sweep_controls(self) -> None:
         self.sweep_time_button.setText(f"Swp Time\n{self.config.sweep_time_ms:.0f} ms")
@@ -2524,6 +2750,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._apply_display_scale()
         self._last_display_power_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
         self._last_current_display_db = self._last_display_power_db.copy()
+        self._initialize_persistence_buffer()
         self._reset_trace_runtime_buffers()
         for trace_state in self.trace_states:
             trace_state.display_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
@@ -2535,6 +2762,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _apply_display_scale(self) -> None:
         self.spectrum_plot.setYRange(self.y_min, self.y_max, padding=Y_AXIS_PADDING)
         self.waterfall_img.setLevels((self.y_min, self.y_max))
+        self._clear_persistence()
         self._update_fixed_ticks()
 
     def _apply_display_mode(self) -> None:
@@ -2582,6 +2810,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             freq_axis_display_ghz[-1],
             padding=X_AXIS_PADDING,
         )
+        self._clear_persistence()
         self._update_fixed_ticks()
         self._update_trace_curves()
         self._update_marker_items()
@@ -2788,6 +3017,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self._last_display_freq_axis_ghz = self.processor.get_display_freq_axis_ghz()
         self._last_current_display_db = current_display_db
+        self._accumulate_persistence(current_display_db)
 
         self._update_traces_from_power_linear(power_linear_display)
 
