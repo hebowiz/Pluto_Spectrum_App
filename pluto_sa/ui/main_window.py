@@ -944,7 +944,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_display_power_db = ta_plot_y
         self._update_wideband_traces_from_display_db(ta_plot_y)
         self._update_trace_curves()
-        self._update_marker_items()
+        # WBRT sweep-equivalent completion: refresh continuous-peak markers
+        # against the just-published composite trace.
+        self._update_markers_for_completed_sweep()
         self._hide_time_analyzer_progress_symbol()
         if self.config.sweep_profile_logging:
             if len(ta_plot_x) == 0 or len(ta_plot_y) == 0:
@@ -1093,12 +1095,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         chunk_slice_ranges: list[tuple[int, int]] = []
         chunk_freq_ranges_hz: list[tuple[int, int]] = []
         chunk_source_ranges: list[tuple[int, int]] = []
-        global_axis_start_ghz = float(first_chunk_axis_ghz[0])
-        max_end_index = 0
+        global_axis_start_ghz: float | None = None
+        next_dest_start_idx = 0
         for index, chunk_start_hz in enumerate(chunk_start_hz_values):
+            is_last_chunk = index == len(chunk_start_hz_values) - 1
             chunk_stop_hz = (
                 stop_hz
-                if index == len(chunk_start_hz_values) - 1
+                if is_last_chunk
                 else min(int(chunk_start_hz) + WIDEBAND_EFFECTIVE_SPAN_HZ, stop_hz)
             )
             self._wideband_chunk_processor.update_center_frequency(int(chunk_centers_hz[index]))
@@ -1106,24 +1109,43 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             chunk_axis_hz = chunk_axis_ghz * 1e9
 
             source_start_idx = int(np.searchsorted(chunk_axis_hz, int(chunk_start_hz), side="left"))
-            source_end_idx = int(np.searchsorted(chunk_axis_hz, int(chunk_stop_hz), side="left"))
+            source_end_side = "right" if is_last_chunk else "left"
+            source_end_idx = int(np.searchsorted(chunk_axis_hz, int(chunk_stop_hz), side=source_end_side))
             if source_start_idx >= len(chunk_axis_hz):
                 source_start_idx = len(chunk_axis_hz) - 1
             if source_end_idx <= source_start_idx:
                 source_end_idx = min(len(chunk_axis_hz), source_start_idx + 1)
 
-            dest_start_idx = int(
-                round(((int(chunk_start_hz) / 1e9) - global_axis_start_ghz) / bin_step_ghz)
-            )
             use_count = source_end_idx - source_start_idx
+            if global_axis_start_ghz is None:
+                first_chunk_start_freq_ghz = float(chunk_axis_ghz[source_start_idx])
+                global_axis_start_ghz = first_chunk_start_freq_ghz
+                dest_start_idx = int(
+                    np.rint((first_chunk_start_freq_ghz - global_axis_start_ghz) / bin_step_ghz)
+                )
+                if self.config.sweep_profile_logging:
+                    print(f"WBRTAnchor first_chunk_start_freq={first_chunk_start_freq_ghz:.9f}")
+                    print(f"WBRTAnchor global_axis_start={global_axis_start_ghz:.9f}")
+                    print(f"WBRTAnchor dest_start_idx={dest_start_idx}")
+            else:
+                dest_start_idx = int(next_dest_start_idx)
             dest_end_idx = dest_start_idx + use_count
+            next_dest_start_idx = dest_end_idx
 
             chunk_freq_ranges_hz.append((chunk_start_hz, chunk_stop_hz))
             chunk_source_ranges.append((source_start_idx, source_end_idx))
             chunk_slice_ranges.append((dest_start_idx, dest_end_idx))
-            max_end_index = max(max_end_index, dest_end_idx)
+            if self.config.sweep_profile_logging:
+                print(
+                    "WBRTChunk "
+                    f"idx={index} "
+                    f"src_bins=[{source_start_idx}:{source_end_idx}] "
+                    f"dst_cols=[{dest_start_idx}:{dest_end_idx}]"
+                )
 
-        composite_axis_ghz = global_axis_start_ghz + np.arange(max_end_index, dtype=float) * bin_step_ghz
+        if global_axis_start_ghz is None:
+            return
+        composite_axis_ghz = global_axis_start_ghz + np.arange(next_dest_start_idx, dtype=float) * bin_step_ghz
         composite_display_db = np.full(len(composite_axis_ghz), np.nan, dtype=float)
         self._wideband_runtime_state = WidebandRuntimeState(
             start_hz=start_hz,
@@ -1145,11 +1167,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _publish_wideband_composite(self) -> None:
         if self._wideband_runtime_state is None:
             return
+        if self.config.sweep_profile_logging:
+            print("WBRTMarker publish called")
         runtime = self._wideband_runtime_state
         composite_axis_ghz = self._wideband_runtime_state.composite_freq_axis_ghz
         composite_display_db = self._wideband_runtime_state.composite_display_db
         if len(composite_axis_ghz) == 0:
             return
+        if self.config.sweep_profile_logging:
+            unfilled_columns = np.where(~np.isfinite(composite_display_db))[0].tolist()
+            print(f"WBRTComposite total_bins={len(composite_display_db)}")
+            print(f"WBRTComposite unfilled_columns={unfilled_columns}")
 
         self._last_display_freq_axis_ghz = composite_axis_ghz.copy()
         self._last_current_display_db = composite_display_db.copy()
@@ -1184,7 +1212,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             padding=X_AXIS_PADDING,
         )
         self._update_trace_curves()
-        self._update_marker_items()
+        self._update_markers_for_completed_sweep()
 
     def _update_wideband_spectrum(self) -> None:
         if self._wideband_runtime_state is None or self._wideband_chunk_processor is None or self._wideband_chunk_config is None:
@@ -4577,6 +4605,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     marker_val = float(marker_state.sweep_snapshot_power_db)
                 else:
                     marker_val = float(trace_db[nearest_index])
+                if (
+                    self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA
+                    and self.config.sweep_profile_logging
+                ):
+                    print(
+                        "WBRTMarker "
+                        f"render freq={marker_state.frequency_hz} "
+                        f"x={marker_x:.9f} y={marker_val:.3f} "
+                        f"visible={marker_state.is_enabled}"
+                    )
             trace_suffix = marker_state.trace_name.replace("Trace", "Tr")
 
             marker_item.setData([marker_x], [marker_val])
@@ -4636,17 +4674,65 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return float(freq_axis_ghz[peak_index]), float(power_db[peak_index])
 
     def _update_markers_for_completed_sweep(self) -> None:
+        log_wbrt = (
+            self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA
+            and self.config.sweep_profile_logging
+        )
         for marker_state in self.marker_states:
+            if log_wbrt:
+                print(
+                    "WBRTMarker "
+                    f"marker_id={marker_state.name} "
+                    f"enabled={marker_state.is_enabled} "
+                    f"continuous_peak={marker_state.continuous_peak_enabled} "
+                    f"trace={marker_state.trace_name}"
+                )
             if marker_state.is_enabled and marker_state.continuous_peak_enabled:
+                marker_before_hz = int(marker_state.frequency_hz)
+                if log_wbrt:
+                    print(f"WBRTMarker marker_before freq={marker_before_hz}")
                 peak_source = self._get_marker_peak_source(marker_state)
                 if peak_source is None:
+                    if log_wbrt:
+                        print("WBRTMarker peak_source len=0 valid_count=0")
                     continue
+                peak_axis_ghz, peak_trace_db = peak_source
+                valid_count = int(np.isfinite(peak_trace_db).sum())
+                if log_wbrt:
+                    axis_len = len(peak_axis_ghz)
+                    trace_len = len(peak_trace_db)
+                    nan_count = int(np.isnan(peak_trace_db).sum())
+                    if trace_len > 0 and np.any(np.isfinite(peak_trace_db)):
+                        max_idx = int(np.nanargmax(peak_trace_db))
+                        max_freq = float(peak_axis_ghz[max_idx]) if max_idx < axis_len else float("nan")
+                    else:
+                        max_idx = -1
+                        max_freq = float("nan")
+                    print(f"WBRTMarker peak_source len={trace_len} valid_count={valid_count}")
+                    print(
+                        "WBRTMarker "
+                        f"peak_source axis_len={axis_len} "
+                        f"trace_len={trace_len} "
+                        f"nan_count={nan_count} "
+                        f"max_idx={max_idx} "
+                        f"max_freq={max_freq:.9f}"
+                    )
                 peak_result = self._detect_peak_on_axis(*peak_source)
                 if peak_result is None:
+                    if log_wbrt:
+                        print("WBRTMarker peak_found freq=-- power=--")
                     continue
                 marker_peak_freq_ghz, marker_peak_val = peak_result
+                if log_wbrt:
+                    print(
+                        "WBRTMarker "
+                        f"peak_found freq={marker_peak_freq_ghz:.9f} "
+                        f"power={marker_peak_val:.3f}"
+                    )
                 marker_state.frequency_hz = int(round(marker_peak_freq_ghz * 1e9))
                 marker_state.sweep_snapshot_power_db = float(marker_peak_val)
+                if log_wbrt:
+                    print(f"WBRTMarker marker_after freq={marker_state.frequency_hz}")
 
         self._update_marker_items()
 
