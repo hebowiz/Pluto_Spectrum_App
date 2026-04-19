@@ -23,6 +23,8 @@ class PlutoReceiver:
         self._rx_thread = None
         self._sweep_config_signature: tuple[int, int, int] | None = None
         self._fast_capture_size: int | None = None
+        self._high_speed_backend_enabled = False
+        self._high_speed_backend_block_size: int | None = None
 
         self.received_samples_total = 0
         self._configure_sdr(config)
@@ -32,6 +34,8 @@ class PlutoReceiver:
         self.config = config
         self._sweep_config_signature = None
         self._fast_capture_size = None
+        self._high_speed_backend_enabled = False
+        self._high_speed_backend_block_size = None
         with self._sdr_lock:
             self.sdr.rx_lo = config.center_freq_hz
             self.sdr.sample_rate = config.sample_rate_hz
@@ -104,11 +108,19 @@ class PlutoReceiver:
         with self._iq_lock:
             self._sweep_config_signature = None
             self._fast_capture_size = None
+            self._high_speed_backend_enabled = False
+            self._high_speed_backend_block_size = None
             with self._sdr_lock:
                 self.config = config
                 self.sdr.sample_rate = config.sample_rate_hz
                 self.sdr.rx_rf_bandwidth = config.rx_bandwidth_hz
                 self.sdr.rx_buffer_size = config.rx_buffer_size
+                # rx_buffer_size setter does not recreate pyadi internal iio.Buffer.
+                # Destroy explicitly so next buffered read reflects the new size.
+                try:
+                    self.sdr.rx_destroy_buffer()
+                except Exception:
+                    pass
             self._allocate_capture_buffers(config)
             self.received_samples_total = 0
 
@@ -126,6 +138,8 @@ class PlutoReceiver:
         with self._iq_lock:
             self.config = config
             self._fast_capture_size = None
+            self._high_speed_backend_enabled = False
+            self._high_speed_backend_block_size = None
             if self._sweep_config_signature == sweep_signature:
                 return
             with self._sdr_lock:
@@ -133,6 +147,10 @@ class PlutoReceiver:
                 self.sdr.rx_rf_bandwidth = config.sweep_rf_bandwidth_hz
                 self.sdr.gain_control_mode_chan0 = "manual"
                 self.sdr.rx_hardwaregain_chan0 = config.rx_gain_db
+                try:
+                    self.sdr.rx_destroy_buffer()
+                except Exception:
+                    pass
             self._sweep_config_signature = sweep_signature
 
     def discard_block(self, num_samples: int) -> int:
@@ -221,6 +239,66 @@ class PlutoReceiver:
             self.config.rx_gain_db = gain_db
             self._sweep_config_signature = None
             self._fast_capture_size = None
+            self._high_speed_backend_enabled = False
+            self._high_speed_backend_block_size = None
+
+    def start_high_speed_capture_backend(self, block_size: int) -> None:
+        """Initialize High Speed TA dedicated buffered RX backend."""
+        size = max(1, int(block_size))
+        with self._sdr_lock:
+            self.sdr.rx_buffer_size = size
+            try:
+                self.sdr.rx_destroy_buffer()
+            except Exception:
+                pass
+            # Prime internal pyadi buffer with desired size.
+            _ = self.sdr.rx()
+            self._high_speed_backend_enabled = True
+            self._high_speed_backend_block_size = size
+            self._fast_capture_size = size
+
+    def stop_high_speed_capture_backend(self) -> None:
+        """Stop High Speed TA dedicated backend and release pyadi RX buffer."""
+        with self._sdr_lock:
+            self._high_speed_backend_enabled = False
+            self._high_speed_backend_block_size = None
+            try:
+                self.sdr.rx_destroy_buffer()
+            except Exception:
+                pass
+
+    def capture_block_high_speed_backend(self) -> np.ndarray:
+        """Read one High Speed TA block via low-overhead buffered backend."""
+        if not self._high_speed_backend_enabled:
+            size = self._high_speed_backend_block_size or self._fast_capture_size or self.config.rx_buffer_size
+            return self.capture_block_fast(int(size))
+
+        with self._sdr_lock:
+            try:
+                raw_channels = self.sdr._rx__rx_buffered_data()
+            except Exception:
+                size = self._high_speed_backend_block_size or self.config.rx_buffer_size
+                return self.capture_block_fast(int(size))
+
+        # Complex Pluto path: two channels [I, Q] expected.
+        if (
+            not isinstance(raw_channels, list)
+            or len(raw_channels) < 2
+        ):
+            size = self._high_speed_backend_block_size or self.config.rx_buffer_size
+            return self.capture_block_fast(int(size))
+
+        i_raw = np.asarray(raw_channels[0])
+        q_raw = np.asarray(raw_channels[1])
+        n = min(len(i_raw), len(q_raw))
+        if n <= 0:
+            return np.empty(0, dtype=np.complex64)
+
+        out = np.empty(n, dtype=np.complex64)
+        out.real = i_raw[:n].astype(np.float32, copy=False)
+        out.imag = q_raw[:n].astype(np.float32, copy=False)
+        self.received_samples_total += n
+        return out
 
     def reconfigure(self, config: SpectrumConfig) -> None:
         was_running = self._rx_thread is not None and self._rx_thread.is_alive()
@@ -236,6 +314,7 @@ class PlutoReceiver:
 
     def close(self) -> None:
         self.stop()
+        self.stop_high_speed_capture_backend()
         del self.sdr
 
     def _rx_worker(self) -> None:

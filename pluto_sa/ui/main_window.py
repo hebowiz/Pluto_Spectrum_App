@@ -58,6 +58,8 @@ TIME_ANALYZER_BUFFER_POINTS = 1000
 TIME_ANALYZER_WARMUP_DISCARD_COUNT = 5
 HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES = 16_384
 HIGH_SPEED_TA_RING_MAX_BLOCKS = 4096
+HIGH_SPEED_TA_GAP_RATIO_THRESHOLD = 1.2
+HIGH_SPEED_TA_PEAK_MIN_PROMINENCE_DB = 3.0
 MIN_TIME_ANALYZER_TIME_SPAN_S = 0.01
 MAX_TIME_ANALYZER_TIME_SPAN_S = 10_000.0
 MIN_CENTER_FREQ_STEP_MHZ = 0.001
@@ -228,6 +230,12 @@ class HighSpeedTimeAnalyzerCaptureState:
     capture_total_samples: int = 0
     block_sample_counts: list[int] = field(default_factory=list)
     last_block_host_timestamp_s: float | None = None
+    prev_block_timestamp_s: float | None = None
+    gap_count: int = 0
+    gap_ratio_sum: float = 0.0
+    max_gap_ratio: float = 0.0
+    gap_times_s: list[float] = field(default_factory=list)
+    last_peak_time_s: float | None = None
 
 
 @dataclass
@@ -275,6 +283,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._high_speed_ta_stop_event = threading.Event()
         self._high_speed_ta_thread: threading.Thread | None = None
         self._high_speed_ta_block_sequence = 0
+        self._high_speed_ta_gap_visual_enabled = True
+        self._high_speed_ta_peak_log_enabled = True
         self.graph_view_mode = GRAPH_VIEW_BOTH
         self._saved_realtime_graph_view_mode = GRAPH_VIEW_BOTH
         self.sweep_state = SWEEP_STATE_RUNNING
@@ -334,6 +344,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.marker_items: list[tuple[pg.ScatterPlotItem, pg.TextItem]] = []
         self.sweep_progress_item: pg.ScatterPlotItem | None = None
         self.time_analyzer_progress_item: pg.ScatterPlotItem | None = None
+        self.high_speed_ta_gap_item: pg.ScatterPlotItem | None = None
         self.marker_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_menu_buttons: list[QtWidgets.QPushButton] = []
@@ -661,9 +672,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         state.capture_total_samples = 0
         state.block_sample_counts.clear()
         state.last_block_host_timestamp_s = None
+        state.prev_block_timestamp_s = None
+        state.gap_count = 0
+        state.gap_ratio_sum = 0.0
+        state.max_gap_ratio = 0.0
+        state.gap_times_s.clear()
+        state.last_peak_time_s = None
         if reset_discard:
             state.discard_samples_remaining = int(TIME_ANALYZER_WARMUP_DISCARD_COUNT)
         self._hide_time_analyzer_progress_symbol()
+        self._hide_high_speed_ta_gap_markers()
 
     def _clear_high_speed_ta_ring_buffer(self) -> None:
         with self._high_speed_ta_ring_lock:
@@ -673,7 +691,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         thread = self._high_speed_ta_thread
         if thread is not None and thread.is_alive():
             return
-        self.receiver.prepare_fast_capture(int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES))
+        self.receiver.start_high_speed_capture_backend(int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES))
         self._high_speed_ta_stop_event.clear()
         self._clear_high_speed_ta_ring_buffer()
         self._high_speed_ta_block_sequence = 0
@@ -693,14 +711,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             thread.join(timeout=1.0)
         self._high_speed_ta_thread = None
         self._clear_high_speed_ta_ring_buffer()
+        self.receiver.stop_high_speed_capture_backend()
         if self.config.sweep_profile_logging:
             print("HighSpeedTAThread stop")
 
     def _high_speed_ta_receiver_worker(self) -> None:
         while not self._high_speed_ta_stop_event.is_set():
-            capture_size = int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES)
             capture_call_start = time.perf_counter()
-            iq = self.receiver.capture_block_fast(capture_size)
+            iq = self.receiver.capture_block_high_speed_backend()
             capture_elapsed_s = time.perf_counter() - capture_call_start
             if iq is None or len(iq) == 0:
                 continue
@@ -742,12 +760,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._time_analyzer_last_sweep_avg_dt_s = None
         self._refresh_status_label()
 
-    def _finalize_high_speed_time_analyzer_sweep_stats(self) -> None:
+    def _finalize_high_speed_time_analyzer_sweep_stats(self, sweep_x_s: np.ndarray) -> None:
         state = self._high_speed_time_analyzer
-        count = len(state.block_timestamps_s)
-        state.last_sweep_samples = int(count)
+        count = int(len(sweep_x_s))
+        state.last_sweep_samples = count
         if count >= 2:
-            elapsed = float(state.block_timestamps_s[-1] - state.block_timestamps_s[0])
+            elapsed = float(sweep_x_s[-1] - sweep_x_s[0])
             state.last_sweep_avg_dt_s = max(0.0, elapsed / float(count - 1))
         else:
             state.last_sweep_avg_dt_s = None
@@ -1430,6 +1448,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.time_analyzer_progress_item.setVisible(False)
         self.spectrum_plot.addItem(self.time_analyzer_progress_item)
+        self.high_speed_ta_gap_item = pg.ScatterPlotItem(
+            symbol="o",
+            size=6,
+            pen=pg.mkPen("#FF3B30"),
+            brush=pg.mkBrush("#FF3B30"),
+        )
+        self.high_speed_ta_gap_item.setVisible(False)
+        self.spectrum_plot.addItem(self.high_speed_ta_gap_item)
 
         marker_colors = ["r", "c", "m", "g"]
         for index, color in enumerate(marker_colors):
@@ -4613,6 +4639,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_trace_curves()
         self._hide_sweep_progress_symbol()
         self._hide_time_analyzer_progress_symbol()
+        self._hide_high_speed_ta_gap_markers()
         self._update_all_marker_control_states()
         self._update_marker_items()
 
@@ -4783,7 +4810,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         rbw_text = self._format_rbw_text()
         if self._is_high_speed_time_analyzer_mode():
             avg_dt_text = (
-                f"{self._high_speed_time_analyzer.last_sweep_avg_dt_s:.4f} s"
+                f"{(self._high_speed_time_analyzer.last_sweep_avg_dt_s * 1000.0):.3f} ms"
                 if self._high_speed_time_analyzer.last_sweep_avg_dt_s is not None
                 else "--"
             )
@@ -4796,7 +4823,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
         elif self.config.analyzer_mode == AnalyzerMode.TIME_ANALYZER:
             avg_dt_text = (
-                f"{self._time_analyzer_last_sweep_avg_dt_s:.4f} s"
+                f"{(self._time_analyzer_last_sweep_avg_dt_s * 1000.0):.3f} ms"
                 if self._time_analyzer_last_sweep_avg_dt_s is not None
                 else "--"
             )
@@ -5060,6 +5087,113 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         state.last_block_host_timestamp_s = sample_timestamp
 
+    def _log_high_speed_ta_gap_detected(
+        self,
+        *,
+        block_index: int,
+        actual_dt_s: float,
+        expected_dt_s: float,
+        gap_ratio: float,
+    ) -> None:
+        if not self.config.sweep_profile_logging:
+            return
+        print(
+            "HighSpeedTAGap "
+            f"detected idx={int(block_index)} "
+            f"actual_dt={actual_dt_s * 1000.0:.3f}ms "
+            f"expected_dt={expected_dt_s * 1000.0:.3f}ms "
+            f"ratio={gap_ratio:.3f}"
+        )
+
+    def _log_high_speed_ta_gap_summary(self) -> None:
+        if not self.config.sweep_profile_logging:
+            return
+        state = self._high_speed_time_analyzer
+        avg_ratio = (
+            state.gap_ratio_sum / float(state.gap_count)
+            if state.gap_count > 0
+            else 0.0
+        )
+        print(
+            "HighSpeedTAGapSummary "
+            f"count={int(state.gap_count)} "
+            f"max_ratio={float(state.max_gap_ratio):.3f} "
+            f"avg_ratio={float(avg_ratio):.3f}"
+        )
+
+    def _hide_high_speed_ta_gap_markers(self) -> None:
+        if self.high_speed_ta_gap_item is None:
+            return
+        self.high_speed_ta_gap_item.setVisible(False)
+        self.high_speed_ta_gap_item.setData([], [])
+
+    def _update_high_speed_ta_gap_markers(
+        self,
+        sweep_x_s: np.ndarray,
+        sweep_y_db: np.ndarray,
+        gap_times_s: list[float],
+    ) -> None:
+        if self.high_speed_ta_gap_item is None:
+            return
+        if (
+            not self._high_speed_ta_gap_visual_enabled
+            or len(gap_times_s) == 0
+            or len(sweep_x_s) == 0
+            or len(sweep_y_db) == 0
+        ):
+            self._hide_high_speed_ta_gap_markers()
+            return
+        x_vals = np.asarray(gap_times_s, dtype=float)
+        if len(sweep_x_s) >= 2:
+            y_vals = np.interp(
+                x_vals,
+                sweep_x_s,
+                sweep_y_db,
+                left=sweep_y_db[0],
+                right=sweep_y_db[-1],
+            )
+        else:
+            y_vals = np.full_like(x_vals, fill_value=float(sweep_y_db[0]))
+        self.high_speed_ta_gap_item.setData(x_vals.tolist(), y_vals.tolist())
+        self.high_speed_ta_gap_item.setVisible(True)
+
+    def _log_high_speed_ta_peaks(
+        self,
+        sweep_x_s: np.ndarray,
+        sweep_y_db: np.ndarray,
+    ) -> None:
+        if (
+            not self._high_speed_ta_peak_log_enabled
+            or not self.config.sweep_profile_logging
+            or len(sweep_x_s) < 3
+            or len(sweep_y_db) < 3
+        ):
+            return
+        finite_mask = np.isfinite(sweep_y_db)
+        if not np.any(finite_mask):
+            return
+        finite_values = sweep_y_db[finite_mask]
+        baseline = float(np.median(finite_values))
+        threshold = baseline + HIGH_SPEED_TA_PEAK_MIN_PROMINENCE_DB
+        prev_peak_time = self._high_speed_time_analyzer.last_peak_time_s
+        for idx in range(1, len(sweep_y_db) - 1):
+            center = float(sweep_y_db[idx])
+            if not np.isfinite(center) or center < threshold:
+                continue
+            if center > float(sweep_y_db[idx - 1]) and center >= float(sweep_y_db[idx + 1]):
+                peak_time = float(sweep_x_s[idx])
+                if prev_peak_time is None:
+                    delta_text = "--"
+                else:
+                    delta_text = f"{(peak_time - prev_peak_time):.6f}"
+                print(
+                    "HighSpeedTAPeak "
+                    f"t={peak_time:.6f}s "
+                    f"dt={delta_text}s"
+                )
+                prev_peak_time = peak_time
+        self._high_speed_time_analyzer.last_peak_time_s = prev_peak_time
+
     def _log_high_speed_ta_consume(self, *, blocks: int, total_samples: int) -> None:
         if not self.config.sweep_profile_logging:
             return
@@ -5135,27 +5269,77 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 return np.empty(0, dtype=float), np.empty(0, dtype=float)
             state.iq_blocks = state.iq_blocks[:count]
             state.block_timestamps_s = state.block_timestamps_s[:count]
-        origin = float(state.block_timestamps_s[0])
-        x_values = np.array(
-            [max(0.0, float(ts) - origin) for ts in state.block_timestamps_s],
-            dtype=float,
-        )
-        y_values = np.array(
-            [self._compute_time_domain_display_value_db(iq_block) for iq_block in state.iq_blocks],
-            dtype=float,
-        )
-        return x_values, y_values
+        sample_rate_hz = max(1.0, float(self.config.sample_rate_hz))
+        fft_n = max(1, int(self.config.fft_size))
+        block_lengths = np.asarray([len(block) for block in state.iq_blocks], dtype=np.int64)
+        if np.any(block_lengths <= 0):
+            valid_blocks = [
+                (block, ts)
+                for block, ts in zip(state.iq_blocks, state.block_timestamps_s)
+                if len(block) > 0
+            ]
+            if not valid_blocks:
+                return np.empty(0, dtype=float), np.empty(0, dtype=float)
+            state.iq_blocks = [block for block, _ in valid_blocks]
+            state.block_timestamps_s = [ts for _, ts in valid_blocks]
+            block_lengths = np.asarray([len(block) for block in state.iq_blocks], dtype=np.int64)
+        total_samples = int(np.sum(block_lengths))
+        window_count = total_samples // fft_n
+        if window_count <= 0:
+            return np.empty(0, dtype=float), np.empty(0, dtype=float)
+
+        iq_all = np.concatenate(state.iq_blocks, axis=0)
+        if len(iq_all) < fft_n:
+            return np.empty(0, dtype=float), np.empty(0, dtype=float)
+        usable_samples = window_count * fft_n
+        if len(iq_all) > usable_samples:
+            iq_all = iq_all[:usable_samples]
+
+        block_ends = np.cumsum(block_lengths, dtype=np.int64)
+        block_starts = block_ends - block_lengths
+        block_end_times = np.asarray(state.block_timestamps_s, dtype=float)
+        block_start_times = block_end_times - (block_lengths.astype(float) / sample_rate_hz)
+        origin_time = float(block_start_times[0])
+
+        x_values = np.empty(window_count, dtype=float)
+        y_values = np.empty(window_count, dtype=float)
+        half_fft = fft_n / 2.0
+
+        for window_idx in range(window_count):
+            start = window_idx * fft_n
+            segment = iq_all[start : start + fft_n]
+            y_values[window_idx] = self._compute_time_domain_display_value_db(segment)
+
+            center_sample_index = start + half_fft
+            block_idx = int(np.searchsorted(block_ends, center_sample_index, side="right"))
+            if block_idx >= len(block_lengths):
+                block_idx = len(block_lengths) - 1
+            sample_in_block = center_sample_index - float(block_starts[block_idx])
+            sample_in_block = min(max(0.0, sample_in_block), float(block_lengths[block_idx] - 1))
+            abs_time = float(block_start_times[block_idx]) + (sample_in_block / sample_rate_hz)
+            x_values[window_idx] = max(0.0, abs_time - origin_time)
+
+        finite_mask = np.isfinite(x_values) & np.isfinite(y_values)
+        if not np.any(finite_mask):
+            return np.empty(0, dtype=float), np.empty(0, dtype=float)
+        x_values = x_values[finite_mask]
+        y_values = y_values[finite_mask]
+        order = np.argsort(x_values, kind="stable")
+        return x_values[order], y_values[order]
 
     def _publish_high_speed_time_analyzer_sweep(
         self,
         sweep_x_s: np.ndarray,
         sweep_y_db: np.ndarray,
+        gap_times_s: list[float],
     ) -> None:
         self._last_display_freq_axis_ghz = sweep_x_s
         self._last_current_display_db = sweep_y_db
         self._last_display_power_db = sweep_y_db
         self._update_wideband_traces_from_display_db(sweep_y_db)
         self._update_trace_curves()
+        self._update_high_speed_ta_gap_markers(sweep_x_s, sweep_y_db, gap_times_s)
+        self._log_high_speed_ta_peaks(sweep_x_s, sweep_y_db)
         self._update_marker_items()
         self._hide_time_analyzer_progress_symbol()
 
@@ -5188,6 +5372,23 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
             sample_timestamp = float(block.timestamp_s)
             elapsed_sec = max(0.0, sample_timestamp - float(state.capture_start_timestamp))
+            if state.prev_block_timestamp_s is not None:
+                actual_dt_s = max(0.0, sample_timestamp - float(state.prev_block_timestamp_s))
+                expected_dt_s = float(block.sample_count) / max(1.0, float(self.config.sample_rate_hz))
+                if expected_dt_s > 0.0:
+                    gap_ratio = actual_dt_s / expected_dt_s
+                    if gap_ratio > HIGH_SPEED_TA_GAP_RATIO_THRESHOLD:
+                        state.gap_count += 1
+                        state.gap_ratio_sum += float(gap_ratio)
+                        state.max_gap_ratio = max(float(state.max_gap_ratio), float(gap_ratio))
+                        state.gap_times_s.append(float(elapsed_sec))
+                        self._log_high_speed_ta_gap_detected(
+                            block_index=block.block_index,
+                            actual_dt_s=actual_dt_s,
+                            expected_dt_s=expected_dt_s,
+                            gap_ratio=gap_ratio,
+                        )
+            state.prev_block_timestamp_s = sample_timestamp
             state.iq_blocks.append(block.iq_block)
             state.block_timestamps_s.append(sample_timestamp)
             state.capture_call_count += 1
@@ -5202,12 +5403,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 continue
 
             sweep_end_start = time.perf_counter()
-            self._finalize_high_speed_time_analyzer_sweep_stats()
             process_start = time.perf_counter()
             sweep_x_s, sweep_y_db = self._process_high_speed_time_analyzer_blocks()
             process_blocks_ms = (time.perf_counter() - process_start) * 1000.0
+            self._finalize_high_speed_time_analyzer_sweep_stats(sweep_x_s)
             publish_start = time.perf_counter()
-            self._publish_high_speed_time_analyzer_sweep(sweep_x_s, sweep_y_db)
+            self._publish_high_speed_time_analyzer_sweep(
+                sweep_x_s,
+                sweep_y_db,
+                state.gap_times_s.copy(),
+            )
             publish_ms = (time.perf_counter() - publish_start) * 1000.0
             self.spectrum_plot.setXRange(0.0, timespan_s, padding=X_AXIS_PADDING)
             self._update_fixed_ticks()
@@ -5223,6 +5428,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 publish_ms=publish_ms,
                 total_ms=total_ms,
             )
+            self._log_high_speed_ta_gap_summary()
 
             if self.sweep_state == SWEEP_STATE_SINGLE:
                 self._finish_single_sweep_like()
