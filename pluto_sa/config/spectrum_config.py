@@ -70,13 +70,19 @@ class SpectrumConfig:
 
     @property
     def sample_rate_hz(self) -> int:
-        if self.analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+        if self.analyzer_mode in (
+            AnalyzerMode.TIME_ANALYZER,
+            AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
+        ):
             return int(self.time_analyzer_sample_rate_hz)
         return int(round(self.display_span_hz / (1.0 - 2.0 * self.guard_ratio)))
 
     @property
     def rx_bandwidth_hz(self) -> int:
-        if self.analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+        if self.analyzer_mode in (
+            AnalyzerMode.TIME_ANALYZER,
+            AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
+        ):
             return int(self.time_analyzer_rf_bandwidth_hz)
         return self.sample_rate_hz
 

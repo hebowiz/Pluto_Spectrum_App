@@ -12,3 +12,4 @@ class AnalyzerMode(str, Enum):
     WIDEBAND_REALTIME_SA = "WideBand RT SA"
     SWEEP_SA = "Sweep SA"
     TIME_ANALYZER = "Time Analyzer"
+    HIGH_SPEED_TIME_ANALYZER = "High Speed TA"
