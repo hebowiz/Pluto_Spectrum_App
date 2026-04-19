@@ -340,7 +340,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._high_speed_ta_analysis_latest_result: HighSpeedTAAnalysisResult | None = None
         self._high_speed_ta_analysis_in_progress = False
         self._high_speed_ta_single_waiting_result = False
-        self._high_speed_ta_gap_visual_enabled = True
+        # Prioritize regular marker visibility in High Speed TA.
+        # Gap scatter can be re-enabled later when marker behavior is stabilized.
+        self._high_speed_ta_gap_visual_enabled = False
         self._high_speed_ta_peak_log_enabled = False
         self.graph_view_mode = GRAPH_VIEW_BOTH
         self._saved_realtime_graph_view_mode = GRAPH_VIEW_BOTH
@@ -380,21 +382,25 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 name="Marker1",
                 trace_name="Trace1",
                 frequency_hz=self.config.center_freq_hz,
+                time_step_sec=0.1,
             ),
             MarkerState(
                 name="Marker2",
                 trace_name="Trace1",
                 frequency_hz=self.config.center_freq_hz,
+                time_step_sec=0.1,
             ),
             MarkerState(
                 name="Marker3",
                 trace_name="Trace1",
                 frequency_hz=self.config.center_freq_hz,
+                time_step_sec=0.1,
             ),
             MarkerState(
                 name="Marker4",
                 trace_name="Trace1",
                 frequency_hz=self.config.center_freq_hz,
+                time_step_sec=0.1,
             ),
         ]
         self.marker_trace_options = [trace_state.name for trace_state in self.trace_states]
@@ -4187,8 +4193,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             else "Continuous Peak OFF"
         )
         if self._is_time_analyzer_mode():
-            controls["frequency"].setText(f"Time\n{marker_state.time_sec:.3f} s")
-            controls["step"].setText(f"Step\n{marker_state.time_step_sec:.3f} s")
+            if self._is_high_speed_time_analyzer_mode():
+                controls["frequency"].setText(f"Time\n{(marker_state.time_sec * 1e3):.3f} ms")
+                controls["step"].setText(f"Step\n{(marker_state.time_step_sec * 1e3):.3f} ms")
+            else:
+                controls["frequency"].setText(f"Time\n{marker_state.time_sec:.3f} s")
+                controls["step"].setText(f"Step\n{marker_state.time_step_sec:.3f} s")
         else:
             controls["frequency"].setText(
                 f"Frequency\n{(marker_state.frequency_hz / 1e6):.3f} MHz"
@@ -4303,18 +4313,32 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _on_marker_step_clicked(self, marker_index: int) -> None:
         marker_state = self._marker_state(marker_index)
         if self._is_time_analyzer_mode():
-            value, accepted = QtWidgets.QInputDialog.getDouble(
-                self,
-                marker_state.name,
-                "Step [s]",
-                value=marker_state.time_step_sec,
-                min=UNBOUNDED_DOUBLE_MIN,
-                max=UNBOUNDED_DOUBLE_MAX,
-                decimals=3,
-            )
-            if not accepted:
-                return
-            marker_state.time_step_sec = self._clamp_float(float(value), 0.001, 1_000.0)
+            if self._is_high_speed_time_analyzer_mode():
+                value_ms, accepted = QtWidgets.QInputDialog.getDouble(
+                    self,
+                    marker_state.name,
+                    "Step [ms]",
+                    value=marker_state.time_step_sec * 1e3,
+                    min=UNBOUNDED_DOUBLE_MIN,
+                    max=UNBOUNDED_DOUBLE_MAX,
+                    decimals=3,
+                )
+                if not accepted:
+                    return
+                marker_state.time_step_sec = self._clamp_float(float(value_ms) * 1e-3, 1e-6, 1_000.0)
+            else:
+                value, accepted = QtWidgets.QInputDialog.getDouble(
+                    self,
+                    marker_state.name,
+                    "Step [s]",
+                    value=marker_state.time_step_sec,
+                    min=UNBOUNDED_DOUBLE_MIN,
+                    max=UNBOUNDED_DOUBLE_MAX,
+                    decimals=3,
+                )
+                if not accepted:
+                    return
+                marker_state.time_step_sec = self._clamp_float(float(value), 0.001, 1_000.0)
             self._update_marker_control_state(marker_index)
             return
         value, accepted = QtWidgets.QInputDialog.getDouble(
@@ -4408,11 +4432,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._apply_center_frequency_change(int(marker_state.frequency_hz))
 
     def _update_marker_items(self) -> None:
-        if self._is_high_speed_time_analyzer_mode():
-            for marker_item, text_item in self.marker_items:
-                marker_item.setData([], [])
-                text_item.setText("")
-            return
         if self._last_display_freq_axis_ghz is None or self._last_display_power_db is None:
             for marker_item, text_item in self.marker_items:
                 marker_item.setData([], [])
@@ -4550,9 +4569,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     f"marker_time_sec={marker_x:.6f} marker_y={marker_val:.6f}"
                 )
             if self._is_time_analyzer_mode():
+                marker_display_time = (
+                    f"{(marker_x * 1e3):.3f} ms"
+                    if self._is_high_speed_time_analyzer_mode()
+                    else f"{marker_x:.3f} s"
+                )
                 text_item.setText(
                     f"M{index + 1} {trace_suffix}\n"
-                    f"{marker_x:.3f} s\n"
+                    f"{marker_display_time}\n"
                     f"{marker_val:.2f} dBm"
                 )
             else:
