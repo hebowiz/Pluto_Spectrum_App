@@ -290,6 +290,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._time_analyzer_last_sweep_samples: int = 0
         self._time_analyzer_last_sweep_avg_dt_s: float | None = None
         self._time_analyzer_discard_samples_remaining: int = 0
+        # Temporary debug switch for TA marker trace-source isolation.
+        self._ta_marker_debug_force_trace1: bool = False
         self.persistence_enabled = False
         self.persistence_image: pg.ImageItem | None = None
         self.persistence_histogram = np.zeros((PERSISTENCE_AMPLITUDE_BINS, 0), dtype=np.float32)
@@ -3765,22 +3767,117 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
             if self._is_time_analyzer_mode():
                 marker_x = float(marker_state.time_sec)
+                try:
+                    trace_index = int(marker_state.trace_name.replace("Trace", "")) - 1
+                except ValueError:
+                    marker_item.setData([], [])
+                    text_item.setText("")
+                    continue
+                if self._ta_marker_debug_force_trace1:
+                    trace_index = 0
+                if trace_index < 0 or trace_index >= len(self.spectrum_curves):
+                    marker_item.setData([], [])
+                    text_item.setText("")
+                    continue
+
+                # Use the exact x/y arrays that are actually plotted in TA.
+                ta_x_raw, ta_y_raw = self.spectrum_curves[trace_index].getData()
+                if ta_x_raw is None or ta_y_raw is None:
+                    if self.config.sweep_profile_logging:
+                        print(
+                            "TAMarker "
+                            f"trace_name={marker_state.trace_name} "
+                            f"forced_trace=Trace{trace_index + 1} "
+                            f"curve_is_visible={self.spectrum_curves[trace_index].isVisible()} "
+                            "curve_point_count=0 "
+                            f"marker_time_sec={marker_x:.6f} "
+                            "x_min=-- x_max=-- interp_y=--"
+                        )
+                    marker_item.setData([], [])
+                    text_item.setText("")
+                    continue
+                ta_x = np.asarray(ta_x_raw, dtype=float)
+                ta_y = np.asarray(ta_y_raw, dtype=float)
+                if len(ta_x) == 0 or len(ta_y) == 0:
+                    if self.config.sweep_profile_logging:
+                        print(
+                            "TAMarker "
+                            f"trace_name={marker_state.trace_name} "
+                            f"forced_trace=Trace{trace_index + 1} "
+                            f"curve_is_visible={self.spectrum_curves[trace_index].isVisible()} "
+                            "curve_point_count=0 "
+                            f"marker_time_sec={marker_x:.6f} "
+                            "x_min=-- x_max=-- interp_y=--"
+                        )
+                    marker_item.setData([], [])
+                    text_item.setText("")
+                    continue
+                if len(ta_x) != len(ta_y):
+                    marker_item.setData([], [])
+                    text_item.setText("")
+                    continue
+                valid_mask = np.isfinite(ta_x) & np.isfinite(ta_y)
+                if not np.any(valid_mask):
+                    marker_item.setData([], [])
+                    text_item.setText("")
+                    continue
+                ta_x_valid = ta_x[valid_mask]
+                ta_y_valid = ta_y[valid_mask]
+                sort_order = np.argsort(ta_x_valid, kind="stable")
+                ta_x_sorted = ta_x_valid[sort_order]
+                ta_y_sorted = ta_y_valid[sort_order]
+                x_min = float(ta_x_sorted[0])
+                x_max = float(ta_x_sorted[-1])
+                # If the new sweep has not reached this time yet, hide marker.
+                if marker_x < x_min or marker_x > x_max:
+                    if self.config.sweep_profile_logging:
+                        print(
+                            "TAMarker "
+                            f"trace_name={marker_state.trace_name} "
+                            f"forced_trace=Trace{trace_index + 1} "
+                            f"curve_is_visible={self.spectrum_curves[trace_index].isVisible()} "
+                            f"curve_point_count={len(ta_x_sorted)} "
+                            f"marker_time_sec={marker_x:.6f} "
+                            f"x_min={x_min:.6f} x_max={x_max:.6f} interp_y=OUT_OF_RANGE"
+                        )
+                    marker_item.setData([], [])
+                    text_item.setText("")
+                    continue
+                nearest_index = int(np.argmin(np.abs(ta_x_sorted - marker_x)))
+                marker_x = float(ta_x_sorted[nearest_index])
+                marker_val = float(ta_y_sorted[nearest_index])
+                if self.config.sweep_profile_logging:
+                    print(
+                        "TAMarker "
+                        f"trace_name={marker_state.trace_name} "
+                        f"forced_trace=Trace{trace_index + 1} "
+                        f"curve_is_visible={self.spectrum_curves[trace_index].isVisible()} "
+                        f"curve_point_count={len(ta_x_sorted)} "
+                        f"marker_time_sec={marker_x:.6f} "
+                        f"x_min={x_min:.6f} x_max={x_max:.6f} "
+                        f"interp_y={marker_val:.6f}"
+                    )
             else:
                 marker_x = marker_state.frequency_hz / 1e9
-            nearest_index = int(
-                np.argmin(np.abs(self._last_display_freq_axis_ghz - marker_x))
-            )
-            marker_x = float(self._last_display_freq_axis_ghz[nearest_index])
-            if (
-                self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
-                and marker_state.sweep_snapshot_power_db is not None
-            ):
-                marker_val = float(marker_state.sweep_snapshot_power_db)
-            else:
-                marker_val = float(trace_db[nearest_index])
+                nearest_index = int(
+                    np.argmin(np.abs(self._last_display_freq_axis_ghz - marker_x))
+                )
+                marker_x = float(self._last_display_freq_axis_ghz[nearest_index])
+                if (
+                    self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
+                    and marker_state.sweep_snapshot_power_db is not None
+                ):
+                    marker_val = float(marker_state.sweep_snapshot_power_db)
+                else:
+                    marker_val = float(trace_db[nearest_index])
             trace_suffix = marker_state.trace_name.replace("Trace", "Tr")
 
             marker_item.setData([marker_x], [marker_val])
+            if self._is_time_analyzer_mode() and self.config.sweep_profile_logging:
+                print(
+                    "TAMarkerFinal "
+                    f"marker_time_sec={marker_x:.6f} marker_y={marker_val:.6f}"
+                )
             if self._is_time_analyzer_mode():
                 text_item.setText(
                     f"M{index + 1} {trace_suffix}\n"
@@ -4619,6 +4716,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_display_power_db = ta_plot_y
         self._update_wideband_traces_from_display_db(ta_plot_y)
         self._update_trace_curves()
+        if self.config.sweep_profile_logging:
+            print("TAOrder stage=trace_setdata_done")
+            print("TAOrder stage=marker_update_start")
+        self._update_marker_items()
+        if self.config.sweep_profile_logging:
+            print("TAOrder stage=marker_update_done")
         if self.config.sweep_profile_logging:
             if len(ta_plot_x) == 0 or len(ta_plot_y) == 0:
                 print("TAPlot valid_count=0")
