@@ -1213,6 +1213,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self._update_trace_curves()
         self._update_markers_for_completed_sweep()
+        self._record_wideband_frame_for_status()
 
     def _update_wideband_spectrum(self) -> None:
         if self._wideband_runtime_state is None or self._wideband_chunk_processor is None or self._wideband_chunk_config is None:
@@ -1349,6 +1350,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.mode_specific_menu_stack.setCurrentIndex(1 if is_sweep_mode else 0)
 
     def _change_analyzer_mode(self, analyzer_mode: AnalyzerMode) -> None:
+        # Old TA is intentionally hidden from UI; redirect direct/internal requests.
+        if analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+            analyzer_mode = AnalyzerMode.HIGH_SPEED_TIME_ANALYZER
+
         if self.config.analyzer_mode == analyzer_mode:
             return
 
@@ -1996,7 +2001,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.REALTIME_SA,
             AnalyzerMode.WIDEBAND_REALTIME_SA,
             AnalyzerMode.SWEEP_SA,
-            AnalyzerMode.TIME_ANALYZER,
             AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
         ):
             button = self._make_control_button(mode.value)
@@ -5160,12 +5164,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         fps_value = self._estimate_realtime_fps()
         if fps_value > 0.0:
             fps_int = int(round(fps_value))
-            estimated_time_sec = int(round(self.config.waterfall_history / fps_value))
-            history_text = f"History: {self.config.waterfall_history} ({estimated_time_sec}s)"
+            estimated_time_sec = float(self.config.waterfall_history) / float(fps_value)
+            history_text = f"History: {self.config.waterfall_history} ({estimated_time_sec:.1f}s)"
             fps_text = f"FPS: {fps_int}"
         else:
             fps_text = "FPS: --"
-            history_text = f"History: {self.config.waterfall_history}"
+            history_text = f"History: {self.config.waterfall_history} (---)"
 
         return f"{base_text}   {fps_text}   {history_text}"
 
@@ -5186,6 +5190,25 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"   FPS: {fps_text}"
             f"   History: {history_frames} (≈ {time_text} s)"
         )
+
+    def _record_wideband_frame_for_status(self) -> None:
+        """Update WBRT FPS history and refresh header at a low fixed cadence."""
+        now_frame = time.perf_counter()
+        if self.prev_frame_time is not None:
+            dt = now_frame - self.prev_frame_time
+            if dt > 0.0:
+                self.frame_dt_history.append(dt)
+                max_len = max(60, int(self.config.drop_judge_window))
+                if len(self.frame_dt_history) > max_len:
+                    del self.frame_dt_history[:-max_len]
+        self.prev_frame_time = now_frame
+
+        self.frame_count_total += 1
+        self.frame_count_interval += 1
+        if now_frame - self.last_report_time >= 1.0:
+            self._refresh_status_label()
+            self.frame_count_interval = 0
+            self.last_report_time = now_frame
 
     def _estimate_realtime_fps(self) -> float:
         if not self.frame_dt_history:
