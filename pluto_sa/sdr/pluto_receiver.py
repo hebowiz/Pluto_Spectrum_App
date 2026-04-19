@@ -17,6 +17,7 @@ class PlutoReceiver:
     def __init__(self, config: SpectrumConfig) -> None:
         self.config = config
         self.sdr = adi.Pluto()
+        self._closed = False
         self._iq_lock = threading.Lock()
         self._sdr_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -202,6 +203,8 @@ class PlutoReceiver:
 
     def capture_block_fast(self, num_samples: int) -> np.ndarray:
         """Capture one IQ block for High Speed TA with reduced copy/lock overhead."""
+        if self._closed:
+            return np.empty(0, dtype=np.complex64)
         capture_size = max(1, int(num_samples))
         with self._sdr_lock:
             if self._fast_capture_size != capture_size:
@@ -244,6 +247,8 @@ class PlutoReceiver:
 
     def start_high_speed_capture_backend(self, block_size: int) -> None:
         """Initialize High Speed TA dedicated buffered RX backend."""
+        if self._closed:
+            return
         size = max(1, int(block_size))
         with self._sdr_lock:
             self.sdr.rx_buffer_size = size
@@ -259,6 +264,8 @@ class PlutoReceiver:
 
     def stop_high_speed_capture_backend(self) -> None:
         """Stop High Speed TA dedicated backend and release pyadi RX buffer."""
+        if self._closed:
+            return
         with self._sdr_lock:
             self._high_speed_backend_enabled = False
             self._high_speed_backend_block_size = None
@@ -269,6 +276,8 @@ class PlutoReceiver:
 
     def capture_block_high_speed_backend(self) -> np.ndarray:
         """Read one High Speed TA block via low-overhead buffered backend."""
+        if self._closed:
+            return np.empty(0, dtype=np.complex64)
         if not self._high_speed_backend_enabled:
             size = self._high_speed_backend_block_size or self._fast_capture_size or self.config.rx_buffer_size
             return self.capture_block_fast(int(size))
@@ -315,10 +324,10 @@ class PlutoReceiver:
     def close(self) -> None:
         self.stop()
         self.stop_high_speed_capture_backend()
-        del self.sdr
+        self._closed = True
 
     def _rx_worker(self) -> None:
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() and not self._closed:
             with self._sdr_lock:
                 iq = self.sdr.rx().astype(np.complex64, copy=False)
             n = len(iq)
