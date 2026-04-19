@@ -22,6 +22,7 @@ from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.detector import DetectorMode, apply_detector
 from pluto_sa.signal.rbw import resolve_rbw_hz
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
+from pluto_sa.ui import sweep_like_progress as slp
 from pluto_sa.utils.calibration import apply_display_power_correction
 
 X_AXIS_PADDING = 0.02
@@ -173,6 +174,41 @@ class WidebandRuntimeState:
     current_chunk_index: int = 0
 
 
+@dataclass
+class SweepLikeProgressState:
+    """Shared progress state for Sweep-like modes (Sweep SA / TA)."""
+
+    sweep_state: str = SWEEP_STATE_RUNNING
+    suppress_progress_until_first_complete: bool = False
+    last_display_freq_axis_ghz: np.ndarray | None = None
+    last_display_power_db: np.ndarray | None = None
+    last_current_display_db: np.ndarray | None = None
+    last_completed_sweep_freq_axis_ghz: np.ndarray | None = None
+    last_completed_sweep_trace_db: dict[str, np.ndarray] = None
+
+    def __post_init__(self) -> None:
+        if self.last_completed_sweep_trace_db is None:
+            self.last_completed_sweep_trace_db = {}
+
+
+@dataclass
+class TimeAnalyzerSweepState:
+    """Time Analyzer specific sweep-like runtime state."""
+
+    time_axis_s: np.ndarray | None = None
+    sample_elapsed_s: np.ndarray | None = None
+    trace_db: np.ndarray | None = None
+    valid_mask: np.ndarray | None = None
+    write_index: int = 0
+    sweep_start_timestamp: float | None = None
+    sweep_sample_count: int = 0
+    sweep_first_timestamp: float | None = None
+    sweep_last_timestamp: float | None = None
+    last_sweep_samples: int = 0
+    last_sweep_avg_dt_s: float | None = None
+    discard_samples_remaining: int = 0
+
+
 class FrequencyAxisItem(pg.AxisItem):
     """Format frequency ticks with a fixed GHz precision."""
 
@@ -197,6 +233,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.processor = processor
         self.sweep_controller = sweep_controller
         self.calibration_offset_db = calibration_offset_db
+        self._sweep_like_progress = SweepLikeProgressState()
+        self._time_analyzer_sweep = TimeAnalyzerSweepState()
         self.graph_view_mode = GRAPH_VIEW_BOTH
         self._saved_realtime_graph_view_mode = GRAPH_VIEW_BOTH
         self.sweep_state = SWEEP_STATE_RUNNING
@@ -269,27 +307,41 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.fft_size_option_buttons: dict[str, QtWidgets.QPushButton] = {}
         self.sweep_detector_option_buttons: dict[DetectorMode, QtWidgets.QPushButton] = {}
         self.persistence_decay_option_buttons: dict[str, QtWidgets.QPushButton] = {}
-        self._last_display_freq_axis_ghz: np.ndarray | None = None
+
+        # Sweep-like state (shared by Sweep SA / Time Analyzer style progress control):
+        # - self._sweep_like_progress.sweep_state: global run mode (running/single/stopped)
+        # - suppress_progress_until_first_complete: first-pass progress symbol suppression
+        # - last_display_*: latest plotted frame
+        # - last_completed_sweep_*: completed-sweep snapshot used by sweep-side marker behaviors
+        self._last_display_freq_axis_ghz = None
         self._last_waterfall_freq_axis_ghz: np.ndarray | None = None
-        self._last_display_power_db: np.ndarray | None = None
-        self._last_current_display_db: np.ndarray | None = None
-        self._last_completed_sweep_freq_axis_ghz: np.ndarray | None = None
-        self._last_completed_sweep_trace_db: dict[str, np.ndarray] = {}
+        self._last_display_power_db = None
+        self._last_current_display_db = None
+        self._last_completed_sweep_freq_axis_ghz = None
+        self._last_completed_sweep_trace_db = {}
         self._wideband_chunk_config: SpectrumConfig | None = None
         self._wideband_chunk_processor: SpectrumProcessor | None = None
         self._wideband_runtime_state: WidebandRuntimeState | None = None
-        self._time_analyzer_time_axis_s: np.ndarray | None = None
-        self._time_analyzer_sample_elapsed_s: np.ndarray | None = None
-        self._time_analyzer_trace_db: np.ndarray | None = None
-        self._time_analyzer_valid_mask: np.ndarray | None = None
-        self._time_analyzer_write_index: int = 0
-        self._time_analyzer_sweep_start_timestamp: float | None = None
-        self._time_analyzer_sweep_sample_count: int = 0
-        self._time_analyzer_sweep_first_timestamp: float | None = None
-        self._time_analyzer_sweep_last_timestamp: float | None = None
-        self._time_analyzer_last_sweep_samples: int = 0
-        self._time_analyzer_last_sweep_avg_dt_s: float | None = None
-        self._time_analyzer_discard_samples_remaining: int = 0
+
+        # Time Analyzer sweep-like state:
+        # - *_time_axis/sample_elapsed/trace/valid_mask: one-sweep working buffers
+        # - _time_analyzer_write_index: accumulation cursor in current sweep
+        # - _time_analyzer_sweep_start_timestamp: per-sweep time origin (t0)
+        # - _time_analyzer_sweep_sample_count / first/last_timestamp: current-sweep stats
+        # - _time_analyzer_last_sweep_samples / _time_analyzer_last_sweep_avg_dt_s: finalized stats for header
+        # - _time_analyzer_discard_samples_remaining: warmup discard counter after mode/settings changes
+        self._time_analyzer_time_axis_s = None
+        self._time_analyzer_sample_elapsed_s = None
+        self._time_analyzer_trace_db = None
+        self._time_analyzer_valid_mask = None
+        self._time_analyzer_write_index = 0
+        self._time_analyzer_sweep_start_timestamp = None
+        self._time_analyzer_sweep_sample_count = 0
+        self._time_analyzer_sweep_first_timestamp = None
+        self._time_analyzer_sweep_last_timestamp = None
+        self._time_analyzer_last_sweep_samples = 0
+        self._time_analyzer_last_sweep_avg_dt_s = None
+        self._time_analyzer_discard_samples_remaining = 0
         # Temporary debug switch for TA marker trace-source isolation.
         self._ta_marker_debug_force_trace1: bool = False
         self.persistence_enabled = False
@@ -329,6 +381,161 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _is_time_analyzer_mode(self) -> bool:
         return self.config.analyzer_mode == AnalyzerMode.TIME_ANALYZER
+
+    # Sweep-like progress state compatibility accessors.
+    # These preserve existing behavior while consolidating storage in
+    # `_sweep_like_progress` and `_time_analyzer_sweep`.
+    @property
+    def sweep_state(self) -> str:
+        return self._sweep_like_progress.sweep_state
+
+    @sweep_state.setter
+    def sweep_state(self, value: str) -> None:
+        self._sweep_like_progress.sweep_state = value
+
+    @property
+    def _sweep_like_suppress_progress_until_first_complete(self) -> bool:
+        return self._sweep_like_progress.suppress_progress_until_first_complete
+
+    @_sweep_like_suppress_progress_until_first_complete.setter
+    def _sweep_like_suppress_progress_until_first_complete(self, value: bool) -> None:
+        self._sweep_like_progress.suppress_progress_until_first_complete = bool(value)
+
+    @property
+    def _last_display_freq_axis_ghz(self) -> np.ndarray | None:
+        return self._sweep_like_progress.last_display_freq_axis_ghz
+
+    @_last_display_freq_axis_ghz.setter
+    def _last_display_freq_axis_ghz(self, value: np.ndarray | None) -> None:
+        self._sweep_like_progress.last_display_freq_axis_ghz = value
+
+    @property
+    def _last_display_power_db(self) -> np.ndarray | None:
+        return self._sweep_like_progress.last_display_power_db
+
+    @_last_display_power_db.setter
+    def _last_display_power_db(self, value: np.ndarray | None) -> None:
+        self._sweep_like_progress.last_display_power_db = value
+
+    @property
+    def _last_current_display_db(self) -> np.ndarray | None:
+        return self._sweep_like_progress.last_current_display_db
+
+    @_last_current_display_db.setter
+    def _last_current_display_db(self, value: np.ndarray | None) -> None:
+        self._sweep_like_progress.last_current_display_db = value
+
+    @property
+    def _last_completed_sweep_freq_axis_ghz(self) -> np.ndarray | None:
+        return self._sweep_like_progress.last_completed_sweep_freq_axis_ghz
+
+    @_last_completed_sweep_freq_axis_ghz.setter
+    def _last_completed_sweep_freq_axis_ghz(self, value: np.ndarray | None) -> None:
+        self._sweep_like_progress.last_completed_sweep_freq_axis_ghz = value
+
+    @property
+    def _last_completed_sweep_trace_db(self) -> dict[str, np.ndarray]:
+        return self._sweep_like_progress.last_completed_sweep_trace_db
+
+    @_last_completed_sweep_trace_db.setter
+    def _last_completed_sweep_trace_db(self, value: dict[str, np.ndarray]) -> None:
+        self._sweep_like_progress.last_completed_sweep_trace_db = value
+
+    @property
+    def _time_analyzer_time_axis_s(self) -> np.ndarray | None:
+        return self._time_analyzer_sweep.time_axis_s
+
+    @_time_analyzer_time_axis_s.setter
+    def _time_analyzer_time_axis_s(self, value: np.ndarray | None) -> None:
+        self._time_analyzer_sweep.time_axis_s = value
+
+    @property
+    def _time_analyzer_sample_elapsed_s(self) -> np.ndarray | None:
+        return self._time_analyzer_sweep.sample_elapsed_s
+
+    @_time_analyzer_sample_elapsed_s.setter
+    def _time_analyzer_sample_elapsed_s(self, value: np.ndarray | None) -> None:
+        self._time_analyzer_sweep.sample_elapsed_s = value
+
+    @property
+    def _time_analyzer_trace_db(self) -> np.ndarray | None:
+        return self._time_analyzer_sweep.trace_db
+
+    @_time_analyzer_trace_db.setter
+    def _time_analyzer_trace_db(self, value: np.ndarray | None) -> None:
+        self._time_analyzer_sweep.trace_db = value
+
+    @property
+    def _time_analyzer_valid_mask(self) -> np.ndarray | None:
+        return self._time_analyzer_sweep.valid_mask
+
+    @_time_analyzer_valid_mask.setter
+    def _time_analyzer_valid_mask(self, value: np.ndarray | None) -> None:
+        self._time_analyzer_sweep.valid_mask = value
+
+    @property
+    def _time_analyzer_write_index(self) -> int:
+        return self._time_analyzer_sweep.write_index
+
+    @_time_analyzer_write_index.setter
+    def _time_analyzer_write_index(self, value: int) -> None:
+        self._time_analyzer_sweep.write_index = int(value)
+
+    @property
+    def _time_analyzer_sweep_start_timestamp(self) -> float | None:
+        return self._time_analyzer_sweep.sweep_start_timestamp
+
+    @_time_analyzer_sweep_start_timestamp.setter
+    def _time_analyzer_sweep_start_timestamp(self, value: float | None) -> None:
+        self._time_analyzer_sweep.sweep_start_timestamp = value
+
+    @property
+    def _time_analyzer_sweep_sample_count(self) -> int:
+        return self._time_analyzer_sweep.sweep_sample_count
+
+    @_time_analyzer_sweep_sample_count.setter
+    def _time_analyzer_sweep_sample_count(self, value: int) -> None:
+        self._time_analyzer_sweep.sweep_sample_count = int(value)
+
+    @property
+    def _time_analyzer_sweep_first_timestamp(self) -> float | None:
+        return self._time_analyzer_sweep.sweep_first_timestamp
+
+    @_time_analyzer_sweep_first_timestamp.setter
+    def _time_analyzer_sweep_first_timestamp(self, value: float | None) -> None:
+        self._time_analyzer_sweep.sweep_first_timestamp = value
+
+    @property
+    def _time_analyzer_sweep_last_timestamp(self) -> float | None:
+        return self._time_analyzer_sweep.sweep_last_timestamp
+
+    @_time_analyzer_sweep_last_timestamp.setter
+    def _time_analyzer_sweep_last_timestamp(self, value: float | None) -> None:
+        self._time_analyzer_sweep.sweep_last_timestamp = value
+
+    @property
+    def _time_analyzer_last_sweep_samples(self) -> int:
+        return self._time_analyzer_sweep.last_sweep_samples
+
+    @_time_analyzer_last_sweep_samples.setter
+    def _time_analyzer_last_sweep_samples(self, value: int) -> None:
+        self._time_analyzer_sweep.last_sweep_samples = int(value)
+
+    @property
+    def _time_analyzer_last_sweep_avg_dt_s(self) -> float | None:
+        return self._time_analyzer_sweep.last_sweep_avg_dt_s
+
+    @_time_analyzer_last_sweep_avg_dt_s.setter
+    def _time_analyzer_last_sweep_avg_dt_s(self, value: float | None) -> None:
+        self._time_analyzer_sweep.last_sweep_avg_dt_s = value
+
+    @property
+    def _time_analyzer_discard_samples_remaining(self) -> int:
+        return self._time_analyzer_sweep.discard_samples_remaining
+
+    @_time_analyzer_discard_samples_remaining.setter
+    def _time_analyzer_discard_samples_remaining(self, value: int) -> None:
+        self._time_analyzer_sweep.discard_samples_remaining = int(value)
 
     def _initialize_time_analyzer_runtime(self) -> None:
         point_count = max(64, int(TIME_ANALYZER_BUFFER_POINTS))
@@ -2184,9 +2391,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             axisOrder="row-major",
         )
 
-    def _current_sweep_state(self) -> str:
-        return self.sweep_state
-
     def _restore_sweep_state(self, previous_state: str) -> None:
         if self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
             if previous_state == SWEEP_STATE_RUNNING:
@@ -2227,14 +2431,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._restore_sweep_state(previous_sweep_state)
 
     def _start_realtime_continuous(self) -> None:
-        self.sweep_state = SWEEP_STATE_RUNNING
+        self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
         self.receiver.start()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
     def _start_time_analyzer_continuous(self) -> None:
-        self.sweep_state = SWEEP_STATE_RUNNING
+        self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
         self.receiver.stop()
         self._reset_time_analyzer_time_window(start_timestamp=time.perf_counter())
@@ -2242,7 +2446,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_continuous_button()
 
     def _start_wideband_continuous(self) -> None:
-        self.sweep_state = SWEEP_STATE_RUNNING
+        self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
         self.receiver.stop()
         self._invalidate_wideband_runtime()
@@ -2852,6 +3056,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_cont_clicked(self) -> None:
+        # sweep-like progress entry: Continuous
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             self._start_sweep_continuous()
             return
@@ -2862,36 +3067,53 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._start_time_analyzer_continuous()
             return
 
-        self.sweep_state = SWEEP_STATE_RUNNING
+        self._prepare_sweep_like_continuous_entry_state()
         self.receiver.start()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
+    def _enter_single_realtime_mode(self) -> None:
+        """Single entry for RealTime SA-style immediate capture path."""
+        self.receiver.start()
+
+    def _enter_single_sweep_mode(self) -> None:
+        """Single entry for Sweep SA sweep-controller driven path."""
+        self.receiver.stop()
+        self.sweep_controller.request_single()
+
+    def _enter_single_wideband_mode(self) -> None:
+        """Single entry for WideBand sweep-like path with runtime reset."""
+        self.receiver.stop()
+        self._invalidate_wideband_runtime()
+
+    def _enter_single_time_analyzer_mode(self) -> None:
+        """Single entry for TA fixed-window accumulation path."""
+        self.receiver.stop()
+        self._reset_time_analyzer_time_window(start_timestamp=time.perf_counter())
+
     def _on_single_clicked(self) -> None:
-        previous_state = self.sweep_state
-        self.sweep_state = SWEEP_STATE_SINGLE
+        # sweep-like progress entry: Single
+        self._prepare_sweep_like_single_entry_state()
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
-            self.receiver.stop()
-            self.sweep_controller.request_single()
+            self._enter_single_sweep_mode()
         elif self._is_wideband_mode():
-            self.receiver.stop()
-            self._invalidate_wideband_runtime()
+            self._enter_single_wideband_mode()
         elif self._is_time_analyzer_mode():
-            self.receiver.stop()
-            self._reset_time_analyzer_time_window(start_timestamp=time.perf_counter())
+            self._enter_single_time_analyzer_mode()
         else:
-            self.receiver.start()
+            self._enter_single_realtime_mode()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
     def _start_sweep_continuous(self) -> None:
-        self.sweep_state = SWEEP_STATE_RUNNING
+        self._prepare_sweep_like_continuous_entry_state()
         self.receiver.stop()
         self.sweep_controller.request_continuous()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
     def _on_reset_clicked(self) -> None:
+        # sweep-like progress entry: Reset
         previous_state = self._current_sweep_state()
         self._reset_all_measurement_state(
             stop_receiver=False,
@@ -2899,18 +3121,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             reset_markers=False,
         )
         self._clear_persistence()
-        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
-            if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
-                self._sweep_like_suppress_progress_until_first_complete = True
-            self._restore_sweep_state(previous_state)
-        elif self._is_time_analyzer_mode():
-            self._sweep_like_suppress_progress_until_first_complete = True
-            if previous_state == SWEEP_STATE_RUNNING:
-                self._start_time_analyzer_continuous()
-            elif previous_state == SWEEP_STATE_SINGLE:
-                self.sweep_state = SWEEP_STATE_STOPPED
-                self.timer.stop()
-                self._update_continuous_button()
+        # sweep-like progress state restore (mode-specific)
+        self._restore_mode_state_after_reset(previous_state)
         self._update_continuous_button()
         self._refresh_status_label()
 
@@ -3373,6 +3585,44 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 return trace_state
         return None
 
+    # Sweep-like progress helpers
+    # These helpers centralize run-state transitions used by Sweep SA / TA style flows.
+    # Keeping them together makes future HighSpeedTA extraction safer.
+
+    # Return the current sweep-like run state.
+    def _current_sweep_state(self) -> str:
+        return slp.current_sweep_state(self._sweep_like_progress)
+
+    # Prepare shared progress state for Continuous entry.
+    def _prepare_sweep_like_continuous_entry_state(self) -> None:
+        slp.prepare_sweep_like_continuous_entry_state(
+            self._sweep_like_progress,
+            running_state=SWEEP_STATE_RUNNING,
+        )
+
+    # Prepare shared progress state for Single entry.
+    def _prepare_sweep_like_single_entry_state(self) -> None:
+        slp.prepare_sweep_like_single_entry_state(
+            self._sweep_like_progress,
+            single_state=SWEEP_STATE_SINGLE,
+        )
+
+    # Restore mode-specific progress state after Reset.
+    def _restore_mode_state_after_reset(self, previous_state: str) -> None:
+        slp.restore_mode_state_after_reset(
+            analyzer_mode=self.config.analyzer_mode,
+            previous_state=previous_state,
+            progress_state=self._sweep_like_progress,
+            running_state=SWEEP_STATE_RUNNING,
+            single_state=SWEEP_STATE_SINGLE,
+            stopped_state=SWEEP_STATE_STOPPED,
+            restore_sweep_state=self._restore_sweep_state,
+            start_time_analyzer_continuous=self._start_time_analyzer_continuous,
+            stop_timer=self.timer.stop,
+            update_continuous_button=self._update_continuous_button,
+            is_time_analyzer_mode=self._is_time_analyzer_mode(),
+        )
+
     def _update_sweep_like_write_index(
         self,
         current_index: int,
@@ -3380,61 +3630,51 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         *,
         is_single: bool,
     ) -> tuple[int, bool]:
-        if point_count <= 0:
-            return 0, True
-        reached_right_edge = current_index >= (point_count - 1)
-        if is_single:
-            next_index = current_index if reached_right_edge else current_index + 1
-        else:
-            next_index = 0 if reached_right_edge else current_index + 1
-        return int(next_index), bool(reached_right_edge)
+        """Advance a sweep-like cursor and report whether the right edge was reached.
+
+        Responsibility:
+        - Shared index progression rule for Sweep/TA style left-to-right updates.
+        - Keep Single mode parked at the right edge.
+        - Wrap to 0 for Continuous mode after reaching the right edge.
+        """
+        return slp.update_sweep_like_write_index(
+            current_index,
+            point_count,
+            is_single=is_single,
+        )
 
     def _finish_single_sweep_like(self) -> None:
-        self.timer.stop()
-        self.sweep_state = SWEEP_STATE_STOPPED
-        self._update_continuous_button()
+        """Finish a sweep-like Single run and transition to stopped state.
+
+        Responsibility:
+        - Stop timer-driven updates.
+        - Normalize sweep_state and button label to STOPPED.
+        """
+        slp.finish_single_sweep_like(
+            progress_state=self._sweep_like_progress,
+            stopped_state=SWEEP_STATE_STOPPED,
+            stop_timer=self.timer.stop,
+            update_continuous_button=self._update_continuous_button,
+        )
 
     def _set_sweep_like_progress_symbol(
         self,
         item: pg.ScatterPlotItem | None,
         point_index: int | None,
     ) -> None:
-        if item is None or self._last_display_freq_axis_ghz is None or point_index is None:
-            if item is not None:
-                item.setData([], [])
-                item.setVisible(False)
-            return
+        """Place/hide a sweep-like progress symbol on the active live trace.
 
-        trace_state = self._active_sweep_progress_trace_state()
-        if trace_state is None or trace_state.display_db is None:
-            item.setData([], [])
-            item.setVisible(False)
-            return
-
-        point_index = int(point_index)
-        if point_index < 0 or point_index >= len(self._last_display_freq_axis_ghz):
-            item.setData([], [])
-            item.setVisible(False)
-            return
-        if point_index >= len(trace_state.display_db):
-            item.setData([], [])
-            item.setVisible(False)
-            return
-
-        marker_y = float(trace_state.display_db[point_index])
-        if not np.isfinite(marker_y):
-            item.setData([], [])
-            item.setVisible(False)
-            return
-
-        color = QtGui.QColor(trace_state.color_hex)
-        item.setPen(pg.mkPen(color))
-        item.setBrush(pg.mkBrush(color))
-        item.setData(
-            [self._last_display_freq_axis_ghz[point_index]],
-            [marker_y],
+        Responsibility:
+        - Resolve x/y from latest plotted axis + active live trace.
+        - Validate index and finite y before showing.
+        - Hide symbol when source data is unavailable or invalid.
+        """
+        slp.set_sweep_like_progress_symbol(
+            item=item,
+            point_index=point_index,
+            freq_axis=self._last_display_freq_axis_ghz,
+            active_trace_state_getter=self._active_sweep_progress_trace_state,
         )
-        item.setVisible(True)
 
     def _hide_sweep_progress_symbol(self) -> None:
         self._set_sweep_like_progress_symbol(self.sweep_progress_item, None)
@@ -4718,6 +4958,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             ext_gain_db=f"{self.config.ext_gain_db:.2f}",
         )
 
+        # sweep-like progress state update (accumulation only, no per-sample drawing)
         idx = int(self._time_analyzer_write_index)
         if idx < 0:
             idx = 0
@@ -4780,6 +5021,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         ui_draw_ms = 0.0
         marker_update_ms = 0.0
+        # sweep-like visual update (trace draw)
         if redraw_performed:
             ui_start = time.perf_counter()
             self._last_display_freq_axis_ghz = sweep_freq_axis_ghz
@@ -4798,6 +5040,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self._update_sweep_progress_symbol(frame_result)
 
+        # sweep-like visual update (marker refresh on sweep completion)
         if frame_result.sweep_complete and self._pending_sweep_marker_update:
             marker_start = time.perf_counter()
             self._pending_sweep_marker_update = False
