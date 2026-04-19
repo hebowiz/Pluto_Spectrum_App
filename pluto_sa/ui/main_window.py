@@ -277,8 +277,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._wideband_chunk_processor: SpectrumProcessor | None = None
         self._wideband_runtime_state: WidebandRuntimeState | None = None
         self._time_analyzer_time_axis_s: np.ndarray | None = None
+        self._time_analyzer_sample_elapsed_s: np.ndarray | None = None
         self._time_analyzer_trace_db: np.ndarray | None = None
+        self._time_analyzer_valid_mask: np.ndarray | None = None
         self._time_analyzer_write_index: int = 0
+        self._time_analyzer_sweep_start_timestamp: float | None = None
         self._time_analyzer_discard_samples_remaining: int = 0
         self.persistence_enabled = False
         self.persistence_image: pg.ImageItem | None = None
@@ -321,11 +324,65 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _initialize_time_analyzer_runtime(self) -> None:
         point_count = max(64, int(TIME_ANALYZER_BUFFER_POINTS))
         interval_ms = max(1, int(self._current_timer_interval_ms()))
-        dt_s = interval_ms / 1000.0
-        self._time_analyzer_time_axis_s = np.arange(point_count, dtype=float) * dt_s
+        time_span_s = max(1e-3, ((point_count - 1) * interval_ms) / 1000.0)
+        self._time_analyzer_time_axis_s = np.linspace(
+            0.0,
+            time_span_s,
+            point_count,
+            endpoint=True,
+            dtype=float,
+        )
+        self._time_analyzer_sample_elapsed_s = self._time_analyzer_time_axis_s.copy()
         self._time_analyzer_trace_db = np.full(point_count, self.y_min, dtype=float)
+        self._time_analyzer_valid_mask = np.zeros(point_count, dtype=bool)
         self._time_analyzer_write_index = 0
+        self._time_analyzer_sweep_start_timestamp = None
         self._time_analyzer_discard_samples_remaining = int(TIME_ANALYZER_WARMUP_DISCARD_COUNT)
+
+    def _time_analyzer_time_span_s(self) -> float:
+        if self._time_analyzer_time_axis_s is None or len(self._time_analyzer_time_axis_s) == 0:
+            return 1.0
+        return max(1e-6, float(self._time_analyzer_time_axis_s[-1]))
+
+    def _reset_time_analyzer_time_window(self, *, start_timestamp: float | None = None) -> None:
+        if self._time_analyzer_trace_db is not None:
+            self._time_analyzer_trace_db.fill(self.y_min)
+        if self._time_analyzer_valid_mask is not None:
+            self._time_analyzer_valid_mask.fill(False)
+        if (
+            self._time_analyzer_time_axis_s is not None
+            and self._time_analyzer_sample_elapsed_s is not None
+            and len(self._time_analyzer_time_axis_s) == len(self._time_analyzer_sample_elapsed_s)
+        ):
+            np.copyto(self._time_analyzer_sample_elapsed_s, self._time_analyzer_time_axis_s)
+        self._time_analyzer_write_index = 0
+        self._time_analyzer_sweep_start_timestamp = start_timestamp
+        self._hide_time_analyzer_progress_symbol()
+
+    def _compose_time_analyzer_plot_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        if (
+            self._time_analyzer_sample_elapsed_s is None
+            or self._time_analyzer_trace_db is None
+            or self._time_analyzer_valid_mask is None
+        ):
+            return np.empty(0, dtype=float), np.empty(0, dtype=float)
+        if len(self._time_analyzer_sample_elapsed_s) != len(self._time_analyzer_trace_db):
+            return np.empty(0, dtype=float), np.empty(0, dtype=float)
+        if len(self._time_analyzer_valid_mask) != len(self._time_analyzer_trace_db):
+            return np.empty(0, dtype=float), np.empty(0, dtype=float)
+
+        valid_mask = (
+            self._time_analyzer_valid_mask
+            & np.isfinite(self._time_analyzer_sample_elapsed_s)
+            & np.isfinite(self._time_analyzer_trace_db)
+        )
+        if not np.any(valid_mask):
+            return np.empty(0, dtype=float), np.empty(0, dtype=float)
+
+        x_valid = self._time_analyzer_sample_elapsed_s[valid_mask]
+        y_valid = self._time_analyzer_trace_db[valid_mask]
+        order = np.argsort(x_valid, kind="stable")
+        return x_valid[order], y_valid[order]
 
     def _resolve_sweep_like_capture_from_rbw(self, rbw_hz: float | None) -> tuple[float, int, int, float]:
         resolved_rbw_hz = self._clip_sweep_rbw(rbw_hz)
@@ -2118,6 +2175,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_state = SWEEP_STATE_RUNNING
         self.sweep_controller.stop()
         self.receiver.stop()
+        self._reset_time_analyzer_time_window(start_timestamp=time.perf_counter())
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
@@ -2726,10 +2784,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._invalidate_wideband_runtime()
         elif self._is_time_analyzer_mode():
             self.receiver.stop()
-            if previous_state == SWEEP_STATE_STOPPED:
-                # Align with Sweep SA single-run semantics: start from the head.
-                self._time_analyzer_write_index = 0
-                self._hide_time_analyzer_progress_symbol()
+            self._reset_time_analyzer_time_window(start_timestamp=time.perf_counter())
         else:
             self.receiver.start()
         self._restart_timer_for_current_mode()
@@ -3282,14 +3337,38 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if (
             self.time_analyzer_progress_item is None
             or not self._is_time_analyzer_mode()
-            or self._last_display_freq_axis_ghz is None
+            or self._time_analyzer_sample_elapsed_s is None
+            or self._time_analyzer_trace_db is None
         ):
             self._hide_time_analyzer_progress_symbol()
             return
 
         if point_index is None:
-            point_index = int(self._time_analyzer_write_index)
-        self._set_sweep_like_progress_symbol(self.time_analyzer_progress_item, int(point_index))
+            point_index = max(0, int(self._time_analyzer_write_index) - 1)
+        point_index = int(point_index)
+        if point_index < 0 or point_index >= len(self._time_analyzer_sample_elapsed_s):
+            self._hide_time_analyzer_progress_symbol()
+            return
+        if point_index >= len(self._time_analyzer_trace_db):
+            self._hide_time_analyzer_progress_symbol()
+            return
+
+        marker_x = float(self._time_analyzer_sample_elapsed_s[point_index])
+        marker_y = float(self._time_analyzer_trace_db[point_index])
+        if not np.isfinite(marker_x) or not np.isfinite(marker_y):
+            self._hide_time_analyzer_progress_symbol()
+            return
+
+        trace_state = self._active_sweep_progress_trace_state()
+        if trace_state is None:
+            self._hide_time_analyzer_progress_symbol()
+            return
+
+        color = QtGui.QColor(trace_state.color_hex)
+        self.time_analyzer_progress_item.setPen(pg.mkPen(color))
+        self.time_analyzer_progress_item.setBrush(pg.mkBrush(color))
+        self.time_analyzer_progress_item.setData([marker_x], [marker_y])
+        self.time_analyzer_progress_item.setVisible(True)
 
     def _update_sweep_progress_symbol(self, frame_result) -> None:
         if (
@@ -4274,10 +4353,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.last_report_time = now
 
     def _update_time_analyzer_spectrum(self) -> None:
-        if self._time_analyzer_time_axis_s is None or self._time_analyzer_trace_db is None:
+        if (
+            self._time_analyzer_time_axis_s is None
+            or self._time_analyzer_sample_elapsed_s is None
+            or self._time_analyzer_trace_db is None
+            or self._time_analyzer_valid_mask is None
+        ):
             self._initialize_time_analyzer_runtime()
             self._reset_plot_state()
-        if self._time_analyzer_time_axis_s is None or self._time_analyzer_trace_db is None:
+        if (
+            self._time_analyzer_time_axis_s is None
+            or self._time_analyzer_sample_elapsed_s is None
+            or self._time_analyzer_trace_db is None
+            or self._time_analyzer_valid_mask is None
+        ):
             return
 
         clipped_rbw = self._clip_sweep_rbw(self.config.rbw_hz)
@@ -4289,11 +4378,31 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         iq = self.receiver.capture_block(capture_size)
         if iq is None or len(iq) == 0:
             return
+        sample_timestamp = time.perf_counter()
         if self._time_analyzer_discard_samples_remaining > 0:
             self._time_analyzer_discard_samples_remaining -= 1
+            self._time_analyzer_sweep_start_timestamp = sample_timestamp
             self._hide_sweep_progress_symbol()
             self._hide_time_analyzer_progress_symbol()
             return
+
+        if self._time_analyzer_sweep_start_timestamp is None:
+            self._time_analyzer_sweep_start_timestamp = sample_timestamp
+        time_span_s = self._time_analyzer_time_span_s()
+        elapsed_sec = max(0.0, sample_timestamp - self._time_analyzer_sweep_start_timestamp)
+        wrapped = False
+        if elapsed_sec > time_span_s:
+            if self.sweep_state == SWEEP_STATE_SINGLE:
+                if self._sweep_like_suppress_progress_until_first_complete:
+                    self._sweep_like_suppress_progress_until_first_complete = False
+                self._hide_sweep_progress_symbol()
+                self._hide_time_analyzer_progress_symbol()
+                self._finish_single_sweep_like()
+                return
+            # Continuous mode uses fixed time window; restart from 0 s.
+            self._reset_time_analyzer_time_window(start_timestamp=sample_timestamp)
+            elapsed_sec = 0.0
+            wrapped = True
 
         n = len(iq)
         window = self.processor.window
@@ -4378,31 +4487,46 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
 
         idx = int(self._time_analyzer_write_index)
+        if idx < 0:
+            idx = 0
+        if idx >= len(self._time_analyzer_trace_db):
+            idx = len(self._time_analyzer_trace_db) - 1
+        self._time_analyzer_sample_elapsed_s[idx] = elapsed_sec
         self._time_analyzer_trace_db[idx] = ta_display_detector_equivalent_db
-        next_index, reached_right_edge = self._update_sweep_like_write_index(
-            idx,
-            len(self._time_analyzer_trace_db),
-            is_single=(self.sweep_state == SWEEP_STATE_SINGLE),
-        )
-        self._time_analyzer_write_index = next_index
+        self._time_analyzer_valid_mask[idx] = True
+        if idx < (len(self._time_analyzer_trace_db) - 1):
+            self._time_analyzer_write_index = idx + 1
 
-        self._last_display_freq_axis_ghz = self._time_analyzer_time_axis_s.copy()
-        self._last_current_display_db = self._time_analyzer_trace_db.copy()
-        self._last_display_power_db = self._time_analyzer_trace_db.copy()
-        self._update_wideband_traces_from_display_db(self._time_analyzer_trace_db)
+        ta_plot_x, ta_plot_y = self._compose_time_analyzer_plot_arrays()
+        self._last_display_freq_axis_ghz = ta_plot_x
+        self._last_current_display_db = ta_plot_y
+        self._last_display_power_db = ta_plot_y
+        self._update_wideband_traces_from_display_db(ta_plot_y)
         self._update_trace_curves()
+        if self.config.sweep_profile_logging:
+            if len(ta_plot_x) == 0 or len(ta_plot_y) == 0:
+                print("TAPlot valid_count=0")
+            else:
+                print(
+                    "TAPlot "
+                    f"valid_count={len(ta_plot_x)} "
+                    f"x_min={float(np.min(ta_plot_x)):.6f} "
+                    f"x_max={float(np.max(ta_plot_x)):.6f} "
+                    f"y_min={float(np.min(ta_plot_y)):.6f} "
+                    f"y_max={float(np.max(ta_plot_y)):.6f}"
+                )
         self._hide_sweep_progress_symbol()
-        if reached_right_edge or self._sweep_like_suppress_progress_until_first_complete:
+        if wrapped or self._sweep_like_suppress_progress_until_first_complete:
             self._hide_time_analyzer_progress_symbol()
         else:
             self._update_time_analyzer_progress_symbol(idx)
 
         if self.sweep_state == SWEEP_STATE_SINGLE:
-            if reached_right_edge:
+            if elapsed_sec >= time_span_s:
                 if self._sweep_like_suppress_progress_until_first_complete:
                     self._sweep_like_suppress_progress_until_first_complete = False
                 self._finish_single_sweep_like()
-        elif reached_right_edge and self._sweep_like_suppress_progress_until_first_complete:
+        elif wrapped and self._sweep_like_suppress_progress_until_first_complete:
             self._sweep_like_suppress_progress_until_first_complete = False
 
     def _update_sweep_spectrum(self) -> None:
