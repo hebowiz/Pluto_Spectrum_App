@@ -51,13 +51,14 @@ class SpectrumConfig:
     sweep_flush_samples: int = 256
     sweep_capture_samples_override: Optional[int] = 1024
     sweep_ui_update_interval_points: int = 4
-    sweep_profile_logging: bool = True
+    sweep_profile_logging: bool = False
     sweep_sample_rate_hz: int = 10_000_000
     sweep_rf_bandwidth_hz: int = 20_000_000
 
     # Time Analyzer settings
     time_analyzer_sample_rate_hz: int = 2_000_000
     time_analyzer_rf_bandwidth_hz: int = 2_000_000
+    time_analyzer_time_span_s: float = 1.0
 
     def __post_init__(self) -> None:
         if self.analyzer_mode == AnalyzerMode.REALTIME_SA and self.display_span_hz > MAX_DISPLAY_SPAN_HZ:
