@@ -45,6 +45,10 @@ class SweepPointResult:
     rbw_center_bin_index: int
     rbw_center_frequency_hz: float
     detector_input_values: np.ndarray
+    dc_removal_applied: bool = True
+    window_len: int = 0
+    raw_center_power_linear: float = 0.0
+    filtered_center_power_linear: float = 0.0
     flush_reads: int = 0
     flush_samples: int = 0
     flush_actual_samples_total: int = 0
@@ -175,6 +179,10 @@ class SweepController:
             rbw_center_bin_index,
             rbw_center_frequency_hz,
             detector_input_values,
+            dc_removal_applied,
+            window_len,
+            raw_center_power_linear,
+            filtered_center_power_linear,
         ) = self._measure_point_power(iq)
         process_ms = (time.perf_counter() - process_start) * 1000.0
         measured_power_db = 10.0 * np.log10(measured_power_linear + 1e-20)
@@ -193,6 +201,10 @@ class SweepController:
             rbw_center_bin_index=rbw_center_bin_index,
             rbw_center_frequency_hz=rbw_center_frequency_hz,
             detector_input_values=detector_input_values.copy(),
+            dc_removal_applied=dc_removal_applied,
+            window_len=window_len,
+            raw_center_power_linear=raw_center_power_linear,
+            filtered_center_power_linear=filtered_center_power_linear,
             flush_reads=flush_reads,
             flush_samples=int(flush_samples),
             flush_actual_samples_total=flush_actual_samples_total,
@@ -340,11 +352,11 @@ class SweepController:
         return flush_reads, flushed_total, actual_per_read
 
     def _resolve_capture_samples(self) -> int:
+        if self.config.sweep_capture_samples_override is not None:
+            return max(1, int(self.config.sweep_capture_samples_override))
         effective_rbw_hz = self._resolve_effective_rbw_hz()
         observation_ratio = self.config.sweep_sample_rate_hz / effective_rbw_hz
         min_samples = max(256, int(np.ceil(observation_ratio * 8.0)))
-        if self.config.sweep_capture_samples_override is not None:
-            min_samples = max(min_samples, int(self.config.sweep_capture_samples_override))
         capture_samples = 1 << int(np.ceil(np.log2(min_samples)))
         return int(capture_samples)
 
@@ -359,7 +371,14 @@ class SweepController:
     def _measure_point_power(
         self,
         iq: np.ndarray,
-    ) -> tuple[float, float, float, int, int, float, int, float, np.ndarray]:
+    ) -> tuple[float, float, float, int, int, float, int, float, np.ndarray, bool, int, float, float]:
+        n_target = max(2, int(self.config.fft_size))
+        if len(iq) > n_target:
+            iq = iq[-n_target:]
+        elif len(iq) < n_target:
+            iq_padded = np.zeros(n_target, dtype=np.complex64)
+            iq_padded[-len(iq) :] = iq
+            iq = iq_padded
         iq = iq - np.mean(iq)
         n = len(iq)
 
@@ -382,7 +401,9 @@ class SweepController:
         rbw_kernel = make_gaussian_rbw_kernel(effective_rbw_hz, bin_width_hz)
         filtered_power = apply_rbw_weighting(power_spectrum, rbw_kernel)
 
-        center_idx = len(filtered_power) // 2
+        center_idx = n_target // 2
+        if center_idx >= len(filtered_power):
+            center_idx = len(filtered_power) // 2
         detector_input = self._build_detector_observation_series(iq, effective_rbw_hz)
         measured_power_linear = apply_detector(detector_input, self.config.sweep_detector_mode)
         peak_bin_index_unshifted = int(np.argmax(power_spectrum_unshifted))
@@ -390,6 +411,8 @@ class SweepController:
         peak_frequency_relative_hz = float(freq_axis_hz[peak_bin_index_shifted])
         rbw_center_bin_index = center_idx
         rbw_center_frequency_hz = float(freq_axis_hz[center_idx])
+        raw_center_power_linear = float(power_spectrum[center_idx])
+        filtered_center_power_linear = float(filtered_power[center_idx])
         return (
             measured_power_linear,
             effective_rbw_hz,
@@ -400,6 +423,10 @@ class SweepController:
             rbw_center_bin_index,
             rbw_center_frequency_hz,
             detector_input,
+            True,
+            n,
+            raw_center_power_linear,
+            filtered_center_power_linear,
         )
 
     def _build_detector_observation_series(
@@ -408,6 +435,19 @@ class SweepController:
         effective_rbw_hz: float,
     ) -> np.ndarray:
         """Build a time-direction observation series for detector reduction."""
+        return self._build_detector_observation_series_core(
+            iq=iq,
+            effective_rbw_hz=effective_rbw_hz,
+            sample_rate_hz=float(self.config.sweep_sample_rate_hz),
+        )
+
+    @staticmethod
+    def _build_detector_observation_series_core(
+        iq: np.ndarray,
+        effective_rbw_hz: float,
+        sample_rate_hz: float,
+    ) -> np.ndarray:
+        """Core detector-series builder shared by Sweep and comparison paths."""
         total_samples = len(iq)
         if total_samples < 2:
             return np.asarray([0.0], dtype=np.float64)
@@ -439,7 +479,7 @@ class SweepController:
             spectrum = spectrum / coherent_gain
 
             power_spectrum = np.abs(spectrum) ** 2
-            segment_bin_width_hz = self.config.sweep_sample_rate_hz / segment_length
+            segment_bin_width_hz = sample_rate_hz / segment_length
             rbw_kernel = make_gaussian_rbw_kernel(effective_rbw_hz, segment_bin_width_hz)
             filtered_power = apply_rbw_weighting(power_spectrum, rbw_kernel)
             center_idx = len(filtered_power) // 2

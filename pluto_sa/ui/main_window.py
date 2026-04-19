@@ -19,7 +19,8 @@ from pluto_sa.config.spectrum_config import (
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
-from pluto_sa.signal.detector import DetectorMode
+from pluto_sa.signal.detector import DetectorMode, apply_detector
+from pluto_sa.signal.rbw import resolve_rbw_hz
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.utils.calibration import apply_display_power_correction
 
@@ -4127,6 +4128,42 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return f"{value_hz / 1_000:.2f} kHz"
         return f"{value_hz:.0f} Hz"
 
+    def _log_compare_sa(self, mode: str, **values: object) -> None:
+        if not self.config.sweep_profile_logging:
+            return
+        ordered_keys = [
+            "center_freq_hz",
+            "point_freq_hz",
+            "point_index",
+            "center_idx",
+            "rbw_hz",
+            "fft_size",
+            "sample_rate_hz",
+            "rf_bandwidth_hz",
+            "dc_removal",
+            "window_len",
+            "capture_len",
+            "raw_point_power",
+            "filtered_point_power",
+            "detector_value",
+            "detector_equivalent_sweep",
+            "display_value",
+            "display_value_sweep_equivalent",
+            "ta_center_filtered",
+            "ta_detector_equivalent",
+            "ta_display_direct",
+            "ta_display_detector_equivalent",
+            "calibration_offset",
+            "ext_att_db",
+            "int_gain_db",
+            "ext_gain_db",
+        ]
+        items: list[str] = [f"mode={mode}"]
+        for key in ordered_keys:
+            if key in values:
+                items.append(f"{key}={values[key]}")
+        print("CompareSA " + " ".join(items))
+
     def update_spectrum(self) -> None:
         if self._is_time_analyzer_mode():
             self._update_time_analyzer_spectrum()
@@ -4258,12 +4295,24 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._hide_time_analyzer_progress_symbol()
             return
 
+        n = len(iq)
+        window = self.processor.window
+        iq_zero_mean = iq - np.mean(iq)
+        iq_windowed = iq_zero_mean * window
+        spectrum = np.fft.fftshift(np.fft.fft(iq_windowed))
+        coherent_gain = np.sum(window) / n
+        spectrum = spectrum / n
+        spectrum = spectrum / coherent_gain
+        raw_power_full = np.abs(spectrum) ** 2
+
         power_linear_full = self.processor.compute_filtered_power(iq)
-        power_linear_display = self.processor.extract_display_spectrum(power_linear_full)
-        if len(power_linear_display) == 0:
+        if len(power_linear_full) == 0:
             return
-        center_index = len(power_linear_display) // 2
-        center_power_linear = float(power_linear_display[center_index])
+        center_index = max(0, int(self.config.fft_size) // 2)
+        if center_index >= len(power_linear_full):
+            center_index = len(power_linear_full) // 2
+        raw_center_power_linear = float(raw_power_full[center_index])
+        center_power_linear = float(power_linear_full[center_index])
         center_power_db = 10.0 * np.log10(center_power_linear + 1e-20)
         corrected_center_db = float(
             apply_display_power_correction(
@@ -4272,17 +4321,64 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self.config.input_correction_db,
             )[0]
         )
+        ta_bin_width_hz = float(self.config.sample_rate_hz) / max(1, int(self.config.fft_size))
+        ta_effective_rbw_hz = resolve_rbw_hz(self.config.rbw_hz, ta_bin_width_hz)
+        ta_detector_series = SweepController._build_detector_observation_series_core(
+            iq=iq,
+            effective_rbw_hz=ta_effective_rbw_hz,
+            sample_rate_hz=float(self.config.sample_rate_hz),
+        )
+        ta_detector_equivalent_linear = float(
+            apply_detector(ta_detector_series, self.config.sweep_detector_mode)
+        )
+        ta_detector_equivalent_db = 10.0 * np.log10(ta_detector_equivalent_linear + 1e-20)
+        ta_display_detector_equivalent_db = float(
+            apply_display_power_correction(
+                np.asarray([ta_detector_equivalent_db], dtype=float),
+                self.calibration_offset_db,
+                self.config.input_correction_db,
+            )[0]
+        )
         if self.config.sweep_profile_logging:
             print(
                 "TimeAnalyzer "
                 f"value_raw={center_power_db:.6f} "
-                f"value_display={corrected_center_db:.6f} "
+                f"value_display={ta_display_detector_equivalent_db:.6f} "
+                f"value_display_direct={corrected_center_db:.6f} "
                 f"center_freq={int(self.config.center_freq_hz)}Hz "
                 f"rbw={float(self.config.rbw_hz):.1f}Hz"
             )
+        self._log_compare_sa(
+            "TIME",
+            center_freq_hz=int(self.config.center_freq_hz),
+            point_freq_hz=int(self.config.center_freq_hz),
+            point_index=center_index,
+            center_idx=max(0, int(self.config.fft_size) // 2),
+            rbw_hz=float(self.config.rbw_hz) if self.config.rbw_hz is not None else 0.0,
+            fft_size=int(self.config.fft_size),
+            sample_rate_hz=int(self.config.sample_rate_hz),
+            rf_bandwidth_hz=int(self.config.rx_bandwidth_hz),
+            dc_removal="ON",
+            window_len=len(window),
+            capture_len=len(iq),
+            raw_point_power=f"{raw_center_power_linear:.6e}",
+            filtered_point_power=f"{center_power_linear:.6e}",
+            detector_value=f"{ta_detector_equivalent_linear:.6e}",
+            detector_equivalent_sweep=f"{ta_detector_equivalent_linear:.6e}",
+            display_value=f"{ta_display_detector_equivalent_db:.6f}",
+            display_value_sweep_equivalent=f"{ta_display_detector_equivalent_db:.6f}",
+            ta_center_filtered=f"{center_power_linear:.6e}",
+            ta_detector_equivalent=f"{ta_detector_equivalent_linear:.6e}",
+            ta_display_direct=f"{corrected_center_db:.6f}",
+            ta_display_detector_equivalent=f"{ta_display_detector_equivalent_db:.6f}",
+            calibration_offset=f"{self.calibration_offset_db:.2f}",
+            ext_att_db=f"{self.config.ext_att_db:.2f}",
+            int_gain_db=int(self.config.rx_gain_db),
+            ext_gain_db=f"{self.config.ext_gain_db:.2f}",
+        )
 
         idx = int(self._time_analyzer_write_index)
-        self._time_analyzer_trace_db[idx] = corrected_center_db
+        self._time_analyzer_trace_db[idx] = ta_display_detector_equivalent_db
         next_index, reached_right_edge = self._update_sweep_like_write_index(
             idx,
             len(self._time_analyzer_trace_db),
@@ -4384,6 +4480,38 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         callback_total_ms = (time.perf_counter() - callback_start) * 1000.0
         latest_point_result = self.sweep_controller.get_latest_point_result()
+        if latest_point_result is not None:
+            center_match_tolerance_hz = max(1.0, float(self.config.sweep_step_hz) * 0.5)
+            if abs(float(latest_point_result.frequency_hz) - float(self.config.center_freq_hz)) <= center_match_tolerance_hz:
+                display_value = float(
+                    apply_display_power_correction(
+                        np.asarray([latest_point_result.measured_power_db], dtype=float),
+                        self.calibration_offset_db,
+                        self.config.input_correction_db,
+                    )[0]
+                )
+                self._log_compare_sa(
+                    "SWEEP",
+                    center_freq_hz=int(self.config.center_freq_hz),
+                    point_freq_hz=int(latest_point_result.frequency_hz),
+                    point_index=int(latest_point_result.rbw_center_bin_index),
+                    center_idx=max(0, int(self.config.fft_size) // 2),
+                    rbw_hz=float(latest_point_result.effective_rbw_hz),
+                    fft_size=int(self.config.fft_size),
+                    sample_rate_hz=int(self.config.sweep_sample_rate_hz),
+                    rf_bandwidth_hz=int(self.config.sweep_rf_bandwidth_hz),
+                    dc_removal="ON" if latest_point_result.dc_removal_applied else "OFF",
+                    window_len=int(latest_point_result.window_len),
+                    capture_len=int(latest_point_result.capture_samples),
+                    raw_point_power=f"{latest_point_result.raw_center_power_linear:.6e}",
+                    filtered_point_power=f"{latest_point_result.filtered_center_power_linear:.6e}",
+                    detector_value=f"{latest_point_result.measured_power_linear:.6e}",
+                    display_value=f"{display_value:.6f}",
+                    calibration_offset=f"{self.calibration_offset_db:.2f}",
+                    ext_att_db=f"{self.config.ext_att_db:.2f}",
+                    int_gain_db=int(self.config.rx_gain_db),
+                    ext_gain_db=f"{self.config.ext_gain_db:.2f}",
+                )
 
     def closeEvent(self, event) -> None:
         self.timer.stop()
