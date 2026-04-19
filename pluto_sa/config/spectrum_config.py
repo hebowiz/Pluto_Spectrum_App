@@ -55,6 +55,10 @@ class SpectrumConfig:
     sweep_sample_rate_hz: int = 10_000_000
     sweep_rf_bandwidth_hz: int = 20_000_000
 
+    # Time Analyzer settings
+    time_analyzer_sample_rate_hz: int = 2_000_000
+    time_analyzer_rf_bandwidth_hz: int = 2_000_000
+
     def __post_init__(self) -> None:
         if self.analyzer_mode == AnalyzerMode.REALTIME_SA and self.display_span_hz > MAX_DISPLAY_SPAN_HZ:
             self.display_span_hz = MAX_DISPLAY_SPAN_HZ
@@ -65,10 +69,14 @@ class SpectrumConfig:
 
     @property
     def sample_rate_hz(self) -> int:
+        if self.analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+            return int(self.time_analyzer_sample_rate_hz)
         return int(round(self.display_span_hz / (1.0 - 2.0 * self.guard_ratio)))
 
     @property
     def rx_bandwidth_hz(self) -> int:
+        if self.analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+            return int(self.time_analyzer_rf_bandwidth_hz)
         return self.sample_rate_hz
 
     @property

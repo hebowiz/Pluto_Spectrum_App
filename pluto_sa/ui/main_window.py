@@ -35,6 +35,11 @@ MIN_SWEEP_RBW_HZ = 100.0
 MAX_SWEEP_RBW_HZ = 3_000_000.0
 MAX_REALTIME_RBW_HZ = 55_000_000.0
 MAX_REALTIME_FFT_SIZE = 16_384
+MIN_TIME_ANALYZER_SAMPLE_RATE_HZ = 521_000
+MIN_TIME_ANALYZER_FFT_SIZE = 64
+MAX_TIME_ANALYZER_FFT_SIZE = 16_384
+SWEEP_LIKE_FFT_GUARD = 14.0
+SWEEP_LIKE_GUARD_OFFSET_HZ = 300_000.0
 MIN_WIDEBAND_SPAN_HZ = 10_000_000
 MAX_WIDEBAND_SPAN_HZ = 6_000_000_000
 MIN_WIDEBAND_START_HZ = 80_000_000
@@ -45,6 +50,7 @@ WIDEBAND_CHUNK_STEP_HZ = 10_000_000
 WIDEBAND_EDGE_OFFSET_HZ = 5_000_000
 WIDEBAND_LO_SETTLE_US = 200
 WIDEBAND_FLUSH_READS = 5
+TIME_ANALYZER_BUFFER_POINTS = 1000
 MIN_CENTER_FREQ_STEP_MHZ = 0.001
 MAX_CENTER_FREQ_STEP_MHZ = 1_000.0
 MIN_REF_LEVEL_DBM = -100.0
@@ -242,6 +248,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.marker_trace_options = [trace_state.name for trace_state in self.trace_states]
         self.marker_items: list[tuple[pg.ScatterPlotItem, pg.TextItem]] = []
         self.sweep_progress_item: pg.ScatterPlotItem | None = None
+        self.time_analyzer_progress_item: pg.ScatterPlotItem | None = None
         self.marker_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_menu_buttons: list[QtWidgets.QPushButton] = []
@@ -264,6 +271,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._wideband_chunk_config: SpectrumConfig | None = None
         self._wideband_chunk_processor: SpectrumProcessor | None = None
         self._wideband_runtime_state: WidebandRuntimeState | None = None
+        self._time_analyzer_time_axis_s: np.ndarray | None = None
+        self._time_analyzer_trace_db: np.ndarray | None = None
+        self._time_analyzer_write_index: int = 0
         self.persistence_enabled = False
         self.persistence_image: pg.ImageItem | None = None
         self.persistence_histogram = np.zeros((PERSISTENCE_AMPLITUDE_BINS, 0), dtype=np.float32)
@@ -298,6 +308,79 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _is_wideband_mode(self) -> bool:
         return self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA
+
+    def _is_time_analyzer_mode(self) -> bool:
+        return self.config.analyzer_mode == AnalyzerMode.TIME_ANALYZER
+
+    def _initialize_time_analyzer_runtime(self) -> None:
+        point_count = max(64, int(TIME_ANALYZER_BUFFER_POINTS))
+        interval_ms = max(1, int(self._current_timer_interval_ms()))
+        dt_s = interval_ms / 1000.0
+        self._time_analyzer_time_axis_s = np.arange(point_count, dtype=float) * dt_s
+        self._time_analyzer_trace_db = np.full(point_count, self.y_min, dtype=float)
+        self._time_analyzer_write_index = 0
+
+    def _resolve_sweep_like_capture_from_rbw(self, rbw_hz: float | None) -> tuple[float, int, int, float]:
+        resolved_rbw_hz = self._clip_sweep_rbw(rbw_hz)
+        target_bw_hz = int(max(4.0 * resolved_rbw_hz, float(MIN_TIME_ANALYZER_SAMPLE_RATE_HZ)))
+        fft_rbw = (8.0 * target_bw_hz) / resolved_rbw_hz
+        fft_guard = (SWEEP_LIKE_FFT_GUARD * target_bw_hz) / SWEEP_LIKE_GUARD_OFFSET_HZ
+        required_fft = int(np.ceil(max(fft_rbw, fft_guard)))
+        fft_size = MIN_TIME_ANALYZER_FFT_SIZE
+        while fft_size < required_fft and fft_size < MAX_TIME_ANALYZER_FFT_SIZE:
+            fft_size *= 2
+        fft_size = self._clamp_int(
+            int(fft_size),
+            MIN_TIME_ANALYZER_FFT_SIZE,
+            MAX_TIME_ANALYZER_FFT_SIZE,
+        )
+        bin_width_hz = target_bw_hz / float(fft_size)
+        return resolved_rbw_hz, target_bw_hz, fft_size, bin_width_hz
+
+    def _resolve_time_analyzer_capture_from_rbw(self) -> tuple[float, int, int, float]:
+        return self._resolve_sweep_like_capture_from_rbw(self.config.rbw_hz)
+
+    def _apply_sweep_rbw_driven_capture_settings(self) -> None:
+        resolved_rbw_hz, target_bw_hz, fft_size, bin_width_hz = (
+            self._resolve_sweep_like_capture_from_rbw(self.config.rbw_hz)
+        )
+        self.config.rbw_hz = float(resolved_rbw_hz)
+        self.config.sweep_sample_rate_hz = int(target_bw_hz)
+        self.config.sweep_rf_bandwidth_hz = int(target_bw_hz)
+        self.config.fft_size = int(fft_size)
+        self.config.sweep_capture_samples_override = int(fft_size)
+        self.config.__post_init__()
+        if self.config.sweep_profile_logging:
+            print(
+                "SweepConfig "
+                f"RBW={resolved_rbw_hz:.1f}Hz "
+                f"BW={target_bw_hz}Hz "
+                f"SR={target_bw_hz}Hz "
+                f"FFT={fft_size} "
+                f"bin_width={bin_width_hz:.1f}Hz"
+            )
+
+    def _apply_time_analyzer_rbw_driven_capture_settings(self) -> None:
+        resolved_rbw_hz, target_bw_hz, fft_size, bin_width_hz = (
+            self._resolve_time_analyzer_capture_from_rbw()
+        )
+        self.config.rbw_hz = float(resolved_rbw_hz)
+        self.config.time_analyzer_sample_rate_hz = int(target_bw_hz)
+        self.config.time_analyzer_rf_bandwidth_hz = int(target_bw_hz)
+        self.config.fft_size = int(fft_size)
+        self.config.__post_init__()
+        self.receiver.reconfigure_span(self.config)
+        self.processor = SpectrumProcessor(self.config)
+        self.processor.update_center_frequency(self.config.center_freq_hz)
+        if self.config.sweep_profile_logging:
+            print(
+                "TimeAnalyzerConfig "
+                f"RBW={resolved_rbw_hz:.1f}Hz "
+                f"BW={target_bw_hz}Hz "
+                f"SR={target_bw_hz}Hz "
+                f"FFT={fft_size} "
+                f"bin_width={bin_width_hz:.1f}Hz"
+            )
 
     def _get_wideband_start_stop_hz(self) -> tuple[int, int]:
         if (
@@ -567,7 +650,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
 
     def _apply_analyzer_mode_ui_constraints(self) -> None:
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.TIME_ANALYZER):
             self._saved_realtime_graph_view_mode = self.graph_view_mode
             self.graph_view_mode = GRAPH_VIEW_SPECTRUM_ONLY
         elif self.graph_view_mode == GRAPH_VIEW_SPECTRUM_ONLY:
@@ -598,19 +681,28 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.config.analyzer_mode = analyzer_mode
             if analyzer_mode == AnalyzerMode.SWEEP_SA:
                 self.config.rbw_hz = self._clip_sweep_rbw(self.config.rbw_hz)
+                self._apply_sweep_rbw_driven_capture_settings()
                 self.sweep_state = SWEEP_STATE_RUNNING
             elif analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
                 self.config.fft_size = min(int(self.config.fft_size), MAX_REALTIME_FFT_SIZE)
                 if self.config.display_span_hz < MIN_WIDEBAND_SPAN_HZ:
                     self.config.display_span_hz = MIN_WIDEBAND_SPAN_HZ
                 self.sweep_state = SWEEP_STATE_RUNNING
-            elif previous_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
+            elif analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+                self.sweep_state = SWEEP_STATE_RUNNING
+            elif previous_mode in (
+                AnalyzerMode.SWEEP_SA,
+                AnalyzerMode.WIDEBAND_REALTIME_SA,
+                AnalyzerMode.TIME_ANALYZER,
+            ):
                 self._apply_realtime_span_limit()
             if analyzer_mode == AnalyzerMode.REALTIME_SA:
                 self.config.fft_size = min(int(self.config.fft_size), MAX_REALTIME_FFT_SIZE)
             self._reset_measurement_state_for_mode_change()
             if analyzer_mode == AnalyzerMode.REALTIME_SA:
                 self._rebuild_realtime_runtime_after_mode_change()
+            elif analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+                self._rebuild_time_analyzer_runtime_after_mode_change()
             self._refresh_sweep_time_estimate()
             self._apply_analyzer_mode_ui_constraints()
             self._refresh_status_label()
@@ -628,6 +720,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._invalidate_wideband_runtime()
                 self._reset_plot_state()
                 self._start_wideband_continuous()
+            elif analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+                self._start_time_analyzer_continuous()
             else:
                 self._start_realtime_continuous()
         finally:
@@ -822,6 +916,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.sweep_progress_item.setVisible(False)
         self.spectrum_plot.addItem(self.sweep_progress_item)
+        self.time_analyzer_progress_item = pg.ScatterPlotItem(
+            symbol="o",
+            size=9,
+            pen=pg.mkPen("w"),
+            brush=pg.mkBrush("w"),
+        )
+        self.time_analyzer_progress_item.setVisible(False)
+        self.spectrum_plot.addItem(self.time_analyzer_progress_item)
 
         marker_colors = ["r", "c", "m", "g"]
         for index, color in enumerate(marker_colors):
@@ -1170,6 +1272,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.REALTIME_SA,
             AnalyzerMode.WIDEBAND_REALTIME_SA,
             AnalyzerMode.SWEEP_SA,
+            AnalyzerMode.TIME_ANALYZER,
         ):
             button = self._make_control_button(mode.value)
             button.clicked.connect(
@@ -1771,6 +1874,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return [(value, f"{value:.{precision}f}") for value in tick_values]
 
     def _update_fixed_ticks(self) -> None:
+        if self._is_time_analyzer_mode():
+            axis = self._time_analyzer_time_axis_s
+            if axis is None or len(axis) == 0:
+                axis = np.array([0.0, 1.0], dtype=float)
+            x_values = np.linspace(float(axis[0]), float(axis[-1]), 11)
+            x_ticks = [(value, f"{value:.2f}") for value in x_values]
+            y_ticks = [
+                (value, f"{value:.0f}") for value in np.linspace(self.y_min, self.y_max, 11)
+            ]
+            self.spectrum_plot.getAxis("bottom").setTicks([x_ticks])
+            self.spectrum_plot.getAxis("left").setTicks([y_ticks])
+            self.waterfall_plot.getAxis("bottom").setTicks([x_ticks])
+            return
+
         start_hz, stop_hz = self._resolve_display_start_stop_hz()
         x_ticks = self._build_frequency_ticks_ghz(start_hz, stop_hz)
         y_ticks = [
@@ -1791,6 +1908,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.waterfall_plot.getAxis("left").setTicks([y_ticks])
 
     def _get_active_waterfall_freq_axis_ghz(self) -> np.ndarray:
+        if self._is_time_analyzer_mode():
+            if self._time_analyzer_time_axis_s is not None:
+                return self._time_analyzer_time_axis_s
+            return np.array([0.0, 1.0], dtype=float)
         if self._is_wideband_mode():
             return self._wideband_waterfall_display_axis_ghz()
         return self.processor.get_decimated_display_freq_axis_ghz()
@@ -1960,6 +2081,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
+    def _start_time_analyzer_continuous(self) -> None:
+        self.sweep_state = SWEEP_STATE_RUNNING
+        self.sweep_controller.stop()
+        self.receiver.stop()
+        self._restart_timer_for_current_mode()
+        self._update_continuous_button()
+
     def _start_wideband_continuous(self) -> None:
         self.sweep_state = SWEEP_STATE_RUNNING
         self.sweep_controller.stop()
@@ -1984,6 +2112,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.processor.update_span_related(self.config)
         self.processor.update_center_frequency(self.config.center_freq_hz)
         self._reset_plot_state()
+
+    def _rebuild_time_analyzer_runtime_after_mode_change(self) -> None:
+        self._apply_time_analyzer_rbw_driven_capture_settings()
+        self.receiver.retune_lo(self.config.center_freq_hz)
+        self._initialize_time_analyzer_runtime()
+        self._reset_plot_state()
+
+    def _update_plot_axis_labels_for_mode(self) -> None:
+        if self._is_time_analyzer_mode():
+            self.spectrum_plot.setLabel("bottom", "Time [s]")
+            self.spectrum_plot.setLabel("left", "Power [dB]")
+        else:
+            self.spectrum_plot.setLabel("bottom", "Frequency [GHz]")
+            self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
 
     def _clear_start_stop_display_mode(self) -> None:
         self.config.use_start_stop_freq = False
@@ -2124,6 +2266,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self._is_wideband_mode():
                 self._invalidate_wideband_runtime()
             self._reset_sweep_display_and_restore_state(previous_sweep_state)
+        elif self._is_time_analyzer_mode():
+            self.receiver.retune_lo(self.config.center_freq_hz)
+            self._reset_plot_state()
+            if self.sweep_state == SWEEP_STATE_RUNNING:
+                self._start_time_analyzer_continuous()
         else:
             self.receiver.retune_lo(self.config.center_freq_hz)
             self.processor.update_center_frequency(self.config.center_freq_hz)
@@ -2131,6 +2278,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_freq_start_stop_clicked(self) -> None:
+        if self._is_time_analyzer_mode():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Start/Stop",
+                "Time Analyzer mode does not use Start/Stop.",
+            )
+            return
         previous_sweep_state = self._current_sweep_state()
         if (
             self.config.use_start_stop_freq
@@ -2354,6 +2508,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _on_rbw_clicked(self) -> None:
         previous_state = self._current_sweep_state()
         is_wideband_mode = self._is_wideband_mode()
+        is_time_analyzer_mode = self._is_time_analyzer_mode()
+        is_sweep_mode = self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
         current_value = 0.0 if self.config.rbw_hz is None else self.config.rbw_hz / 1e3
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
@@ -2368,12 +2524,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         rbw_hz = None if value <= 0.0 else float(value * 1e3)
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.TIME_ANALYZER):
             rbw_hz = self._clip_sweep_rbw(rbw_hz)
         else:
             rbw_hz = self._clip_realtime_rbw(rbw_hz)
         self.config.rbw_hz = rbw_hz
-        self._rebuild_processor_only()
+        if is_time_analyzer_mode:
+            self._apply_time_analyzer_rbw_driven_capture_settings()
+        elif is_sweep_mode:
+            self._apply_sweep_rbw_driven_capture_settings()
+            self.receiver.invalidate_sweep_configuration()
+            self._reset_sweep_display_and_restore_state(previous_state)
+        else:
+            self._rebuild_processor_only()
         if is_wideband_mode:
             self.timer.stop()
             self._invalidate_wideband_runtime()
@@ -2393,6 +2556,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return min(max(rbw_hz, 0.0), MAX_REALTIME_RBW_HZ)
 
     def _select_fft_size(self, fft_size: int) -> None:
+        if self._is_time_analyzer_mode():
+            self._refresh_status_label()
+            return
         previous_state = self._current_sweep_state()
         is_wideband_mode = self._is_wideband_mode()
         if self.config.analyzer_mode in (
@@ -2507,6 +2673,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self._is_wideband_mode():
             self._start_wideband_continuous()
             return
+        if self._is_time_analyzer_mode():
+            self._start_time_analyzer_continuous()
+            return
 
         self.sweep_state = SWEEP_STATE_RUNNING
         self.receiver.start()
@@ -2521,6 +2690,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         elif self._is_wideband_mode():
             self.receiver.stop()
             self._invalidate_wideband_runtime()
+        elif self._is_time_analyzer_mode():
+            self.receiver.stop()
         else:
             self.receiver.start()
         self._restart_timer_for_current_mode()
@@ -2543,6 +2714,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._clear_persistence()
         if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
             self._restore_sweep_state(previous_state)
+        elif self._is_time_analyzer_mode():
+            if previous_state == SWEEP_STATE_RUNNING:
+                self._start_time_analyzer_continuous()
+            elif previous_state == SWEEP_STATE_SINGLE:
+                self.sweep_state = SWEEP_STATE_STOPPED
+                self.timer.stop()
+                self._update_continuous_button()
         self._update_continuous_button()
         self._refresh_status_label()
 
@@ -2655,7 +2833,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_trace_menu_button(trace_index)
 
     def _update_graph_view_controls(self) -> None:
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.TIME_ANALYZER):
             self.graph_view_button.setText("Graph View\nSpectrum Only")
             self.graph_view_button.setEnabled(False)
         else:
@@ -2889,6 +3067,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _update_realtime_sa_controls(self) -> None:
         self.fft_size_button.setText(f"FFT size: {self.config.fft_size}")
+        self.fft_size_button.setEnabled(not self._is_time_analyzer_mode())
         if self.config.analyzer_mode not in (
             AnalyzerMode.REALTIME_SA,
             AnalyzerMode.WIDEBAND_REALTIME_SA,
@@ -2946,6 +3125,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trace_state.average_power = None
 
     def _get_active_spectrum_freq_axis_ghz(self) -> np.ndarray:
+        if self._is_time_analyzer_mode():
+            if self._time_analyzer_time_axis_s is not None:
+                return self._time_analyzer_time_axis_s
+            return np.array([0.0, 1.0], dtype=float)
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             if self._last_display_freq_axis_ghz is not None:
                 return self._last_display_freq_axis_ghz
@@ -2990,6 +3173,50 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
         self.sweep_progress_item.setData([], [])
         self.sweep_progress_item.setVisible(False)
+
+    def _hide_time_analyzer_progress_symbol(self) -> None:
+        if self.time_analyzer_progress_item is None:
+            return
+        self.time_analyzer_progress_item.setData([], [])
+        self.time_analyzer_progress_item.setVisible(False)
+
+    def _update_time_analyzer_progress_symbol(self, point_index: int | None = None) -> None:
+        if (
+            self.time_analyzer_progress_item is None
+            or not self._is_time_analyzer_mode()
+            or self._last_display_freq_axis_ghz is None
+        ):
+            self._hide_time_analyzer_progress_symbol()
+            return
+
+        trace_state = self._active_sweep_progress_trace_state()
+        if trace_state is None or trace_state.display_db is None:
+            self._hide_time_analyzer_progress_symbol()
+            return
+
+        if point_index is None:
+            point_index = int(self._time_analyzer_write_index)
+        point_index = int(point_index)
+        if point_index < 0 or point_index >= len(self._last_display_freq_axis_ghz):
+            self._hide_time_analyzer_progress_symbol()
+            return
+        if point_index >= len(trace_state.display_db):
+            self._hide_time_analyzer_progress_symbol()
+            return
+
+        marker_y = float(trace_state.display_db[point_index])
+        if not np.isfinite(marker_y):
+            self._hide_time_analyzer_progress_symbol()
+            return
+
+        color = QtGui.QColor(trace_state.color_hex)
+        self.time_analyzer_progress_item.setPen(pg.mkPen(color))
+        self.time_analyzer_progress_item.setBrush(pg.mkBrush(color))
+        self.time_analyzer_progress_item.setData(
+            [self._last_display_freq_axis_ghz[point_index]],
+            [marker_y],
+        )
+        self.time_analyzer_progress_item.setVisible(True)
 
     def _update_sweep_progress_symbol(self, frame_result) -> None:
         if (
@@ -3449,7 +3676,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.config.update_interval_ms > 0
             else 1.0 / 60.0
         )
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+        if self._is_time_analyzer_mode():
+            self._initialize_time_analyzer_runtime()
+            if self._time_analyzer_time_axis_s is None:
+                freq_axis_display_ghz = np.array([0.0, 1.0], dtype=float)
+            else:
+                freq_axis_display_ghz = self._time_analyzer_time_axis_s
+        elif self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             freq_axis_display_ghz = self.sweep_controller.get_sweep_frequency_axis_hz() / 1e9
         elif self._is_wideband_mode():
             if self._wideband_runtime_state is not None:
@@ -3471,6 +3704,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         # Store the active axis before tick generation so Sweep SA reticks immediately.
         self._last_display_freq_axis_ghz = freq_axis_display_ghz
+        self._update_plot_axis_labels_for_mode()
         self._apply_display_scale()
         self._last_display_power_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
         self._last_current_display_db = self._last_display_power_db.copy()
@@ -3480,6 +3714,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trace_state.display_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
         self._update_trace_curves()
         self._hide_sweep_progress_symbol()
+        if self._is_time_analyzer_mode():
+            self._update_time_analyzer_progress_symbol(0)
+        else:
+            self._hide_time_analyzer_progress_symbol()
         self._update_all_marker_control_states()
         self._update_marker_items()
 
@@ -3648,14 +3886,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 f"Actual Swp: {self.actual_sweep_time_s:.1f} s"
             )
         else:
-            realtime_suffix = self._make_realtime_status_suffix()
             line1 = (
                 f"{freq_label_1}: {freq_value_1}   "
                 f"{freq_label_2}: {freq_value_2}   "
-                f"RBW: {rbw_text}   "
-                f"FFT: {self.config.fft_size}   "
-                f"Bin Width: {self.config.bin_width_hz:.1f} Hz"
-                f"{realtime_suffix}"
+                f"RBW: {rbw_text}"
             )
         line2 = (
             f"Ref Level: {self.config.ref_level_dbm:.0f} dBm   "
@@ -3663,8 +3897,44 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"Ext ATT: {self.config.ext_att_db:.0f} dB   "
             f"Ext Gain: {self.config.ext_gain_db:.0f} dB"
         )
-        line3 = f"Detector: {self.config.sweep_detector_mode}"
-        return f"{line1}\n{line2}\n{line3}"
+        line3 = self._make_fft_info_status_line()
+        line4 = f"Detector: {self.config.sweep_detector_mode}"
+        return f"{line1}\n{line2}\n{line3}\n{line4}"
+
+    def _make_fft_info_status_line(self) -> str:
+        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+            sample_rate_hz = float(self.config.sweep_sample_rate_hz)
+            rf_bandwidth_hz = float(self.config.sweep_rf_bandwidth_hz)
+            bin_width_hz = sample_rate_hz / max(1, int(self.config.fft_size))
+        else:
+            sample_rate_hz = float(self.config.sample_rate_hz)
+            rf_bandwidth_hz = float(self.config.rx_bandwidth_hz)
+            bin_width_hz = float(self.config.bin_width_hz)
+
+        base_text = (
+            f"FFT: {self.config.fft_size}   "
+            f"Bin Width: {self._format_frequency_value_hz_compact(bin_width_hz)}   "
+            f"RF BW: {self._format_frequency_value_hz_compact(rf_bandwidth_hz)}   "
+            f"Samp Rate: {self._format_frequency_value_hz_compact(sample_rate_hz)}"
+        )
+
+        if self.config.analyzer_mode not in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        ):
+            return base_text
+
+        fps_value = self._estimate_realtime_fps()
+        if fps_value > 0.0:
+            fps_int = int(round(fps_value))
+            estimated_time_sec = int(round(self.config.waterfall_history / fps_value))
+            history_text = f"History: {self.config.waterfall_history} ({estimated_time_sec}s)"
+            fps_text = f"FPS: {fps_int}"
+        else:
+            fps_text = "FPS: --"
+            history_text = f"History: {self.config.waterfall_history}"
+
+        return f"{base_text}   {fps_text}   {history_text}"
 
     def _make_realtime_status_suffix(self) -> str:
         if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
@@ -3725,7 +3995,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return f"{value_hz / 1_000:.1f} kHz"
         return f"{value_hz:.0f} Hz"
 
+    def _format_frequency_value_hz_compact(self, value_hz: float) -> str:
+        if value_hz >= 1_000_000:
+            return f"{value_hz / 1_000_000:.2f} MHz"
+        if value_hz >= 1_000:
+            return f"{value_hz / 1_000:.2f} kHz"
+        return f"{value_hz:.0f} Hz"
+
     def update_spectrum(self) -> None:
+        if self._is_time_analyzer_mode():
+            self._update_time_analyzer_spectrum()
+            return
+        self._hide_time_analyzer_progress_symbol()
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             self._update_sweep_spectrum()
             return
@@ -3829,6 +4110,70 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
             self.frame_count_interval = 0
             self.last_report_time = now
+
+    def _update_time_analyzer_spectrum(self) -> None:
+        if self._time_analyzer_time_axis_s is None or self._time_analyzer_trace_db is None:
+            self._initialize_time_analyzer_runtime()
+            self._reset_plot_state()
+        if self._time_analyzer_time_axis_s is None or self._time_analyzer_trace_db is None:
+            return
+
+        clipped_rbw = self._clip_sweep_rbw(self.config.rbw_hz)
+        if self.config.rbw_hz != clipped_rbw:
+            self.config.rbw_hz = clipped_rbw
+            self._apply_time_analyzer_rbw_driven_capture_settings()
+
+        capture_size = int(self.config.fft_size)
+        iq = self.receiver.capture_block(capture_size)
+        if iq is None or len(iq) == 0:
+            return
+
+        power_linear_full = self.processor.compute_filtered_power(iq)
+        power_linear_display = self.processor.extract_display_spectrum(power_linear_full)
+        if len(power_linear_display) == 0:
+            return
+        center_index = len(power_linear_display) // 2
+        center_power_linear = float(power_linear_display[center_index])
+        center_power_db = 10.0 * np.log10(center_power_linear + 1e-20)
+        corrected_center_db = float(
+            apply_display_power_correction(
+                np.asarray([center_power_db], dtype=float),
+                self.calibration_offset_db,
+                self.config.input_correction_db,
+            )[0]
+        )
+        if self.config.sweep_profile_logging:
+            print(
+                "TimeAnalyzer "
+                f"value_raw={center_power_db:.6f} "
+                f"value_display={corrected_center_db:.6f} "
+                f"center_freq={int(self.config.center_freq_hz)}Hz "
+                f"rbw={float(self.config.rbw_hz):.1f}Hz"
+            )
+
+        idx = int(self._time_analyzer_write_index)
+        self._time_analyzer_trace_db[idx] = corrected_center_db
+        if self.sweep_state == SWEEP_STATE_SINGLE:
+            if idx >= len(self._time_analyzer_trace_db) - 1:
+                self._time_analyzer_write_index = idx
+            else:
+                self._time_analyzer_write_index = idx + 1
+        else:
+            self._time_analyzer_write_index = (idx + 1) % len(self._time_analyzer_trace_db)
+
+        self._last_display_freq_axis_ghz = self._time_analyzer_time_axis_s.copy()
+        self._last_current_display_db = self._time_analyzer_trace_db.copy()
+        self._last_display_power_db = self._time_analyzer_trace_db.copy()
+        self._update_wideband_traces_from_display_db(self._time_analyzer_trace_db)
+        self._update_trace_curves()
+        self._hide_sweep_progress_symbol()
+        self._update_time_analyzer_progress_symbol(idx)
+
+        if self.sweep_state == SWEEP_STATE_SINGLE:
+            if idx >= len(self._time_analyzer_trace_db) - 1:
+                self.timer.stop()
+                self.sweep_state = SWEEP_STATE_STOPPED
+                self._update_continuous_button()
 
     def _update_sweep_spectrum(self) -> None:
         callback_start = time.perf_counter()
