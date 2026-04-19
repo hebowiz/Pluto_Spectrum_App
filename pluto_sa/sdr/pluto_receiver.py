@@ -22,6 +22,7 @@ class PlutoReceiver:
         self._stop_event = threading.Event()
         self._rx_thread = None
         self._sweep_config_signature: tuple[int, int, int] | None = None
+        self._fast_capture_size: int | None = None
 
         self.received_samples_total = 0
         self._configure_sdr(config)
@@ -30,6 +31,7 @@ class PlutoReceiver:
     def _configure_sdr(self, config: SpectrumConfig) -> None:
         self.config = config
         self._sweep_config_signature = None
+        self._fast_capture_size = None
         with self._sdr_lock:
             self.sdr.rx_lo = config.center_freq_hz
             self.sdr.sample_rate = config.sample_rate_hz
@@ -101,6 +103,7 @@ class PlutoReceiver:
     def reconfigure_span(self, config: SpectrumConfig) -> None:
         with self._iq_lock:
             self._sweep_config_signature = None
+            self._fast_capture_size = None
             with self._sdr_lock:
                 self.config = config
                 self.sdr.sample_rate = config.sample_rate_hz
@@ -122,6 +125,7 @@ class PlutoReceiver:
         )
         with self._iq_lock:
             self.config = config
+            self._fast_capture_size = None
             if self._sweep_config_signature == sweep_signature:
                 return
             with self._sdr_lock:
@@ -170,12 +174,53 @@ class PlutoReceiver:
 
         return iq
 
+    def prepare_fast_capture(self, num_samples: int) -> None:
+        """Preconfigure SDR RX block size for High Speed TA fast capture path."""
+        capture_size = max(1, int(num_samples))
+        with self._sdr_lock:
+            if self.sdr.rx_buffer_size != capture_size:
+                self.sdr.rx_buffer_size = capture_size
+            self._fast_capture_size = capture_size
+
+    def capture_block_fast(self, num_samples: int) -> np.ndarray:
+        """Capture one IQ block for High Speed TA with reduced copy/lock overhead."""
+        capture_size = max(1, int(num_samples))
+        with self._sdr_lock:
+            if self._fast_capture_size != capture_size:
+                if self.sdr.rx_buffer_size != capture_size:
+                    self.sdr.rx_buffer_size = capture_size
+                self._fast_capture_size = capture_size
+
+            iq = np.empty(capture_size, dtype=np.complex64)
+            filled = 0
+            while filled < capture_size:
+                chunk = self.sdr.rx()
+                if chunk is None:
+                    break
+                chunk_len = int(len(chunk))
+                if chunk_len <= 0:
+                    break
+                chunk_arr = (
+                    chunk
+                    if chunk.dtype == np.complex64
+                    else chunk.astype(np.complex64, copy=False)
+                )
+                copy_len = min(chunk_len, capture_size - filled)
+                iq[filled : filled + copy_len] = chunk_arr[:copy_len]
+                filled += copy_len
+
+        self.received_samples_total += filled
+        if filled >= capture_size:
+            return iq
+        return iq[:filled]
+
     def set_gain_db(self, gain_db: int) -> None:
         with self._iq_lock:
             with self._sdr_lock:
                 self.sdr.rx_hardwaregain_chan0 = gain_db
             self.config.rx_gain_db = gain_db
             self._sweep_config_signature = None
+            self._fast_capture_size = None
 
     def reconfigure(self, config: SpectrumConfig) -> None:
         was_running = self._rx_thread is not None and self._rx_thread.is_alive()
