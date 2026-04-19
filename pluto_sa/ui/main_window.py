@@ -424,6 +424,28 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         order = np.argsort(x_valid, kind="stable")
         return x_valid[order], y_valid[order]
 
+    def _publish_time_analyzer_accumulated_sweep(self) -> None:
+        ta_plot_x, ta_plot_y = self._compose_time_analyzer_plot_arrays()
+        self._last_display_freq_axis_ghz = ta_plot_x
+        self._last_current_display_db = ta_plot_y
+        self._last_display_power_db = ta_plot_y
+        self._update_wideband_traces_from_display_db(ta_plot_y)
+        self._update_trace_curves()
+        self._update_marker_items()
+        self._hide_time_analyzer_progress_symbol()
+        if self.config.sweep_profile_logging:
+            if len(ta_plot_x) == 0 or len(ta_plot_y) == 0:
+                print("TAPlot valid_count=0")
+            else:
+                print(
+                    "TAPlot "
+                    f"valid_count={len(ta_plot_x)} "
+                    f"x_min={float(np.min(ta_plot_x)):.6f} "
+                    f"x_max={float(np.max(ta_plot_x)):.6f} "
+                    f"y_min={float(np.min(ta_plot_y)):.6f} "
+                    f"y_max={float(np.max(ta_plot_y)):.6f}"
+                )
+
     def _resolve_sweep_like_capture_from_rbw(self, rbw_hz: float | None) -> tuple[float, int, int, float]:
         resolved_rbw_hz = self._clip_sweep_rbw(rbw_hz)
         target_bw_hz = int(max(4.0 * resolved_rbw_hz, float(MIN_TIME_ANALYZER_SAMPLE_RATE_HZ)))
@@ -4582,11 +4604,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if iq is None or len(iq) == 0:
             return
         sample_timestamp = time.perf_counter()
+        self._hide_time_analyzer_progress_symbol()
         if self._time_analyzer_discard_samples_remaining > 0:
             self._time_analyzer_discard_samples_remaining -= 1
             self._time_analyzer_sweep_start_timestamp = sample_timestamp
             self._hide_sweep_progress_symbol()
-            self._hide_time_analyzer_progress_symbol()
             return
 
         time_span_s = self._time_analyzer_time_span_s()
@@ -4600,12 +4622,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._time_analyzer_sweep_start_timestamp = sample_timestamp
             elapsed_sec = max(0.0, sample_timestamp - self._time_analyzer_sweep_start_timestamp)
             if elapsed_sec > time_span_s:
+                # Finalize and render the completed sweep once.
                 self._finalize_time_analyzer_sweep_stats()
+                self._publish_time_analyzer_accumulated_sweep()
                 if self.sweep_state == SWEEP_STATE_SINGLE:
                     if self._sweep_like_suppress_progress_until_first_complete:
                         self._sweep_like_suppress_progress_until_first_complete = False
                     self._hide_sweep_progress_symbol()
-                    self._hide_time_analyzer_progress_symbol()
                     self._finish_single_sweep_like()
                     return
                 # Continuous mode uses fixed time window; restart from 0 s.
@@ -4709,44 +4732,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._time_analyzer_sweep_sample_count += 1
         if idx < (len(self._time_analyzer_trace_db) - 1):
             self._time_analyzer_write_index = idx + 1
-
-        ta_plot_x, ta_plot_y = self._compose_time_analyzer_plot_arrays()
-        self._last_display_freq_axis_ghz = ta_plot_x
-        self._last_current_display_db = ta_plot_y
-        self._last_display_power_db = ta_plot_y
-        self._update_wideband_traces_from_display_db(ta_plot_y)
-        self._update_trace_curves()
-        if self.config.sweep_profile_logging:
-            print("TAOrder stage=trace_setdata_done")
-            print("TAOrder stage=marker_update_start")
-        self._update_marker_items()
-        if self.config.sweep_profile_logging:
-            print("TAOrder stage=marker_update_done")
-        if self.config.sweep_profile_logging:
-            if len(ta_plot_x) == 0 or len(ta_plot_y) == 0:
-                print("TAPlot valid_count=0")
-            else:
-                print(
-                    "TAPlot "
-                    f"valid_count={len(ta_plot_x)} "
-                    f"x_min={float(np.min(ta_plot_x)):.6f} "
-                    f"x_max={float(np.max(ta_plot_x)):.6f} "
-                    f"y_min={float(np.min(ta_plot_y)):.6f} "
-                    f"y_max={float(np.max(ta_plot_y)):.6f}"
-                )
         self._hide_sweep_progress_symbol()
-        if wrapped or self._sweep_like_suppress_progress_until_first_complete:
-            self._hide_time_analyzer_progress_symbol()
-        else:
-            self._update_time_analyzer_progress_symbol(idx)
-
-        if self.sweep_state == SWEEP_STATE_SINGLE:
-            if elapsed_sec >= time_span_s:
-                self._finalize_time_analyzer_sweep_stats()
-                if self._sweep_like_suppress_progress_until_first_complete:
-                    self._sweep_like_suppress_progress_until_first_complete = False
-                self._finish_single_sweep_like()
-        elif wrapped and self._sweep_like_suppress_progress_until_first_complete:
+        # No per-sample drawing in TA; render only when one sweep is complete.
+        if wrapped and self._sweep_like_suppress_progress_until_first_complete:
             self._sweep_like_suppress_progress_until_first_complete = False
 
     def _update_sweep_spectrum(self) -> None:
