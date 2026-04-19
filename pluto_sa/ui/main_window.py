@@ -51,6 +51,7 @@ WIDEBAND_EDGE_OFFSET_HZ = 5_000_000
 WIDEBAND_LO_SETTLE_US = 200
 WIDEBAND_FLUSH_READS = 5
 TIME_ANALYZER_BUFFER_POINTS = 1000
+TIME_ANALYZER_WARMUP_DISCARD_COUNT = 5
 MIN_CENTER_FREQ_STEP_MHZ = 0.001
 MAX_CENTER_FREQ_STEP_MHZ = 1_000.0
 MIN_REF_LEVEL_DBM = -100.0
@@ -277,6 +278,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._time_analyzer_time_axis_s: np.ndarray | None = None
         self._time_analyzer_trace_db: np.ndarray | None = None
         self._time_analyzer_write_index: int = 0
+        self._time_analyzer_discard_samples_remaining: int = 0
         self.persistence_enabled = False
         self.persistence_image: pg.ImageItem | None = None
         self.persistence_histogram = np.zeros((PERSISTENCE_AMPLITUDE_BINS, 0), dtype=np.float32)
@@ -322,6 +324,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._time_analyzer_time_axis_s = np.arange(point_count, dtype=float) * dt_s
         self._time_analyzer_trace_db = np.full(point_count, self.y_min, dtype=float)
         self._time_analyzer_write_index = 0
+        self._time_analyzer_discard_samples_remaining = int(TIME_ANALYZER_WARMUP_DISCARD_COUNT)
 
     def _resolve_sweep_like_capture_from_rbw(self, rbw_hz: float | None) -> tuple[float, int, int, float]:
         resolved_rbw_hz = self._clip_sweep_rbw(rbw_hz)
@@ -371,6 +374,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.time_analyzer_sample_rate_hz = int(target_bw_hz)
         self.config.time_analyzer_rf_bandwidth_hz = int(target_bw_hz)
         self.config.fft_size = int(fft_size)
+        self._time_analyzer_discard_samples_remaining = int(TIME_ANALYZER_WARMUP_DISCARD_COUNT)
         self.config.__post_init__()
         self.receiver.reconfigure_span(self.config)
         self.processor = SpectrumProcessor(self.config)
@@ -3353,8 +3357,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             controls["frequency"].setText(f"Time\n{marker_state.time_sec:.3f} s")
             controls["step"].setText(f"Step\n{marker_state.time_step_sec:.3f} s")
         else:
-            controls["frequency"].setText("Frequency")
-            controls["step"].setText("Step")
+            controls["frequency"].setText(
+                f"Frequency\n{(marker_state.frequency_hz / 1e6):.3f} MHz"
+            )
+            controls["step"].setText(
+                f"Step\n{(marker_state.step_hz / 1e6):.3f} MHz"
+            )
 
         manual_move_enabled = not marker_state.continuous_peak_enabled
         selected_trace_db = self._select_marker_trace_db(marker_state)
@@ -4243,6 +4251,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         capture_size = int(self.config.fft_size)
         iq = self.receiver.capture_block(capture_size)
         if iq is None or len(iq) == 0:
+            return
+        if self._time_analyzer_discard_samples_remaining > 0:
+            self._time_analyzer_discard_samples_remaining -= 1
+            self._hide_sweep_progress_symbol()
+            self._hide_time_analyzer_progress_symbol()
             return
 
         power_linear_full = self.processor.compute_filtered_power(iq)
