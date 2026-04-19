@@ -135,6 +135,8 @@ class MarkerState:
     trace_name: str = "Trace1"
     frequency_hz: int = 2_440_000_000
     step_hz: int = 1_000_000
+    time_sec: float = 0.0
+    time_step_sec: float = 1.0
     continuous_peak_enabled: bool = False
     sweep_snapshot_power_db: float | None = None
 
@@ -1002,6 +1004,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         step_hz = max(1, int(round(span_hz / divisor)))
         return step_hz
 
+    def _time_marker_bounds_sec(self) -> tuple[float, float]:
+        if self._time_analyzer_time_axis_s is None or len(self._time_analyzer_time_axis_s) == 0:
+            return 0.0, 1.0
+        return 0.0, float(self._time_analyzer_time_axis_s[-1])
+
+    def _marker_wheel_step_sec(self, *, coarse: bool) -> float:
+        start_s, stop_s = self._time_marker_bounds_sec()
+        span_s = max(1e-6, stop_s - start_s)
+        divisor = 100.0 if coarse else 1000.0
+        return max(1e-6, span_s / divisor)
+
     def _shift_marker_frequency_hz(self, marker_index: int, delta_hz: int) -> bool:
         marker_state = self._marker_state(marker_index)
         if marker_state.continuous_peak_enabled:
@@ -1013,6 +1026,23 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             int(display_stop_hz),
         )
         marker_state.frequency_hz = target_frequency_hz
+        marker_state.is_enabled = True
+        marker_state.continuous_peak_enabled = False
+        self._clear_marker_sweep_snapshot(marker_state)
+        self._update_marker_control_state(marker_index)
+        self._update_marker_items()
+        return True
+
+    def _shift_marker_time_sec(self, marker_index: int, delta_sec: float) -> bool:
+        marker_state = self._marker_state(marker_index)
+        if marker_state.continuous_peak_enabled:
+            return False
+        start_s, stop_s = self._time_marker_bounds_sec()
+        marker_state.time_sec = self._clamp_float(
+            marker_state.time_sec + float(delta_sec),
+            start_s,
+            stop_s,
+        )
         marker_state.is_enabled = True
         marker_state.continuous_peak_enabled = False
         self._clear_marker_sweep_snapshot(marker_state)
@@ -1036,20 +1066,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return True
 
         coarse = bool(event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier)
-        span_start_hz, span_stop_hz = self._resolve_display_start_stop_hz()
-        span_used_hz = max(1, int(round(span_stop_hz - span_start_hz)))
-        step_hz = self._marker_wheel_step_hz(coarse=coarse)
-        print(
-            "MarkerWheel "
-            f"mode={self.config.analyzer_mode.value} "
-            f"span_used={span_used_hz} "
-            f"display_span={self.config.display_span_hz} "
-            f"start={self.config.display_start_freq_hz} "
-            f"stop={self.config.display_stop_freq_hz} "
-            f"step={step_hz}"
-        )
         direction = 1 if wheel_delta > 0 else -1
-        moved = self._shift_marker_frequency_hz(marker_index, direction * step_hz)
+        if self._is_time_analyzer_mode():
+            step_sec = self._marker_wheel_step_sec(coarse=coarse)
+            moved = self._shift_marker_time_sec(marker_index, direction * step_sec)
+        else:
+            step_hz = self._marker_wheel_step_hz(coarse=coarse)
+            moved = self._shift_marker_frequency_hz(marker_index, direction * step_hz)
         if moved:
             event.accept()
         return True
@@ -2127,7 +2150,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _update_plot_axis_labels_for_mode(self) -> None:
         if self._is_time_analyzer_mode():
             self.spectrum_plot.setLabel("bottom", "Time [s]")
-            self.spectrum_plot.setLabel("left", "Power [dB]")
+            self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
         else:
             self.spectrum_plot.setLabel("bottom", "Frequency [GHz]")
             self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
@@ -3326,6 +3349,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if marker_state.continuous_peak_enabled
             else "Continuous Peak OFF"
         )
+        if self._is_time_analyzer_mode():
+            controls["frequency"].setText(f"Time\n{marker_state.time_sec:.3f} s")
+            controls["step"].setText(f"Step\n{marker_state.time_step_sec:.3f} s")
+        else:
+            controls["frequency"].setText("Frequency")
+            controls["step"].setText("Step")
 
         manual_move_enabled = not marker_state.continuous_peak_enabled
         selected_trace_db = self._select_marker_trace_db(marker_state)
@@ -3333,7 +3362,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         controls["frequency"].setEnabled(manual_move_enabled)
         controls["left"].setEnabled(manual_move_enabled)
         controls["right"].setEnabled(manual_move_enabled)
-        controls["peak_search"].setEnabled(manual_move_enabled and trace_available)
+        controls["peak_search"].setEnabled(
+            manual_move_enabled and trace_available and (not self._is_time_analyzer_mode())
+        )
+        controls["continuous_peak"].setEnabled(not self._is_time_analyzer_mode())
+        controls["to_center"].setEnabled(not self._is_time_analyzer_mode())
         self._update_marker_menu_button(marker_index)
 
     def _update_all_marker_control_states(self) -> None:
@@ -3383,6 +3416,26 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         marker_state = self._marker_state(marker_index)
         if marker_state.continuous_peak_enabled:
             return
+        if self._is_time_analyzer_mode():
+            start_s, stop_s = self._time_marker_bounds_sec()
+            value, accepted = QtWidgets.QInputDialog.getDouble(
+                self,
+                marker_state.name,
+                "Time [s]",
+                value=marker_state.time_sec,
+                min=UNBOUNDED_DOUBLE_MIN,
+                max=UNBOUNDED_DOUBLE_MAX,
+                decimals=3,
+            )
+            if not accepted:
+                return
+            marker_state.time_sec = self._clamp_float(float(value), start_s, stop_s)
+            marker_state.is_enabled = True
+            marker_state.continuous_peak_enabled = False
+            self._clear_marker_sweep_snapshot(marker_state)
+            self._update_marker_control_state(marker_index)
+            self._update_marker_items()
+            return
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             marker_state.name,
@@ -3408,6 +3461,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _on_marker_step_clicked(self, marker_index: int) -> None:
         marker_state = self._marker_state(marker_index)
+        if self._is_time_analyzer_mode():
+            value, accepted = QtWidgets.QInputDialog.getDouble(
+                self,
+                marker_state.name,
+                "Step [s]",
+                value=marker_state.time_step_sec,
+                min=UNBOUNDED_DOUBLE_MIN,
+                max=UNBOUNDED_DOUBLE_MAX,
+                decimals=3,
+            )
+            if not accepted:
+                return
+            marker_state.time_step_sec = self._clamp_float(float(value), 0.001, 1_000.0)
+            self._update_marker_control_state(marker_index)
+            return
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             marker_state.name,
@@ -3431,6 +3499,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         marker_state = self._marker_state(marker_index)
         if marker_state.continuous_peak_enabled:
             return
+        if self._is_time_analyzer_mode():
+            start_s, stop_s = self._time_marker_bounds_sec()
+            marker_state.time_sec = self._clamp_float(
+                marker_state.time_sec + (direction * marker_state.time_step_sec),
+                start_s,
+                stop_s,
+            )
+            marker_state.is_enabled = True
+            marker_state.continuous_peak_enabled = False
+            self._clear_marker_sweep_snapshot(marker_state)
+            self._update_marker_control_state(marker_index)
+            self._update_marker_items()
+            return
         marker_state.frequency_hz = self._clamp_int(
             marker_state.frequency_hz + direction * marker_state.step_hz,
             MIN_MARKER_FREQUENCY_HZ,
@@ -3443,6 +3524,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_marker_items()
 
     def _on_marker_peak_search_clicked(self, marker_index: int) -> None:
+        if self._is_time_analyzer_mode():
+            return
         marker_state = self._marker_state(marker_index)
         if marker_state.continuous_peak_enabled:
             return
@@ -3466,6 +3549,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_marker_items()
 
     def _on_marker_continuous_peak_clicked(self, marker_index: int) -> None:
+        if self._is_time_analyzer_mode():
+            return
         marker_state = self._marker_state(marker_index)
         marker_state.continuous_peak_enabled = not marker_state.continuous_peak_enabled
         if marker_state.continuous_peak_enabled:
@@ -3476,6 +3561,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_marker_items()
 
     def _on_marker_to_center_clicked(self, marker_index: int) -> None:
+        if self._is_time_analyzer_mode():
+            return
         marker_state = self._marker_state(marker_index)
         self._apply_center_frequency_change(int(marker_state.frequency_hz))
 
@@ -3503,11 +3590,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 text_item.setText(f"M{index + 1} {trace_suffix}")
                 continue
 
-            frequency_ghz = marker_state.frequency_hz / 1e9
+            if self._is_time_analyzer_mode():
+                marker_x = float(marker_state.time_sec)
+            else:
+                marker_x = marker_state.frequency_hz / 1e9
             nearest_index = int(
-                np.argmin(np.abs(self._last_display_freq_axis_ghz - frequency_ghz))
+                np.argmin(np.abs(self._last_display_freq_axis_ghz - marker_x))
             )
-            marker_freq = float(self._last_display_freq_axis_ghz[nearest_index])
+            marker_x = float(self._last_display_freq_axis_ghz[nearest_index])
             if (
                 self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
                 and marker_state.sweep_snapshot_power_db is not None
@@ -3517,13 +3607,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 marker_val = float(trace_db[nearest_index])
             trace_suffix = marker_state.trace_name.replace("Trace", "Tr")
 
-            marker_item.setData([marker_freq], [marker_val])
-            text_item.setText(
-                f"M{index + 1} {trace_suffix}\n"
-                f"{marker_freq:.6f} GHz\n"
-                f"{marker_val:.2f} dBm"
-            )
-            text_item.setPos(marker_freq, marker_val)
+            marker_item.setData([marker_x], [marker_val])
+            if self._is_time_analyzer_mode():
+                text_item.setText(
+                    f"M{index + 1} {trace_suffix}\n"
+                    f"{marker_x:.3f} s\n"
+                    f"{marker_val:.2f} dBm"
+                )
+            else:
+                text_item.setText(
+                    f"M{index + 1} {trace_suffix}\n"
+                    f"{marker_x:.6f} GHz\n"
+                    f"{marker_val:.2f} dBm"
+                )
+            text_item.setPos(marker_x, marker_val)
 
     def _show_not_implemented(self, feature_name: str) -> None:
         QtWidgets.QMessageBox.information(
