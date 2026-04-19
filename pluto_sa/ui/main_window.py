@@ -2577,7 +2577,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 if axis is None or len(axis) == 0:
                     axis = np.array([0.0, 1.0], dtype=float)
             x_values = np.linspace(float(axis[0]), float(axis[-1]), 11)
-            x_ticks = [(value, f"{value:.2f}") for value in x_values]
+            if self._is_high_speed_time_analyzer_mode():
+                x_ticks = [(value, f"{(value * 1e3):.3f}") for value in x_values]
+            else:
+                x_ticks = [(value, f"{value:.2f}") for value in x_values]
             y_ticks = [
                 (value, f"{value:.0f}") for value in np.linspace(self.y_min, self.y_max, 11)
             ]
@@ -2847,7 +2850,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _update_plot_axis_labels_for_mode(self) -> None:
         if self._is_time_analyzer_mode():
-            self.spectrum_plot.setLabel("bottom", "Time [s]")
+            if self._is_high_speed_time_analyzer_mode():
+                self.spectrum_plot.setLabel("bottom", "Time [ms]")
+            else:
+                self.spectrum_plot.setLabel("bottom", "Time [s]")
             self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
         else:
             self.spectrum_plot.setLabel("bottom", "Frequency [GHz]")
@@ -2996,7 +3002,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.receiver.retune_lo(self.config.center_freq_hz)
             self._reset_plot_state()
             if self.sweep_state == SWEEP_STATE_RUNNING:
-                self._start_time_analyzer_continuous()
+                if self._is_high_speed_time_analyzer_mode():
+                    self._start_high_speed_time_analyzer_continuous()
+                else:
+                    self._start_time_analyzer_continuous()
         else:
             self.receiver.retune_lo(self.config.center_freq_hz)
             self.processor.update_center_frequency(self.config.center_freq_hz)
@@ -3292,11 +3301,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if not self._is_time_analyzer_mode():
             return
         previous_state = self._current_sweep_state()
+        is_high_speed_ta = self._is_high_speed_time_analyzer_mode()
+        current_time_span_s = float(self.config.time_analyzer_time_span_s)
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Time Span",
-            "Time Span [s]",
-            value=float(self.config.time_analyzer_time_span_s),
+            "Time Span [ms]" if is_high_speed_ta else "Time Span [s]",
+            value=(current_time_span_s * 1e3) if is_high_speed_ta else current_time_span_s,
             min=UNBOUNDED_DOUBLE_MIN,
             max=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
@@ -3304,8 +3315,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if not accepted:
             return
 
+        requested_time_span_s = (float(value) * 1e-3) if is_high_speed_ta else float(value)
         self.config.time_analyzer_time_span_s = self._clamp_float(
-            float(value),
+            requested_time_span_s,
             MIN_TIME_ANALYZER_TIME_SPAN_S,
             MAX_TIME_ANALYZER_TIME_SPAN_S,
         )
@@ -3900,8 +3912,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.freq_span_button.setEnabled(not is_time_analyzer)
         if is_time_analyzer:
             self.time_span_button.setEnabled(True)
+            time_span_value = float(self.config.time_analyzer_time_span_s)
+            if self._is_high_speed_time_analyzer_mode():
+                span_text = f"{(time_span_value * 1e3):.3f} ms"
+            else:
+                span_text = f"{time_span_value:.3f} s"
             self.time_span_button.setText(
-                f"Time Span\n{float(self.config.time_analyzer_time_span_s):.3f} s"
+                f"Time Span\n{span_text}"
             )
         else:
             self.time_span_button.setEnabled(False)
@@ -4947,11 +4964,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _get_header_frequency_fields(self) -> tuple[str, str, str, str]:
         if self._is_time_analyzer_mode():
+            time_span_s = float(self.config.time_analyzer_time_span_s)
+            if self._is_high_speed_time_analyzer_mode():
+                span_text = f"{(time_span_s * 1e3):.3f} ms"
+            else:
+                span_text = f"{time_span_s:.3f} s"
             return (
                 "Center",
                 f"{self.config.center_freq_hz / 1e6:.3f} MHz",
                 "Time Span",
-                f"{float(self.config.time_analyzer_time_span_s):.3f} s",
+                span_text,
             )
         if (
             self.config.use_start_stop_freq
