@@ -199,6 +199,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._last_sweep_drawn_completed_points = -1
         self._last_sweep_callback_time: float | None = None
         self._sweep_callback_sequence = 0
+        self._sweep_like_suppress_progress_until_first_complete = False
 
         self.setWindowTitle("PlutoSDR Real-Time Spectrum Prototype")
         self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -679,6 +680,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         try:
             previous_mode = self.config.analyzer_mode
             self.config.analyzer_mode = analyzer_mode
+            self._sweep_like_suppress_progress_until_first_complete = analyzer_mode in (
+                AnalyzerMode.SWEEP_SA,
+                AnalyzerMode.TIME_ANALYZER,
+            )
             if analyzer_mode == AnalyzerMode.SWEEP_SA:
                 self.config.rbw_hz = self._clip_sweep_rbw(self.config.rbw_hz)
                 self._apply_sweep_rbw_driven_capture_settings()
@@ -2683,6 +2688,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_continuous_button()
 
     def _on_single_clicked(self) -> None:
+        previous_state = self.sweep_state
         self.sweep_state = SWEEP_STATE_SINGLE
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             self.receiver.stop()
@@ -2692,6 +2698,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._invalidate_wideband_runtime()
         elif self._is_time_analyzer_mode():
             self.receiver.stop()
+            if previous_state == SWEEP_STATE_STOPPED:
+                # Align with Sweep SA single-run semantics: start from the head.
+                self._time_analyzer_write_index = 0
+                self._hide_time_analyzer_progress_symbol()
         else:
             self.receiver.start()
         self._restart_timer_for_current_mode()
@@ -2713,8 +2723,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self._clear_persistence()
         if self.config.analyzer_mode in (AnalyzerMode.SWEEP_SA, AnalyzerMode.WIDEBAND_REALTIME_SA):
+            if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
+                self._sweep_like_suppress_progress_until_first_complete = True
             self._restore_sweep_state(previous_state)
         elif self._is_time_analyzer_mode():
+            self._sweep_like_suppress_progress_until_first_complete = True
             if previous_state == SWEEP_STATE_RUNNING:
                 self._start_time_analyzer_continuous()
             elif previous_state == SWEEP_STATE_SINGLE:
@@ -3168,17 +3181,74 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 return trace_state
         return None
 
-    def _hide_sweep_progress_symbol(self) -> None:
-        if self.sweep_progress_item is None:
+    def _update_sweep_like_write_index(
+        self,
+        current_index: int,
+        point_count: int,
+        *,
+        is_single: bool,
+    ) -> tuple[int, bool]:
+        if point_count <= 0:
+            return 0, True
+        reached_right_edge = current_index >= (point_count - 1)
+        if is_single:
+            next_index = current_index if reached_right_edge else current_index + 1
+        else:
+            next_index = 0 if reached_right_edge else current_index + 1
+        return int(next_index), bool(reached_right_edge)
+
+    def _finish_single_sweep_like(self) -> None:
+        self.timer.stop()
+        self.sweep_state = SWEEP_STATE_STOPPED
+        self._update_continuous_button()
+
+    def _set_sweep_like_progress_symbol(
+        self,
+        item: pg.ScatterPlotItem | None,
+        point_index: int | None,
+    ) -> None:
+        if item is None or self._last_display_freq_axis_ghz is None or point_index is None:
+            if item is not None:
+                item.setData([], [])
+                item.setVisible(False)
             return
-        self.sweep_progress_item.setData([], [])
-        self.sweep_progress_item.setVisible(False)
+
+        trace_state = self._active_sweep_progress_trace_state()
+        if trace_state is None or trace_state.display_db is None:
+            item.setData([], [])
+            item.setVisible(False)
+            return
+
+        point_index = int(point_index)
+        if point_index < 0 or point_index >= len(self._last_display_freq_axis_ghz):
+            item.setData([], [])
+            item.setVisible(False)
+            return
+        if point_index >= len(trace_state.display_db):
+            item.setData([], [])
+            item.setVisible(False)
+            return
+
+        marker_y = float(trace_state.display_db[point_index])
+        if not np.isfinite(marker_y):
+            item.setData([], [])
+            item.setVisible(False)
+            return
+
+        color = QtGui.QColor(trace_state.color_hex)
+        item.setPen(pg.mkPen(color))
+        item.setBrush(pg.mkBrush(color))
+        item.setData(
+            [self._last_display_freq_axis_ghz[point_index]],
+            [marker_y],
+        )
+        item.setVisible(True)
+
+    def _hide_sweep_progress_symbol(self) -> None:
+        self._set_sweep_like_progress_symbol(self.sweep_progress_item, None)
 
     def _hide_time_analyzer_progress_symbol(self) -> None:
-        if self.time_analyzer_progress_item is None:
-            return
-        self.time_analyzer_progress_item.setData([], [])
-        self.time_analyzer_progress_item.setVisible(False)
+        self._set_sweep_like_progress_symbol(self.time_analyzer_progress_item, None)
 
     def _update_time_analyzer_progress_symbol(self, point_index: int | None = None) -> None:
         if (
@@ -3189,34 +3259,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._hide_time_analyzer_progress_symbol()
             return
 
-        trace_state = self._active_sweep_progress_trace_state()
-        if trace_state is None or trace_state.display_db is None:
-            self._hide_time_analyzer_progress_symbol()
-            return
-
         if point_index is None:
             point_index = int(self._time_analyzer_write_index)
-        point_index = int(point_index)
-        if point_index < 0 or point_index >= len(self._last_display_freq_axis_ghz):
-            self._hide_time_analyzer_progress_symbol()
-            return
-        if point_index >= len(trace_state.display_db):
-            self._hide_time_analyzer_progress_symbol()
-            return
-
-        marker_y = float(trace_state.display_db[point_index])
-        if not np.isfinite(marker_y):
-            self._hide_time_analyzer_progress_symbol()
-            return
-
-        color = QtGui.QColor(trace_state.color_hex)
-        self.time_analyzer_progress_item.setPen(pg.mkPen(color))
-        self.time_analyzer_progress_item.setBrush(pg.mkBrush(color))
-        self.time_analyzer_progress_item.setData(
-            [self._last_display_freq_axis_ghz[point_index]],
-            [marker_y],
-        )
-        self.time_analyzer_progress_item.setVisible(True)
+        self._set_sweep_like_progress_symbol(self.time_analyzer_progress_item, int(point_index))
 
     def _update_sweep_progress_symbol(self, frame_result) -> None:
         if (
@@ -3224,36 +3269,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             or self._last_display_freq_axis_ghz is None
             or frame_result.sweep_complete
             or frame_result.active_point_index is None
+            or self._sweep_like_suppress_progress_until_first_complete
         ):
             self._hide_sweep_progress_symbol()
             return
-
-        trace_state = self._active_sweep_progress_trace_state()
-        if trace_state is None or trace_state.display_db is None:
-            self._hide_sweep_progress_symbol()
-            return
-
-        point_index = int(frame_result.active_point_index)
-        if point_index < 0 or point_index >= len(self._last_display_freq_axis_ghz):
-            self._hide_sweep_progress_symbol()
-            return
-        if point_index >= len(trace_state.display_db):
-            self._hide_sweep_progress_symbol()
-            return
-
-        marker_y = trace_state.display_db[point_index]
-        if not np.isfinite(marker_y):
-            self._hide_sweep_progress_symbol()
-            return
-
-        color = QtGui.QColor(trace_state.color_hex)
-        self.sweep_progress_item.setPen(pg.mkPen(color))
-        self.sweep_progress_item.setBrush(pg.mkBrush(color))
-        self.sweep_progress_item.setData(
-            [self._last_display_freq_axis_ghz[point_index]],
-            [marker_y],
+        self._set_sweep_like_progress_symbol(
+            self.sweep_progress_item,
+            int(frame_result.active_point_index),
         )
-        self.sweep_progress_item.setVisible(True)
 
     def _select_marker_trace_db(self, marker_state: MarkerState) -> np.ndarray | None:
         for trace_state in self.trace_states:
@@ -3714,10 +3737,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trace_state.display_db = np.full(len(freq_axis_display_ghz), self.y_min, dtype=float)
         self._update_trace_curves()
         self._hide_sweep_progress_symbol()
-        if self._is_time_analyzer_mode():
-            self._update_time_analyzer_progress_symbol(0)
-        else:
-            self._hide_time_analyzer_progress_symbol()
+        self._hide_time_analyzer_progress_symbol()
         self._update_all_marker_control_states()
         self._update_marker_items()
 
@@ -4153,13 +4173,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         idx = int(self._time_analyzer_write_index)
         self._time_analyzer_trace_db[idx] = corrected_center_db
-        if self.sweep_state == SWEEP_STATE_SINGLE:
-            if idx >= len(self._time_analyzer_trace_db) - 1:
-                self._time_analyzer_write_index = idx
-            else:
-                self._time_analyzer_write_index = idx + 1
-        else:
-            self._time_analyzer_write_index = (idx + 1) % len(self._time_analyzer_trace_db)
+        next_index, reached_right_edge = self._update_sweep_like_write_index(
+            idx,
+            len(self._time_analyzer_trace_db),
+            is_single=(self.sweep_state == SWEEP_STATE_SINGLE),
+        )
+        self._time_analyzer_write_index = next_index
 
         self._last_display_freq_axis_ghz = self._time_analyzer_time_axis_s.copy()
         self._last_current_display_db = self._time_analyzer_trace_db.copy()
@@ -4167,13 +4186,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_wideband_traces_from_display_db(self._time_analyzer_trace_db)
         self._update_trace_curves()
         self._hide_sweep_progress_symbol()
-        self._update_time_analyzer_progress_symbol(idx)
+        if reached_right_edge or self._sweep_like_suppress_progress_until_first_complete:
+            self._hide_time_analyzer_progress_symbol()
+        else:
+            self._update_time_analyzer_progress_symbol(idx)
 
         if self.sweep_state == SWEEP_STATE_SINGLE:
-            if idx >= len(self._time_analyzer_trace_db) - 1:
-                self.timer.stop()
-                self.sweep_state = SWEEP_STATE_STOPPED
-                self._update_continuous_button()
+            if reached_right_edge:
+                if self._sweep_like_suppress_progress_until_first_complete:
+                    self._sweep_like_suppress_progress_until_first_complete = False
+                self._finish_single_sweep_like()
+        elif reached_right_edge and self._sweep_like_suppress_progress_until_first_complete:
+            self._sweep_like_suppress_progress_until_first_complete = False
 
     def _update_sweep_spectrum(self) -> None:
         callback_start = time.perf_counter()
@@ -4242,10 +4266,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_markers_for_completed_sweep()
             marker_update_ms = (time.perf_counter() - marker_start) * 1000.0
 
+        if frame_result.sweep_complete and self._sweep_like_suppress_progress_until_first_complete:
+            self._sweep_like_suppress_progress_until_first_complete = False
+
         if self.sweep_state == SWEEP_STATE_SINGLE and not self.sweep_controller.is_running():
-            self.timer.stop()
-            self.sweep_state = SWEEP_STATE_STOPPED
-            self._update_continuous_button()
+            self._finish_single_sweep_like()
 
         callback_total_ms = (time.perf_counter() - callback_start) * 1000.0
         latest_point_result = self.sweep_controller.get_latest_point_result()
