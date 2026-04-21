@@ -30,7 +30,8 @@ class SpectrumProcessor:
         self.update_center_frequency(config.center_freq_hz)
 
     def compute_filtered_power(self, iq: np.ndarray) -> np.ndarray:
-        iq = iq - np.mean(iq)
+        if self.config.remove_dc_offset:
+            iq = iq - np.mean(iq)
         iq_windowed = iq * self.window
         spectrum = np.fft.fftshift(np.fft.fft(iq_windowed))
         n = self.config.fft_size

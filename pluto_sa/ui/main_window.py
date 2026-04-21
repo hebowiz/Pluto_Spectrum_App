@@ -5641,8 +5641,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         n = len(iq)
         if len(window) != n:
             return float(y_min)
-        iq_zero_mean = iq - np.mean(iq)
-        iq_windowed = iq_zero_mean * window
+        iq_processed = iq - np.mean(iq) if self.config.remove_dc_offset else iq
+        iq_windowed = iq_processed * window
         spectrum = np.fft.fftshift(np.fft.fft(iq_windowed))
         coherent_gain = np.sum(window) / n
         spectrum = spectrum / n
@@ -5658,6 +5658,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             iq=iq,
             effective_rbw_hz=ta_effective_rbw_hz,
             sample_rate_hz=float(sample_rate_hz),
+            remove_dc_offset=bool(self.config.remove_dc_offset),
         )
         ta_detector_equivalent_linear = float(apply_detector(ta_detector_series, detector_mode))
         ta_detector_equivalent_db = 10.0 * np.log10(ta_detector_equivalent_linear + 1e-20)
@@ -5780,10 +5781,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         segment_valid = (segment_indices >= 0) & (segment_indices < segment_length)
 
         observation_values = np.empty((window_count, len(starts)), dtype=np.float64)
+        remove_dc_offset = bool(self.config.remove_dc_offset)
         for obs_idx, start in enumerate(starts):
             segment_frames = frames[:, start : start + segment_length]
-            segment_zero_mean = segment_frames - np.mean(segment_frames, axis=1, keepdims=True)
-            segment_windowed = segment_zero_mean * segment_window.reshape(1, -1)
+            if remove_dc_offset:
+                segment_frames = segment_frames - np.mean(segment_frames, axis=1, keepdims=True)
+            segment_windowed = segment_frames * segment_window.reshape(1, -1)
             segment_fft = np.fft.fftshift(
                 np.fft.fft(segment_windowed, axis=1),
                 axes=1,
@@ -6198,8 +6201,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         n = len(iq)
         window = self.processor.window
-        iq_zero_mean = iq - np.mean(iq)
-        iq_windowed = iq_zero_mean * window
+        iq_processed = iq - np.mean(iq) if self.config.remove_dc_offset else iq
+        iq_windowed = iq_processed * window
         spectrum = np.fft.fftshift(np.fft.fft(iq_windowed))
         coherent_gain = np.sum(window) / n
         spectrum = spectrum / n
@@ -6228,6 +6231,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             iq=iq,
             effective_rbw_hz=ta_effective_rbw_hz,
             sample_rate_hz=float(self.config.sample_rate_hz),
+            remove_dc_offset=bool(self.config.remove_dc_offset),
         )
         ta_detector_equivalent_linear = float(
             apply_detector(ta_detector_series, self.config.sweep_detector_mode)

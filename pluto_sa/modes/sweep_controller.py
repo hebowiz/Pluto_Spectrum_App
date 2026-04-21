@@ -379,7 +379,9 @@ class SweepController:
             iq_padded = np.zeros(n_target, dtype=np.complex64)
             iq_padded[-len(iq) :] = iq
             iq = iq_padded
-        iq = iq - np.mean(iq)
+        dc_removal_applied = bool(self.config.remove_dc_offset)
+        if dc_removal_applied:
+            iq = iq - np.mean(iq)
         n = len(iq)
 
         window = np.hanning(n)
@@ -423,7 +425,7 @@ class SweepController:
             rbw_center_bin_index,
             rbw_center_frequency_hz,
             detector_input,
-            True,
+            dc_removal_applied,
             n,
             raw_center_power_linear,
             filtered_center_power_linear,
@@ -439,6 +441,7 @@ class SweepController:
             iq=iq,
             effective_rbw_hz=effective_rbw_hz,
             sample_rate_hz=float(self.config.sweep_sample_rate_hz),
+            remove_dc_offset=bool(self.config.remove_dc_offset),
         )
 
     @staticmethod
@@ -446,6 +449,7 @@ class SweepController:
         iq: np.ndarray,
         effective_rbw_hz: float,
         sample_rate_hz: float,
+        remove_dc_offset: bool = True,
     ) -> np.ndarray:
         """Core detector-series builder shared by Sweep and comparison paths."""
         total_samples = len(iq)
@@ -471,7 +475,8 @@ class SweepController:
             if len(segment) < segment_length:
                 continue
 
-            segment = segment - np.mean(segment)
+            if remove_dc_offset:
+                segment = segment - np.mean(segment)
             window = np.hanning(segment_length)
             coherent_gain = np.sum(window) / segment_length
             spectrum = np.fft.fftshift(np.fft.fft(segment * window))
