@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import time
 import threading
+import json
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -73,6 +75,7 @@ CALIBRATION_SIGNAL_OFFSET_HZ = 2_000_000
 CALIBRATION_SEARCH_WINDOW_HALF_HZ = 1_000_000
 CALIBRATION_FRAMES_PER_POINT = 5
 CALIBRATION_PEAK_MIN_DBM = -40.0
+SETTINGS_LAST_CORRECTION_CSV_PATH_KEY = "last_correction_csv_path"
 MIN_CENTER_FREQ_STEP_MHZ = 0.001
 MAX_CENTER_FREQ_STEP_MHZ = 1_000.0
 MIN_REF_LEVEL_DBM = -100.0
@@ -335,6 +338,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_controller = sweep_controller
         self.calibration_offset_db = calibration_offset_db
         self.calibration_controller = CalibrationController()
+        self._app_root_dir = Path(__file__).resolve().parents[2]
+        self._data_dir = self._app_root_dir / "data"
+        self._calibration_data_dir = self._data_dir / "calibration"
+        self._settings_file_path = self._data_dir / "settings.json"
+        self._last_correction_csv_path: str | None = None
         self._calibration_mode_saved_config: SpectrumConfig | None = None
         self._calibration_last_file_dir: str | None = None
         self._sweep_like_progress = SweepLikeProgressState()
@@ -491,6 +499,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.config.update_interval_ms > 0
             else 1.0 / 60.0
         )
+        self._initialize_calibration_storage()
+        self._load_app_settings()
+        self._auto_load_correction_csv_on_startup()
         self._build_ui()
         self._build_timer()
         self.sweep_controller.set_sweep_complete_callback(self._on_sweep_complete)
@@ -504,6 +515,52 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _sync_amplitude_scale_from_config(self) -> None:
         self.y_max = self.config.y_max_dbm
         self.y_min = self.config.y_min_dbm
+
+    def _initialize_calibration_storage(self) -> None:
+        self._calibration_data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _load_app_settings(self) -> None:
+        self._last_correction_csv_path = None
+        if not self._settings_file_path.exists():
+            return
+        try:
+            with open(self._settings_file_path, "r", encoding="utf-8") as settings_file:
+                settings = json.load(settings_file)
+        except Exception:
+            return
+        last_path = settings.get(SETTINGS_LAST_CORRECTION_CSV_PATH_KEY)
+        if isinstance(last_path, str) and len(last_path.strip()) > 0:
+            self._last_correction_csv_path = last_path.strip()
+
+    def _save_app_settings(self) -> None:
+        settings = {
+            SETTINGS_LAST_CORRECTION_CSV_PATH_KEY: self._last_correction_csv_path,
+        }
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        with open(self._settings_file_path, "w", encoding="utf-8") as settings_file:
+            json.dump(settings, settings_file, ensure_ascii=False, indent=2)
+
+    def _auto_load_correction_csv_on_startup(self) -> None:
+        path = self._last_correction_csv_path
+        if not path:
+            self.calibration_controller.set_correction_enabled(False)
+            return
+        if not Path(path).exists():
+            print(f"[CAL] Auto-load correction CSV failed: {path}")
+            print("[CAL] Starting with Calibration OFF.")
+            self.calibration_controller.set_correction_enabled(False)
+            return
+        try:
+            self.calibration_controller.load_correction_csv(path)
+            self.calibration_controller.set_correction_enabled(True)
+            self._calibration_last_file_dir = str(Path(path).parent)
+            print(f"[CAL] Auto-load correction CSV: {path}")
+            print("[CAL] Correction loaded successfully. Calibration ON.")
+        except Exception as exc:
+            print(f"[CAL] Auto-load correction CSV failed: {path}")
+            print(f"[CAL] Reason: {exc}")
+            print("[CAL] Starting with Calibration OFF.")
+            self.calibration_controller.set_correction_enabled(False)
 
     def _is_wideband_mode(self) -> bool:
         return self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA
@@ -2566,7 +2623,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.calibration_start_button = self._make_control_button("Calibrate")
         self.calibration_menu_load_button = self._make_control_button("Load Correction CSV")
-        self.calibration_menu_toggle_button = self._make_control_button("Calibration OFF")
+        self.calibration_menu_toggle_button = self._make_control_button("Correction OFF")
 
         page_layout.addWidget(self.calibration_start_button)
         page_layout.addWidget(self.calibration_menu_load_button)
@@ -4172,7 +4229,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.calibration_measure_button.setText(measure_text)
 
         enabled_text = "ON" if self.calibration_controller.correction_enabled else "OFF"
-        self.calibration_menu_toggle_button.setText(f"Calibration {enabled_text}")
+        self.calibration_menu_toggle_button.setText(f"Correction {enabled_text}")
 
         is_measuring = self.calibration_controller.sequence_is_measuring
         is_retry_waiting = self.calibration_controller.sequence_retry_waiting
@@ -4233,7 +4290,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _default_csv_dialog_dir(self) -> str:
         if self._calibration_last_file_dir is not None:
             return self._calibration_last_file_dir
-        return "."
+        return str(self._calibration_data_dir)
 
     def _on_calibration_toggle_clicked(self) -> None:
         if self.calibration_controller.sequence_is_measuring:
@@ -4267,6 +4324,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
             return
         self._calibration_last_file_dir = str(QtCore.QFileInfo(file_path).absolutePath())
+        self._last_correction_csv_path = str(Path(file_path))
+        try:
+            self._save_app_settings()
+        except Exception as exc:
+            print(f"[CAL] Failed to persist settings after manual load: {exc}")
         print(
             "[CAL] Correction CSV loaded "
             f"count={summary.count} "
@@ -4375,10 +4437,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
             return False
         default_dir = self._default_csv_dialog_dir()
+        default_name = f"pluto_cal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        default_save_path = str(Path(default_dir) / default_name)
         file_path, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Calibration Result CSV",
-            default_dir,
+            default_save_path,
             "CSV Files (*.csv);;All Files (*)",
         )
         if not file_path:
@@ -4412,6 +4476,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return False
 
         self._calibration_last_file_dir = str(QtCore.QFileInfo(save_path).absolutePath())
+        self._last_correction_csv_path = str(Path(save_path))
         frequency_hz = np.asarray([int(item.frequency_hz) for item in results], dtype=np.int64)
         calibration_offsets_db = np.asarray(
             [float(item.calibration_offset_db) for item in results],
@@ -4422,6 +4487,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             calibration_offsets_db,
         )
         self.calibration_controller.set_correction_enabled(True)
+        try:
+            self._save_app_settings()
+        except Exception as exc:
+            print(f"[CAL] Failed to persist settings after save: {exc}")
         print(
             "[CAL] Result CSV saved "
             f"path={save_path} count={len(results)} "
@@ -5738,11 +5807,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"Ref Level: {self.config.ref_level_dbm:.0f} dBm   "
             f"Int Gain: {self.config.rx_gain_db} dB   "
             f"Ext ATT: {self.config.ext_att_db:.0f} dB   "
-            f"Ext Gain: {self.config.ext_gain_db:.0f} dB"
+            f"Ext Gain: {self.config.ext_gain_db:.0f} dB   "
+            f"{self._make_correction_status_text()}"
         )
         line3 = self._make_fft_info_status_line()
         line4 = f"Detector: {self.config.sweep_detector_mode}"
         return f"{line1}\n{line2}\n{line3}\n{line4}"
+
+    def _make_correction_status_text(self) -> str:
+        return "Correction: ON" if self.calibration_controller.correction_enabled else "Correction: OFF"
 
     def _make_fft_info_status_line(self) -> str:
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
