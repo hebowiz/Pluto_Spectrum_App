@@ -30,6 +30,7 @@ class SpectrumConfig:
     display_range_db: float = 100.0
     ext_att_db: float = 30.0
     ext_gain_db: float = 0.0
+    # zero-mean化処理のON/OFF。TrueでON
     remove_dc_offset: bool = False
 
     # Real-Time SA settings

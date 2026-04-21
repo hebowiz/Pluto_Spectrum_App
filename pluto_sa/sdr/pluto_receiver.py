@@ -105,6 +105,16 @@ class PlutoReceiver:
             with self._sdr_lock:
                 return int(self.sdr.rx_lo)
 
+    def get_current_sample_rate_hz(self) -> int:
+        with self._iq_lock:
+            with self._sdr_lock:
+                return int(self.sdr.sample_rate)
+
+    def get_current_rf_bandwidth_hz(self) -> int:
+        with self._iq_lock:
+            with self._sdr_lock:
+                return int(self.sdr.rx_rf_bandwidth)
+
     def reconfigure_span(self, config: SpectrumConfig) -> None:
         with self._iq_lock:
             self._sweep_config_signature = None

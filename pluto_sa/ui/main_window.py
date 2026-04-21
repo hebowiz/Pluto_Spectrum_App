@@ -1057,6 +1057,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
         return start_hz, stop_hz
 
+    def _build_wideband_chunk_config(self, *, center_freq_hz: int | None = None) -> SpectrumConfig:
+        chunk_config = deepcopy(self.config)
+        chunk_config.analyzer_mode = AnalyzerMode.REALTIME_SA
+        chunk_config.display_span_hz = WIDEBAND_CHUNK_CAPTURE_SPAN_HZ
+        if center_freq_hz is None:
+            start_hz, _stop_hz = self._get_wideband_start_stop_hz()
+            center_freq_hz = int(start_hz + WIDEBAND_EDGE_OFFSET_HZ)
+        chunk_config.center_freq_hz = int(center_freq_hz)
+        chunk_config.use_start_stop_freq = False
+        chunk_config.display_start_freq_hz = None
+        chunk_config.display_stop_freq_hz = None
+        chunk_config.rbw_hz = self.config.rbw_hz
+        chunk_config.__post_init__()
+        return chunk_config
+
     def _initialize_wideband_runtime(self) -> None:
         start_hz, stop_hz = self._get_wideband_start_stop_hz()
         chunk_start_hz_values = np.arange(
@@ -1069,15 +1084,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             chunk_start_hz_values = np.array([int(start_hz)], dtype=np.int64)
         chunk_centers_hz = chunk_start_hz_values + WIDEBAND_EDGE_OFFSET_HZ
 
-        chunk_config = deepcopy(self.config)
-        chunk_config.analyzer_mode = AnalyzerMode.REALTIME_SA
-        chunk_config.display_span_hz = WIDEBAND_CHUNK_CAPTURE_SPAN_HZ
-        chunk_config.center_freq_hz = int(chunk_centers_hz[0])
-        chunk_config.use_start_stop_freq = False
-        chunk_config.display_start_freq_hz = None
-        chunk_config.display_stop_freq_hz = None
-        chunk_config.rbw_hz = self.config.rbw_hz
-        chunk_config.__post_init__()
+        chunk_config = self._build_wideband_chunk_config(
+            center_freq_hz=int(chunk_centers_hz[0])
+        )
 
         self._wideband_chunk_config = chunk_config
         self._wideband_chunk_processor = SpectrumProcessor(chunk_config)
@@ -3394,7 +3403,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.fft_size = int(fft_size)
         if is_wideband_mode:
             self._invalidate_wideband_runtime()
-        self.receiver.reconfigure_span(self.config)
+            self.receiver.reconfigure_span(self._build_wideband_chunk_config())
+        else:
+            self.receiver.reconfigure_span(self.config)
         self.processor.update_span_related(self.config)
         self._apply_span_update()
         self._update_realtime_sa_controls()
@@ -5142,6 +5153,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
             sample_rate_hz = float(self.config.sweep_sample_rate_hz)
             rf_bandwidth_hz = float(self.config.sweep_rf_bandwidth_hz)
+            bin_width_hz = sample_rate_hz / max(1, int(self.config.fft_size))
+        elif self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
+            # WBRT runtime uses an internal chunk config; reflect actual SDR values.
+            sample_rate_hz = float(self.receiver.get_current_sample_rate_hz())
+            rf_bandwidth_hz = float(self.receiver.get_current_rf_bandwidth_hz())
             bin_width_hz = sample_rate_hz / max(1, int(self.config.fft_size))
         else:
             sample_rate_hz = float(self.config.sample_rate_hz)
