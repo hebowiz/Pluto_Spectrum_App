@@ -1368,7 +1368,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_realtime_sa_controls()
         if hasattr(self, "analyzer_mode_button"):
             self._update_analyzer_mode_controls()
-        if hasattr(self, "calibration_toggle_button"):
+        if hasattr(self, "calibration_menu_toggle_button"):
             self._update_calibration_page_controls()
         if hasattr(self, "freq_span_button") and hasattr(self, "time_span_button"):
             self._update_span_x_scale_controls()
@@ -1479,7 +1479,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._refresh_status_label()
             self._page_history.clear()
             if analyzer_mode == AnalyzerMode.CALIBRATION:
-                self._show_control_page("Calibration", self.calibration_page, push_history=False)
+                self._show_control_page("Calibrate", self.calibration_page, push_history=False)
             else:
                 self._show_control_page("Main Menu", self.main_menu_page, push_history=False)
             if analyzer_mode == AnalyzerMode.SWEEP_SA:
@@ -1918,6 +1918,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         ]
         self.realtime_sa_page = self._build_realtime_sa_page()
         self.calibration_page = self._build_calibration_page()
+        self.calibration_menu_page = self._build_calibration_menu_page()
         self.persistence_decay_page = self._build_persistence_decay_page()
         self.sweep_page = self._build_sweep_page()
         self.control_stack.addWidget(self.main_menu_page)
@@ -1942,6 +1943,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for page in self.marker_trace_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.realtime_sa_page)
+        self.control_stack.addWidget(self.calibration_menu_page)
         self.control_stack.addWidget(self.calibration_page)
         self.control_stack.addWidget(self.persistence_decay_page)
         self.control_stack.addWidget(self.sweep_page)
@@ -2073,9 +2075,33 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _open_realtime_mode_page(self) -> None:
         if self._is_calibration_mode():
-            self._show_control_page("Calibration", self.calibration_page)
+            self._show_control_page("Calibrate", self.calibration_page)
             return
         self._show_control_page("RealTime SA", self.realtime_sa_page)
+
+    def _show_calibration_menu(self) -> None:
+        self._page_history = [
+            (title, page)
+            for title, page in self._page_history
+            if page not in (self.calibration_menu_page, self.calibration_page)
+        ]
+        if not self._page_history:
+            self._page_history.append(("Main Menu", self.main_menu_page))
+        if self._page_history[-1][1] is not self.analyzer_mode_page:
+            self._page_history.append(("Analyzer Mode", self.analyzer_mode_page))
+        self._show_control_page("Calibration", self.calibration_menu_page, push_history=False)
+
+    def _open_calibration_menu_from_analyzer(self) -> None:
+        self._show_calibration_menu()
+
+    def _open_calibration_menu_from_realtime_page(self) -> None:
+        self._show_calibration_menu()
+
+    def _on_calibration_start_clicked(self) -> None:
+        if self._is_calibration_mode():
+            self._show_control_page("Calibrate", self.calibration_page)
+            return
+        self._change_analyzer_mode(AnalyzerMode.CALIBRATION)
 
     def _build_analyzer_mode_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
@@ -2087,7 +2113,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.REALTIME_SA,
             AnalyzerMode.WIDEBAND_REALTIME_SA,
             AnalyzerMode.SWEEP_SA,
-            AnalyzerMode.CALIBRATION,
             AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
         ):
             button = self._make_control_button(mode.value)
@@ -2098,6 +2123,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
             self.analyzer_mode_option_buttons[mode] = button
             page_layout.addWidget(button)
+
+        self.calibration_mode_entry_button = self._make_control_button(AnalyzerMode.CALIBRATION.value)
+        self.calibration_mode_entry_button.clicked.connect(self._open_calibration_menu_from_analyzer)
+        page_layout.addWidget(self.calibration_mode_entry_button)
 
         page_layout.addStretch(1)
         self._update_analyzer_mode_selection_page()
@@ -2524,9 +2553,32 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             lambda: self._show_control_page("Persistence Decay", self.persistence_decay_page)
         )
         self.calibration_menu_button.clicked.connect(
-            lambda: self._show_control_page("Calibration", self.calibration_page)
+            self._open_calibration_menu_from_realtime_page
         )
         self._update_realtime_sa_controls()
+        return page
+
+    def _build_calibration_menu_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.calibration_start_button = self._make_control_button("Calibrate")
+        self.calibration_menu_load_button = self._make_control_button("Load Correction CSV")
+        self.calibration_menu_toggle_button = self._make_control_button("Calibration OFF")
+
+        page_layout.addWidget(self.calibration_start_button)
+        page_layout.addWidget(self.calibration_menu_load_button)
+        page_layout.addWidget(self.calibration_menu_toggle_button)
+        page_layout.addStretch(1)
+
+        self.calibration_start_button.clicked.connect(self._on_calibration_start_clicked)
+        self.calibration_menu_load_button.clicked.connect(
+            self._on_calibration_load_correction_csv_clicked
+        )
+        self.calibration_menu_toggle_button.clicked.connect(self._on_calibration_toggle_clicked)
+        self._update_calibration_page_controls()
         return page
 
     def _build_calibration_page(self) -> QtWidgets.QWidget:
@@ -2536,27 +2588,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setSpacing(10)
 
         self.calibration_measure_button = self._make_control_button("Measure (Pending)")
-        self.calibration_return_button = self._make_control_button("Return")
-        self.calibration_load_button = self._make_control_button("Load Correction CSV")
         self.calibration_load_reference_button = self._make_control_button("Load Reference CSV")
-        self.calibration_toggle_button = self._make_control_button("Calibration OFF")
+        self.calibration_return_button = self._make_control_button("Return")
 
         page_layout.addWidget(self.calibration_measure_button)
-        page_layout.addWidget(self.calibration_return_button)
-        page_layout.addWidget(self.calibration_load_button)
         page_layout.addWidget(self.calibration_load_reference_button)
-        page_layout.addWidget(self.calibration_toggle_button)
+        page_layout.addWidget(self.calibration_return_button)
         page_layout.addStretch(1)
 
         self.calibration_measure_button.clicked.connect(self._on_calibration_measure_clicked)
         self.calibration_return_button.clicked.connect(self._on_calibration_return_clicked)
-        self.calibration_load_button.clicked.connect(
-            self._on_calibration_load_correction_csv_clicked
-        )
         self.calibration_load_reference_button.clicked.connect(
             self._on_calibration_load_reference_csv_clicked
         )
-        self.calibration_toggle_button.clicked.connect(self._on_calibration_toggle_clicked)
         self._update_calibration_page_controls()
         return page
 
@@ -4050,6 +4094,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 else UNSELECTED_BUTTON_PREFIX
             )
             button.setText(f"{prefix}{mode.value}")
+        if hasattr(self, "calibration_mode_entry_button"):
+            self.calibration_mode_entry_button.setText(
+                f"{UNSELECTED_BUTTON_PREFIX}{AnalyzerMode.CALIBRATION.value}"
+            )
 
     def _update_trace_type_selection_page(self, trace_index: int) -> None:
         if trace_index >= len(self.trace_type_option_buttons):
@@ -4105,7 +4153,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.time_span_button.setText("Time Span")
 
     def _update_calibration_page_controls(self) -> None:
-        if not hasattr(self, "calibration_toggle_button"):
+        if not hasattr(self, "calibration_menu_toggle_button"):
+            return
+        if not hasattr(self, "calibration_measure_button"):
             return
         current_point = self.calibration_controller.current_sequence_point()
         sequence_done = self.calibration_controller.sequence_completed()
@@ -4117,11 +4167,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             measure_text = f"Measure {current_point.frequency_hz / 1e6:.0f} MHz"
         if self.calibration_controller.sequence_retry_waiting and not sequence_done:
             measure_text = f"Retry {current_point.frequency_hz / 1e6:.0f} MHz"
+        elif not self.calibration_controller.reference_loaded and not sequence_done:
+            measure_text = "Measure"
         self.calibration_measure_button.setText(measure_text)
 
         enabled_text = "ON" if self.calibration_controller.correction_enabled else "OFF"
-        loaded_suffix = " (Loaded)" if self.calibration_controller.correction_loaded else " (No Data)"
-        self.calibration_toggle_button.setText(f"Calibration {enabled_text}{loaded_suffix}")
+        self.calibration_menu_toggle_button.setText(f"Calibration {enabled_text}")
 
         is_measuring = self.calibration_controller.sequence_is_measuring
         is_retry_waiting = self.calibration_controller.sequence_retry_waiting
@@ -4129,24 +4180,28 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if is_measuring:
             self.calibration_measure_button.setEnabled(False)
             self.calibration_return_button.setEnabled(False)
-            self.calibration_load_button.setEnabled(False)
             self.calibration_load_reference_button.setEnabled(False)
-            self.calibration_toggle_button.setEnabled(False)
+            self.calibration_start_button.setEnabled(False)
+            self.calibration_menu_load_button.setEnabled(False)
+            self.calibration_menu_toggle_button.setEnabled(False)
             return
 
         if is_retry_waiting:
             self.calibration_measure_button.setEnabled(not sequence_done)
             self.calibration_return_button.setEnabled(True)
-            self.calibration_load_button.setEnabled(False)
             self.calibration_load_reference_button.setEnabled(False)
-            self.calibration_toggle_button.setEnabled(False)
+            self.calibration_start_button.setEnabled(False)
+            self.calibration_menu_load_button.setEnabled(False)
+            self.calibration_menu_toggle_button.setEnabled(False)
             return
 
-        self.calibration_measure_button.setEnabled(True)
+        can_run_measure = bool(self.calibration_controller.reference_loaded)
+        self.calibration_measure_button.setEnabled(bool(sequence_done) or can_run_measure)
         self.calibration_return_button.setEnabled(True)
-        self.calibration_load_button.setEnabled(True)
         self.calibration_load_reference_button.setEnabled(True)
-        self.calibration_toggle_button.setEnabled(True)
+        self.calibration_start_button.setEnabled(not self._is_calibration_mode())
+        self.calibration_menu_load_button.setEnabled(True)
+        self.calibration_menu_toggle_button.setEnabled(True)
 
     def _update_calibration_mode_controls(self) -> None:
         in_calibration = self._is_calibration_mode()
@@ -4366,6 +4421,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             frequency_hz,
             calibration_offsets_db,
         )
+        self.calibration_controller.set_correction_enabled(True)
         print(
             "[CAL] Result CSV saved "
             f"path={save_path} count={len(results)} "
@@ -4376,6 +4432,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _on_calibration_measure_clicked(self) -> None:
         if not self._is_calibration_mode():
+            return
+        if (
+            not self.calibration_controller.sequence_completed()
+            and not self.calibration_controller.reference_loaded
+        ):
+            print("[CAL] Reference CSV is required before measurement.")
+            self._update_calibration_page_controls()
             return
         if self.calibration_controller.sequence_completed():
             save_ok = self._save_calibration_results_csv()
@@ -4467,6 +4530,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self._calibration_mode_saved_config is not None:
             restore_mode = self._calibration_mode_saved_config.analyzer_mode
         self._change_analyzer_mode(restore_mode)
+        self._show_calibration_menu()
 
     def _update_sweep_controls(self) -> None:
         self.sweep_time_button.setText(f"Swp Time\n{self.config.sweep_time_ms:.0f} ms")
