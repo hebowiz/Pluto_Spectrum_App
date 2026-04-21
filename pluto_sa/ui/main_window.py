@@ -7,6 +7,7 @@ import threading
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import numpy as np
 import pyqtgraph as pg
@@ -24,6 +25,7 @@ from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.detector import DetectorMode, apply_detector
 from pluto_sa.signal.rbw import apply_rbw_weighting, make_gaussian_rbw_kernel, resolve_rbw_hz
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
+from pluto_sa.ui.calibration_controller import CalibrationController
 from pluto_sa.ui import sweep_like_progress as slp
 from pluto_sa.utils.calibration import apply_display_power_correction
 
@@ -62,6 +64,15 @@ HIGH_SPEED_TA_GAP_RATIO_THRESHOLD = 1.2
 HIGH_SPEED_TA_PEAK_MIN_PROMINENCE_DB = 3.0
 MIN_TIME_ANALYZER_TIME_SPAN_S = 0.01
 MAX_TIME_ANALYZER_TIME_SPAN_S = 10_000.0
+CALIBRATION_FIXED_SPAN_HZ = 10_000_000
+CALIBRATION_FIXED_RBW_HZ = 1_000_000.0
+CALIBRATION_FIXED_FFT_SIZE = 4096
+CALIBRATION_FIXED_REF_LEVEL_DBM = 20.0
+CALIBRATION_FIXED_INT_GAIN_DB = 30
+CALIBRATION_SIGNAL_OFFSET_HZ = 2_000_000
+CALIBRATION_SEARCH_WINDOW_HALF_HZ = 1_000_000
+CALIBRATION_FRAMES_PER_POINT = 5
+CALIBRATION_PEAK_MIN_DBM = -40.0
 MIN_CENTER_FREQ_STEP_MHZ = 0.001
 MAX_CENTER_FREQ_STEP_MHZ = 1_000.0
 MIN_REF_LEVEL_DBM = -100.0
@@ -270,6 +281,7 @@ class HighSpeedTAAnalysisJob:
     rbw_hz: float | None
     detector_mode: str
     calibration_offset_db: float
+    frequency_dependent_offset_db: float
     input_correction_db: float
     window: np.ndarray
     y_min: float
@@ -322,6 +334,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.processor = processor
         self.sweep_controller = sweep_controller
         self.calibration_offset_db = calibration_offset_db
+        self.calibration_controller = CalibrationController()
+        self._calibration_mode_saved_config: SpectrumConfig | None = None
+        self._calibration_last_file_dir: str | None = None
         self._sweep_like_progress = SweepLikeProgressState()
         self._time_analyzer_sweep = TimeAnalyzerSweepState()
         self._high_speed_time_analyzer = HighSpeedTimeAnalyzerCaptureState()
@@ -492,6 +507,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _is_wideband_mode(self) -> bool:
         return self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA
+
+    def _is_calibration_mode(self) -> bool:
+        return self.config.analyzer_mode == AnalyzerMode.CALIBRATION
 
     def _is_time_analyzer_mode(self) -> bool:
         return self.config.analyzer_mode in (
@@ -1259,13 +1277,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         power_linear_full = self._wideband_chunk_processor.compute_filtered_power(iq)
         power_linear_display = self._wideband_chunk_processor.extract_display_spectrum(power_linear_full)
         current_power_db_display = 10.0 * np.log10(power_linear_display + 1e-20)
-        current_display_db = apply_display_power_correction(
-            current_power_db_display,
-            self.calibration_offset_db,
-            self.config.input_correction_db,
-        )
-
         chunk_axis_ghz = self._wideband_chunk_processor.get_display_freq_axis_ghz()
+        current_display_db = self._apply_display_power_correction_with_frequency(
+            current_power_db_display,
+            freq_axis_ghz=chunk_axis_ghz,
+        )
         source_start_idx, source_end_idx = runtime.chunk_source_ranges[chunk_index]
         start_idx, end_idx = runtime.chunk_slice_ranges[chunk_index]
         runtime.composite_display_db[start_idx:end_idx] = current_display_db[source_start_idx:source_end_idx]
@@ -1352,11 +1368,42 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_realtime_sa_controls()
         if hasattr(self, "analyzer_mode_button"):
             self._update_analyzer_mode_controls()
+        if hasattr(self, "calibration_toggle_button"):
+            self._update_calibration_page_controls()
         if hasattr(self, "freq_span_button") and hasattr(self, "time_span_button"):
             self._update_span_x_scale_controls()
+        if hasattr(self, "int_gain_button"):
+            self._update_calibration_mode_controls()
         if hasattr(self, "mode_specific_menu_stack"):
             is_sweep_mode = self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
             self.mode_specific_menu_stack.setCurrentIndex(1 if is_sweep_mode else 0)
+
+    def _apply_calibration_fixed_profile(self) -> None:
+        self.config.display_span_hz = int(CALIBRATION_FIXED_SPAN_HZ)
+        self.config.rbw_hz = float(CALIBRATION_FIXED_RBW_HZ)
+        self.config.fft_size = int(CALIBRATION_FIXED_FFT_SIZE)
+        self.config.ref_level_dbm = float(CALIBRATION_FIXED_REF_LEVEL_DBM)
+        self.config.rx_gain_db = int(CALIBRATION_FIXED_INT_GAIN_DB)
+        half_span_hz = int(CALIBRATION_FIXED_SPAN_HZ // 2)
+        self._apply_frequency_window(
+            int(self.config.center_freq_hz) - half_span_hz,
+            int(self.config.center_freq_hz) + half_span_hz,
+            use_start_stop_display=False,
+        )
+
+    def _capture_calibration_mode_snapshot(self) -> None:
+        if self._calibration_mode_saved_config is None:
+            self._calibration_mode_saved_config = deepcopy(self.config)
+
+    def _restore_calibration_mode_snapshot(self, target_mode: AnalyzerMode) -> None:
+        if self._calibration_mode_saved_config is None:
+            self.config.analyzer_mode = target_mode
+            return
+        restored_config = deepcopy(self._calibration_mode_saved_config)
+        for field_name in self.config.__dataclass_fields__:
+            setattr(self.config, field_name, getattr(restored_config, field_name))
+        self.config.analyzer_mode = target_mode
+        self._calibration_mode_saved_config = None
 
     def _change_analyzer_mode(self, analyzer_mode: AnalyzerMode) -> None:
         # Old TA is intentionally hidden from UI; redirect direct/internal requests.
@@ -1370,7 +1417,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._set_left_display_updates_enabled(False)
         try:
             previous_mode = self.config.analyzer_mode
-            self.config.analyzer_mode = analyzer_mode
+            if (
+                analyzer_mode == AnalyzerMode.CALIBRATION
+                and previous_mode != AnalyzerMode.CALIBRATION
+                and self._calibration_mode_saved_config is None
+            ):
+                self._calibration_mode_saved_config = deepcopy(self.config)
+            if previous_mode == AnalyzerMode.CALIBRATION and analyzer_mode != AnalyzerMode.CALIBRATION:
+                self._restore_calibration_mode_snapshot(analyzer_mode)
+            else:
+                self.config.analyzer_mode = analyzer_mode
+            if analyzer_mode == AnalyzerMode.CALIBRATION:
+                self._capture_calibration_mode_snapshot()
+                self._apply_calibration_fixed_profile()
+                self.config.analyzer_mode = AnalyzerMode.CALIBRATION
+                self.calibration_controller.reset_sequence()
             self._sweep_like_suppress_progress_until_first_complete = (
                 analyzer_mode == AnalyzerMode.SWEEP_SA
                 or analyzer_mode in (
@@ -1381,6 +1442,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if analyzer_mode == AnalyzerMode.SWEEP_SA:
                 self.config.rbw_hz = self._clip_sweep_rbw(self.config.rbw_hz)
                 self._apply_sweep_rbw_driven_capture_settings()
+                self.sweep_state = SWEEP_STATE_RUNNING
+            elif analyzer_mode == AnalyzerMode.CALIBRATION:
                 self.sweep_state = SWEEP_STATE_RUNNING
             elif analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
                 self.config.fft_size = min(int(self.config.fft_size), MAX_REALTIME_FFT_SIZE)
@@ -1395,6 +1458,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             elif previous_mode in (
                 AnalyzerMode.SWEEP_SA,
                 AnalyzerMode.WIDEBAND_REALTIME_SA,
+                AnalyzerMode.CALIBRATION,
                 AnalyzerMode.TIME_ANALYZER,
                 AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
             ):
@@ -1404,6 +1468,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._reset_measurement_state_for_mode_change()
             if analyzer_mode == AnalyzerMode.REALTIME_SA:
                 self._rebuild_realtime_runtime_after_mode_change()
+            elif analyzer_mode == AnalyzerMode.CALIBRATION:
+                self._rebuild_realtime_runtime_after_mode_change()
             elif analyzer_mode == AnalyzerMode.TIME_ANALYZER:
                 self._rebuild_time_analyzer_runtime_after_mode_change()
             elif analyzer_mode == AnalyzerMode.HIGH_SPEED_TIME_ANALYZER:
@@ -1412,7 +1478,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._apply_analyzer_mode_ui_constraints()
             self._refresh_status_label()
             self._page_history.clear()
-            self._show_control_page("Main Menu", self.main_menu_page, push_history=False)
+            if analyzer_mode == AnalyzerMode.CALIBRATION:
+                self._show_control_page("Calibration", self.calibration_page, push_history=False)
+            else:
+                self._show_control_page("Main Menu", self.main_menu_page, push_history=False)
             if analyzer_mode == AnalyzerMode.SWEEP_SA:
                 self.receiver.invalidate_sweep_configuration()
                 self.sweep_controller.reset()
@@ -1421,6 +1490,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._last_current_display_db = None
                 self._apply_span_update()
                 self._start_sweep_continuous()
+            elif analyzer_mode == AnalyzerMode.CALIBRATION:
+                self._start_realtime_continuous()
             elif analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
                 self._invalidate_wideband_runtime()
                 self._reset_plot_state()
@@ -1846,6 +1917,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._build_marker_trace_page(index) for index in range(len(self.marker_states))
         ]
         self.realtime_sa_page = self._build_realtime_sa_page()
+        self.calibration_page = self._build_calibration_page()
         self.persistence_decay_page = self._build_persistence_decay_page()
         self.sweep_page = self._build_sweep_page()
         self.control_stack.addWidget(self.main_menu_page)
@@ -1870,6 +1942,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for page in self.marker_trace_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.realtime_sa_page)
+        self.control_stack.addWidget(self.calibration_page)
         self.control_stack.addWidget(self.persistence_decay_page)
         self.control_stack.addWidget(self.sweep_page)
         self.back_button.clicked.connect(
@@ -1984,9 +2057,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.trace_detector_button.clicked.connect(
             lambda: self._show_control_page("Trace/Detector", self.trace_detector_menu_page)
         )
-        self.realtime_sa_menu_button.clicked.connect(
-            lambda: self._show_control_page("RealTime SA", self.realtime_sa_page)
-        )
+        self.realtime_sa_menu_button.clicked.connect(self._open_realtime_mode_page)
         self.sweep_menu_button.clicked.connect(
             lambda: self._show_control_page("Sweep", self.sweep_page)
         )
@@ -2000,6 +2071,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_analyzer_mode_controls()
         return page
 
+    def _open_realtime_mode_page(self) -> None:
+        if self._is_calibration_mode():
+            self._show_control_page("Calibration", self.calibration_page)
+            return
+        self._show_control_page("RealTime SA", self.realtime_sa_page)
+
     def _build_analyzer_mode_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
         page_layout = QtWidgets.QVBoxLayout(page)
@@ -2010,6 +2087,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.REALTIME_SA,
             AnalyzerMode.WIDEBAND_REALTIME_SA,
             AnalyzerMode.SWEEP_SA,
+            AnalyzerMode.CALIBRATION,
             AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
         ):
             button = self._make_control_button(mode.value)
@@ -2430,10 +2508,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.fft_size_button = self._make_control_button("FFT size")
         self.history_button = self._make_control_button("History")
         self.persistence_decay_button = self._make_value_control_button("Persistence Decay")
+        self.calibration_menu_button = self._make_control_button("Calibration")
 
         page_layout.addWidget(self.fft_size_button)
         page_layout.addWidget(self.history_button)
         page_layout.addWidget(self.persistence_decay_button)
+        page_layout.addWidget(self.calibration_menu_button)
         page_layout.addStretch(1)
 
         self.fft_size_button.clicked.connect(
@@ -2443,7 +2523,41 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.persistence_decay_button.clicked.connect(
             lambda: self._show_control_page("Persistence Decay", self.persistence_decay_page)
         )
+        self.calibration_menu_button.clicked.connect(
+            lambda: self._show_control_page("Calibration", self.calibration_page)
+        )
         self._update_realtime_sa_controls()
+        return page
+
+    def _build_calibration_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.calibration_measure_button = self._make_control_button("Measure (Pending)")
+        self.calibration_return_button = self._make_control_button("Return")
+        self.calibration_load_button = self._make_control_button("Load Correction CSV")
+        self.calibration_load_reference_button = self._make_control_button("Load Reference CSV")
+        self.calibration_toggle_button = self._make_control_button("Calibration OFF")
+
+        page_layout.addWidget(self.calibration_measure_button)
+        page_layout.addWidget(self.calibration_return_button)
+        page_layout.addWidget(self.calibration_load_button)
+        page_layout.addWidget(self.calibration_load_reference_button)
+        page_layout.addWidget(self.calibration_toggle_button)
+        page_layout.addStretch(1)
+
+        self.calibration_measure_button.clicked.connect(self._on_calibration_measure_clicked)
+        self.calibration_return_button.clicked.connect(self._on_calibration_return_clicked)
+        self.calibration_load_button.clicked.connect(
+            self._on_calibration_load_correction_csv_clicked
+        )
+        self.calibration_load_reference_button.clicked.connect(
+            self._on_calibration_load_reference_csv_clicked
+        )
+        self.calibration_toggle_button.clicked.connect(self._on_calibration_toggle_clicked)
+        self._update_calibration_page_controls()
         return page
 
     def _build_persistence_decay_page(self) -> QtWidgets.QWidget:
@@ -2990,6 +3104,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return spin_box.value()
 
     def _on_freq_channel_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         value = self._show_center_frequency_dialog()
         if value is None:
             return
@@ -2998,6 +3114,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._apply_center_frequency_change(center_freq_hz)
 
     def _on_cf_step_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "CF Step",
@@ -3054,6 +3172,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_freq_start_stop_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         if self._is_time_analyzer_mode():
             QtWidgets.QMessageBox.information(
                 self,
@@ -3141,6 +3261,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_span_x_scale_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         if self._is_time_analyzer_mode():
             return
         previous_sweep_state = self._current_sweep_state()
@@ -3183,6 +3305,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_ref_level_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Ref Level",
@@ -3205,6 +3329,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_range_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Range",
@@ -3227,6 +3353,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_int_gain_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         value, accepted = QtWidgets.QInputDialog.getInt(
             self,
             "Int Gain",
@@ -3244,6 +3372,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_ext_att_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Ext ATT",
@@ -3264,6 +3394,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_ext_gain_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Ext Gain",
@@ -3284,6 +3416,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_rbw_clicked(self) -> None:
+        if self._is_calibration_mode():
+            return
         previous_state = self._current_sweep_state()
         is_wideband_mode = self._is_wideband_mode()
         is_high_speed_ta_mode = self._is_high_speed_time_analyzer_mode()
@@ -3385,6 +3519,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return min(max(rbw_hz, 0.0), MAX_REALTIME_RBW_HZ)
 
     def _select_fft_size(self, fft_size: int) -> None:
+        if self._is_calibration_mode():
+            self._refresh_status_label()
+            return
         if self._is_time_analyzer_mode():
             self._refresh_status_label()
             return
@@ -3952,7 +4089,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "freq_span_button") or not hasattr(self, "time_span_button"):
             return
         is_time_analyzer = self._is_time_analyzer_mode()
-        self.freq_span_button.setEnabled(not is_time_analyzer)
+        self.freq_span_button.setEnabled((not is_time_analyzer) and (not self._is_calibration_mode()))
         if is_time_analyzer:
             self.time_span_button.setEnabled(True)
             time_span_value = float(self.config.time_analyzer_time_span_s)
@@ -3966,6 +4103,370 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         else:
             self.time_span_button.setEnabled(False)
             self.time_span_button.setText("Time Span")
+
+    def _update_calibration_page_controls(self) -> None:
+        if not hasattr(self, "calibration_toggle_button"):
+            return
+        current_point = self.calibration_controller.current_sequence_point()
+        sequence_done = self.calibration_controller.sequence_completed()
+        if sequence_done:
+            measure_text = "Save Results CSV"
+        elif current_point is None:
+            measure_text = "Measure --"
+        else:
+            measure_text = f"Measure {current_point.frequency_hz / 1e6:.0f} MHz"
+        if self.calibration_controller.sequence_retry_waiting and not sequence_done:
+            measure_text = f"Retry {current_point.frequency_hz / 1e6:.0f} MHz"
+        self.calibration_measure_button.setText(measure_text)
+
+        enabled_text = "ON" if self.calibration_controller.correction_enabled else "OFF"
+        loaded_suffix = " (Loaded)" if self.calibration_controller.correction_loaded else " (No Data)"
+        self.calibration_toggle_button.setText(f"Calibration {enabled_text}{loaded_suffix}")
+
+        is_measuring = self.calibration_controller.sequence_is_measuring
+        is_retry_waiting = self.calibration_controller.sequence_retry_waiting
+
+        if is_measuring:
+            self.calibration_measure_button.setEnabled(False)
+            self.calibration_return_button.setEnabled(False)
+            self.calibration_load_button.setEnabled(False)
+            self.calibration_load_reference_button.setEnabled(False)
+            self.calibration_toggle_button.setEnabled(False)
+            return
+
+        if is_retry_waiting:
+            self.calibration_measure_button.setEnabled(not sequence_done)
+            self.calibration_return_button.setEnabled(True)
+            self.calibration_load_button.setEnabled(False)
+            self.calibration_load_reference_button.setEnabled(False)
+            self.calibration_toggle_button.setEnabled(False)
+            return
+
+        self.calibration_measure_button.setEnabled(True)
+        self.calibration_return_button.setEnabled(True)
+        self.calibration_load_button.setEnabled(True)
+        self.calibration_load_reference_button.setEnabled(True)
+        self.calibration_toggle_button.setEnabled(True)
+
+    def _update_calibration_mode_controls(self) -> None:
+        in_calibration = self._is_calibration_mode()
+        if hasattr(self, "freq_center_button"):
+            self.freq_center_button.setEnabled(not in_calibration)
+        if hasattr(self, "cf_step_button"):
+            self.cf_step_button.setEnabled(not in_calibration)
+        if hasattr(self, "freq_center_left_button"):
+            self.freq_center_left_button.setEnabled(not in_calibration)
+        if hasattr(self, "freq_center_right_button"):
+            self.freq_center_right_button.setEnabled(not in_calibration)
+        if hasattr(self, "freq_start_stop_button"):
+            self.freq_start_stop_button.setEnabled(not in_calibration)
+        if hasattr(self, "ref_level_button"):
+            self.ref_level_button.setEnabled(not in_calibration)
+        if hasattr(self, "range_button"):
+            self.range_button.setEnabled(not in_calibration)
+        if hasattr(self, "rbw_button"):
+            self.rbw_button.setEnabled(not in_calibration)
+        if hasattr(self, "fft_size_button"):
+            self.fft_size_button.setEnabled((not self._is_time_analyzer_mode()) and (not in_calibration))
+        if hasattr(self, "int_gain_button"):
+            self.int_gain_button.setEnabled(not in_calibration)
+        if hasattr(self, "ext_att_button"):
+            self.ext_att_button.setEnabled(not in_calibration)
+        if hasattr(self, "ext_gain_button"):
+            self.ext_gain_button.setEnabled(not in_calibration)
+
+    def _default_csv_dialog_dir(self) -> str:
+        if self._calibration_last_file_dir is not None:
+            return self._calibration_last_file_dir
+        return "."
+
+    def _on_calibration_toggle_clicked(self) -> None:
+        if self.calibration_controller.sequence_is_measuring:
+            return
+        if self.calibration_controller.sequence_retry_waiting:
+            return
+        self.calibration_controller.toggle_correction_enabled()
+        self._update_calibration_page_controls()
+        self._refresh_status_label()
+
+    def _on_calibration_load_correction_csv_clicked(self) -> None:
+        if self.calibration_controller.sequence_is_measuring:
+            return
+        if self.calibration_controller.sequence_retry_waiting:
+            return
+        file_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load Calibration Correction CSV",
+            self._default_csv_dialog_dir(),
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            summary = self.calibration_controller.load_correction_csv(file_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Calibration CSV",
+                f"Failed to load correction CSV:\n{exc}",
+            )
+            return
+        self._calibration_last_file_dir = str(QtCore.QFileInfo(file_path).absolutePath())
+        print(
+            "[CAL] Correction CSV loaded "
+            f"count={summary.count} "
+            f"min={summary.min_frequency_hz}Hz "
+            f"max={summary.max_frequency_hz}Hz "
+            f"enabled={self.calibration_controller.correction_enabled}"
+        )
+        self._update_calibration_page_controls()
+        self._refresh_status_label()
+
+    def _on_calibration_load_reference_csv_clicked(self) -> None:
+        if self.calibration_controller.sequence_is_measuring:
+            return
+        if self.calibration_controller.sequence_retry_waiting:
+            return
+        file_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load Calibration Reference CSV",
+            self._default_csv_dialog_dir(),
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not file_path:
+            return
+        try:
+            summary = self.calibration_controller.load_reference_csv(file_path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Reference CSV",
+                f"Failed to load reference CSV:\n{exc}",
+            )
+            return
+        self._calibration_last_file_dir = str(QtCore.QFileInfo(file_path).absolutePath())
+        print(
+            "[CAL] Reference CSV loaded "
+            f"count={summary.count} "
+            f"min={summary.min_frequency_hz}Hz "
+            f"max={summary.max_frequency_hz}Hz"
+        )
+        self._refresh_status_label()
+
+    def _set_calibration_center_frequency(self, calibration_frequency_hz: int) -> None:
+        center_hz = int(calibration_frequency_hz) - int(CALIBRATION_SIGNAL_OFFSET_HZ)
+        half_span_hz = int(CALIBRATION_FIXED_SPAN_HZ // 2)
+        self._apply_frequency_window(
+            center_hz - half_span_hz,
+            center_hz + half_span_hz,
+            use_start_stop_display=False,
+        )
+        self.receiver.reconfigure_span(self.config)
+        self.receiver.retune_lo(self.config.center_freq_hz)
+        self.processor.update_span_related(self.config)
+        self.processor.update_center_frequency(self.config.center_freq_hz)
+        self._apply_span_update()
+
+    def _measure_calibration_point_maxima_dbm(
+        self,
+        calibration_frequency_hz: int,
+    ) -> tuple[list[float], str | None]:
+        maxima_dbm: list[float] = []
+        capture_size = int(self.config.fft_size)
+        for _frame_index in range(int(CALIBRATION_FRAMES_PER_POINT)):
+            iq = self.receiver.capture_block(capture_size)
+            if len(iq) != len(self.processor.window):
+                continue
+            power_linear_full = self.processor.compute_filtered_power(iq)
+            power_linear_display = self.processor.extract_display_spectrum(power_linear_full)
+            if len(power_linear_display) == 0:
+                continue
+            power_db_display = np.full(len(power_linear_display), np.nan, dtype=float)
+            valid_mask = np.isfinite(power_linear_display)
+            power_db_display[valid_mask] = 10.0 * np.log10(power_linear_display[valid_mask] + 1e-20)
+            freq_axis_hz = self.processor.get_display_freq_axis_ghz() * 1e9
+            if len(freq_axis_hz) != len(power_db_display):
+                continue
+            search_mask = np.abs(freq_axis_hz - float(calibration_frequency_hz)) <= float(
+                CALIBRATION_SEARCH_WINDOW_HALF_HZ
+            )
+            if not np.any(search_mask):
+                continue
+            search_values = power_db_display[search_mask]
+            finite_values = search_values[np.isfinite(search_values)]
+            if len(finite_values) == 0:
+                continue
+            measured_internal_dbm = float(np.max(finite_values))
+            measured_display_like_dbm = float(
+                measured_internal_dbm
+                + float(self.calibration_offset_db)
+                + float(self.config.input_correction_db)
+            )
+            maxima_dbm.append(measured_display_like_dbm)
+        if len(maxima_dbm) == 0:
+            return maxima_dbm, "no_finite_peak"
+        measured_avg_dbm = float(np.mean(maxima_dbm))
+        if measured_avg_dbm < float(CALIBRATION_PEAK_MIN_DBM):
+            return maxima_dbm, "peak_too_low"
+        return maxima_dbm, None
+
+    def _save_calibration_results_csv(self) -> bool:
+        results = self.calibration_controller.measurement_results
+        if len(results) == 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Calibration",
+                "No calibration results to save.",
+            )
+            return False
+        default_dir = self._default_csv_dialog_dir()
+        file_path, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Calibration Result CSV",
+            default_dir,
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not file_path:
+            return False
+        save_path = file_path if file_path.lower().endswith(".csv") else f"{file_path}.csv"
+        try:
+            with open(save_path, "w", encoding="utf-8", newline="") as csv_file:
+                csv_file.write("# Calibration Result File\n")
+                csv_file.write(f"# Int Gain [dB]: {int(self.config.rx_gain_db)}\n")
+                csv_file.write(f"# RBW [Hz]: {int(round(float(self.config.rbw_hz or 0.0)))}\n")
+                csv_file.write(f"# Ext ATT [dB]: {float(self.config.ext_att_db):.1f}\n")
+                csv_file.write(f"# Ext Gain [dB]: {float(self.config.ext_gain_db):.1f}\n")
+                csv_file.write(f"# Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                csv_file.write("# Note: Pluto Spectrum App Calibration\n")
+                csv_file.write(
+                    "frequency_hz,measured_power_dbm,reference_power_dbm,calibration_offset_db\n"
+                )
+                for result in results:
+                    csv_file.write(
+                        f"{int(result.frequency_hz)},"
+                        f"{float(result.measured_power_dbm):.6f},"
+                        f"{float(result.reference_power_dbm):.6f},"
+                        f"{float(result.calibration_offset_db):.6f}\n"
+                    )
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Calibration Save",
+                f"Failed to save calibration CSV:\n{exc}",
+            )
+            return False
+
+        self._calibration_last_file_dir = str(QtCore.QFileInfo(save_path).absolutePath())
+        frequency_hz = np.asarray([int(item.frequency_hz) for item in results], dtype=np.int64)
+        calibration_offsets_db = np.asarray(
+            [float(item.calibration_offset_db) for item in results],
+            dtype=float,
+        )
+        self.calibration_controller.offset_table.set_table(
+            frequency_hz,
+            calibration_offsets_db,
+        )
+        print(
+            "[CAL] Result CSV saved "
+            f"path={save_path} count={len(results)} "
+            f"min={int(frequency_hz[0])}Hz max={int(frequency_hz[-1])}Hz "
+            f"enabled={self.calibration_controller.correction_enabled}"
+        )
+        return True
+
+    def _on_calibration_measure_clicked(self) -> None:
+        if not self._is_calibration_mode():
+            return
+        if self.calibration_controller.sequence_completed():
+            save_ok = self._save_calibration_results_csv()
+            self._update_calibration_page_controls()
+            self._refresh_status_label()
+            if not save_ok:
+                return
+            restore_mode = AnalyzerMode.REALTIME_SA
+            if self._calibration_mode_saved_config is not None:
+                restore_mode = self._calibration_mode_saved_config.analyzer_mode
+            self._change_analyzer_mode(restore_mode)
+            return
+        point = self.calibration_controller.current_sequence_point()
+        if point is None:
+            self._update_calibration_page_controls()
+            return
+
+        self.calibration_controller.mark_measurement_started()
+        self._update_calibration_page_controls()
+        timer_was_active = self.timer.isActive()
+        switched_mode_during_measure = False
+        if timer_was_active:
+            self.timer.stop()
+        try:
+            self._set_calibration_center_frequency(int(point.frequency_hz))
+            maxima_dbm, error_reason = self._measure_calibration_point_maxima_dbm(
+                int(point.frequency_hz)
+            )
+            if error_reason is not None:
+                self.calibration_controller.mark_retry_waiting()
+                if error_reason == "peak_too_low":
+                    measured_avg_dbm = float(np.mean(maxima_dbm)) if len(maxima_dbm) > 0 else float("nan")
+                    print(
+                        "[CAL] ERROR "
+                        f"f={point.frequency_hz / 1e6:.0f} MHz "
+                        f"reason=peak_below_threshold "
+                        f"measured={measured_avg_dbm:.2f} dBm "
+                        f"threshold={CALIBRATION_PEAK_MIN_DBM:.1f} dBm"
+                    )
+                else:
+                    print(
+                        "[CAL] ERROR "
+                        f"f={point.frequency_hz / 1e6:.0f} MHz "
+                        "reason=no_finite_peak_in_search_window"
+                    )
+                return
+
+            self.calibration_controller.clear_retry_waiting()
+            measured_display_like_dbm = float(np.mean(maxima_dbm))
+            reference_power_dbm = float(point.reference_power_dbm)
+            calculated_offset_db = float(
+                reference_power_dbm
+                - measured_display_like_dbm
+            )
+            result = self.calibration_controller.append_result_and_advance(
+                measured_power_dbm=measured_display_like_dbm,
+                calibration_offset_db=calculated_offset_db,
+            )
+            print(
+                "[CAL] "
+                f"f={result.frequency_hz / 1e6:.0f} MHz  "
+                f"Meas={result.measured_power_dbm:.1f} dBm  "
+                f"Ref={result.reference_power_dbm:.1f} dBm  "
+                f"Offset={result.calibration_offset_db:.1f} dB"
+            )
+            if self.calibration_controller.sequence_completed():
+                save_ok = self._save_calibration_results_csv()
+                if save_ok:
+                    restore_mode = AnalyzerMode.REALTIME_SA
+                    if self._calibration_mode_saved_config is not None:
+                        restore_mode = self._calibration_mode_saved_config.analyzer_mode
+                    self._change_analyzer_mode(restore_mode)
+                    switched_mode_during_measure = True
+                    return
+        finally:
+            self.calibration_controller.mark_measurement_finished()
+            if (
+                timer_was_active
+                and not switched_mode_during_measure
+                and self.sweep_state != SWEEP_STATE_STOPPED
+            ):
+                self._restart_timer_for_current_mode()
+            self._update_calibration_page_controls()
+            self._refresh_status_label()
+
+    def _on_calibration_return_clicked(self) -> None:
+        self.calibration_controller.reset_sequence()
+        restore_mode = AnalyzerMode.REALTIME_SA
+        if self._calibration_mode_saved_config is not None:
+            restore_mode = self._calibration_mode_saved_config.analyzer_mode
+        self._change_analyzer_mode(restore_mode)
 
     def _update_sweep_controls(self) -> None:
         self.sweep_time_button.setText(f"Swp Time\n{self.config.sweep_time_ms:.0f} ms")
@@ -4760,16 +5261,45 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if trace_state.display_db is not None:
                 self._last_completed_sweep_trace_db[trace_state.name] = trace_state.display_db.copy()
 
-    def _update_traces_from_power_linear(self, power_linear_display: np.ndarray) -> None:
+    def _apply_display_power_correction_with_frequency(
+        self,
+        values_db: np.ndarray,
+        *,
+        freq_axis_ghz: np.ndarray | None = None,
+        frequency_hz: float | None = None,
+    ) -> np.ndarray:
+        corrected = apply_display_power_correction(
+            values_db,
+            self.calibration_offset_db,
+            self.config.input_correction_db,
+        )
+        if freq_axis_ghz is not None and len(freq_axis_ghz) == len(corrected):
+            offset_values = self.calibration_controller.get_frequency_offsets_db(
+                np.asarray(freq_axis_ghz, dtype=float) * 1e9
+            )
+            return corrected + offset_values
+        if frequency_hz is not None:
+            offset_db = self.calibration_controller.get_frequency_offset_db(float(frequency_hz))
+            return corrected + float(offset_db)
+        return corrected
+
+    def _update_traces_from_power_linear(
+        self,
+        power_linear_display: np.ndarray,
+        *,
+        freq_axis_ghz: np.ndarray | None = None,
+    ) -> None:
+        resolved_axis_ghz = freq_axis_ghz
+        if resolved_axis_ghz is None:
+            resolved_axis_ghz = self.processor.get_display_freq_axis_ghz()
         current_power_db_display = np.full(len(power_linear_display), np.nan, dtype=float)
         valid_mask = np.isfinite(power_linear_display)
         current_power_db_display[valid_mask] = 10.0 * np.log10(
             power_linear_display[valid_mask] + 1e-20
         )
-        current_display_db = apply_display_power_correction(
+        current_display_db = self._apply_display_power_correction_with_frequency(
             current_power_db_display,
-            self.calibration_offset_db,
-            self.config.input_correction_db,
+            freq_axis_ghz=resolved_axis_ghz,
         )
         self._last_current_display_db = current_display_db
 
@@ -4817,10 +5347,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trace_db = np.full(len(trace_linear), np.nan, dtype=float)
             trace_valid_mask = np.isfinite(trace_linear)
             trace_db[trace_valid_mask] = 10.0 * np.log10(trace_linear[trace_valid_mask] + 1e-20)
-            trace_state.display_db = apply_display_power_correction(
+            trace_state.display_db = self._apply_display_power_correction_with_frequency(
                 trace_db,
-                self.calibration_offset_db,
-                self.config.input_correction_db,
+                freq_axis_ghz=resolved_axis_ghz,
             )
 
         self._last_display_power_db = (
@@ -5061,6 +5590,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _refresh_status_label(self) -> None:
         self._refresh_sweep_time_estimate()
         self._update_span_x_scale_controls()
+        self._update_calibration_page_controls()
+        self._update_calibration_mode_controls()
         self.status_label.setText(self._make_header_status_text())
 
     def _get_header_frequency_fields(self) -> tuple[str, str, str, str]:
@@ -5590,6 +6121,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             rbw_hz=self.config.rbw_hz,
             detector_mode=self.config.sweep_detector_mode,
             calibration_offset_db=float(self.calibration_offset_db),
+            frequency_dependent_offset_db=float(
+                self.calibration_controller.get_frequency_offset_db(float(self.config.center_freq_hz))
+            ),
             input_correction_db=float(self.config.input_correction_db),
             window=self.processor.window.copy(),
             y_min=float(self.y_min),
@@ -5833,7 +6367,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         # Preserve TA/Sweep-aligned amplitude definition through detector-equivalent value.
         y_values = 10.0 * np.log10(detector_linear + 1e-20)
-        y_values = y_values + float(job.calibration_offset_db) + float(job.input_correction_db)
+        y_values = (
+            y_values
+            + float(job.calibration_offset_db)
+            + float(job.frequency_dependent_offset_db)
+            + float(job.input_correction_db)
+        )
 
         block_ends = np.cumsum(block_lengths, dtype=np.int64)
         block_starts = block_ends - block_lengths
@@ -6079,10 +6618,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         power_linear_full = self.processor.compute_filtered_power(iq)
         power_linear_display = self.processor.extract_display_spectrum(power_linear_full)
         current_power_db_display = 10.0 * np.log10(power_linear_display + 1e-20)
-        current_display_db = apply_display_power_correction(
+        current_display_db = self._apply_display_power_correction_with_frequency(
             current_power_db_display,
-            self.calibration_offset_db,
-            self.config.input_correction_db,
+            freq_axis_ghz=self.processor.get_display_freq_axis_ghz(),
         )
 
         current_received_total = self.receiver.get_received_sample_count()
@@ -6235,10 +6773,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         center_power_linear = float(power_linear_full[center_index])
         center_power_db = 10.0 * np.log10(center_power_linear + 1e-20)
         corrected_center_db = float(
-            apply_display_power_correction(
+            self._apply_display_power_correction_with_frequency(
                 np.asarray([center_power_db], dtype=float),
-                self.calibration_offset_db,
-                self.config.input_correction_db,
+                frequency_hz=float(self.config.center_freq_hz),
             )[0]
         )
         ta_bin_width_hz = float(self.config.sample_rate_hz) / max(1, int(self.config.fft_size))
@@ -6254,10 +6791,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         ta_detector_equivalent_db = 10.0 * np.log10(ta_detector_equivalent_linear + 1e-20)
         ta_display_detector_equivalent_db = float(
-            apply_display_power_correction(
+            self._apply_display_power_correction_with_frequency(
                 np.asarray([ta_detector_equivalent_db], dtype=float),
-                self.calibration_offset_db,
-                self.config.input_correction_db,
+                frequency_hz=float(self.config.center_freq_hz),
             )[0]
         )
         if self.config.sweep_profile_logging:
@@ -6371,7 +6907,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             power_linear_display[valid_mask] = 10.0 ** (
                 frame_result.display_db[valid_mask] / 10.0
             )
-            self._update_traces_from_power_linear(power_linear_display)
+            self._update_traces_from_power_linear(
+                power_linear_display,
+                freq_axis_ghz=sweep_freq_axis_ghz,
+            )
             if frame_result.sweep_complete:
                 self._capture_completed_sweep_snapshot()
             self._update_trace_curves()
@@ -6399,10 +6938,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             center_match_tolerance_hz = max(1.0, float(self.config.sweep_step_hz) * 0.5)
             if abs(float(latest_point_result.frequency_hz) - float(self.config.center_freq_hz)) <= center_match_tolerance_hz:
                 display_value = float(
-                    apply_display_power_correction(
+                    self._apply_display_power_correction_with_frequency(
                         np.asarray([latest_point_result.measured_power_db], dtype=float),
-                        self.calibration_offset_db,
-                        self.config.input_correction_db,
+                        frequency_hz=float(latest_point_result.frequency_hz),
                     )[0]
                 )
                 self._log_compare_sa(
