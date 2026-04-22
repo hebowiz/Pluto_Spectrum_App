@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+import time
+import traceback
 from typing import Optional
 
 import adi
@@ -26,10 +28,32 @@ class PlutoReceiver:
         self._fast_capture_size: int | None = None
         self._high_speed_backend_enabled = False
         self._high_speed_backend_block_size: int | None = None
+        self._high_speed_buffered_reader = None
+        self._high_speed_buffered_checked = False
+        self._high_speed_buffered_available = False
+        self._high_speed_buffered_unavailable_reason: str | None = None
+        self._high_speed_buffered_notice_emitted = False
+        self._hsta_debug_last_log_s: dict[str, float] = {}
 
         self.received_samples_total = 0
         self._configure_sdr(config)
         self._allocate_capture_buffers(config)
+
+    def _hsta_debug_log(
+        self,
+        event: str,
+        *,
+        message: str = "",
+        throttle_s: float = 0.0,
+    ) -> None:
+        now = time.perf_counter()
+        if throttle_s > 0.0:
+            last = self._hsta_debug_last_log_s.get(event)
+            if last is not None and (now - last) < throttle_s:
+                return
+            self._hsta_debug_last_log_s[event] = now
+        payload = f" {message}" if message else ""
+        print(f"[HSTA-DBG][RX] {event}{payload}")
 
     def _configure_sdr(self, config: SpectrumConfig) -> None:
         self.config = config
@@ -37,6 +61,11 @@ class PlutoReceiver:
         self._fast_capture_size = None
         self._high_speed_backend_enabled = False
         self._high_speed_backend_block_size = None
+        self._high_speed_buffered_reader = None
+        self._high_speed_buffered_checked = False
+        self._high_speed_buffered_available = False
+        self._high_speed_buffered_unavailable_reason = None
+        self._high_speed_buffered_notice_emitted = False
         with self._sdr_lock:
             self.sdr.rx_lo = config.center_freq_hz
             self.sdr.sample_rate = config.sample_rate_hz
@@ -134,6 +163,11 @@ class PlutoReceiver:
                     pass
             self._allocate_capture_buffers(config)
             self.received_samples_total = 0
+            self._high_speed_buffered_reader = None
+            self._high_speed_buffered_checked = False
+            self._high_speed_buffered_available = False
+            self._high_speed_buffered_unavailable_reason = None
+            self._high_speed_buffered_notice_emitted = False
 
     def invalidate_sweep_configuration(self) -> None:
         with self._iq_lock:
@@ -151,6 +185,11 @@ class PlutoReceiver:
             self._fast_capture_size = None
             self._high_speed_backend_enabled = False
             self._high_speed_backend_block_size = None
+            self._high_speed_buffered_reader = None
+            self._high_speed_buffered_checked = False
+            self._high_speed_buffered_available = False
+            self._high_speed_buffered_unavailable_reason = None
+            self._high_speed_buffered_notice_emitted = False
             if self._sweep_config_signature == sweep_signature:
                 return
             with self._sdr_lock:
@@ -225,10 +264,20 @@ class PlutoReceiver:
             iq = np.empty(capture_size, dtype=np.complex64)
             filled = 0
             while filled < capture_size:
+                self._hsta_debug_log(
+                    "sdr_rx_before_fast",
+                    message=f"want={capture_size} filled={filled}",
+                    throttle_s=1.0,
+                )
                 chunk = self.sdr.rx()
+                chunk_len = 0 if chunk is None else int(len(chunk))
+                self._hsta_debug_log(
+                    "sdr_rx_after_fast",
+                    message=f"chunk_len={chunk_len} none={int(chunk is None)}",
+                    throttle_s=1.0,
+                )
                 if chunk is None:
                     break
-                chunk_len = int(len(chunk))
                 if chunk_len <= 0:
                     break
                 chunk_arr = (
@@ -254,12 +303,56 @@ class PlutoReceiver:
             self._fast_capture_size = None
             self._high_speed_backend_enabled = False
             self._high_speed_backend_block_size = None
+            self._high_speed_buffered_reader = None
+            self._high_speed_buffered_checked = False
+            self._high_speed_buffered_available = False
+            self._high_speed_buffered_unavailable_reason = None
+            self._high_speed_buffered_notice_emitted = False
+
+    def _mark_high_speed_buffered_unavailable(
+        self,
+        *,
+        reason: str,
+        exc: Exception | None = None,
+        include_traceback: bool = False,
+    ) -> None:
+        self._high_speed_buffered_available = False
+        self._high_speed_buffered_reader = None
+        self._high_speed_buffered_unavailable_reason = reason
+        if self._high_speed_buffered_notice_emitted:
+            return
+        self._high_speed_buffered_notice_emitted = True
+        message = f"buffered backend unavailable, using rx() fallback reason={reason}"
+        if exc is not None:
+            message += f" type={type(exc).__name__} msg={str(exc)!r}"
+        self._hsta_debug_log("buffered_backend_unavailable", message=message)
+        if include_traceback and exc is not None:
+            print("[HSTA-DBG][RX] buffered_backend_unavailable_traceback_begin")
+            print(traceback.format_exc().rstrip())
+            print("[HSTA-DBG][RX] buffered_backend_unavailable_traceback_end")
+
+    def _ensure_high_speed_buffered_capability(self) -> None:
+        if self._high_speed_buffered_checked:
+            return
+        self._high_speed_buffered_checked = True
+        candidate = getattr(self.sdr, "_rx__rx_buffered_data", None)
+        if callable(candidate):
+            self._high_speed_buffered_reader = candidate
+            self._high_speed_buffered_available = True
+            self._high_speed_buffered_unavailable_reason = None
+            self._hsta_debug_log(
+                "buffered_backend_capability",
+                message="available=1 api=_rx__rx_buffered_data",
+            )
+            return
+        self._mark_high_speed_buffered_unavailable(reason="missing_private_api")
 
     def start_high_speed_capture_backend(self, block_size: int) -> None:
         """Initialize High Speed TA dedicated buffered RX backend."""
         if self._closed:
             return
         size = max(1, int(block_size))
+        self._hsta_debug_log("backend_start", message=f"block_size={size}")
         with self._sdr_lock:
             self.sdr.rx_buffer_size = size
             try:
@@ -267,15 +360,22 @@ class PlutoReceiver:
             except Exception:
                 pass
             # Prime internal pyadi buffer with desired size.
+            self._hsta_debug_log("sdr_rx_before_prime", message=f"size={size}")
             _ = self.sdr.rx()
+            self._hsta_debug_log(
+                "sdr_rx_after_prime",
+                message=f"len={0 if _ is None else int(len(_))} none={int(_ is None)}",
+            )
             self._high_speed_backend_enabled = True
             self._high_speed_backend_block_size = size
             self._fast_capture_size = size
+        self._ensure_high_speed_buffered_capability()
 
     def stop_high_speed_capture_backend(self) -> None:
         """Stop High Speed TA dedicated backend and release pyadi RX buffer."""
         if self._closed:
             return
+        self._hsta_debug_log("backend_stop")
         with self._sdr_lock:
             self._high_speed_backend_enabled = False
             self._high_speed_backend_block_size = None
@@ -290,14 +390,75 @@ class PlutoReceiver:
             return np.empty(0, dtype=np.complex64)
         if not self._high_speed_backend_enabled:
             size = self._high_speed_backend_block_size or self._fast_capture_size or self.config.rx_buffer_size
+            self._hsta_debug_log(
+                "backend_disabled_fallback_fast",
+                message=f"size={int(size)}",
+                throttle_s=1.0,
+            )
             return self.capture_block_fast(int(size))
 
+        self._ensure_high_speed_buffered_capability()
+        if not self._high_speed_buffered_available or self._high_speed_buffered_reader is None:
+            size = int(self._high_speed_backend_block_size or self.config.rx_buffer_size)
+            self._hsta_debug_log(
+                "buffered_backend_bypassed_use_rx",
+                message=(
+                    f"size={size} "
+                    f"reason={self._high_speed_buffered_unavailable_reason or 'unknown'}"
+                ),
+                throttle_s=2.0,
+            )
+            return self.capture_block_fast(size)
+
+        raw_channels = None
+        fallback_size: int | None = None
+        fallback_reason: str | None = None
         with self._sdr_lock:
             try:
-                raw_channels = self.sdr._rx__rx_buffered_data()
-            except Exception:
-                size = self._high_speed_backend_block_size or self.config.rx_buffer_size
-                return self.capture_block_fast(int(size))
+                configured_size = int(
+                    self._high_speed_backend_block_size or self.config.rx_buffer_size
+                )
+                current_size = int(self.sdr.rx_buffer_size)
+                self._hsta_debug_log(
+                    "buffered_read_before",
+                    message=(
+                        f"configured_size={configured_size} "
+                        f"rx_buffer_size={current_size}"
+                    ),
+                    throttle_s=1.0,
+                )
+                raw_channels = self._high_speed_buffered_reader()
+            except Exception as exc:
+                fallback_size = int(
+                    self._high_speed_backend_block_size or self.config.rx_buffer_size
+                )
+                self._mark_high_speed_buffered_unavailable(
+                    reason="buffered_read_exception",
+                    exc=exc,
+                    include_traceback=True,
+                )
+                self._hsta_debug_log(
+                    "buffered_read_exception_fallback_fast",
+                    message=f"size={fallback_size}",
+                )
+                fallback_reason = "buffered_read_exception"
+        if fallback_size is not None:
+            out = self.capture_block_fast(int(fallback_size))
+            self._hsta_debug_log(
+                "fallback_fast_result",
+                message=(
+                    f"reason={fallback_reason} "
+                    f"len={int(len(out))} "
+                    f"none={int(out is None)}"
+                ),
+                throttle_s=1.0,
+            )
+            return out
+        self._hsta_debug_log(
+            "buffered_read_after",
+            message=f"type={type(raw_channels).__name__}",
+            throttle_s=1.0,
+        )
 
         # Complex Pluto path: two channels [I, Q] expected.
         if (
@@ -305,18 +466,29 @@ class PlutoReceiver:
             or len(raw_channels) < 2
         ):
             size = self._high_speed_backend_block_size or self.config.rx_buffer_size
+            self._hsta_debug_log(
+                "buffered_shape_unexpected_fallback_fast",
+                message=f"size={int(size)}",
+                throttle_s=1.0,
+            )
             return self.capture_block_fast(int(size))
 
         i_raw = np.asarray(raw_channels[0])
         q_raw = np.asarray(raw_channels[1])
         n = min(len(i_raw), len(q_raw))
         if n <= 0:
+            self._hsta_debug_log("buffered_output_empty", throttle_s=1.0)
             return np.empty(0, dtype=np.complex64)
 
         out = np.empty(n, dtype=np.complex64)
         out.real = i_raw[:n].astype(np.float32, copy=False)
         out.imag = q_raw[:n].astype(np.float32, copy=False)
         self.received_samples_total += n
+        self._hsta_debug_log(
+            "buffered_output_ready",
+            message=f"len={int(n)}",
+            throttle_s=1.0,
+        )
         return out
 
     def reconfigure(self, config: SpectrumConfig) -> None:

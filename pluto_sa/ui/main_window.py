@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import threading
 import json
+import traceback
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -64,6 +65,7 @@ HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES = 16_384
 HIGH_SPEED_TA_RING_MAX_BLOCKS = 4096
 HIGH_SPEED_TA_GAP_RATIO_THRESHOLD = 1.2
 HIGH_SPEED_TA_PEAK_MIN_PROMINENCE_DB = 3.0
+HSTA_DEBUG_THROTTLE_S = 1.0
 MIN_TIME_ANALYZER_TIME_SPAN_S = 0.01
 MAX_TIME_ANALYZER_TIME_SPAN_S = 10_000.0
 CALIBRATION_FIXED_SPAN_HZ = 10_000_000
@@ -363,6 +365,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._high_speed_ta_analysis_latest_result: HighSpeedTAAnalysisResult | None = None
         self._high_speed_ta_analysis_in_progress = False
         self._high_speed_ta_single_waiting_result = False
+        self._hsta_debug_last_log_s: dict[str, float] = {}
         # Prioritize regular marker visibility in High Speed TA.
         # Gap scatter can be re-enabled later when marker behavior is stabilized.
         self._high_speed_ta_gap_visual_enabled = False
@@ -824,6 +827,25 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._hide_time_analyzer_progress_symbol()
         self._hide_high_speed_ta_gap_markers()
 
+    def _hsta_debug_log(
+        self,
+        event: str,
+        *,
+        message: str = "",
+        throttle_s: float = 0.0,
+        force: bool = False,
+    ) -> None:
+        if not self._is_high_speed_time_analyzer_mode() and not force:
+            return
+        now = time.perf_counter()
+        if throttle_s > 0.0:
+            last = self._hsta_debug_last_log_s.get(event)
+            if last is not None and (now - last) < throttle_s:
+                return
+            self._hsta_debug_last_log_s[event] = now
+        payload = f" {message}" if message else ""
+        print(f"[HSTA-DBG] {event}{payload}")
+
     def _clear_high_speed_ta_ring_buffer(self) -> None:
         with self._high_speed_ta_ring_lock:
             self._high_speed_ta_ring.clear()
@@ -893,7 +915,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     continue
             if self.config.sweep_profile_logging:
                 print(f"HighSpeedTAJob start sweep_id={int(job.sweep_id)}")
-            result = self._run_high_speed_ta_analysis_job(job)
+            try:
+                result = self._run_high_speed_ta_analysis_job(job)
+            except Exception as exc:
+                self._hsta_debug_log(
+                    "analysis_worker_exception",
+                    message=f"sweep_id={int(job.sweep_id)} err={exc!r}",
+                    force=True,
+                )
+                traceback.print_exc()
+                with self._high_speed_ta_analysis_lock:
+                    self._high_speed_ta_analysis_latest_result = None
+                    self._high_speed_ta_analysis_in_progress = False
+                self._high_speed_ta_analysis_event.clear()
+                continue
             if self.config.sweep_profile_logging:
                 print(f"HighSpeedTAJob done sweep_id={int(result.sweep_id)}")
             with self._high_speed_ta_analysis_lock:
@@ -903,7 +938,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _start_high_speed_ta_receiver_thread(self) -> None:
         thread = self._high_speed_ta_thread
         if thread is not None and thread.is_alive():
+            self._hsta_debug_log(
+                "receiver_thread_already_running",
+                throttle_s=HSTA_DEBUG_THROTTLE_S,
+            )
             return
+        self._hsta_debug_log("receiver_thread_start_request", force=True)
         self._start_high_speed_ta_analysis_thread()
         self.receiver.start_high_speed_capture_backend(int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES))
         self._high_speed_ta_stop_event.clear()
@@ -919,6 +959,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             print("HighSpeedTAThread start")
 
     def _stop_high_speed_ta_receiver_thread(self, *, stop_analysis_thread: bool = True) -> None:
+        self._hsta_debug_log(
+            "receiver_thread_stop_request",
+            message=f"stop_analysis={int(stop_analysis_thread)}",
+            force=True,
+        )
         self._high_speed_ta_stop_event.set()
         thread = self._high_speed_ta_thread
         if thread is not None:
@@ -933,30 +978,58 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _high_speed_ta_receiver_worker(self) -> None:
         while not self._high_speed_ta_stop_event.is_set():
-            capture_call_start = time.perf_counter()
-            iq = self.receiver.capture_block_high_speed_backend()
-            capture_elapsed_s = time.perf_counter() - capture_call_start
-            if iq is None or len(iq) == 0:
-                continue
-            timestamp_s = time.perf_counter()
-            sample_count = int(len(iq))
-            with self._high_speed_ta_ring_lock:
-                block_index = int(self._high_speed_ta_block_sequence)
-                self._high_speed_ta_block_sequence += 1
-                self._high_speed_ta_ring.append(
-                    HighSpeedTABlock(
-                        block_index=block_index,
-                        iq_block=iq,
-                        timestamp_s=timestamp_s,
-                        sample_count=sample_count,
-                        capture_call_elapsed_s=float(capture_elapsed_s),
+            try:
+                self._hsta_debug_log(
+                    "rx_call_before",
+                    throttle_s=HSTA_DEBUG_THROTTLE_S,
+                )
+                capture_call_start = time.perf_counter()
+                iq = self.receiver.capture_block_high_speed_backend()
+                capture_elapsed_s = time.perf_counter() - capture_call_start
+                sample_count = 0 if iq is None else int(len(iq))
+                self._hsta_debug_log(
+                    "rx_call_after",
+                    message=(
+                        f"elapsed={capture_elapsed_s:.6f}s "
+                        f"len={sample_count} "
+                        f"none={int(iq is None)}"
+                    ),
+                    throttle_s=HSTA_DEBUG_THROTTLE_S,
+                )
+                if iq is None or len(iq) == 0:
+                    continue
+                timestamp_s = time.perf_counter()
+                with self._high_speed_ta_ring_lock:
+                    block_index = int(self._high_speed_ta_block_sequence)
+                    self._high_speed_ta_block_sequence += 1
+                    self._high_speed_ta_ring.append(
+                        HighSpeedTABlock(
+                            block_index=block_index,
+                            iq_block=iq,
+                            timestamp_s=timestamp_s,
+                            sample_count=sample_count,
+                            capture_call_elapsed_s=float(capture_elapsed_s),
+                        )
                     )
+                    ring_size = len(self._high_speed_ta_ring)
+                self._hsta_debug_log(
+                    "ring_store",
+                    message=f"idx={block_index} len={sample_count} ring={ring_size}",
+                    throttle_s=HSTA_DEBUG_THROTTLE_S,
                 )
-            if self.config.sweep_profile_logging:
-                print(
-                    "HighSpeedTAThread "
-                    f"block idx={block_index} samples={sample_count}"
+                if self.config.sweep_profile_logging:
+                    print(
+                        "HighSpeedTAThread "
+                        f"block idx={block_index} samples={sample_count}"
+                    )
+            except Exception as exc:
+                self._hsta_debug_log(
+                    "receiver_worker_exception",
+                    message=f"err={exc!r}",
+                    force=True,
                 )
+                traceback.print_exc()
+                time.sleep(0.05)
 
     def _finalize_time_analyzer_sweep_stats(self) -> None:
         count = int(self._time_analyzer_sweep_sample_count)
@@ -3045,6 +3118,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_continuous_button()
 
     def _start_high_speed_time_analyzer_continuous(self) -> None:
+        self._hsta_debug_log(
+            "mode_start_continuous",
+            message=f"sweep_state_before={self.sweep_state}",
+            force=True,
+        )
         self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
         self.receiver.stop()
@@ -3222,8 +3300,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "CF Step",
             "Center Step [MHz]",
             value=self.config.center_freq_step_mhz,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -3303,8 +3381,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Start/Stop",
             "Start Frequency [MHz]",
             value=current_start_mhz,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -3320,8 +3398,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Start/Stop",
             "Stop Frequency [MHz]",
             value=current_stop_mhz,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -3377,8 +3455,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Freq Span",
             "Display Span [MHz]",
             value=self.config.display_span_hz / 1e6,
-            min=(MIN_WIDEBAND_SPAN_HZ / 1e6) if self._is_wideband_mode() else MIN_SPAN_MHZ,
-            max=max_span_mhz,
+            minValue=(MIN_WIDEBAND_SPAN_HZ / 1e6) if self._is_wideband_mode() else MIN_SPAN_MHZ,
+            maxValue=max_span_mhz,
             decimals=3,
         )
         if not accepted:
@@ -3413,8 +3491,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Ref Level",
             "Ref Level [dBm]",
             value=self.config.ref_level_dbm,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=1,
         )
         if not accepted:
@@ -3437,8 +3515,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Range",
             "Display Range [dB]",
             value=self.config.display_range_db,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=1,
         )
         if not accepted:
@@ -3461,8 +3539,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Int Gain",
             "Internal Gain [dB]",
             value=self.config.rx_gain_db,
-            min=MIN_INTERNAL_GAIN_DB,
-            max=MAX_INTERNAL_GAIN_DB,
+            minValue=MIN_INTERNAL_GAIN_DB,
+            maxValue=MAX_INTERNAL_GAIN_DB,
         )
         if not accepted:
             return
@@ -3480,8 +3558,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Ext ATT",
             "External ATT [dB]",
             value=self.config.ext_att_db,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=1,
         )
         if not accepted:
@@ -3502,8 +3580,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Ext Gain",
             "External Gain [dB]",
             value=self.config.ext_gain_db,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=1,
         )
         if not accepted:
@@ -3530,8 +3608,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "RBW",
             "RBW [kHz] (0 = None)",
             value=current_value,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -3584,8 +3662,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Time Span",
             "Time Span [ms]" if is_high_speed_ta else "Time Span [s]",
             value=(current_time_span_s * 1e3) if is_high_speed_ta else current_time_span_s,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -3663,8 +3741,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Swp Time",
             "Sweep Time [ms]",
             value=self.config.sweep_time_ms,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -3687,8 +3765,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Swp Pts",
             "Sweep Points",
             value=self.config.sweep_points,
-            min=UNBOUNDED_INT_MIN,
-            max=UNBOUNDED_INT_MAX,
+            minValue=UNBOUNDED_INT_MIN,
+            maxValue=UNBOUNDED_INT_MAX,
         )
         if not accepted:
             return
@@ -3721,8 +3799,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "History",
             "Waterfall History",
             value=self.config.waterfall_history,
-            min=UNBOUNDED_INT_MIN,
-            max=UNBOUNDED_INT_MAX,
+            minValue=UNBOUNDED_INT_MIN,
+            maxValue=UNBOUNDED_INT_MAX,
         )
         if not accepted:
             return
@@ -3776,6 +3854,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _enter_single_high_speed_time_analyzer_mode(self) -> None:
         """Single entry for High Speed TA capture/process path."""
+        self._hsta_debug_log(
+            "mode_start_single",
+            message=f"sweep_state_before={self.sweep_state}",
+            force=True,
+        )
         self.receiver.stop()
         self._high_speed_ta_single_waiting_result = False
         with self._high_speed_ta_analysis_lock:
@@ -3865,8 +3948,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trace_state.name,
             "Average Count",
             value=trace_state.average_count,
-            min=UNBOUNDED_INT_MIN,
-            max=UNBOUNDED_INT_MAX,
+            minValue=UNBOUNDED_INT_MIN,
+            maxValue=UNBOUNDED_INT_MAX,
         )
         if not accepted:
             return
@@ -4968,8 +5051,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 marker_state.name,
                 "Time [s]",
                 value=marker_state.time_sec,
-                min=UNBOUNDED_DOUBLE_MIN,
-                max=UNBOUNDED_DOUBLE_MAX,
+                minValue=UNBOUNDED_DOUBLE_MIN,
+                maxValue=UNBOUNDED_DOUBLE_MAX,
                 decimals=3,
             )
             if not accepted:
@@ -4986,8 +5069,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             marker_state.name,
             "Frequency [MHz]",
             value=marker_state.frequency_hz / 1e6,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -5013,8 +5096,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     marker_state.name,
                     "Step [ms]",
                     value=marker_state.time_step_sec * 1e3,
-                    min=UNBOUNDED_DOUBLE_MIN,
-                    max=UNBOUNDED_DOUBLE_MAX,
+                    minValue=UNBOUNDED_DOUBLE_MIN,
+                    maxValue=UNBOUNDED_DOUBLE_MAX,
                     decimals=3,
                 )
                 if not accepted:
@@ -5026,8 +5109,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     marker_state.name,
                     "Step [s]",
                     value=marker_state.time_step_sec,
-                    min=UNBOUNDED_DOUBLE_MIN,
-                    max=UNBOUNDED_DOUBLE_MAX,
+                    minValue=UNBOUNDED_DOUBLE_MIN,
+                    maxValue=UNBOUNDED_DOUBLE_MAX,
                     decimals=3,
                 )
                 if not accepted:
@@ -5040,8 +5123,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             marker_state.name,
             "Step [kHz]",
             value=marker_state.step_hz / 1e3,
-            min=UNBOUNDED_DOUBLE_MIN,
-            max=UNBOUNDED_DOUBLE_MAX,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
             decimals=3,
         )
         if not accepted:
@@ -5871,7 +5954,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         return (
             f"   FPS: {fps_text}"
-            f"   History: {history_frames} (≈ {time_text} s)"
+            f"   History: {history_frames} (≁E{time_text} s)"
         )
 
     def _record_wideband_frame_for_status(self) -> None:
@@ -6104,15 +6187,22 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         actual_dt_s: float,
         expected_dt_s: float,
         gap_ratio: float,
+        capture_call_elapsed_s: float | None = None,
     ) -> None:
         if not self.config.sweep_profile_logging:
             return
+        capture_call_ms_text = (
+            f"{(float(capture_call_elapsed_s) * 1000.0):.3f}"
+            if capture_call_elapsed_s is not None
+            else "--"
+        )
         print(
             "HighSpeedTAGap "
             f"detected idx={int(block_index)} "
             f"actual_dt={actual_dt_s * 1000.0:.3f}ms "
             f"expected_dt={expected_dt_s * 1000.0:.3f}ms "
-            f"ratio={gap_ratio:.3f}"
+            f"ratio={gap_ratio:.3f} "
+            f"capture_call={capture_call_ms_text}ms"
         )
 
     def _log_high_speed_ta_gap_summary(
@@ -6565,6 +6655,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         sweep_y_db: np.ndarray,
         gap_times_s: list[float],
     ) -> None:
+        self._hsta_debug_log(
+            "publish_entry",
+            message=f"x_len={len(sweep_x_s)} y_len={len(sweep_y_db)} gaps={len(gap_times_s)}",
+            force=True,
+        )
         self._last_display_freq_axis_ghz = sweep_x_s
         self._last_current_display_db = sweep_y_db
         self._last_display_power_db = sweep_y_db
@@ -6578,6 +6673,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _update_high_speed_time_analyzer_spectrum(self) -> None:
         if self.config.analyzer_mode != AnalyzerMode.HIGH_SPEED_TIME_ANALYZER:
             return
+        self._hsta_debug_log(
+            "update_loop_entry",
+            message=(
+                f"waiting={int(self._high_speed_ta_single_waiting_result)} "
+                f"analyzing={int(self._high_speed_ta_analysis_in_progress)}"
+            ),
+            throttle_s=HSTA_DEBUG_THROTTLE_S,
+        )
         clipped_rbw = self._clip_sweep_rbw(self.config.rbw_hz)
         if self.config.rbw_hz != clipped_rbw:
             self.config.rbw_hz = clipped_rbw
@@ -6588,6 +6691,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         analysis_result = self._take_high_speed_ta_analysis_result()
         if analysis_result is not None:
+            self._hsta_debug_log(
+                "analysis_result_ready",
+                message=(
+                    f"x_len={len(analysis_result.sweep_x_s)} "
+                    f"y_len={len(analysis_result.sweep_y_db)}"
+                ),
+                force=True,
+            )
             self._finalize_high_speed_time_analyzer_sweep_stats(analysis_result.sweep_x_s)
             publish_start = time.perf_counter()
             self._publish_high_speed_time_analyzer_sweep(
@@ -6633,6 +6744,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         if self._high_speed_ta_single_waiting_result:
+            if not self._high_speed_ta_analysis_in_progress:
+                self._hsta_debug_log(
+                    "analysis_wait_stale_recover",
+                    message="waiting=1 analyzing=0 -> restart capture",
+                    force=True,
+                )
+                self._high_speed_ta_single_waiting_result = False
+                self._start_high_speed_ta_receiver_thread()
             return
 
         if self._high_speed_ta_analysis_in_progress:
@@ -6640,7 +6759,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         incoming_blocks = self._consume_high_speed_ta_ring_blocks()
         if not incoming_blocks:
+            self._hsta_debug_log(
+                "consume_ring_empty",
+                throttle_s=HSTA_DEBUG_THROTTLE_S,
+            )
             return
+        self._hsta_debug_log(
+            "consume_ring_blocks",
+            message=f"count={len(incoming_blocks)}",
+            throttle_s=HSTA_DEBUG_THROTTLE_S,
+        )
         self._log_high_speed_ta_consume(
             blocks=len(incoming_blocks),
             total_samples=sum(int(block.sample_count) for block in incoming_blocks),
@@ -6681,6 +6809,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                             actual_dt_s=actual_dt_s,
                             expected_dt_s=expected_dt_s,
                             gap_ratio=gap_ratio,
+                            capture_call_elapsed_s=block.capture_call_elapsed_s,
                         )
             state.prev_block_timestamp_s = sample_timestamp
             state.iq_blocks.append(block.iq_block)
@@ -6710,6 +6839,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             job = self._snapshot_and_rollover_high_speed_ta_sweep(
                 captured_duration_s=captured_duration_s,
                 single_shot=(self.sweep_state == SWEEP_STATE_SINGLE),
+            )
+            self._hsta_debug_log(
+                "analysis_job_submit",
+                message=(
+                    f"sweep_id={int(job.sweep_id)} "
+                    f"blocks={len(job.iq_blocks)} "
+                    f"total_samples={int(job.capture_total_samples)}"
+                ),
+                force=True,
             )
             # Synchronize sweep boundary: stop capture while analysis is running.
             self._stop_high_speed_ta_receiver_thread(stop_analysis_thread=False)
@@ -7106,3 +7244,4 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.timer.stop()
         self.receiver.close()
         super().closeEvent(event)
+
