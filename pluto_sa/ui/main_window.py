@@ -5847,10 +5847,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         fps_value = self._estimate_realtime_fps()
         if fps_value > 0.0:
-            fps_int = int(round(fps_value))
             estimated_time_sec = float(self.config.waterfall_history) / float(fps_value)
             history_text = f"History: {self.config.waterfall_history} ({estimated_time_sec:.1f}s)"
-            fps_text = f"FPS: {fps_int}"
+            fps_text = f"FPS: {fps_value:.1f}"
         else:
             fps_text = "FPS: --"
             history_text = f"History: {self.config.waterfall_history} (---)"
@@ -5865,10 +5864,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         history_frames = self.config.waterfall_history
         if fps_value <= 0.0:
             time_text = "--"
-            fps_text = "0"
+            fps_text = "--"
         else:
             time_text = f"{history_frames / fps_value:.1f}"
-            fps_text = f"{int(round(fps_value))}"
+            fps_text = f"{fps_value:.1f}"
 
         return (
             f"   FPS: {fps_text}"
