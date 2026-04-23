@@ -151,6 +151,9 @@ PERSISTENCE_DECAY_VALUES = {
 }
 SELECTED_BUTTON_PREFIX = "> "
 UNSELECTED_BUTTON_PREFIX = "  "
+RIGHT_PANE_GROUP_TITLE_FONT_SCALE = 1.45
+RIGHT_PANE_BUTTON_FONT_SCALE = 1.45
+AXIS_LABEL_FONT_SIZE_PT = 12
 
 
 @dataclass
@@ -1727,8 +1730,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.waterfall_plot.setBackground("k")
         self._configure_plot_chrome(self.waterfall_plot)
-        self.waterfall_plot.setLabel("bottom", "Frequency [GHz]")
-        self.waterfall_plot.setLabel("left", "History")
+        self.waterfall_plot.setLabel(
+            "bottom",
+            "Frequency [GHz]",
+            **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+        )
+        self.waterfall_plot.setLabel(
+            "left",
+            "History",
+            **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+        )
         self.waterfall_plot.getViewBox().invertY(False)
         self.waterfall_plot.getAxis("left").setPen("w")
         self.waterfall_plot.getAxis("bottom").setPen("w")
@@ -1788,8 +1799,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.getAxis("left").setPen("w")
         self.spectrum_plot.getAxis("bottom").setPen("w")
 
-        self.spectrum_plot.setLabel("bottom", "Frequency [GHz]")
-        self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
+        self.spectrum_plot.setLabel(
+            "bottom",
+            "Frequency [GHz]",
+            **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+        )
+        self.spectrum_plot.setLabel(
+            "left",
+            "Amplitude [dBm]",
+            **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+        )
         self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
 
         freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
@@ -2825,14 +2844,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _apply_groupbox_title_font(self, group_box: QtWidgets.QGroupBox) -> None:
         group_font = QtGui.QFont(group_box.font())
-        group_font.setPointSizeF(group_font.pointSizeF() * 1.6)
+        group_font.setPointSizeF(group_font.pointSizeF() * RIGHT_PANE_GROUP_TITLE_FONT_SCALE)
         group_font.setBold(True)
         group_box.setFont(group_font)
 
     def _make_control_button(self, text: str) -> QtWidgets.QPushButton:
         button = QtWidgets.QPushButton(text)
         button_font = QtGui.QFont(button.font())
-        button_font.setPointSizeF(button_font.pointSizeF() * 1.6)
+        button_font.setPointSizeF(button_font.pointSizeF() * RIGHT_PANE_BUTTON_FONT_SCALE)
         button_font.setBold(True)
         button.setFont(button_font)
         button.setMinimumHeight(50)
@@ -3185,13 +3204,33 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _update_plot_axis_labels_for_mode(self) -> None:
         if self._is_time_analyzer_mode():
             if self._is_high_speed_time_analyzer_mode():
-                self.spectrum_plot.setLabel("bottom", "Time [ms]")
+                self.spectrum_plot.setLabel(
+                    "bottom",
+                    "Time [ms]",
+                    **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+                )
             else:
-                self.spectrum_plot.setLabel("bottom", "Time [s]")
-            self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
+                self.spectrum_plot.setLabel(
+                    "bottom",
+                    "Time [s]",
+                    **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+                )
+            self.spectrum_plot.setLabel(
+                "left",
+                "Amplitude [dBm]",
+                **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+            )
         else:
-            self.spectrum_plot.setLabel("bottom", "Frequency [GHz]")
-            self.spectrum_plot.setLabel("left", "Amplitude [dBm]")
+            self.spectrum_plot.setLabel(
+                "bottom",
+                "Frequency [GHz]",
+                **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+            )
+            self.spectrum_plot.setLabel(
+                "left",
+                "Amplitude [dBm]",
+                **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
+            )
 
     def _clear_start_stop_display_mode(self) -> None:
         self.config.use_start_stop_freq = False
