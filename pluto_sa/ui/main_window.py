@@ -2131,13 +2131,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._apply_groupbox_title_font(analyzer_group)
         analyzer_layout = QtWidgets.QVBoxLayout(analyzer_group)
         self.analyzer_mode_button = self._make_value_control_button("Analyzer Mode")
-        self.freq_menu_button = self._make_control_button("FREQ Channel")
-        self.amplitude_menu_button = self._make_control_button("AMPTD Y Scale")
+        self.freq_menu_button = self._make_control_button("Frequency")
+        self.amplitude_menu_button = self._make_control_button("Amplitude")
         self.input_menu_button = self._make_control_button("Input")
         self.bw_menu_button = self._make_control_button("BW")
         self.display_menu_button = self._make_control_button("Display")
         self.trace_detector_button = self._make_control_button("Trace/Detector")
-        self.realtime_sa_menu_button = self._make_control_button("RealTime SA")
+        self.realtime_sa_menu_button = self._make_control_button("FFT")
         self.sweep_menu_button = self._make_control_button("Sweep")
         analyzer_layout.addWidget(self.analyzer_mode_button)
         analyzer_layout.addWidget(self.freq_menu_button)
@@ -2192,10 +2192,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             lambda: self._show_control_page("Analyzer Mode", self.analyzer_mode_page)
         )
         self.freq_menu_button.clicked.connect(
-            lambda: self._show_control_page("FREQ Channel", self.freq_channel_page)
+            lambda: self._show_control_page("Frequency", self.freq_channel_page)
         )
         self.amplitude_menu_button.clicked.connect(
-            lambda: self._show_control_page("AMPTD Y Scale", self.amptd_y_scale_page)
+            lambda: self._show_control_page("Amplitude", self.amptd_y_scale_page)
         )
         self.input_menu_button.clicked.connect(
             lambda: self._show_control_page("Input", self.input_page)
@@ -2227,7 +2227,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self._is_calibration_mode():
             self._show_control_page("Calibrate", self.calibration_page)
             return
-        self._show_control_page("RealTime SA", self.realtime_sa_page)
+        self._show_control_page("FFT", self.realtime_sa_page)
 
     def _show_calibration_menu(self) -> None:
         self._page_history = [
@@ -2262,7 +2262,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.SWEEP_SA,
             AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
         ):
-            button = self._make_control_button(mode.value)
+            button = self._make_control_button(self._analyzer_mode_display_name(mode))
             button.clicked.connect(
                 lambda _checked=False, selected_mode=mode: self._change_analyzer_mode(
                     selected_mode
@@ -2386,18 +2386,27 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setSpacing(10)
 
         self.graph_view_button = self._make_value_control_button("Graph View")
+        self.history_button = self._make_control_button("History")
         self.persistence_button = self._make_control_button("Persistence OFF")
+        self.persistence_decay_button = self._make_value_control_button("Persistence Decay")
 
         page_layout.addWidget(self.graph_view_button)
+        page_layout.addWidget(self.history_button)
         page_layout.addWidget(self.persistence_button)
+        page_layout.addWidget(self.persistence_decay_button)
         page_layout.addStretch(1)
 
         self.graph_view_button.clicked.connect(
             lambda: self._show_control_page("Graph View", self.graph_view_select_page)
         )
+        self.history_button.clicked.connect(self._on_history_clicked)
         self.persistence_button.clicked.connect(self._toggle_persistence_enabled)
+        self.persistence_decay_button.clicked.connect(
+            lambda: self._show_control_page("Persistence Decay", self.persistence_decay_page)
+        )
         self._update_graph_view_controls()
         self._update_persistence_controls()
+        self._update_display_menu_controls()
         return page
 
     def _build_graph_view_select_page(self) -> QtWidgets.QWidget:
@@ -2676,22 +2685,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setSpacing(10)
 
         self.fft_size_button = self._make_control_button("FFT size")
-        self.history_button = self._make_control_button("History")
-        self.persistence_decay_button = self._make_value_control_button("Persistence Decay")
 
         page_layout.addWidget(self.fft_size_button)
-        page_layout.addWidget(self.history_button)
-        page_layout.addWidget(self.persistence_decay_button)
         page_layout.addStretch(1)
 
         self.fft_size_button.clicked.connect(
             lambda: self._show_control_page("FFT size", self.fft_size_page)
         )
-        self.history_button.clicked.connect(self._on_history_clicked)
-        self.persistence_decay_button.clicked.connect(
-            lambda: self._show_control_page("Persistence Decay", self.persistence_decay_page)
-        )
-        self._update_realtime_sa_controls()
+        self._update_fft_menu_controls()
         return page
 
     def _build_calibration_menu_page(self) -> QtWidgets.QWidget:
@@ -4072,17 +4073,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_trace_menu_button(trace_index)
 
     def _update_graph_view_controls(self) -> None:
-        if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA or self._is_time_analyzer_mode():
-            self.graph_view_button.setText("Graph View\nSpectrum Only")
-            self.graph_view_button.setEnabled(False)
-        else:
-            self.graph_view_button.setText(
-                f"Graph View\n{GRAPH_VIEW_LABELS[self.graph_view_mode]}"
-            )
-            self.graph_view_button.setEnabled(True)
+        graph_view_supported = self.config.analyzer_mode in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        )
+        self.graph_view_button.setText(
+            f"Graph View\n{GRAPH_VIEW_LABELS[self.graph_view_mode]}"
+        )
+        self.graph_view_button.setEnabled(graph_view_supported)
         self._update_graph_view_selection_page()
 
     def _update_graph_view_selection_page(self) -> None:
+        graph_view_supported = self.config.analyzer_mode in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        )
         for mode, button in self.graph_view_option_buttons.items():
             prefix = (
                 SELECTED_BUTTON_PREFIX
@@ -4090,10 +4095,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 else UNSELECTED_BUTTON_PREFIX
             )
             button.setText(f"{prefix}{GRAPH_VIEW_LABELS[mode]}")
-            if self.config.analyzer_mode == AnalyzerMode.SWEEP_SA:
-                button.setEnabled(mode == GRAPH_VIEW_SPECTRUM_ONLY)
-            else:
-                button.setEnabled(True)
+            button.setEnabled(graph_view_supported)
 
     def _update_persistence_controls(self) -> None:
         persistence_supported = self.config.analyzer_mode in (
@@ -4276,10 +4278,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _update_analyzer_mode_controls(self) -> None:
         self.analyzer_mode_button.setText(
-            f"Analyzer Mode\n{self.config.analyzer_mode.value}"
+            f"Analyzer Mode\n{self._analyzer_mode_display_name(self.config.analyzer_mode)}"
         )
         self.analyzer_mode_button.setMinimumHeight(68)
         self._update_analyzer_mode_selection_page()
+
+    @staticmethod
+    def _analyzer_mode_display_name(mode: AnalyzerMode) -> str:
+        if mode == AnalyzerMode.HIGH_SPEED_TIME_ANALYZER:
+            return "HighSpeed TA"
+        return mode.value
 
     def _update_analyzer_mode_selection_page(self) -> None:
         for mode, button in self.analyzer_mode_option_buttons.items():
@@ -4288,7 +4296,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 if mode == self.config.analyzer_mode
                 else UNSELECTED_BUTTON_PREFIX
             )
-            button.setText(f"{prefix}{mode.value}")
+            button.setText(f"{prefix}{self._analyzer_mode_display_name(mode)}")
         if hasattr(self, "calibration_mode_entry_button"):
             self.calibration_mode_entry_button.setText(
                 f"{UNSELECTED_BUTTON_PREFIX}{AnalyzerMode.CALIBRATION.value}"
@@ -4308,25 +4316,28 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
             button.setText(f"{prefix}{trace_type}")
 
-    def _update_realtime_sa_controls(self) -> None:
+    def _update_fft_menu_controls(self) -> None:
         self.fft_size_button.setText(f"FFT size\n{self.config.fft_size}")
         self.fft_size_button.setEnabled(not self._is_time_analyzer_mode())
-        if self.config.analyzer_mode not in (
+
+    def _update_display_menu_controls(self) -> None:
+        realtime_display_supported = self.config.analyzer_mode in (
             AnalyzerMode.REALTIME_SA,
             AnalyzerMode.WIDEBAND_REALTIME_SA,
-        ):
-            self.persistence_decay_button.setText(
-                f"Persistence Decay\n{self.config.persistence_decay_mode}"
-            )
-            self.persistence_decay_button.setEnabled(False)
-        else:
-            self.persistence_decay_button.setText(
-                f"Persistence Decay\n{self.config.persistence_decay_mode}"
-            )
-            self.persistence_decay_button.setEnabled(True)
+        )
+        if hasattr(self, "history_button"):
+            self.history_button.setEnabled(realtime_display_supported)
+        self.persistence_decay_button.setText(
+            f"Persistence Decay\n{self.config.persistence_decay_mode}"
+        )
+        self.persistence_decay_button.setEnabled(realtime_display_supported)
         self._update_fft_size_selection_page()
         self._update_persistence_decay_selection_page()
         self._update_span_x_scale_controls()
+
+    def _update_realtime_sa_controls(self) -> None:
+        self._update_fft_menu_controls()
+        self._update_display_menu_controls()
 
     def _update_span_x_scale_controls(self) -> None:
         if not hasattr(self, "freq_span_button"):
