@@ -1503,7 +1503,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_analyzer_mode_controls()
         if hasattr(self, "calibration_menu_toggle_button"):
             self._update_calibration_page_controls()
-        if hasattr(self, "freq_span_button") and hasattr(self, "time_span_button"):
+        if hasattr(self, "freq_span_button"):
             self._update_span_x_scale_controls()
         if hasattr(self, "int_gain_button"):
             self._update_calibration_mode_controls()
@@ -1515,7 +1515,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             show_sweep_button = is_sweep_mode or is_high_speed_ta_mode
             self.mode_specific_menu_stack.setCurrentIndex(1 if show_sweep_button else 0)
             if hasattr(self, "sweep_menu_button"):
-                self.sweep_menu_button.setEnabled(not is_high_speed_ta_mode)
+                self.sweep_menu_button.setEnabled(True)
+        if hasattr(self, "sweep_time_button") and hasattr(self, "sweep_points_button"):
+            self._update_sweep_controls()
 
     def _apply_calibration_fixed_profile(self) -> None:
         self.config.display_span_hz = int(CALIBRATION_FIXED_SPAN_HZ)
@@ -2049,7 +2051,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.main_menu_page = self._build_main_menu_page()
         self.analyzer_mode_page = self._build_analyzer_mode_page()
         self.freq_channel_page = self._build_freq_channel_page()
-        self.span_x_scale_page = self._build_span_x_scale_page()
         self.amptd_y_scale_page = self._build_amptd_y_scale_page()
         self.input_page = self._build_input_page()
         self.bw_page = self._build_bw_page()
@@ -2079,7 +2080,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.control_stack.addWidget(self.main_menu_page)
         self.control_stack.addWidget(self.analyzer_mode_page)
         self.control_stack.addWidget(self.freq_channel_page)
-        self.control_stack.addWidget(self.span_x_scale_page)
         self.control_stack.addWidget(self.amptd_y_scale_page)
         self.control_stack.addWidget(self.input_page)
         self.control_stack.addWidget(self.bw_page)
@@ -2132,7 +2132,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         analyzer_layout = QtWidgets.QVBoxLayout(analyzer_group)
         self.analyzer_mode_button = self._make_value_control_button("Analyzer Mode")
         self.freq_menu_button = self._make_control_button("FREQ Channel")
-        self.span_menu_button = self._make_control_button("SPAN X Scale")
         self.amplitude_menu_button = self._make_control_button("AMPTD Y Scale")
         self.input_menu_button = self._make_control_button("Input")
         self.bw_menu_button = self._make_control_button("BW")
@@ -2142,7 +2141,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_menu_button = self._make_control_button("Sweep")
         analyzer_layout.addWidget(self.analyzer_mode_button)
         analyzer_layout.addWidget(self.freq_menu_button)
-        analyzer_layout.addWidget(self.span_menu_button)
         analyzer_layout.addWidget(self.amplitude_menu_button)
         analyzer_layout.addWidget(self.input_menu_button)
         analyzer_layout.addWidget(self.bw_menu_button)
@@ -2195,9 +2193,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.freq_menu_button.clicked.connect(
             lambda: self._show_control_page("FREQ Channel", self.freq_channel_page)
-        )
-        self.span_menu_button.clicked.connect(
-            lambda: self._show_control_page("SPAN X Scale", self.span_x_scale_page)
         )
         self.amplitude_menu_button.clicked.connect(
             lambda: self._show_control_page("AMPTD Y Scale", self.amptd_y_scale_page)
@@ -2292,6 +2287,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.freq_center_button = self._make_control_button("Center")
         self.cf_step_button = self._make_control_button("CF Step")
+        self.freq_span_button = self._make_control_button("Freq Span")
         self.freq_center_left_button = self._make_control_button("<-")
         self.freq_center_right_button = self._make_control_button("->")
         self.freq_start_stop_button = self._make_control_button("Start/Stop")
@@ -2305,11 +2301,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.addWidget(self.freq_center_button)
         page_layout.addWidget(self.cf_step_button)
         page_layout.addLayout(center_nudge_layout)
+        page_layout.addWidget(self.freq_span_button)
         page_layout.addWidget(self.freq_start_stop_button)
         page_layout.addStretch(1)
 
         self.freq_center_button.clicked.connect(self._on_freq_channel_clicked)
         self.cf_step_button.clicked.connect(self._on_cf_step_clicked)
+        self.freq_span_button.clicked.connect(self._on_span_x_scale_clicked)
         self.freq_center_left_button.clicked.connect(
             lambda _checked=False: self._nudge_center_frequency(-1)
         )
@@ -2324,16 +2322,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout = QtWidgets.QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(10)
-
-        self.freq_span_button = self._make_control_button("Freq Span")
-        self.time_span_button = self._make_control_button("Time Span")
-
-        page_layout.addWidget(self.freq_span_button)
-        page_layout.addWidget(self.time_span_button)
         page_layout.addStretch(1)
-
-        self.freq_span_button.clicked.connect(self._on_span_x_scale_clicked)
-        self.time_span_button.clicked.connect(self._on_time_span_clicked)
         return page
 
     def _build_amptd_y_scale_page(self) -> QtWidgets.QWidget:
@@ -3771,6 +3760,37 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _on_sweep_time_clicked(self) -> None:
         previous_state = self._current_sweep_state()
+        if self._is_high_speed_time_analyzer_mode():
+            current_ms = float(self.config.time_analyzer_time_span_s) * 1e3
+            value, accepted = QtWidgets.QInputDialog.getDouble(
+                self,
+                "Swp Time",
+                "Sweep Time [ms]",
+                value=current_ms,
+                minValue=UNBOUNDED_DOUBLE_MIN,
+                maxValue=UNBOUNDED_DOUBLE_MAX,
+                decimals=3,
+            )
+            if not accepted:
+                return
+
+            requested_time_span_s = float(value) * 1e-3
+            self.config.time_analyzer_time_span_s = self._clamp_float(
+                requested_time_span_s,
+                MIN_TIME_ANALYZER_TIME_SPAN_S,
+                MAX_TIME_ANALYZER_TIME_SPAN_S,
+            )
+            self._reset_plot_state()
+            self._update_sweep_controls()
+            self._refresh_status_label()
+            if previous_state == SWEEP_STATE_RUNNING:
+                self._start_high_speed_time_analyzer_continuous()
+            elif previous_state == SWEEP_STATE_SINGLE:
+                self.sweep_state = SWEEP_STATE_STOPPED
+                self.timer.stop()
+                self._update_continuous_button()
+            return
+
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Swp Time",
@@ -4309,23 +4329,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_span_x_scale_controls()
 
     def _update_span_x_scale_controls(self) -> None:
-        if not hasattr(self, "freq_span_button") or not hasattr(self, "time_span_button"):
+        if not hasattr(self, "freq_span_button"):
             return
         is_time_analyzer = self._is_time_analyzer_mode()
         self.freq_span_button.setEnabled((not is_time_analyzer) and (not self._is_calibration_mode()))
-        if is_time_analyzer:
-            self.time_span_button.setEnabled(True)
-            time_span_value = float(self.config.time_analyzer_time_span_s)
-            if self._is_high_speed_time_analyzer_mode():
-                span_text = f"{(time_span_value * 1e3):.3f} ms"
-            else:
-                span_text = f"{time_span_value:.3f} s"
-            self.time_span_button.setText(
-                f"Time Span\n{span_text}"
-            )
-        else:
-            self.time_span_button.setEnabled(False)
-            self.time_span_button.setText("Time Span")
+        display_span_mhz = float(self.config.display_span_hz) / 1e6
+        self.freq_span_button.setText(f"Freq Span\n{display_span_mhz:.3f} MHz")
 
     def _update_calibration_page_controls(self) -> None:
         if not hasattr(self, "calibration_menu_toggle_button"):
@@ -4720,8 +4729,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._show_calibration_menu()
 
     def _update_sweep_controls(self) -> None:
-        self.sweep_time_button.setText(f"Swp Time\n{self.config.sweep_time_ms:.0f} ms")
+        is_sweep_sa = self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
+        is_high_speed_ta = self._is_high_speed_time_analyzer_mode()
+        if self._is_high_speed_time_analyzer_mode():
+            sweep_time_ms = float(self.config.time_analyzer_time_span_s) * 1e3
+            self.sweep_time_button.setText(f"Swp Time\n{sweep_time_ms:.3f} ms")
+        else:
+            self.sweep_time_button.setText(f"Swp Time\n{self.config.sweep_time_ms:.0f} ms")
         self.sweep_points_button.setText(f"Swp Pts\n{self.config.sweep_points}")
+        self.sweep_time_button.setEnabled((not is_sweep_sa) or is_high_speed_ta)
+        self.sweep_points_button.setEnabled(
+            not (is_sweep_sa or is_high_speed_ta)
+        )
 
     def _update_sweep_detector_selection_page(self) -> None:
         for detector_mode, button in self.sweep_detector_option_buttons.items():
@@ -5850,12 +5869,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             time_span_s = float(self.config.time_analyzer_time_span_s)
             if self._is_high_speed_time_analyzer_mode():
                 span_text = f"{(time_span_s * 1e3):.3f} ms"
+                span_label = "Swp Time"
             else:
                 span_text = f"{time_span_s:.3f} s"
+                span_label = "Time Span"
             return (
                 "Center",
                 f"{self.config.center_freq_hz / 1e6:.3f} MHz",
-                "Time Span",
+                span_label,
                 span_text,
             )
         if (
