@@ -2438,11 +2438,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.trace_menu_buttons.append(button)
             page_layout.addWidget(button)
 
-        detector_button = self._make_control_button("Detector")
-        detector_button.clicked.connect(
+        self.detector_menu_button = self._make_control_button("Detector")
+        self.detector_menu_button.clicked.connect(
             lambda: self._show_control_page("Detector", self.detector_page)
         )
-        page_layout.addWidget(detector_button)
+        page_layout.addWidget(self.detector_menu_button)
         page_layout.addStretch(1)
         return page
 
@@ -4048,14 +4048,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         trace_state = self._trace_state(trace_index)
         controls = self.trace_controls[trace_index]
         controls["visible"].setText(
-            "Trace ON" if trace_state.is_visible else "Trace OFF"
+            f"Trace\n{'ON' if trace_state.is_visible else 'OFF'}"
         )
-        controls["type"].setText(f"Type: {trace_state.trace_type}")
+        controls["type"].setText(f"Type\n{trace_state.trace_type}")
         controls["hold"].setText(
-            "Hold ON" if trace_state.hold_enabled else "Hold OFF"
+            f"Hold\n{'ON' if trace_state.hold_enabled else 'OFF'}"
         )
         controls["average_count"].setText(
-            f"Average Count: {trace_state.average_count}"
+            f"Average Count\n{trace_state.average_count}"
         )
         controls["average_count"].setEnabled(trace_state.trace_type == TRACE_TYPE_AVERAGE)
         self._update_trace_menu_button(trace_index)
@@ -4101,11 +4101,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.WIDEBAND_REALTIME_SA,
         )
         if not persistence_supported:
-            self.persistence_button.setText("Persistence OFF")
+            self.persistence_button.setText("Persistence\nOFF")
             self.persistence_button.setEnabled(False)
         else:
             state_label = "ON" if self.persistence_enabled else "OFF"
-            self.persistence_button.setText(f"Persistence {state_label}")
+            self.persistence_button.setText(f"Persistence\n{state_label}")
             self.persistence_button.setEnabled(True)
         self._apply_persistence_visibility()
 
@@ -4309,7 +4309,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             button.setText(f"{prefix}{trace_type}")
 
     def _update_realtime_sa_controls(self) -> None:
-        self.fft_size_button.setText(f"FFT size: {self.config.fft_size}")
+        self.fft_size_button.setText(f"FFT size\n{self.config.fft_size}")
         self.fft_size_button.setEnabled(not self._is_time_analyzer_mode())
         if self.config.analyzer_mode not in (
             AnalyzerMode.REALTIME_SA,
@@ -4332,6 +4332,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "freq_span_button"):
             return
         is_time_analyzer = self._is_time_analyzer_mode()
+        is_high_speed_ta = self._is_high_speed_time_analyzer_mode()
+        self.freq_span_button.setVisible(not is_high_speed_ta)
+        if hasattr(self, "freq_start_stop_button"):
+            self.freq_start_stop_button.setVisible(not is_high_speed_ta)
         self.freq_span_button.setEnabled((not is_time_analyzer) and (not self._is_calibration_mode()))
         display_span_mhz = float(self.config.display_span_hz) / 1e6
         self.freq_span_button.setText(f"Freq Span\n{display_span_mhz:.3f} MHz")
@@ -4356,7 +4360,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.calibration_measure_button.setText(measure_text)
 
         enabled_text = "ON" if self.calibration_controller.correction_enabled else "OFF"
-        self.calibration_menu_toggle_button.setText(f"Correction {enabled_text}")
+        self.calibration_menu_toggle_button.setText(f"Correction\n{enabled_text}")
 
         is_measuring = self.calibration_controller.sequence_is_measuring
         is_retry_waiting = self.calibration_controller.sequence_retry_waiting
@@ -5013,15 +5017,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         selected_trace_state = self._trace_state_by_name(marker_state.trace_name)
 
         controls["toggle"].setText(
-            "Marker ON" if marker_state.is_enabled else "Marker OFF"
+            f"Marker\n{'ON' if marker_state.is_enabled else 'OFF'}"
         )
         controls["trace"].setText(marker_state.trace_name)
         if selected_trace_state is not None:
             controls["trace"].setStyleSheet(f"color: {selected_trace_state.color_hex};")
         controls["continuous_peak"].setText(
-            "Continuous Peak ON"
+            "Continuous Peak\nON"
             if marker_state.continuous_peak_enabled
-            else "Continuous Peak OFF"
+            else "Continuous Peak\nOFF"
         )
         if self._is_time_analyzer_mode():
             if self._is_high_speed_time_analyzer_mode():
@@ -5859,10 +5863,96 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _refresh_status_label(self) -> None:
         self._refresh_sweep_time_estimate()
+        self._update_control_button_value_labels()
         self._update_span_x_scale_controls()
         self._update_calibration_page_controls()
         self._update_calibration_mode_controls()
         self.status_label.setText(self._make_header_status_text())
+
+    @staticmethod
+    def _set_labeled_button_value(
+        button: QtWidgets.QPushButton, title: str, value_text: str
+    ) -> None:
+        button.setText(f"{title}\n{value_text}")
+
+    def _update_control_button_value_labels(self) -> None:
+        if hasattr(self, "freq_center_button"):
+            self._set_labeled_button_value(
+                self.freq_center_button,
+                "Center",
+                f"{self.config.center_freq_hz / 1e6:.3f} MHz",
+            )
+        if hasattr(self, "cf_step_button"):
+            self._set_labeled_button_value(
+                self.cf_step_button,
+                "CF Step",
+                f"{self.config.center_freq_step_mhz:.3f} MHz",
+            )
+        if hasattr(self, "freq_start_stop_button"):
+            center_hz = float(self.config.center_freq_hz)
+            span_hz = float(self.config.display_span_hz)
+            start_hz = center_hz - (span_hz / 2.0)
+            stop_hz = center_hz + (span_hz / 2.0)
+            self.freq_start_stop_button.setText(
+                "Start/Stop\n"
+                f"Start: {start_hz / 1e6:.3f} MHz\n"
+                f"Stop: {stop_hz / 1e6:.3f} MHz"
+            )
+        if hasattr(self, "ref_level_button"):
+            self._set_labeled_button_value(
+                self.ref_level_button,
+                "Ref Level",
+                self._format_ref_level_text(),
+            )
+        if hasattr(self, "range_button"):
+            self._set_labeled_button_value(
+                self.range_button,
+                "Range",
+                self._format_range_text(),
+            )
+        if hasattr(self, "int_gain_button"):
+            self._set_labeled_button_value(
+                self.int_gain_button,
+                "Int Gain",
+                f"{self.config.rx_gain_db} dB",
+            )
+        if hasattr(self, "ext_att_button"):
+            self._set_labeled_button_value(
+                self.ext_att_button,
+                "Ext ATT",
+                self._format_ext_att_text(),
+            )
+        if hasattr(self, "ext_gain_button"):
+            self._set_labeled_button_value(
+                self.ext_gain_button,
+                "Ext Gain",
+                self._format_ext_gain_text(),
+            )
+        if hasattr(self, "rbw_button"):
+            self._set_labeled_button_value(
+                self.rbw_button,
+                "RBW",
+                self._format_rbw_text(),
+            )
+        if hasattr(self, "history_button"):
+            self._set_labeled_button_value(
+                self.history_button,
+                "History",
+                str(self.config.waterfall_history),
+            )
+        if hasattr(self, "detector_menu_button"):
+            self._set_labeled_button_value(
+                self.detector_menu_button,
+                "Detector",
+                str(self.config.sweep_detector_mode),
+            )
+        if hasattr(self, "calibration_menu_toggle_button"):
+            enabled_text = "ON" if self.calibration_controller.correction_enabled else "OFF"
+            self._set_labeled_button_value(
+                self.calibration_menu_toggle_button,
+                "Correction",
+                enabled_text,
+            )
 
     def _get_header_frequency_fields(self) -> tuple[str, str, str, str]:
         if self._is_time_analyzer_mode():
@@ -5943,10 +6033,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 f"RBW: {rbw_text}"
             )
         line2 = (
-            f"Ref Level: {self.config.ref_level_dbm:.0f} dBm   "
+            f"Ref Level: {self._format_ref_level_text()}   "
+            f"Range: {self._format_range_text()}   "
             f"Int Gain: {self.config.rx_gain_db} dB   "
-            f"Ext ATT: {self.config.ext_att_db:.0f} dB   "
-            f"Ext Gain: {self.config.ext_gain_db:.0f} dB   "
+            f"Ext ATT: {self._format_ext_att_text()}   "
+            f"Ext Gain: {self._format_ext_gain_text()}   "
             f"{self._make_correction_status_text()}"
         )
         line3 = self._make_fft_info_status_line()
@@ -6079,6 +6170,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if value_hz >= 1_000:
             return f"{value_hz / 1_000:.2f} kHz"
         return f"{value_hz:.0f} Hz"
+
+    def _format_ref_level_text(self) -> str:
+        return f"{self.config.ref_level_dbm:.0f} dBm"
+
+    def _format_range_text(self) -> str:
+        return f"{int(round(self.config.display_range_db))} dB"
+
+    def _format_ext_att_text(self) -> str:
+        return f"{self.config.ext_att_db:.0f} dB"
+
+    def _format_ext_gain_text(self) -> str:
+        return f"{self.config.ext_gain_db:.0f} dB"
 
     def _log_compare_sa(self, mode: str, **values: object) -> None:
         if not self.config.sweep_profile_logging:
