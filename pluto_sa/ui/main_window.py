@@ -1509,7 +1509,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_calibration_mode_controls()
         if hasattr(self, "mode_specific_menu_stack"):
             is_sweep_mode = self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
-            self.mode_specific_menu_stack.setCurrentIndex(1 if is_sweep_mode else 0)
+            is_high_speed_ta_mode = (
+                self.config.analyzer_mode == AnalyzerMode.HIGH_SPEED_TIME_ANALYZER
+            )
+            show_sweep_button = is_sweep_mode or is_high_speed_ta_mode
+            self.mode_specific_menu_stack.setCurrentIndex(1 if show_sweep_button else 0)
+            if hasattr(self, "sweep_menu_button"):
+                self.sweep_menu_button.setEnabled(not is_high_speed_ta_mode)
 
     def _apply_calibration_fixed_profile(self) -> None:
         self.config.display_span_hz = int(CALIBRATION_FIXED_SPAN_HZ)
@@ -2243,9 +2249,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _open_calibration_menu_from_analyzer(self) -> None:
         self._show_calibration_menu()
 
-    def _open_calibration_menu_from_realtime_page(self) -> None:
-        self._show_calibration_menu()
-
     def _on_calibration_start_clicked(self) -> None:
         if self._is_calibration_mode():
             self._show_control_page("Calibrate", self.calibration_page)
@@ -2686,12 +2689,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.fft_size_button = self._make_control_button("FFT size")
         self.history_button = self._make_control_button("History")
         self.persistence_decay_button = self._make_value_control_button("Persistence Decay")
-        self.calibration_menu_button = self._make_control_button("Calibration")
 
         page_layout.addWidget(self.fft_size_button)
         page_layout.addWidget(self.history_button)
         page_layout.addWidget(self.persistence_decay_button)
-        page_layout.addWidget(self.calibration_menu_button)
         page_layout.addStretch(1)
 
         self.fft_size_button.clicked.connect(
@@ -2700,9 +2701,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.history_button.clicked.connect(self._on_history_clicked)
         self.persistence_decay_button.clicked.connect(
             lambda: self._show_control_page("Persistence Decay", self.persistence_decay_page)
-        )
-        self.calibration_menu_button.clicked.connect(
-            self._open_calibration_menu_from_realtime_page
         )
         self._update_realtime_sa_controls()
         return page
@@ -3292,34 +3290,32 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _clamp_int(value: int, minimum: int, maximum: int) -> int:
         return min(max(value, minimum), maximum)
 
-    def _show_center_frequency_dialog(self) -> float | None:
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Center")
-
-        layout = QtWidgets.QVBoxLayout(dialog)
-
-        form_layout = QtWidgets.QFormLayout()
-        spin_box = QtWidgets.QDoubleSpinBox(dialog)
-        spin_box.setRange(UNBOUNDED_DOUBLE_MIN, UNBOUNDED_DOUBLE_MAX)
-        spin_box.setDecimals(3)
-        spin_box.setSingleStep(self.config.center_freq_step_mhz)
-        spin_box.setValue(self.config.center_freq_hz / 1e6)
-        spin_box.setSuffix(" MHz")
-        form_layout.addRow("Center Frequency", spin_box)
-        layout.addLayout(form_layout)
-
-        button_box = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel,
-            parent=dialog,
+    def _show_frequency_mhz_input_dialog(
+        self,
+        *,
+        title: str,
+        label: str,
+        value_mhz: float,
+    ) -> tuple[float, bool]:
+        return QtWidgets.QInputDialog.getDouble(
+            self,
+            title,
+            label,
+            value=value_mhz,
+            minValue=UNBOUNDED_DOUBLE_MIN,
+            maxValue=UNBOUNDED_DOUBLE_MAX,
+            decimals=3,
         )
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        layout.addWidget(button_box)
 
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
+    def _show_center_frequency_dialog(self) -> float | None:
+        value, accepted = self._show_frequency_mhz_input_dialog(
+            title="Center",
+            label="Frequency [MHz]",
+            value_mhz=self.config.center_freq_hz / 1e6,
+        )
+        if not accepted:
             return None
-
-        return spin_box.value()
+        return float(value)
 
     def _on_freq_channel_clicked(self) -> None:
         if self._is_calibration_mode():
@@ -5033,7 +5029,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             manual_move_enabled and trace_available and (not self._is_time_analyzer_mode())
         )
         controls["continuous_peak"].setEnabled(not self._is_time_analyzer_mode())
-        controls["to_center"].setEnabled(not self._is_time_analyzer_mode())
+        show_to_center = not self._is_high_speed_time_analyzer_mode()
+        controls["to_center"].setVisible(show_to_center)
+        controls["to_center"].setEnabled(
+            show_to_center and (not self._is_time_analyzer_mode())
+        )
         self._update_marker_menu_button(marker_index)
 
     def _update_all_marker_control_states(self) -> None:
@@ -5103,14 +5103,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._update_marker_control_state(marker_index)
             self._update_marker_items()
             return
-        value, accepted = QtWidgets.QInputDialog.getDouble(
-            self,
-            marker_state.name,
-            "Frequency [MHz]",
-            value=marker_state.frequency_hz / 1e6,
-            minValue=UNBOUNDED_DOUBLE_MIN,
-            maxValue=UNBOUNDED_DOUBLE_MAX,
-            decimals=3,
+        value, accepted = self._show_frequency_mhz_input_dialog(
+            title=marker_state.name,
+            label="Frequency [MHz]",
+            value_mhz=marker_state.frequency_hz / 1e6,
         )
         if not accepted:
             return
