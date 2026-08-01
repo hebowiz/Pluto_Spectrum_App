@@ -130,6 +130,8 @@ IQStreamBuffer
 - [ ] IQ保存・offline replay APIを追加
 - [ ] VSAのDDC/resampling/synchronization/demodulation pipelineを追加
 
+External hardware triggerは当面の対象外とし、連続IQに対するhost software triggerへ集中します。
+
 ## テスト方針
 
 ### 実機不要
@@ -219,3 +221,4 @@ python -m pytest -q
 - Sweep/WideBand/Calibration/旧Time Analyzerの同期取得を共通APIへ移行。
 - stop timeout後の二重Producer起動を防止。
 - 一般的なRTSA/VSAの信号経路を調査し、Trigger/VSA共通architectureとdata contractを追加。
+- External hardware triggerを当面の対象外とし、software triggerへ範囲を限定。

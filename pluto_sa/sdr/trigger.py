@@ -14,7 +14,6 @@ class TriggerKind(str, Enum):
     FREE_RUN = "free_run"
     POWER_LEVEL = "power_level"
     FREQUENCY_MASK = "frequency_mask"
-    EXTERNAL = "external"
 
 
 class TriggerSlope(str, Enum):

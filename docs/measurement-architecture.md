@@ -81,8 +81,9 @@ oldest                                              newest
 2. IQ magnitudeによるPower Level（rising/falling/either、hysteresis）
 3. minimum duration、holdoff、delay
 4. Frequency Mask Trigger（overlap FFTを全frame評価）
-5. External Trigger（Pluto側で利用可能なhardware/firmware能力を確認後）
-6. 将来: density、runt、protocol/pattern trigger
+5. 将来: density、runt、protocol/pattern trigger
+
+External hardware triggerは当面の対象外です。Triggerはすべて、Plutoから連続受信したIQをホスト側で評価します。
 
 ### Run/rearm state
 
@@ -119,7 +120,7 @@ Trigger判定とrecord生成は状態機械として実装し、UIボタンの�
 - USB 2.0/libiio転送が連続帯域の上限になります。
 - host software triggerは判定latencyを持ちますが、prestore方式ならrecord内trigger位置には影響させずに済みます。
 - アプリが付けるsample連番は、Pluto/libiio内部のdropを直接証明できません。既知の連続信号による相関検証が必要です。
-- 標準Plutoで利用できる外部trigger/timestamp能力は未確定です。UIだけ先行してhardware trigger対応を名乗りません。
+- External hardware triggerは当面使用しない前提です。共通API、UI、検証項目にも含めません。将来必要になった場合はsoftware trigger sourceの一種として混在させず、transport/hardware capabilityとして別途設計します。
 
 ## 7. 実装状況
 
