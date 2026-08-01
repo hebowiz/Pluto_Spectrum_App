@@ -17,6 +17,7 @@
 - [Calibration](modes/calibration.md)
 - [旧 Time Analyzer（UI非表示）](modes/time-analyzer-legacy.md)
 - [IQストリーム改善計画・実装状況](iq-streaming.md)
+- [リアルタイムSA・VSA準拠の計測アーキテクチャ](measurement-architecture.md)
 
 ## モード一覧
 

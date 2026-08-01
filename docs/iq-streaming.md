@@ -16,6 +16,7 @@
 3. 欠落やバッファ超過を黙って処理せず、サンプル連番と統計で観測可能にする。
 4. RealTime SA、WideBand RT SA、Sweep SA、Time Analyzer、HighSpeed TA、Calibration、将来のVSAが共通のIQブロック形式を使用する。
 5. ハードウェアなしでストリーム境界、consumer遅延、overrunをpytestできるようにする。
+6. 将来のTrigger/VSAが同じsample timelineとtime recordを利用できる構造にする。
 
 「無欠落」は無制限のSample Rateで保証する意味ではありません。実機ベンチマークで定める動作範囲内において、アプリケーション側の未報告欠落がなく、既知の不連続がすべて通知される状態を指します。
 
@@ -66,6 +67,7 @@ IQStreamBuffer
 - consumerごとに読み取りcursorを持たせます。
 - consumerがリング容量より遅れた場合は`overrun`を返し、黙って古いデータへ飛びません。
 - 解析用windowはホスト時刻ではなくサンプル数で区切ります。
+- Trigger eventも`stream_id + sample_index`で表し、循環prestoreからpre/post-trigger recordを生成します。
 - 表示用consumerは古いフレームを捨てられますが、HighSpeed TA/VSAでは欠落を明示します。
 
 ### モード別の連続性
@@ -117,6 +119,17 @@ IQStreamBuffer
 - [ ] libiio 1.x Stream APIを評価
 - [ ] 必要な場合のみCythonまたは専用受信プロセスを評価
 
+### Phase 5: Trigger / VSA acquisition
+
+- [x] Triggerと取得recordの共通data contractを追加
+- [ ] Power Level trigger detectorを追加
+- [ ] pre/post-trigger circular recorderを追加
+- [ ] Auto/Normal/Single、holdoff、minimum durationを追加
+- [ ] overlap FFT監視によるFrequency Mask Triggerを追加
+- [ ] HighSpeed TAをtrigger-aware record consumerへ移行
+- [ ] IQ保存・offline replay APIを追加
+- [ ] VSAのDDC/resampling/synchronization/demodulation pipelineを追加
+
 ## テスト方針
 
 ### 実機不要
@@ -135,12 +148,13 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 17 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、不連続時のpartial破棄、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持です。
+2026-08-02時点: 27 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、不連続時のpartial破棄、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持です。
 
 ## 現在の実装構成
 
 - `pluto_sa/sdr/iq_stream.py`: ハードウェア非依存のブロック、cursor、リング、統計
 - `pluto_sa/sdr/iq_window.py`: block境界をまたぐ厳密sample数window assembler
+- `pluto_sa/sdr/trigger.py`: Trigger設定/eventとpre/post-trigger取得recordの共通contract
 - `pluto_sa/sdr/pluto_receiver.py`: SDRの単一所有者、連続Producer、同期取得、epoch発行
 - `pluto_sa/ui/main_window.py`: RealTime latest consumer、HighSpeed TA loss-aware consumer
 - `pluto_sa/modes/sweep_controller.py`: Sweep同期IQBlock consumer
@@ -154,6 +168,7 @@ python -m pytest -q
 - 1つのプロセス内で発行済みブロックの順序とepoch内sample位置を追跡できる。
 - consumer遅延でリング上書きが起きた場合、欠落を黙って隠さない。
 - stop timeout時に生存workerを見失って二重Producerを開始しない。
+- Trigger/VSA recordがhost時刻ではなくsample timelineで位置を共有できる。
 
 ### まだ保証できないこと
 
@@ -170,6 +185,7 @@ python -m pytest -q
 3. RX refill時間、実効sample/s、ring使用量、consumer lag、overrunをUI/ログへ公開する。
 4. 実機でblock sizeとSample Rateを掃引し、既知信号の相関で欠落を検証する。
 5. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
+6. Power Level triggerとpre/poststore state machineを純粋ロジックとして実装する。
 
 ### PlutoSDR実機
 
@@ -202,3 +218,4 @@ python -m pytest -q
 - HighSpeed TAは解析中も共通RX workerを止めない構成へ変更。
 - Sweep/WideBand/Calibration/旧Time Analyzerの同期取得を共通APIへ移行。
 - stop timeout後の二重Producer起動を防止。
+- 一般的なRTSA/VSAの信号経路を調査し、Trigger/VSA共通architectureとdata contractを追加。
