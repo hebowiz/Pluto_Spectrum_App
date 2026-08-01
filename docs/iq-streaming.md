@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 41 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、FFT frame整列、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、HighSpeed TA queueのFIFO/backpressure/generation分離、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持、USB優先/URI上書き、終了時RX buffer破棄です。
+2026-08-02時点: 43 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、FFT frame整列、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、HighSpeed TA queueのFIFO/backpressure/generation分離、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持、USB優先/URI上書き、終了時RX buffer破棄、HSTA Single/Continuous再開始時のcursor無効化です。
 
 ## 現在の実装構成
 
@@ -234,4 +234,5 @@ python -m pytest -q
 - 共通streamを4/6 MSPSで停止・再開し、overrun/連番/sample index errorが0であることを確認。
 - HighSpeed TA SingleおよびContinuousを4/6 MSPSで実機検証し、ring上書き0、解析queue最大1を確認。
 - 終了時のpyadi-iio buffer access violationを検出し、worker停止後の明示的RX buffer破棄で再発しないことを確認。
+- HSTA状態変更時に古いstream cursorが残る不具合を修正し、Single→ContinuousとSweep Time変更後の表示再開を実機確認。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

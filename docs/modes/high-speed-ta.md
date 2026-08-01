@@ -72,3 +72,4 @@ HighSpeed TA consumerは独立cursorでブロックを読みます。受信開�
 - Power Level Triggerとpre/post-trigger基盤は実装済みですが、HighSpeed TAのUI/consumerにはまだ接続していません。現在はFree Run相当です。
 - 512×65536 samplesのcomplex64保持は最大約256 MiBです。
 - USB/libiio内部の欠落はアプリ側連番だけでは検出できないため、実機の既知信号による連続性検証が必要です。
+- Single/Continuous切替やSweep Time変更時は、既存RX workerとstream cursorを同時に無効化して新しいepochで再開します。

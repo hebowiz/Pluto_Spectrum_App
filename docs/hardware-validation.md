@@ -82,9 +82,22 @@ Qtをoffscreenで動かし、実際の`RealtimeSpectrumWindow`、共通Producer�
 
 初回の4 MSPS Continuous終了時に、pyadi-iioの`Buffer.__del__`からaccess violationが1回発生しました。受信worker停止後に`rx_destroy_buffer()`を明示実行するよう`PlutoReceiver.close()`を修正し、4 MSPS・6 MSPSの再試験では再発していません。
 
+### 実操作で判明した状態遷移不具合
+
+SingleからContinuousへの切替、およびContinuous中のSweep Time変更後に表示が停止する不具合がありました。再開始処理がRX workerだけを停止してHSTA stream cursorを残していたため、次の開始を重複開始と誤認していたことが原因です。
+
+状態変更時は`_stop_high_speed_ta_stream()`を通し、worker停止とcursor無効化を一体で行うよう修正しました。direct USB、4 MSPSで次の連続シナリオを再試験しています。
+
+| 操作 | 修正後の結果 |
+|---|---|
+| Single取得中 → Continuous | 0.75秒間に6 windows更新 |
+| Sweep Time 100 ms → 50 ms | 続く0.75秒間に12 windows更新 |
+| 全シナリオ | ring上書き0、終了時例外なし |
+
 ```powershell
 $env:QT_QPA_PLATFORM = 'offscreen'
 python -m tools.validate_hsta_hardware --sample-rate 6000000 --time-span 0.1 --continuous-duration 5 --timeout 7
+python -m tools.validate_hsta_hardware --sample-rate 4000000 --time-span 0.1 --exercise-transitions
 ```
 
 ## 解釈上の注意と次の検証

@@ -3065,7 +3065,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
-        self.receiver.stop()
+        # Stop through the HSTA lifecycle helper so the stream cursor is
+        # invalidated as well as the receiver worker.  Leaving the old cursor
+        # here makes the subsequent start look like a duplicate and freezes
+        # Single -> Continuous and runtime setting changes.
+        self._stop_high_speed_ta_stream(stop_analysis_thread=False)
         self._high_speed_ta_single_waiting_result = False
         self._reset_high_speed_time_analyzer_capture_window(
             start_timestamp=None,
@@ -3844,7 +3848,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             message=f"sweep_state_before={self.sweep_state}",
             force=True,
         )
-        self.receiver.stop()
+        # Continuous -> Single must invalidate the prior stream cursor before
+        # starting the new epoch.
+        self._stop_high_speed_ta_stream(stop_analysis_thread=False)
         self._high_speed_ta_single_waiting_result = False
         self._reset_high_speed_time_analyzer_capture_window(
             start_timestamp=None,
