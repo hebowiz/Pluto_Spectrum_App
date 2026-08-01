@@ -95,6 +95,7 @@ class AcquisitionMetadata:
     rf_bandwidth_hz: float
     gain_db: float
     source: str
+    iq_full_scale: float = 2048.0
 
     def __post_init__(self) -> None:
         if float(self.sample_rate_hz) <= 0.0:
@@ -103,6 +104,8 @@ class AcquisitionMetadata:
             raise ValueError("center_freq_hz must be positive")
         if float(self.rf_bandwidth_hz) <= 0.0:
             raise ValueError("rf_bandwidth_hz must be positive")
+        if float(self.iq_full_scale) <= 0.0:
+            raise ValueError("iq_full_scale must be positive")
 
 
 @dataclass(frozen=True)
@@ -130,6 +133,9 @@ class IQAcquisitionRecord:
             raise ValueError("trigger event and record sample index must match")
         if len(iq) != self.config.record_samples:
             raise ValueError("record length must match trigger configuration")
+        owned_iq = np.array(iq, dtype=np.complex64, copy=True)
+        owned_iq.flags.writeable = False
+        object.__setattr__(self, "iq", owned_iq)
 
     @property
     def sample_count(self) -> int:

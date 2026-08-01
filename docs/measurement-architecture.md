@@ -95,6 +95,8 @@ External hardware triggerは当面の対象外です。Triggerはすべて、Plu
 
 Trigger判定とrecord生成は状態機械として実装し、UIボタンの分岐へ埋め込みません。
 
+Power Level Triggerの初期実装は各complex IQ sampleのmagnitudeを明示的な`iq_full_scale`で正規化したdBFSを使用します。校正済みdBm triggerとは区別します。Pluto実機でraw code scaleを確認し、取得metadataへ保存したfull-scale値から判定を再現できるようにします。
+
 ## 4. RTSA表示処理
 
 - FFT frameは連続sampleから生成し、必要なPOIに応じてoverlap率を設定します。
@@ -129,7 +131,9 @@ Trigger判定とrecord生成は状態機械として実装し、UIボタンの�
 - 共通`IQStreamBuffer`、epoch、cursor、overrun検出: 実装済み
 - exact-length `IQWindowAssembler`: 実装済み
 - `TriggerConfig`、`TriggerEvent`、`AcquisitionMetadata`、`IQAcquisitionRecord`: data contract実装済み
-- Power/FMT detector、pre/poststore state machine: 未実装
+- Power Level detector: 実装済み（rising/falling/either、hysteresis、minimum duration、holdoff）
+- pre/poststore state machine: 実装済み（block境界、判定遅延、不連続、Single/Stop on Trigger）
+- Auto timeout/FMT detector: 未実装
 - HighSpeed TAのtrigger-aware record consumer化: 未実装
 - VSA demodulation: 未実装
 

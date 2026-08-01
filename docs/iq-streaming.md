@@ -122,9 +122,9 @@ IQStreamBuffer
 ### Phase 5: Trigger / VSA acquisition
 
 - [x] Triggerと取得recordの共通data contractを追加
-- [ ] Power Level trigger detectorを追加
-- [ ] pre/post-trigger circular recorderを追加
-- [ ] Auto/Normal/Single、holdoff、minimum durationを追加
+- [x] Power Level trigger detectorを追加
+- [x] pre/post-trigger circular recorderを追加
+- [ ] Auto timeoutを追加（Normal/Single、holdoff、minimum durationは基盤実装済み）
 - [ ] overlap FFT監視によるFrequency Mask Triggerを追加
 - [ ] HighSpeed TAをtrigger-aware record consumerへ移行
 - [ ] IQ保存・offline replay APIを追加
@@ -150,13 +150,15 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 27 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、不連続時のpartial破棄、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持です。
+2026-08-02時点: 35 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持です。
 
 ## 現在の実装構成
 
 - `pluto_sa/sdr/iq_stream.py`: ハードウェア非依存のブロック、cursor、リング、統計
 - `pluto_sa/sdr/iq_window.py`: block境界をまたぐ厳密sample数window assembler
 - `pluto_sa/sdr/trigger.py`: Trigger設定/eventとpre/post-trigger取得recordの共通contract
+- `pluto_sa/sdr/trigger_detector.py`: sample-domain Power Level Trigger状態機械
+- `pluto_sa/sdr/trigger_recorder.py`: circular prestore/poststoreとrecord生成
 - `pluto_sa/sdr/pluto_receiver.py`: SDRの単一所有者、連続Producer、同期取得、epoch発行
 - `pluto_sa/ui/main_window.py`: RealTime latest consumer、HighSpeed TA loss-aware consumer
 - `pluto_sa/modes/sweep_controller.py`: Sweep同期IQBlock consumer
@@ -187,7 +189,7 @@ python -m pytest -q
 3. RX refill時間、実効sample/s、ring使用量、consumer lag、overrunをUI/ログへ公開する。
 4. 実機でblock sizeとSample Rateを掃引し、既知信号の相関で欠落を検証する。
 5. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
-6. Power Level triggerとpre/poststore state machineを純粋ロジックとして実装する。
+6. Power Level Trigger/recorderをHighSpeed TAの共通stream consumerへ接続する。
 
 ### PlutoSDR実機
 
@@ -222,3 +224,4 @@ python -m pytest -q
 - stop timeout後の二重Producer起動を防止。
 - 一般的なRTSA/VSAの信号経路を調査し、Trigger/VSA共通architectureとdata contractを追加。
 - External hardware triggerを当面の対象外とし、software triggerへ範囲を限定。
+- Power Level Triggerとpre/post-trigger recorderを追加し、判定遅延分を含むprestoreを実装。

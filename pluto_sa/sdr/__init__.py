@@ -18,6 +18,8 @@ from pluto_sa.sdr.trigger import (
     TriggerRunMode,
     TriggerSlope,
 )
+from pluto_sa.sdr.trigger_detector import PowerLevelTriggerDetector
+from pluto_sa.sdr.trigger_recorder import TriggeredIQRecorder
 
 __all__ = [
     "IQBlock",
@@ -35,4 +37,6 @@ __all__ = [
     "TriggerRearmMode",
     "TriggerRunMode",
     "TriggerSlope",
+    "PowerLevelTriggerDetector",
+    "TriggeredIQRecorder",
 ]

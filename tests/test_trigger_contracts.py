@@ -70,6 +70,8 @@ def test_acquisition_record_locates_trigger_on_sample_timeline() -> None:
     assert record.trigger_sample_offset == 2
     assert record.end_sample_index == 105
     assert record.is_contiguous is True
+    with pytest.raises(ValueError, match="read-only"):
+        record.iq[0] = 1.0 + 1.0j
 
 
 def test_acquisition_record_rejects_trigger_outside_record() -> None:
