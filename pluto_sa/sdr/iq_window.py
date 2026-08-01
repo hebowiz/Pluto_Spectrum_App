@@ -9,6 +9,23 @@ import numpy as np
 from pluto_sa.sdr.iq_stream import IQBlock
 
 
+def resolve_fft_aligned_window_samples(
+    time_span_s: float,
+    sample_rate_hz: float,
+    fft_size: int,
+) -> int:
+    """Return the smallest whole-FFT record covering the requested duration."""
+    if float(time_span_s) <= 0.0:
+        raise ValueError("time_span_s must be positive")
+    if float(sample_rate_hz) <= 0.0:
+        raise ValueError("sample_rate_hz must be positive")
+    if int(fft_size) <= 0:
+        raise ValueError("fft_size must be positive")
+    requested = max(1, int(round(float(time_span_s) * float(sample_rate_hz))))
+    fft_n = int(fft_size)
+    return ((requested + fft_n - 1) // fft_n) * fft_n
+
+
 @dataclass(frozen=True)
 class IQWindow:
     """One contiguous, exact-length IQ analysis window."""

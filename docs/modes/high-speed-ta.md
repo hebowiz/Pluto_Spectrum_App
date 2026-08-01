@@ -31,10 +31,10 @@ PlutoReceiver共通RX worker（全モード共通の単一Producer）
   └─ IQBlock発行 → IQStreamBuffer（初期512ブロック）
 
 GUIスレッド
-  └─ 時間窓完成の判定、解析ジョブ投入、結果描画
+  └─ IQWindowAssembler → bounded解析queue → 結果描画
 
 解析スレッド
-  └─ IQブロック群のFFT/RBW/Detector処理
+  └─ job queueから連続windowを取得 → FFT/RBW/Detector処理 → result queue
 ```
 
 HighSpeed TA consumerは独立cursorでブロックを読みます。受信開始直後または設定変更後は5ブロックをwarm-upとして解析対象から除外します。
@@ -47,12 +47,16 @@ HighSpeed TA consumerは独立cursorでブロックを読みます。受信開�
 
 ## 時間窓と解析
 
-- 指定Time Span以上のサンプル数になるまでブロックを蓄積して1掃引とします。
+- `IQWindowAssembler`がブロック境界をまたいで余剰sampleを次窓へcarryします。
+- window長は指定Time Spanを覆う最小のFFT frame整数倍です。これにより解析時に端数sampleを捨てません。
 - ブロック間隔が期待時間の1.2倍を超えた場合、gapとして統計へ記録します。
-- 1つの時間窓が完成すると取得データのスナップショットを解析スレッドへ渡します。
+- 1つの時間窓が完成すると取得データのスナップショットを最大4件の解析job queueへ渡します。
+- 解析結果も最大4件のFIFO queueでGUIへ渡します。旧実装の単一pending/latest slotによる上書きはありません。
 - Continuousでは解析・描画中も共通Producerを停止せず、後続IQをリングに蓄積します。
+- GUI consumerは1回のtimer callbackで最大8 IQ blockまで追従します。
+- job queueが満杯の場合は完成windowを保持して新しいIQを読まず、backpressureを共通リングへ伝えます。
 - consumerが512ブロックより遅れた場合はoverrunとして明示し、不連続をまたいだ時間窓を破棄します。
-- Singleは1時間窓の解析・表示完了後に停止します。
+- Singleは正確な1時間窓が完成した時点でProducerを停止し、解析・表示完了後に測定を終了します。
 
 ## 振幅処理
 
@@ -63,7 +67,8 @@ HighSpeed TA consumerは独立cursorでブロックを読みます。受信開�
 - gap検出用データは保持しますが、現時点ではgapマーカー表示を無効化しています。
 - ピークログも初期状態では無効です。
 - 大きなTime SpanではIQブロックと解析負荷が増加します。
-- 現段階の時間窓はブロック境界まで含むため、指定Time Spanを最大1ブロック弱超過する場合があります。厳密なsample単位window切出しは未実装です。
-- GUIは解析中にconsumer読出しを止め、解析完了後に1ブロックずつ追従します。長い解析ではリングoverrunの可能性があります。
+- 実効Time SpanはFFT frame単位へ切り上げるため、指定値より最大`(FFT size - 1) / Sample Rate`だけ長くなります。
+- 解析が取得より継続的に遅い場合、job/result queueから共通リングへbackpressureが伝わり、最終的にring overrunとなる可能性があります。この場合は不連続を明示してpartial windowを破棄します。
+- Power Level Triggerとpre/post-trigger基盤は実装済みですが、HighSpeed TAのUI/consumerにはまだ接続していません。現在はFree Run相当です。
 - 512×65536 samplesのcomplex64保持は最大約256 MiBです。
 - USB/libiio内部の欠落はアプリ側連番だけでは検出できないため、実機の既知信号による連続性検証が必要です。

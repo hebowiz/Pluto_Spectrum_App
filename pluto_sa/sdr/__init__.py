@@ -7,7 +7,11 @@ from pluto_sa.sdr.iq_stream import (
     IQStreamCursor,
     IQStreamStats,
 )
-from pluto_sa.sdr.iq_window import IQWindow, IQWindowAssembler
+from pluto_sa.sdr.iq_window import (
+    IQWindow,
+    IQWindowAssembler,
+    resolve_fft_aligned_window_samples,
+)
 from pluto_sa.sdr.trigger import (
     AcquisitionMetadata,
     IQAcquisitionRecord,
@@ -29,6 +33,7 @@ __all__ = [
     "IQStreamStats",
     "IQWindow",
     "IQWindowAssembler",
+    "resolve_fft_aligned_window_samples",
     "AcquisitionMetadata",
     "IQAcquisitionRecord",
     "TriggerConfig",

@@ -3,7 +3,10 @@ from __future__ import annotations
 import numpy as np
 
 from pluto_sa.sdr.iq_stream import IQStreamBuffer
-from pluto_sa.sdr.iq_window import IQWindowAssembler
+from pluto_sa.sdr.iq_window import (
+    IQWindowAssembler,
+    resolve_fft_aligned_window_samples,
+)
 
 
 def publish(stream: IQStreamBuffer, values: list[int]):
@@ -71,3 +74,15 @@ def test_sample_index_gap_discards_partial_window() -> None:
     assert len(windows) == 1
     assert windows[0].start_sample_index == 12
     assert windows[0].discontinuity_before is True
+
+
+def test_fft_aligned_window_covers_requested_time_without_partial_frame() -> None:
+    samples = resolve_fft_aligned_window_samples(
+        time_span_s=0.010,
+        sample_rate_hz=1_000_000,
+        fft_size=4096,
+    )
+
+    assert samples == 12_288
+    assert samples % 4096 == 0
+    assert samples >= 10_000

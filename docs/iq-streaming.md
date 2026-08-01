@@ -20,7 +20,7 @@
 
 「無欠落」は無制限のSample Rateで保証する意味ではありません。実機ベンチマークで定める動作範囲内において、アプリケーション側の未報告欠落がなく、既知の不連続がすべて通知される状態を指します。
 
-## 現行実装で確認した問題
+## 改善前の実装で確認した問題
 
 - HighSpeed TAは時間窓完成時に受信スレッドとlibiioバッファを停止・破棄する。
 - HighSpeed TAは解析と描画の完了後に受信を再開するため、各時間窓の間に必ず空白が生じる。
@@ -107,7 +107,7 @@ IQStreamBuffer
 - [x] HighSpeed TAを解析中も停止しないconsumerへ移行
 - [x] 旧Time Analyzerの同期取得を共通ブロックAPIへ移行
 - [x] Sweep/WideBand/Calibrationの同期取得を共通ブロックAPIへ移行
-- [ ] HighSpeed TAを厳密なsample数windowと連続解析job queueへ移行
+- [x] HighSpeed TAをFFT整列した厳密sample数windowと連続解析job queueへ移行
 - [ ] 旧Time Analyzerを同期取得から共通連続Producer consumerへ移行
 
 ### Phase 4: transport最適化
@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 35 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持です。
+2026-08-02時点: 38 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、FFT frame整列、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、HighSpeed TA queueのFIFO/backpressure/generation分離、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持です。
 
 ## 現在の実装構成
 
@@ -165,10 +165,13 @@ python -m pytest -q
 - `tests/test_iq_stream.py`: 純粋ストリームテスト
 - `tests/test_iq_window.py`: window分割、tail carry、不連続テスト
 - `tests/test_pluto_receiver_stream.py`: Fake Pluto統合テスト
+- `tests/test_hsta_analysis_queue.py`: HighSpeed TA FIFO backpressureとstale result分離
 
 ### 現時点で保証できること
 
 - HighSpeed TAは時間窓完成時および解析中にRX workerを意図的に停止しない。
+- HighSpeed TA consumerは解析と並行してIQを読み、FFT frame整数倍の連続windowをFIFO解析queueへ投入する。
+- job/result queue満杯時は無通知上書きせず、backpressureを共通IQ ringへ伝える。
 - 1つのプロセス内で発行済みブロックの順序とepoch内sample位置を追跡できる。
 - consumer遅延でリング上書きが起きた場合、欠落を黙って隠さない。
 - stop timeout時に生存workerを見失って二重Producerを開始しない。
@@ -178,18 +181,17 @@ python -m pytest -q
 
 - Pluto/libiio/USBより前または内部で発生した欠落。アプリ連番は取得成功したblockに付ける番号であり、ハードウェア連続性の証明ではない。
 - どのSample Rateまで実機で無欠落か。
-- 任意Time Spanぴったりのsample数window。現在は最後のblock分だけ超過し得る。
+- 指定Time Spanそのものではなく、解析可能なFFT frame整数倍へ最大1 frame弱切り上げる。
 - 解析がリング保持時間より長い場合の無欠落。現在はoverrunを検出してwindowを破棄する。
 - Sweep/WideBandはLO切替を伴うため、帯域全体の時間・位相連続性は設計上存在しない。
 
 ## 次に行う作業
 
-1. HighSpeed TAを`IQWindowAssembler`へ接続する。
-2. 1件だけの解析pending slotを、容量とbackpressure方針を持つ連続window queueへ移行する。
-3. RX refill時間、実効sample/s、ring使用量、consumer lag、overrunをUI/ログへ公開する。
+1. Power Level Trigger/recorderをHighSpeed TAの共通stream consumerへ接続する。
+2. Auto timeoutとTrigger UIを追加する。
+3. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
 4. 実機でblock sizeとSample Rateを掃引し、既知信号の相関で欠落を検証する。
 5. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
-6. Power Level Trigger/recorderをHighSpeed TAの共通stream consumerへ接続する。
 
 ### PlutoSDR実機
 
@@ -225,3 +227,4 @@ python -m pytest -q
 - 一般的なRTSA/VSAの信号経路を調査し、Trigger/VSA共通architectureとdata contractを追加。
 - External hardware triggerを当面の対象外とし、software triggerへ範囲を限定。
 - Power Level Triggerとpre/post-trigger recorderを追加し、判定遅延分を含むprestoreを実装。
+- HighSpeed TAをFFT整列exact window、bounded FIFO job/result queue、明示的backpressureへ移行。
