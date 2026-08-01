@@ -94,10 +94,22 @@ SingleからContinuousへの切替、およびContinuous中のSweep Time変更�
 | Sweep Time 100 ms → 50 ms | 続く0.75秒間に12 windows更新 |
 | 全シナリオ | ring上書き0、終了時例外なし |
 
+### Power Trigger統合
+
+共通`TriggerAcquisitionController`とHighSpeed TAのrecord consumerをdirect USB、4 MSPS、Time Span 100 ms、Position 50%で検証しました。
+
+| 条件 | 結果 |
+|---|---|
+| Power Auto、到達不能な+20 dBFS、timeout 200 ms、1.5秒 | 3 records、forced 3、natural 0、ring上書き0 |
+| Power Normal、-100 dBFS、Single | 1 record、forced 0、natural 1、ring上書き0 |
+
+前者は診断CLIからUI範囲外の+20 dBFSを指定し、自然eventが絶対に成立しない条件でforced timeoutだけを検証しています。通常UIのLevel上限は0 dBFSです。
+
 ```powershell
 $env:QT_QPA_PLATFORM = 'offscreen'
 python -m tools.validate_hsta_hardware --sample-rate 6000000 --time-span 0.1 --continuous-duration 5 --timeout 7
 python -m tools.validate_hsta_hardware --sample-rate 4000000 --time-span 0.1 --exercise-transitions
+python -m tools.validate_hsta_hardware --sample-rate 4000000 --time-span 0.1 --continuous-duration 1.5 --trigger-kind power_level --trigger-run-mode auto --trigger-level-dbfs 20 --trigger-auto-timeout 0.2
 ```
 
 ## 解釈上の注意と次の検証

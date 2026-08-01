@@ -133,8 +133,10 @@ Power Level Triggerの初期実装は各complex IQ sampleのmagnitudeを明示�
 - `TriggerConfig`、`TriggerEvent`、`AcquisitionMetadata`、`IQAcquisitionRecord`: data contract実装済み
 - Power Level detector: 実装済み（rising/falling/either、hysteresis、minimum duration、holdoff）
 - pre/poststore state machine: 実装済み（block境界、判定遅延、不連続、Single/Stop on Trigger）
-- Auto timeout/FMT detector: 未実装
-- HighSpeed TAのtrigger-aware record consumer化: 未実装
+- 共通Trigger acquisition controller: 実装済み（Free Run、Power Auto/Normal/Single、forced timeout、rearm）
+- HighSpeed TAのtrigger-aware record consumer化: 実装済み
+- HighSpeed TA Trigger UI: 基本設定を実装済み（Source、Mode、Level、Slope、Position、Auto Timeout）
+- FMT detector: 未実装
 - VSA demodulation: 未実装
 
 ## 参考資料

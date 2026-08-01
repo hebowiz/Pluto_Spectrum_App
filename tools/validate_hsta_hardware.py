@@ -30,6 +30,11 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--continuous-duration", type=float, default=0.0)
     parser.add_argument("--exercise-transitions", action="store_true")
+    parser.add_argument("--trigger-kind", choices=("free_run", "power_level"), default="free_run")
+    parser.add_argument("--trigger-run-mode", choices=("auto", "normal"), default="auto")
+    parser.add_argument("--trigger-level-dbfs", type=float, default=-20.0)
+    parser.add_argument("--trigger-position-percent", type=float, default=50.0)
+    parser.add_argument("--trigger-auto-timeout", type=float, default=1.0)
     args = parser.parse_args()
 
     app = pg.mkQApp("Pluto HSTA hardware validation")
@@ -40,6 +45,11 @@ def main() -> None:
         time_analyzer_time_span_s=args.time_span,
         fft_size=4096,
         sdr_uri=args.uri,
+        hsta_trigger_kind=args.trigger_kind,
+        hsta_trigger_run_mode=args.trigger_run_mode,
+        hsta_trigger_level_dbfs=args.trigger_level_dbfs,
+        hsta_trigger_position_percent=args.trigger_position_percent,
+        hsta_trigger_auto_timeout_s=args.trigger_auto_timeout,
     )
     receiver = PlutoReceiver(config)
     processor = SpectrumProcessor(config)
@@ -61,11 +71,18 @@ def main() -> None:
     max_job_queue_size = 0
     max_result_queue_size = 0
     transition_publish_counts: dict[str, int] = {}
+    forced_trigger_count = 0
+    natural_trigger_count = 0
     original_publish = window._publish_high_speed_ta_analysis_result
 
     def counted_publish(result) -> None:
-        nonlocal publish_count
+        nonlocal publish_count, forced_trigger_count, natural_trigger_count
         publish_count += 1
+        if result.trigger_kind == "power_level":
+            if result.trigger_forced:
+                forced_trigger_count += 1
+            else:
+                natural_trigger_count += 1
         original_publish(result)
 
     window._publish_high_speed_ta_analysis_result = counted_publish
@@ -147,7 +164,13 @@ def main() -> None:
             "requested_sample_rate_hz": args.sample_rate,
             "requested_time_span_s": args.time_span,
             "continuous_duration_s": args.continuous_duration,
+            "trigger_kind": args.trigger_kind,
+            "trigger_run_mode": args.trigger_run_mode,
+            "trigger_level_dbfs": args.trigger_level_dbfs,
+            "trigger_position_percent": args.trigger_position_percent,
             "publish_count": publish_count,
+            "forced_trigger_count": forced_trigger_count,
+            "natural_trigger_count": natural_trigger_count,
             "display_points": (
                 0
                 if window._last_current_display_db is None

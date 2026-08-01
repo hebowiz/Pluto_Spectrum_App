@@ -124,9 +124,9 @@ IQStreamBuffer
 - [x] Triggerと取得recordの共通data contractを追加
 - [x] Power Level trigger detectorを追加
 - [x] pre/post-trigger circular recorderを追加
-- [ ] Auto timeoutを追加（Normal/Single、holdoff、minimum durationは基盤実装済み）
+- [x] 共通acquisition controllerとAuto timeoutを追加
 - [ ] overlap FFT監視によるFrequency Mask Triggerを追加
-- [ ] HighSpeed TAをtrigger-aware record consumerへ移行
+- [x] HighSpeed TAをtrigger-aware record consumerへ移行
 - [ ] IQ保存・offline replay APIを追加
 - [ ] VSAのDDC/resampling/synchronization/demodulation pipelineを追加
 
@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 43 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、FFT frame整列、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、HighSpeed TA queueのFIFO/backpressure/generation分離、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持、USB優先/URI上書き、終了時RX buffer破棄、HSTA Single/Continuous再開始時のcursor無効化です。
+2026-08-02時点: 52 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、FFT frame整列、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、Free Run/Power Auto/Normal/Single acquisition、forced timeout/rearm、post-trigger中の再arm抑止、HighSpeed TA queueのFIFO/backpressure/generation分離、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持、USB優先/URI上書き、終了時RX buffer破棄、HSTA Single/Continuous再開始時のcursor無効化です。
 
 ## 現在の実装構成
 
@@ -159,6 +159,7 @@ python -m pytest -q
 - `pluto_sa/sdr/trigger.py`: Trigger設定/eventとpre/post-trigger取得recordの共通contract
 - `pluto_sa/sdr/trigger_detector.py`: sample-domain Power Level Trigger状態機械
 - `pluto_sa/sdr/trigger_recorder.py`: circular prestore/poststoreとrecord生成
+- `pluto_sa/sdr/trigger_acquisition.py`: arm/detect/forced timeout/rearmを統括する共通controller
 - `pluto_sa/sdr/pluto_receiver.py`: SDRの単一所有者、連続Producer、同期取得、epoch発行
 - `pluto_sa/ui/main_window.py`: RealTime latest consumer、HighSpeed TA loss-aware consumer
 - `pluto_sa/modes/sweep_controller.py`: Sweep同期IQBlock consumer
@@ -188,11 +189,10 @@ python -m pytest -q
 
 ## 次に行う作業
 
-1. Power Level Trigger/recorderをHighSpeed TAの共通stream consumerへ接続する。
-2. Auto timeoutとTrigger UIを追加する。
-3. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
-4. 実機でblock sizeを掃引し、既知信号の長時間相関で欠落を検証する。
-5. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
+1. Trigger位置の表示と、minimum duration/holdoff/hysteresisのUI設定を追加する。
+2. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
+3. 実機でblock sizeを掃引し、既知信号の長時間相関で欠落を検証する。
+4. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
 
 ### PlutoSDR実機
 
@@ -235,4 +235,7 @@ python -m pytest -q
 - HighSpeed TA SingleおよびContinuousを4/6 MSPSで実機検証し、ring上書き0、解析queue最大1を確認。
 - 終了時のpyadi-iio buffer access violationを検出し、worker停止後の明示的RX buffer破棄で再発しないことを確認。
 - HSTA状態変更時に古いstream cursorが残る不具合を修正し、Single→ContinuousとSweep Time変更後の表示再開を実機確認。
+- Free Run/Power Levelのarm、Auto forced timeout、Normal、Single、rearmを統括する共通acquisition controllerを追加。
+- HighSpeed TAの窓生成を`IQAcquisitionRecord`へ移行し、Trigger基本設定UIを追加。
+- Power Auto forced recordとPower Normal natural recordをdirect USB実機で確認。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

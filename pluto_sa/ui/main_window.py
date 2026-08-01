@@ -27,11 +27,16 @@ from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.sdr.iq_stream import IQStreamCursor
-from pluto_sa.sdr.iq_window import (
-    IQWindow,
-    IQWindowAssembler,
-    resolve_fft_aligned_window_samples,
+from pluto_sa.sdr.iq_window import resolve_fft_aligned_window_samples
+from pluto_sa.sdr.trigger import (
+    AcquisitionMetadata,
+    IQAcquisitionRecord,
+    TriggerConfig,
+    TriggerKind,
+    TriggerRunMode,
+    TriggerSlope,
 )
+from pluto_sa.sdr.trigger_acquisition import TriggerAcquisitionController
 from pluto_sa.signal.detector import DetectorMode, apply_detector
 from pluto_sa.signal.rbw import apply_rbw_weighting, make_gaussian_rbw_kernel, resolve_rbw_hz
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
@@ -295,6 +300,10 @@ class HighSpeedTAAnalysisJob:
     single_shot: bool
     sweep_id: int
     generation: int = 0
+    trigger_kind: str = TriggerKind.FREE_RUN.value
+    trigger_sample_offset: int = 0
+    trigger_forced: bool = False
+    trigger_measured_value: float | None = None
 
 
 @dataclass
@@ -317,6 +326,10 @@ class HighSpeedTAAnalysisResult:
     single_shot: bool
     sweep_id: int
     generation: int = 0
+    trigger_kind: str = TriggerKind.FREE_RUN.value
+    trigger_sample_offset: int = 0
+    trigger_forced: bool = False
+    trigger_measured_value: float | None = None
 
 
 class FrequencyAxisItem(pg.AxisItem):
@@ -355,7 +368,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._time_analyzer_sweep = TimeAnalyzerSweepState()
         self._high_speed_time_analyzer = HighSpeedTimeAnalyzerCaptureState()
         self._high_speed_ta_stream_cursor: IQStreamCursor | None = None
-        self._high_speed_ta_window_assembler: IQWindowAssembler | None = None
+        self._high_speed_ta_trigger_acquisition: TriggerAcquisitionController | None = None
         self._high_speed_ta_pending_analysis_jobs: deque[HighSpeedTAAnalysisJob] = deque()
         self._high_speed_ta_generation = 0
         self._high_speed_ta_analysis_stop_event = threading.Event()
@@ -807,7 +820,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         reset_discard: bool = True,
     ) -> None:
         self._high_speed_ta_generation += 1
-        self._high_speed_ta_window_assembler = None
+        self._high_speed_ta_trigger_acquisition = None
         self._clear_high_speed_ta_analysis_queues()
         state = self._high_speed_time_analyzer
         state.iq_blocks.clear()
@@ -1997,6 +2010,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._build_trace_type_page(index) for index in range(len(self.trace_states))
         ]
         self.detector_page = self._build_detector_page()
+        self.trigger_page = self._build_trigger_page()
         self.marker_menu_page = self._build_marker_menu_page()
         self.marker_detail_pages = [
             self._build_marker_detail_page(index) for index in range(len(self.marker_states))
@@ -2024,6 +2038,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for page in self.trace_type_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.detector_page)
+        self.control_stack.addWidget(self.trigger_page)
         self.control_stack.addWidget(self.marker_menu_page)
         for page in self.marker_detail_pages:
             self.control_stack.addWidget(page)
@@ -2149,11 +2164,52 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.cont_button.clicked.connect(self._on_cont_clicked)
         self.single_button.clicked.connect(self._on_single_clicked)
         self.reset_button.clicked.connect(self._on_reset_clicked)
-        self.trigger_button.clicked.connect(lambda: self._show_not_implemented("Trigger"))
+        self.trigger_button.clicked.connect(self._open_trigger_page)
         self.marker_button.clicked.connect(
             lambda: self._show_control_page("Marker", self.marker_menu_page)
         )
         self._update_analyzer_mode_controls()
+        return page
+
+    def _open_trigger_page(self) -> None:
+        if not self._is_high_speed_time_analyzer_mode():
+            self._show_not_implemented("Trigger")
+            return
+        self._update_trigger_controls()
+        self._show_control_page("Trigger", self.trigger_page)
+
+    def _build_trigger_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        self.trigger_kind_button = self._make_control_button("Source")
+        self.trigger_run_mode_button = self._make_control_button("Mode")
+        self.trigger_level_button = self._make_control_button("Level")
+        self.trigger_slope_button = self._make_control_button("Slope")
+        self.trigger_position_button = self._make_control_button("Position")
+        self.trigger_auto_timeout_button = self._make_control_button("Auto Timeout")
+        for button in (
+            self.trigger_kind_button,
+            self.trigger_run_mode_button,
+            self.trigger_level_button,
+            self.trigger_slope_button,
+            self.trigger_position_button,
+            self.trigger_auto_timeout_button,
+        ):
+            page_layout.addWidget(button)
+        page_layout.addStretch(1)
+
+        self.trigger_kind_button.clicked.connect(self._cycle_hsta_trigger_kind)
+        self.trigger_run_mode_button.clicked.connect(self._cycle_hsta_trigger_run_mode)
+        self.trigger_level_button.clicked.connect(self._on_hsta_trigger_level_clicked)
+        self.trigger_slope_button.clicked.connect(self._cycle_hsta_trigger_slope)
+        self.trigger_position_button.clicked.connect(self._on_hsta_trigger_position_clicked)
+        self.trigger_auto_timeout_button.clicked.connect(
+            self._on_hsta_trigger_auto_timeout_clicked
+        )
+        self._update_trigger_controls()
         return page
 
     def _open_realtime_mode_page(self) -> None:
@@ -6416,25 +6472,67 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"expected_elapsed={expected_elapsed_ms:.3f}ms"
         )
 
-    def _ensure_high_speed_ta_window_assembler(self) -> IQWindowAssembler:
+    def _ensure_high_speed_ta_trigger_acquisition(self) -> TriggerAcquisitionController:
         sample_rate_hz = max(1.0, float(self.config.sample_rate_hz))
         window_samples = resolve_fft_aligned_window_samples(
             self._time_analyzer_time_span_s(),
             sample_rate_hz,
             int(self.config.fft_size),
         )
-        assembler = self._high_speed_ta_window_assembler
-        if assembler is None or assembler.window_samples != window_samples:
-            if assembler is not None:
+        trigger_kind = TriggerKind(self.config.hsta_trigger_kind)
+        if trigger_kind == TriggerKind.POWER_LEVEL:
+            trigger_position = min(
+                100.0,
+                max(0.0, float(self.config.hsta_trigger_position_percent)),
+            )
+            pretrigger_samples = int(
+                round((window_samples - 1) * trigger_position / 100.0)
+            )
+        else:
+            pretrigger_samples = 0
+        posttrigger_samples = window_samples - pretrigger_samples - 1
+        run_mode = (
+            TriggerRunMode.SINGLE
+            if self.sweep_state == SWEEP_STATE_SINGLE
+            else TriggerRunMode(self.config.hsta_trigger_run_mode)
+        )
+        trigger_config = TriggerConfig(
+            kind=trigger_kind,
+            run_mode=run_mode,
+            slope=TriggerSlope(self.config.hsta_trigger_slope),
+            level_dbfs=float(self.config.hsta_trigger_level_dbfs),
+            hysteresis_db=float(self.config.hsta_trigger_hysteresis_db),
+            pretrigger_samples=pretrigger_samples,
+            posttrigger_samples=posttrigger_samples,
+            auto_timeout_samples=(
+                max(
+                    1,
+                    int(round(float(self.config.hsta_trigger_auto_timeout_s) * sample_rate_hz)),
+                )
+                if trigger_kind == TriggerKind.POWER_LEVEL
+                and run_mode == TriggerRunMode.AUTO
+                else None
+            ),
+        )
+        acquisition = self._high_speed_ta_trigger_acquisition
+        if acquisition is None or acquisition.config != trigger_config:
+            if acquisition is not None:
                 self._high_speed_ta_generation += 1
                 self._clear_high_speed_ta_analysis_queues()
-            assembler = IQWindowAssembler(window_samples=window_samples)
-            self._high_speed_ta_window_assembler = assembler
-        return assembler
+            metadata = AcquisitionMetadata(
+                sample_rate_hz=sample_rate_hz,
+                center_freq_hz=float(self.config.center_freq_hz),
+                rf_bandwidth_hz=float(self.config.rx_bandwidth_hz),
+                gain_db=float(self.config.rx_gain_db),
+                source="high_speed_ta",
+            )
+            acquisition = TriggerAcquisitionController(trigger_config, metadata)
+            self._high_speed_ta_trigger_acquisition = acquisition
+        return acquisition
 
-    def _build_high_speed_ta_job_from_window(
+    def _build_high_speed_ta_job_from_record(
         self,
-        window: IQWindow,
+        record: IQAcquisitionRecord,
         *,
         block_timestamp_s: float,
         capture_call_elapsed_s: float,
@@ -6445,14 +6543,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         state.sweep_id += 1
         sample_rate_hz = max(1.0, float(self.config.sample_rate_hz))
         return HighSpeedTAAnalysisJob(
-            iq_blocks=[window.iq],
+            iq_blocks=[record.iq],
             block_timestamps_s=[float(block_timestamp_s)],
             gap_times_s=[],
-            capture_total_s=float(window.sample_count) / sample_rate_hz,
-            capture_call_count=max(1, window.last_sequence - window.first_sequence + 1),
+            capture_total_s=float(record.sample_count) / sample_rate_hz,
+            capture_call_count=max(
+                1,
+                int(np.ceil(record.sample_count / float(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES))),
+            ),
             capture_call_total_s=max(0.0, float(capture_call_elapsed_s)),
-            capture_total_samples=window.sample_count,
-            block_sample_counts=[window.sample_count],
+            capture_total_samples=record.sample_count,
+            block_sample_counts=[record.sample_count],
             gap_count=0,
             gap_ratio_sum=0.0,
             max_gap_ratio=0.0,
@@ -6473,6 +6574,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             single_shot=bool(single_shot),
             sweep_id=sweep_id,
             generation=int(self._high_speed_ta_generation),
+            trigger_kind=record.trigger.kind.value,
+            trigger_sample_offset=int(record.trigger_sample_offset),
+            trigger_forced=bool(record.trigger.forced),
+            trigger_measured_value=record.trigger.measured_value,
         )
 
     def _flush_high_speed_ta_pending_jobs(self) -> bool:
@@ -6568,6 +6673,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 single_shot=bool(job.single_shot),
                 sweep_id=int(job.sweep_id),
                 generation=int(job.generation),
+                trigger_kind=job.trigger_kind,
+                trigger_sample_offset=int(job.trigger_sample_offset),
+                trigger_forced=bool(job.trigger_forced),
+                trigger_measured_value=job.trigger_measured_value,
             )
 
         block_lengths = np.asarray([len(block) for block in job.iq_blocks], dtype=np.int64)
@@ -6591,6 +6700,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 single_shot=bool(job.single_shot),
                 sweep_id=int(job.sweep_id),
                 generation=int(job.generation),
+                trigger_kind=job.trigger_kind,
+                trigger_sample_offset=int(job.trigger_sample_offset),
+                trigger_forced=bool(job.trigger_forced),
+                trigger_measured_value=job.trigger_measured_value,
             )
 
         valid_indices = np.nonzero(valid_mask)[0]
@@ -6620,6 +6733,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 single_shot=bool(job.single_shot),
                 sweep_id=int(job.sweep_id),
                 generation=int(job.generation),
+                trigger_kind=job.trigger_kind,
+                trigger_sample_offset=int(job.trigger_sample_offset),
+                trigger_forced=bool(job.trigger_forced),
+                trigger_measured_value=job.trigger_measured_value,
             )
 
         iq_all = (
@@ -6758,6 +6875,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             single_shot=bool(job.single_shot),
             sweep_id=int(job.sweep_id),
             generation=int(job.generation),
+            trigger_kind=job.trigger_kind,
+            trigger_sample_offset=int(job.trigger_sample_offset),
+            trigger_forced=bool(job.trigger_forced),
+            trigger_measured_value=job.trigger_measured_value,
         )
 
     def _publish_high_speed_time_analyzer_sweep(
@@ -6820,6 +6941,128 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             max_gap_ratio=analysis_result.max_gap_ratio,
         )
 
+    def _restart_hsta_after_trigger_change(self) -> None:
+        self._high_speed_ta_generation += 1
+        self._high_speed_ta_trigger_acquisition = None
+        self._clear_high_speed_ta_analysis_queues()
+        if not self._is_high_speed_time_analyzer_mode():
+            return
+        if self.sweep_state == SWEEP_STATE_RUNNING:
+            self._start_high_speed_time_analyzer_continuous()
+        elif self.sweep_state == SWEEP_STATE_SINGLE:
+            self._enter_single_high_speed_time_analyzer_mode()
+            self._restart_timer_for_current_mode()
+
+    def _cycle_hsta_trigger_kind(self) -> None:
+        self.config.hsta_trigger_kind = (
+            TriggerKind.POWER_LEVEL.value
+            if self.config.hsta_trigger_kind == TriggerKind.FREE_RUN.value
+            else TriggerKind.FREE_RUN.value
+        )
+        self._restart_hsta_after_trigger_change()
+        self._update_trigger_controls()
+        self._refresh_status_label()
+
+    def _cycle_hsta_trigger_run_mode(self) -> None:
+        self.config.hsta_trigger_run_mode = (
+            TriggerRunMode.NORMAL.value
+            if self.config.hsta_trigger_run_mode == TriggerRunMode.AUTO.value
+            else TriggerRunMode.AUTO.value
+        )
+        self._restart_hsta_after_trigger_change()
+        self._update_trigger_controls()
+        self._refresh_status_label()
+
+    def _cycle_hsta_trigger_slope(self) -> None:
+        slopes = [
+            TriggerSlope.RISING.value,
+            TriggerSlope.FALLING.value,
+            TriggerSlope.EITHER.value,
+        ]
+        try:
+            index = slopes.index(self.config.hsta_trigger_slope)
+        except ValueError:
+            index = 0
+        self.config.hsta_trigger_slope = slopes[(index + 1) % len(slopes)]
+        self._restart_hsta_after_trigger_change()
+        self._update_trigger_controls()
+
+    def _on_hsta_trigger_level_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Trigger Level",
+            "Level [dBFS]",
+            value=float(self.config.hsta_trigger_level_dbfs),
+            minValue=-200.0,
+            maxValue=0.0,
+            decimals=1,
+        )
+        if not accepted:
+            return
+        self.config.hsta_trigger_level_dbfs = float(value)
+        self._restart_hsta_after_trigger_change()
+        self._update_trigger_controls()
+
+    def _on_hsta_trigger_position_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Trigger Position",
+            "Pre-trigger position [%]",
+            value=float(self.config.hsta_trigger_position_percent),
+            minValue=0.0,
+            maxValue=100.0,
+            decimals=1,
+        )
+        if not accepted:
+            return
+        self.config.hsta_trigger_position_percent = float(value)
+        self._restart_hsta_after_trigger_change()
+        self._update_trigger_controls()
+
+    def _on_hsta_trigger_auto_timeout_clicked(self) -> None:
+        value, accepted = QtWidgets.QInputDialog.getDouble(
+            self,
+            "Auto Timeout",
+            "Timeout [ms]",
+            value=float(self.config.hsta_trigger_auto_timeout_s) * 1e3,
+            minValue=1.0,
+            maxValue=1_000_000.0,
+            decimals=1,
+        )
+        if not accepted:
+            return
+        self.config.hsta_trigger_auto_timeout_s = float(value) * 1e-3
+        self._restart_hsta_after_trigger_change()
+        self._update_trigger_controls()
+
+    def _update_trigger_controls(self) -> None:
+        if not hasattr(self, "trigger_kind_button"):
+            return
+        is_power = self.config.hsta_trigger_kind == TriggerKind.POWER_LEVEL.value
+        is_auto = self.config.hsta_trigger_run_mode == TriggerRunMode.AUTO.value
+        source_label = "Power Level" if is_power else "Free Run"
+        self.trigger_kind_button.setText(f"Source\n{source_label}")
+        self.trigger_run_mode_button.setText(
+            f"Mode\n{self.config.hsta_trigger_run_mode.title()}"
+        )
+        self.trigger_level_button.setText(
+            f"Level\n{float(self.config.hsta_trigger_level_dbfs):.1f} dBFS"
+        )
+        self.trigger_slope_button.setText(
+            f"Slope\n{self.config.hsta_trigger_slope.title()}"
+        )
+        self.trigger_position_button.setText(
+            f"Position\n{float(self.config.hsta_trigger_position_percent):.1f} %"
+        )
+        self.trigger_auto_timeout_button.setText(
+            f"Auto Timeout\n{float(self.config.hsta_trigger_auto_timeout_s) * 1e3:.1f} ms"
+        )
+        self.trigger_run_mode_button.setEnabled(is_power)
+        self.trigger_level_button.setEnabled(is_power)
+        self.trigger_slope_button.setEnabled(is_power)
+        self.trigger_position_button.setEnabled(is_power)
+        self.trigger_auto_timeout_button.setEnabled(is_power and is_auto)
+
     def _update_high_speed_time_analyzer_spectrum(self) -> None:
         if self.config.analyzer_mode != AnalyzerMode.HIGH_SPEED_TIME_ANALYZER:
             return
@@ -6856,7 +7099,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._start_high_speed_ta_stream()
             return
 
-        assembler = self._ensure_high_speed_ta_window_assembler()
+        acquisition = self._ensure_high_speed_ta_trigger_acquisition()
         for read_index in range(HIGH_SPEED_TA_STREAM_READ_BLOCKS):
             stream_result = self.receiver.read_iq_stream(
                 self._high_speed_ta_stream_cursor,
@@ -6869,7 +7112,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     message=f"missed_blocks={int(stream_result.missed_blocks)}",
                     force=True,
                 )
-                assembler.reset()
+                acquisition.reset()
                 self._high_speed_ta_pending_analysis_jobs.clear()
                 state.prev_block_timestamp_s = None
                 state.gap_count += int(stream_result.missed_blocks)
@@ -6912,14 +7155,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                         )
             state.prev_block_timestamp_s = sample_timestamp
 
-            windows = assembler.feed(block)
-            if not windows:
+            records = acquisition.feed(block)
+            if not records:
                 continue
             single_shot = self.sweep_state == SWEEP_STATE_SINGLE
-            for window in (windows[:1] if single_shot else windows):
+            for record in (records[:1] if single_shot else records):
                 self._high_speed_ta_pending_analysis_jobs.append(
-                    self._build_high_speed_ta_job_from_window(
-                        window,
+                    self._build_high_speed_ta_job_from_record(
+                        record,
                         block_timestamp_s=sample_timestamp,
                         capture_call_elapsed_s=float(block.capture_elapsed_s),
                         single_shot=single_shot,

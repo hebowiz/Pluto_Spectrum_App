@@ -24,6 +24,7 @@ from pluto_sa.sdr.trigger import (
 )
 from pluto_sa.sdr.trigger_detector import PowerLevelTriggerDetector
 from pluto_sa.sdr.trigger_recorder import TriggeredIQRecorder
+from pluto_sa.sdr.trigger_acquisition import TriggerAcquisitionController
 
 __all__ = [
     "IQBlock",
@@ -44,4 +45,5 @@ __all__ = [
     "TriggerSlope",
     "PowerLevelTriggerDetector",
     "TriggeredIQRecorder",
+    "TriggerAcquisitionController",
 ]

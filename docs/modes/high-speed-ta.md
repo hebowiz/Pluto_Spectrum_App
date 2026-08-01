@@ -31,7 +31,7 @@ PlutoReceiver共通RX worker（全モード共通の単一Producer）
   └─ IQBlock発行 → IQStreamBuffer（初期512ブロック）
 
 GUIスレッド
-  └─ IQWindowAssembler → bounded解析queue → 結果描画
+  └─ TriggerAcquisitionController → IQAcquisitionRecord → bounded解析queue → 結果描画
 
 解析スレッド
   └─ job queueから連続windowを取得 → FFT/RBW/Detector処理 → result queue
@@ -45,9 +45,29 @@ HighSpeed TA consumerは独立cursorでブロックを読みます。受信開�
 
 `start()`は既存workerとblock size/sourceが異なる二重起動を拒否します。`stop()`がタイムアウトしても生存workerの参照を保持し、別workerを重ねて開始しません。
 
-## 時間窓と解析
+## Trigger
 
-- `IQWindowAssembler`がブロック境界をまたいで余剰sampleを次窓へcarryします。
+Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed TAだけが対象です。
+
+| 設定 | 内容 |
+|---|---|
+| Source | Free Run / Power Level |
+| Mode | Auto / Normal |
+| Level | complex IQ magnitudeのdBFS、初期-20 dBFS |
+| Slope | Rising / Falling / Either |
+| Position | record内のpre-trigger比率、初期50% |
+| Auto Timeout | eventがない場合にforced recordを作る時間、初期1000 ms |
+
+- Free Runは従来どおり隙間のない連続recordを生成します。
+- Power LevelのAutoは条件成立時にnatural record、timeout時にforced recordを生成して再armします。
+- Power LevelのNormalは条件成立まで表示recordを更新しません。
+- Main MenuのSingleはTrigger条件成立後にpre/postを含む1 recordを完成して停止します。SingleではAuto timeoutを使用しません。
+- PositionからFFT frame整数倍のrecord長をpre/post sample数へ分配します。
+- Levelは校正済みdBmではありません。`iq_full_scale=2048`で正規化したsample magnitudeのdBFSです。
+
+## 時間recordと解析
+
+- `TriggerAcquisitionController`がブロック境界をまたぐpre/post-trigger recordを作ります。
 - window長は指定Time Spanを覆う最小のFFT frame整数倍です。これにより解析時に端数sampleを捨てません。
 - ブロック間隔が期待時間の1.2倍を超えた場合、gapとして統計へ記録します。
 - 1つの時間窓が完成すると取得データのスナップショットを最大4件の解析job queueへ渡します。
@@ -56,7 +76,7 @@ HighSpeed TA consumerは独立cursorでブロックを読みます。受信開�
 - GUI consumerは1回のtimer callbackで最大8 IQ blockまで追従します。
 - job queueが満杯の場合は完成windowを保持して新しいIQを読まず、backpressureを共通リングへ伝えます。
 - consumerが512ブロックより遅れた場合はoverrunとして明示し、不連続をまたいだ時間窓を破棄します。
-- Singleは正確な1時間窓が完成した時点でProducerを停止し、解析・表示完了後に測定を終了します。
+- Singleは正確な1 recordが完成した時点でProducerを停止し、解析・表示完了後に測定を終了します。
 
 ## 振幅処理
 
@@ -69,7 +89,7 @@ HighSpeed TA consumerは独立cursorでブロックを読みます。受信開�
 - 大きなTime SpanではIQブロックと解析負荷が増加します。
 - 実効Time SpanはFFT frame単位へ切り上げるため、指定値より最大`(FFT size - 1) / Sample Rate`だけ長くなります。
 - 解析が取得より継続的に遅い場合、job/result queueから共通リングへbackpressureが伝わり、最終的にring overrunとなる可能性があります。この場合は不連続を明示してpartial windowを破棄します。
-- Power Level Triggerとpre/post-trigger基盤は実装済みですが、HighSpeed TAのUI/consumerにはまだ接続していません。現在はFree Run相当です。
+- Trigger位置の縦線表示、minimum duration/holdoff/hysteresisのUI設定、Frequency Mask Triggerは未実装です。
 - 512×65536 samplesのcomplex64保持は最大約256 MiBです。
 - USB/libiio内部の欠落はアプリ側連番だけでは検出できないため、実機の既知信号による連続性検証が必要です。
 - Single/Continuous切替やSweep Time変更時は、既存RX workerとstream cursorを同時に無効化して新しいepochで再開します。

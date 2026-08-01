@@ -4,7 +4,10 @@ from collections import deque
 from queue import Queue
 from types import MethodType, SimpleNamespace
 
-from pluto_sa.ui.main_window import RealtimeSpectrumWindow
+from pluto_sa.ui.main_window import (
+    RealtimeSpectrumWindow,
+    SWEEP_STATE_RUNNING,
+)
 
 
 def build_queue_owner(*, capacity: int = 1):
@@ -91,3 +94,36 @@ def test_hsta_single_restart_invalidates_existing_stream_cursor() -> None:
     assert calls[0] == ("stop", {"stop_analysis_thread": False})
     assert calls[-1] == "start"
     assert owner._high_speed_ta_single_waiting_result is False
+
+
+def test_hsta_power_trigger_builds_fft_aligned_positioned_record() -> None:
+    config = SimpleNamespace(
+        sample_rate_hz=1_000_000,
+        fft_size=4096,
+        time_analyzer_time_span_s=0.01,
+        hsta_trigger_kind="power_level",
+        hsta_trigger_run_mode="auto",
+        hsta_trigger_slope="rising",
+        hsta_trigger_level_dbfs=-20.0,
+        hsta_trigger_hysteresis_db=1.0,
+        hsta_trigger_position_percent=25.0,
+        hsta_trigger_auto_timeout_s=0.2,
+        center_freq_hz=100_000_000,
+        rx_bandwidth_hz=1_000_000,
+        rx_gain_db=20,
+    )
+    owner = SimpleNamespace(
+        config=config,
+        sweep_state=SWEEP_STATE_RUNNING,
+        _high_speed_ta_trigger_acquisition=None,
+        _high_speed_ta_generation=0,
+        _time_analyzer_time_span_s=lambda: config.time_analyzer_time_span_s,
+        _clear_high_speed_ta_analysis_queues=lambda: None,
+    )
+
+    acquisition = RealtimeSpectrumWindow._ensure_high_speed_ta_trigger_acquisition(owner)
+
+    assert acquisition.config.record_samples == 12_288
+    assert acquisition.config.pretrigger_samples == 3_072
+    assert acquisition.config.posttrigger_samples == 9_215
+    assert acquisition.config.auto_timeout_samples == 200_000
