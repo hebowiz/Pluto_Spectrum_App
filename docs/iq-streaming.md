@@ -7,7 +7,7 @@
 - 作業ブランチ: `feature/continuous-iq-stream`
 - 開始日: 2026-08-02
 - 基準コミット: `b33f42e`
-- 状態: Phase 1～3の初期統合完了、実機検証前
+- 状態: Phase 1～3の初期統合完了、短時間の実機smoke test完了
 
 ## 目標
 
@@ -114,7 +114,7 @@ IQStreamBuffer
 
 - [ ] ブロックサイズ16,384 / 32,768 / 65,536 / 131,072を実測比較
 - [ ] libiio kernel buffer数を実測比較
-- [ ] direct USBとRNDISを比較
+- [x] direct USBとRNDISの短時間スループットを比較
 - [ ] 生int16 I/Q保持によるコピー削減を評価
 - [ ] libiio 1.x Stream APIを評価
 - [ ] 必要な場合のみCythonまたは専用受信プロセスを評価
@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 38 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、FFT frame整列、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、HighSpeed TA queueのFIFO/backpressure/generation分離、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持です。
+2026-08-02時点: 41 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、FFT frame整列、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、HighSpeed TA queueのFIFO/backpressure/generation分離、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持、USB優先/URI上書き、終了時RX buffer破棄です。
 
 ## 現在の実装構成
 
@@ -176,11 +176,12 @@ python -m pytest -q
 - consumer遅延でリング上書きが起きた場合、欠落を黙って隠さない。
 - stop timeout時に生存workerを見失って二重Producerを開始しない。
 - Trigger/VSA recordがhost時刻ではなくsample timelineで位置を共有できる。
+- direct USBの短時間試験では4 MSPSおよび6 MSPSで共通stream/HSTA Continuousがring上書き0で完走する。
 
 ### まだ保証できないこと
 
 - Pluto/libiio/USBより前または内部で発生した欠落。アプリ連番は取得成功したblockに付ける番号であり、ハードウェア連続性の証明ではない。
-- どのSample Rateまで実機で無欠落か。
+- 長時間相関試験で保証できるSample Rate上限。短時間の転送試験ではdirect USB 6 MSPS、RNDIS 5 MSPSが境界だった。
 - 指定Time Spanそのものではなく、解析可能なFFT frame整数倍へ最大1 frame弱切り上げる。
 - 解析がリング保持時間より長い場合の無欠落。現在はoverrunを検出してwindowを破棄する。
 - Sweep/WideBandはLO切替を伴うため、帯域全体の時間・位相連続性は設計上存在しない。
@@ -190,7 +191,7 @@ python -m pytest -q
 1. Power Level Trigger/recorderをHighSpeed TAの共通stream consumerへ接続する。
 2. Auto timeoutとTrigger UIを追加する。
 3. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
-4. 実機でblock sizeとSample Rateを掃引し、既知信号の相関で欠落を検証する。
+4. 実機でblock sizeを掃引し、既知信号の長時間相関で欠落を検証する。
 5. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
 
 ### PlutoSDR実機
@@ -228,3 +229,9 @@ python -m pytest -q
 - External hardware triggerを当面の対象外とし、software triggerへ範囲を限定。
 - Power Level Triggerとpre/post-trigger recorderを追加し、判定遅延分を含むprestoreを実装。
 - HighSpeed TAをFFT整列exact window、bounded FIFO job/result queue、明示的backpressureへ移行。
+- 実機のdirect USB/RNDISを短時間比較し、direct USBは6 MSPS、RNDISは5 MSPSまで要求転送量へ追従することを確認。
+- 接続先の暗黙なRNDIS選択を防ぐため、明示URI、環境変数、direct USB、Pluto IPの優先順を追加。
+- 共通streamを4/6 MSPSで停止・再開し、overrun/連番/sample index errorが0であることを確認。
+- HighSpeed TA SingleおよびContinuousを4/6 MSPSで実機検証し、ring上書き0、解析queue最大1を確認。
+- 終了時のpyadi-iio buffer access violationを検出し、worker停止後の明示的RX buffer破棄で再発しないことを確認。
+- 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

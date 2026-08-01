@@ -18,6 +18,7 @@
 - [旧 Time Analyzer（UI非表示）](modes/time-analyzer-legacy.md)
 - [IQストリーム改善計画・実装状況](iq-streaming.md)
 - [リアルタイムSA・VSA準拠の計測アーキテクチャ](measurement-architecture.md)
+- [PlutoSDR実機検証記録](hardware-validation.md)
 
 ## モード一覧
 
@@ -46,7 +47,7 @@ python -m pluto_sa.main
 4. `SweepController`: Sweep SAの点測定と進行管理
 5. `RealtimeSpectrumWindow`: UI、モード切替、描画、測定制御
 
-PlutoSDRへの接続は `PlutoReceiver` の生成時に行われます。現時点では、実機なしでGUIだけを起動するシミュレーションモードはありません。
+PlutoSDRへの接続は `PlutoReceiver` の生成時に行われます。URIを明示しない場合はdirect USBを優先し、`SpectrumConfig.sdr_uri`または環境変数`PLUTO_SDR_URI`で上書きできます。現時点では、実機なしでGUIだけを起動するシミュレーションモードはありません。
 
 ## 更新方針
 

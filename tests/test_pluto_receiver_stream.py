@@ -40,7 +40,8 @@ class FakePluto:
 
 def build_receiver(monkeypatch, *, fft_size: int = 4) -> PlutoReceiver:
     fake = FakePluto()
-    monkeypatch.setattr(receiver_module.adi, "Pluto", lambda: fake)
+    monkeypatch.setattr(receiver_module.adi, "Pluto", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(receiver_module.iio, "scan_contexts", lambda: {})
     config = SpectrumConfig(fft_size=fft_size, capture_buffer_blocks=16)
     return PlutoReceiver(config)
 
@@ -115,7 +116,8 @@ def test_stop_keeps_reference_to_worker_that_is_still_blocked(monkeypatch) -> No
             return super().rx()
 
     fake = BlockingPluto()
-    monkeypatch.setattr(receiver_module.adi, "Pluto", lambda: fake)
+    monkeypatch.setattr(receiver_module.adi, "Pluto", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(receiver_module.iio, "scan_contexts", lambda: {})
     receiver = PlutoReceiver(SpectrumConfig(fft_size=4, capture_buffer_blocks=16))
     receiver.start(block_size=4)
     assert entered_rx.wait(timeout=1.0)
@@ -128,3 +130,60 @@ def test_stop_keeps_reference_to_worker_that_is_still_blocked(monkeypatch) -> No
 
     release_rx.set()
     assert receiver.stop()
+
+
+def test_receiver_prefers_direct_usb_context(monkeypatch) -> None:
+    fake = FakePluto()
+    selected: dict[str, str | None] = {}
+    monkeypatch.setattr(
+        receiver_module.iio,
+        "scan_contexts",
+        lambda: {
+            "ip:pluto.local": "Analog Devices PlutoSDR",
+            "usb:1.54.5": "Analog Devices PlutoSDR",
+        },
+    )
+    monkeypatch.setattr(
+        receiver_module.adi,
+        "Pluto",
+        lambda *, uri=None: selected.update(uri=uri) or fake,
+    )
+
+    receiver = PlutoReceiver(SpectrumConfig(fft_size=4))
+
+    assert selected["uri"] == "usb:1.54.5"
+    assert receiver.connection_uri == "usb:1.54.5"
+
+
+def test_configured_uri_overrides_usb_autodetection(monkeypatch) -> None:
+    fake = FakePluto()
+    selected: dict[str, str | None] = {}
+    monkeypatch.setattr(
+        receiver_module.iio,
+        "scan_contexts",
+        lambda: {"usb:1.54.5": "Analog Devices PlutoSDR"},
+    )
+    monkeypatch.setattr(
+        receiver_module.adi,
+        "Pluto",
+        lambda *, uri=None: selected.update(uri=uri) or fake,
+    )
+
+    receiver = PlutoReceiver(SpectrumConfig(fft_size=4, sdr_uri="ip:pluto.local"))
+
+    assert selected["uri"] == "ip:pluto.local"
+    assert receiver.connection_uri == "ip:pluto.local"
+
+
+def test_close_destroys_rx_buffer_after_worker_stops(monkeypatch) -> None:
+    receiver = build_receiver(monkeypatch)
+    receiver.start(block_size=4)
+    deadline = time.perf_counter() + 1.0
+    while receiver.get_iq_stream_stats().published_blocks == 0:
+        assert time.perf_counter() < deadline
+        time.sleep(0.005)
+
+    receiver.close()
+
+    assert receiver._rx_thread is None
+    assert receiver.sdr.destroy_count >= 1

@@ -7,6 +7,7 @@ import time
 from typing import Optional
 
 import adi
+import iio
 import numpy as np
 
 from pluto_sa.config.spectrum_config import SpectrumConfig
@@ -24,7 +25,12 @@ class PlutoReceiver:
 
     def __init__(self, config: SpectrumConfig) -> None:
         self.config = config
-        self.sdr = adi.Pluto()
+        self.connection_uri = self._resolve_connection_uri(config.sdr_uri)
+        self.sdr = (
+            adi.Pluto(uri=self.connection_uri)
+            if self.connection_uri is not None
+            else adi.Pluto()
+        )
         self._closed = False
         self._iq_lock = threading.Lock()
         self._sdr_lock = threading.Lock()
@@ -40,6 +46,25 @@ class PlutoReceiver:
         self.received_samples_total = 0
         self._configure_sdr(config)
         self._allocate_capture_buffers(config)
+
+    @staticmethod
+    def _resolve_connection_uri(configured_uri: str | None) -> str | None:
+        """Prefer deterministic direct USB unless the caller selects a URI."""
+        if configured_uri is not None and configured_uri.strip():
+            return configured_uri.strip()
+        try:
+            contexts = iio.scan_contexts()
+        except Exception:
+            return None
+        usb_uris = sorted(uri for uri in contexts if uri.startswith("usb:"))
+        if usb_uris:
+            return usb_uris[0]
+        pluto_ip_uris = sorted(
+            uri
+            for uri, description in contexts.items()
+            if uri.startswith("ip:") and "pluto" in description.lower()
+        )
+        return pluto_ip_uris[0] if pluto_ip_uris else None
 
     def _configure_sdr(self, config: SpectrumConfig) -> None:
         self.config = config
@@ -305,7 +330,13 @@ class PlutoReceiver:
 
     def close(self) -> None:
         self._closed = True
-        self.stop()
+        if not self.stop():
+            return
+        with self._sdr_lock:
+            try:
+                self.sdr.rx_destroy_buffer()
+            except Exception:
+                pass
 
     def _rx_worker(self) -> None:
         while not self._stop_event.is_set() and not self._closed:

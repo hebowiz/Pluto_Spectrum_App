@@ -116,3 +116,9 @@ Sweep系では完了した掃引データを基準にマーカーを更新しま
 - `source`: 取得を要求したモード
 
 consumerは独立cursorを持ちます。保持容量を超えた場合は`overrun`と推定可能な欠落ブロック数を返し、黙って上書きを隠しません。詳細と未完了項目は[IQストリーム改善計画](iq-streaming.md)を参照してください。
+
+## 10. PlutoSDR接続
+
+接続URIの優先順は、`SpectrumConfig.sdr_uri`、環境変数`PLUTO_SDR_URI`、列挙されたdirect USB、PlutoのIP contextです。direct USBとRNDISが同時に見える場合にpyadi-iioの自動選択へ依存しないようにしています。
+
+現在選択されたURIは`PlutoReceiver.connection_uri`で参照できます。実機の短時間測定結果と再現手順は[PlutoSDR実機検証記録](hardware-validation.md)を参照してください。

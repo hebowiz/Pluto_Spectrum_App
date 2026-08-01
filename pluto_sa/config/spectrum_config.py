@@ -1,6 +1,7 @@
 """Spectrum analyzer configuration."""
 
 from dataclasses import dataclass
+import os
 from typing import Optional
 
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
@@ -32,6 +33,8 @@ class SpectrumConfig:
     ext_gain_db: float = 0.0
     # zero-mean化処理のON/OFF。TrueでON
     remove_dc_offset: bool = False
+    # None: PLUTO_SDR_URI環境変数、次にdirect USBを自動選択する。
+    sdr_uri: Optional[str] = None
 
     # Real-Time SA settings
     fft_size: int = 4096
@@ -63,6 +66,8 @@ class SpectrumConfig:
     time_analyzer_time_span_s: float = 1.0
 
     def __post_init__(self) -> None:
+        if self.sdr_uri is None:
+            self.sdr_uri = os.environ.get("PLUTO_SDR_URI") or None
         if self.analyzer_mode == AnalyzerMode.REALTIME_SA and self.display_span_hz > MAX_DISPLAY_SPAN_HZ:
             self.display_span_hz = MAX_DISPLAY_SPAN_HZ
         if self.rx_gain_db < MIN_INTERNAL_GAIN_DB:
