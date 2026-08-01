@@ -6,7 +6,6 @@ import time
 import threading
 import json
 import traceback
-from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,6 +24,7 @@ from pluto_sa.config.spectrum_config import (
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
+from pluto_sa.sdr.iq_stream import IQStreamCursor
 from pluto_sa.signal.detector import DetectorMode, apply_detector
 from pluto_sa.signal.rbw import apply_rbw_weighting, make_gaussian_rbw_kernel, resolve_rbw_hz
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
@@ -61,8 +61,7 @@ WIDEBAND_LO_SETTLE_US = 200
 WIDEBAND_FLUSH_READS = 5
 TIME_ANALYZER_BUFFER_POINTS = 1000
 TIME_ANALYZER_WARMUP_DISCARD_COUNT = 5
-HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES = 16_384
-HIGH_SPEED_TA_RING_MAX_BLOCKS = 4096
+HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES = 65_536
 HIGH_SPEED_TA_GAP_RATIO_THRESHOLD = 1.2
 HIGH_SPEED_TA_PEAK_MIN_PROMINENCE_DB = 3.0
 HSTA_DEBUG_THROTTLE_S = 1.0
@@ -267,6 +266,8 @@ class HighSpeedTABlock:
     timestamp_s: float
     sample_count: int
     capture_call_elapsed_s: float
+    discontinuity_before: bool = False
+    missed_blocks_before: int = 0
 
 
 @dataclass
@@ -353,13 +354,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._sweep_like_progress = SweepLikeProgressState()
         self._time_analyzer_sweep = TimeAnalyzerSweepState()
         self._high_speed_time_analyzer = HighSpeedTimeAnalyzerCaptureState()
-        self._high_speed_ta_ring_lock = threading.Lock()
-        self._high_speed_ta_ring: deque[HighSpeedTABlock] = deque(
-            maxlen=HIGH_SPEED_TA_RING_MAX_BLOCKS
-        )
-        self._high_speed_ta_stop_event = threading.Event()
-        self._high_speed_ta_thread: threading.Thread | None = None
-        self._high_speed_ta_block_sequence = 0
+        self._high_speed_ta_stream_cursor: IQStreamCursor | None = None
         self._high_speed_ta_analysis_lock = threading.Lock()
         self._high_speed_ta_analysis_event = threading.Event()
         self._high_speed_ta_analysis_stop_event = threading.Event()
@@ -849,10 +844,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         payload = f" {message}" if message else ""
         print(f"[HSTA-DBG] {event}{payload}")
 
-    def _clear_high_speed_ta_ring_buffer(self) -> None:
-        with self._high_speed_ta_ring_lock:
-            self._high_speed_ta_ring.clear()
-
     def _start_high_speed_ta_analysis_thread(self) -> None:
         thread = self._high_speed_ta_analysis_thread
         if thread is not None and thread.is_alive():
@@ -938,101 +929,34 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._high_speed_ta_analysis_latest_result = result
             self._high_speed_ta_analysis_event.clear()
 
-    def _start_high_speed_ta_receiver_thread(self) -> None:
-        thread = self._high_speed_ta_thread
-        if thread is not None and thread.is_alive():
+    def _start_high_speed_ta_stream(self) -> None:
+        if self._high_speed_ta_stream_cursor is not None:
             self._hsta_debug_log(
-                "receiver_thread_already_running",
+                "stream_already_running",
                 throttle_s=HSTA_DEBUG_THROTTLE_S,
             )
             return
-        self._hsta_debug_log("receiver_thread_start_request", force=True)
+        self._hsta_debug_log("stream_start_request", force=True)
         self._start_high_speed_ta_analysis_thread()
-        self.receiver.start_high_speed_capture_backend(int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES))
-        self._high_speed_ta_stop_event.clear()
-        self._clear_high_speed_ta_ring_buffer()
-        self._high_speed_ta_block_sequence = 0
-        self._high_speed_ta_thread = threading.Thread(
-            target=self._high_speed_ta_receiver_worker,
-            name="high-speed-ta-rx",
-            daemon=True,
+        self._high_speed_ta_stream_cursor = self.receiver.start(
+            block_size=int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES),
+            source="high_speed_ta",
         )
-        self._high_speed_ta_thread.start()
         if self.config.sweep_profile_logging:
             print("HighSpeedTAThread start")
 
-    def _stop_high_speed_ta_receiver_thread(self, *, stop_analysis_thread: bool = True) -> None:
+    def _stop_high_speed_ta_stream(self, *, stop_analysis_thread: bool = True) -> None:
         self._hsta_debug_log(
-            "receiver_thread_stop_request",
+            "stream_stop_request",
             message=f"stop_analysis={int(stop_analysis_thread)}",
             force=True,
         )
-        self._high_speed_ta_stop_event.set()
-        thread = self._high_speed_ta_thread
-        if thread is not None:
-            thread.join(timeout=1.0)
-        self._high_speed_ta_thread = None
-        self._clear_high_speed_ta_ring_buffer()
-        self.receiver.stop_high_speed_capture_backend()
+        self.receiver.stop()
+        self._high_speed_ta_stream_cursor = None
         if stop_analysis_thread:
             self._stop_high_speed_ta_analysis_thread()
         if self.config.sweep_profile_logging:
             print("HighSpeedTAThread stop")
-
-    def _high_speed_ta_receiver_worker(self) -> None:
-        while not self._high_speed_ta_stop_event.is_set():
-            try:
-                self._hsta_debug_log(
-                    "rx_call_before",
-                    throttle_s=HSTA_DEBUG_THROTTLE_S,
-                )
-                capture_call_start = time.perf_counter()
-                iq = self.receiver.capture_block_high_speed_backend()
-                capture_elapsed_s = time.perf_counter() - capture_call_start
-                sample_count = 0 if iq is None else int(len(iq))
-                self._hsta_debug_log(
-                    "rx_call_after",
-                    message=(
-                        f"elapsed={capture_elapsed_s:.6f}s "
-                        f"len={sample_count} "
-                        f"none={int(iq is None)}"
-                    ),
-                    throttle_s=HSTA_DEBUG_THROTTLE_S,
-                )
-                if iq is None or len(iq) == 0:
-                    continue
-                timestamp_s = time.perf_counter()
-                with self._high_speed_ta_ring_lock:
-                    block_index = int(self._high_speed_ta_block_sequence)
-                    self._high_speed_ta_block_sequence += 1
-                    self._high_speed_ta_ring.append(
-                        HighSpeedTABlock(
-                            block_index=block_index,
-                            iq_block=iq,
-                            timestamp_s=timestamp_s,
-                            sample_count=sample_count,
-                            capture_call_elapsed_s=float(capture_elapsed_s),
-                        )
-                    )
-                    ring_size = len(self._high_speed_ta_ring)
-                self._hsta_debug_log(
-                    "ring_store",
-                    message=f"idx={block_index} len={sample_count} ring={ring_size}",
-                    throttle_s=HSTA_DEBUG_THROTTLE_S,
-                )
-                if self.config.sweep_profile_logging:
-                    print(
-                        "HighSpeedTAThread "
-                        f"block idx={block_index} samples={sample_count}"
-                    )
-            except Exception as exc:
-                self._hsta_debug_log(
-                    "receiver_worker_exception",
-                    message=f"err={exc!r}",
-                    force=True,
-                )
-                traceback.print_exc()
-                time.sleep(0.05)
 
     def _finalize_time_analyzer_sweep_stats(self) -> None:
         count = int(self._time_analyzer_sweep_sample_count)
@@ -1400,7 +1324,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for _ in range(WIDEBAND_FLUSH_READS):
             flush_actual_total += self.receiver.discard_block(capture_size)
         actual_lo_before_capture_hz = self.receiver.get_current_lo_hz()
-        iq = self.receiver.capture_block(capture_size)
+        iq_block = self.receiver.capture_iq_block(capture_size, source="wideband")
+        iq = iq_block.iq
         actual_lo_during_capture_hz = self.receiver.get_current_lo_hz()
         processor_window_len = len(self._wideband_chunk_processor.window)
         if len(iq) != processor_window_len:
@@ -1439,7 +1364,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if stop_receiver and hasattr(self, "timer"):
             self.timer.stop()
             self.receiver.stop()
-        self._stop_high_speed_ta_receiver_thread()
+        self._stop_high_speed_ta_stream()
 
         if stop_sweep:
             self.sweep_controller.stop()
@@ -3119,7 +3044,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
         self.receiver.stop()
-        self._stop_high_speed_ta_receiver_thread()
+        self._stop_high_speed_ta_stream()
         self._reset_time_analyzer_time_window(start_timestamp=time.perf_counter())
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
@@ -3142,7 +3067,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             start_timestamp=None,
             reset_discard=True,
         )
-        self._start_high_speed_ta_receiver_thread()
+        self._start_high_speed_ta_stream()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
@@ -3925,7 +3850,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             start_timestamp=None,
             reset_discard=True,
         )
-        self._start_high_speed_ta_receiver_thread()
+        self._start_high_speed_ta_stream()
 
     def _on_single_clicked(self) -> None:
         # sweep-like progress entry: Single
@@ -4533,7 +4458,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         maxima_dbm: list[float] = []
         capture_size = int(self.config.fft_size)
         for _frame_index in range(int(CALIBRATION_FRAMES_PER_POINT)):
-            iq = self.receiver.capture_block(capture_size)
+            iq_block = self.receiver.capture_iq_block(capture_size, source="calibration")
+            iq = iq_block.iq
             if len(iq) != len(self.processor.window):
                 continue
             power_linear_full = self.processor.compute_filtered_power(iq)
@@ -6484,14 +6410,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"expected_elapsed={expected_elapsed_ms:.3f}ms"
         )
 
-    def _consume_high_speed_ta_ring_blocks(self) -> list[HighSpeedTABlock]:
-        with self._high_speed_ta_ring_lock:
-            if not self._high_speed_ta_ring:
-                return []
-            blocks = list(self._high_speed_ta_ring)
-            self._high_speed_ta_ring.clear()
-        return blocks
-
     def _snapshot_and_rollover_high_speed_ta_sweep(
         self,
         *,
@@ -6906,28 +6824,75 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if analysis_result.single_shot:
                 self._high_speed_ta_single_waiting_result = False
                 self._finish_single_sweep_like()
-                self._stop_high_speed_ta_receiver_thread()
+                self._stop_high_speed_ta_stream()
                 return
-            # Continuous sync mode: restart capture only after analyze+publish completed.
+            # The common IQ producer remained active during analysis.
             self._high_speed_ta_single_waiting_result = False
-            self._start_high_speed_ta_receiver_thread()
             return
 
         if self._high_speed_ta_single_waiting_result:
             if not self._high_speed_ta_analysis_in_progress:
                 self._hsta_debug_log(
                     "analysis_wait_stale_recover",
-                    message="waiting=1 analyzing=0 -> restart capture",
+                    message="waiting=1 analyzing=0 -> resume stream consumption",
                     force=True,
                 )
                 self._high_speed_ta_single_waiting_result = False
-                self._start_high_speed_ta_receiver_thread()
             return
 
         if self._high_speed_ta_analysis_in_progress:
             return
 
-        incoming_blocks = self._consume_high_speed_ta_ring_blocks()
+        if self._high_speed_ta_stream_cursor is None:
+            self._hsta_debug_log(
+                "stream_cursor_missing",
+                message="restarting common IQ stream",
+                force=True,
+            )
+            self._start_high_speed_ta_stream()
+            return
+        stream_result = self.receiver.read_iq_stream(
+            self._high_speed_ta_stream_cursor,
+            max_blocks=1,
+        )
+        self._high_speed_ta_stream_cursor = stream_result.cursor
+        if stream_result.overrun:
+            self._hsta_debug_log(
+                "stream_overrun",
+                message=f"missed_blocks={int(stream_result.missed_blocks)}",
+                force=True,
+            )
+            # Never stitch samples across a known ring overrun. Preserve the
+            # overrun in the next completed window's diagnostics.
+            state.iq_blocks = []
+            state.block_timestamps_s = []
+            state.capture_start_timestamp = None
+            state.capture_call_count = 0
+            state.capture_call_total_s = 0.0
+            state.capture_total_samples = 0
+            state.block_sample_counts = []
+            state.last_block_host_timestamp_s = None
+            state.prev_block_timestamp_s = None
+            state.gap_count = int(stream_result.missed_blocks)
+            state.gap_ratio_sum = 0.0
+            state.max_gap_ratio = float("inf")
+            state.gap_times_s = [0.0]
+        incoming_blocks = [
+            HighSpeedTABlock(
+                block_index=int(block.block_index),
+                iq_block=block.iq,
+                timestamp_s=float(block.timestamp_s),
+                sample_count=int(block.sample_count),
+                capture_call_elapsed_s=float(block.capture_elapsed_s),
+                discontinuity_before=bool(block.discontinuity_before),
+                missed_blocks_before=(
+                    int(stream_result.missed_blocks)
+                    if index == 0 and stream_result.overrun
+                    else 0
+                ),
+            )
+            for index, block in enumerate(stream_result.blocks)
+        ]
         if not incoming_blocks:
             self._hsta_debug_log(
                 "consume_ring_empty",
@@ -7019,8 +6984,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 ),
                 force=True,
             )
-            # Synchronize sweep boundary: stop capture while analysis is running.
-            self._stop_high_speed_ta_receiver_thread(stop_analysis_thread=False)
+            # Keep the common IQ producer running while this window is analyzed.
             self._submit_high_speed_ta_analysis_job(job)
             self._high_speed_ta_single_waiting_result = True
             return
@@ -7161,7 +7125,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._apply_time_analyzer_rbw_driven_capture_settings()
 
         capture_size = int(self.config.fft_size)
-        iq = self.receiver.capture_block(capture_size)
+        iq_block = self.receiver.capture_iq_block(capture_size, source="time_analyzer")
+        iq = iq_block.iq
         if iq is None or len(iq) == 0:
             return
         sample_timestamp = time.perf_counter()

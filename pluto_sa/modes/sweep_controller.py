@@ -165,7 +165,8 @@ class SweepController:
         flush_ms = (time.perf_counter() - flush_start) * 1000.0
 
         capture_start = time.perf_counter()
-        iq = self.receiver.capture_block(capture_samples)
+        iq_block = self.receiver.capture_iq_block(capture_samples, source="sweep")
+        iq = iq_block.iq
         capture_ms = (time.perf_counter() - capture_start) * 1000.0
 
         process_start = time.perf_counter()
