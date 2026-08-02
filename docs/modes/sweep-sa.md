@@ -30,7 +30,14 @@ required FFT = max(8 × target bandwidth / RBW,
 FFT size = required FFT以上となる64～16384の2のべき乗
 ```
 
-Sweep SAでは取得サンプル数を決定したFFT sizeと同値にします。
+FFT sizeは周波数ピーク診断用です。実際の取得サンプル数はIQ filterのsettlingとdetector観測時間を確保するため、次の必要数以上となる2のべき乗へ拡張します。このため狭RBWでは従来よりSweep Timeが長くなります。
+
+```text
+minimum capture samples
+  = IQ filter settling samples + ceil(4 × Sample Rate / RBW)
+capture samples
+  = max(FFT size, minimum capture samples)以上の2のべき乗
+```
 
 ## 1点の測定フロー
 
@@ -40,10 +47,12 @@ Sweep SAでは取得サンプル数を決定したFFT sizeと同値にします�
 4. 指定回数だけ受信データを読み捨て
 5. IQブロックを取得
 6. 必要に応じてDC平均値を除去
-7. Hann窓、FFT、coherent gain正規化を実施
-8. 時間方向に複数のオーバーラップ区間を作り、各区間の中心周波数電力を算出
+7. LO pointごとに初期化した4次Butterworth complex IQ filterを適用
+8. filterのsettling区間後に`I² + Q²`の時間系列を生成
 9. Detectorで代表値へ集約
 10. dB変換後、掃引結果へ格納
+
+RBWはcomplex basebandの両側3 dB bandwidthです。FFTはピーク周波数などのdebug情報には残していますが、掃引点の測定電力には使用しません。
 
 ## Detector
 
@@ -51,7 +60,7 @@ Sweep SAでは取得サンプル数を決定したFFT sizeと同値にします�
 |---|---|
 | Sample | 観測系列の最後の値 |
 | Peak | 観測系列の最大値 |
-| RMS | 観測系列の二乗平均平方根 |
+| RMS | IQの平均二乗、すなわちlinear power系列の算術平均 |
 
 ## Sweep進行
 

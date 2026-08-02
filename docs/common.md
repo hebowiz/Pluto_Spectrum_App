@@ -20,7 +20,7 @@
 
 ## 2. 振幅処理
 
-FFT前にHann窓を適用し、FFTサイズと窓のcoherent gainで正規化します。RBWはGaussianカーネルを電力スペクトルへ畳み込む方式です。カーネルはFWHMとして指定されたRBWから生成され、総和を1へ正規化しないため、周波数方向のエネルギー積算として働きます。
+RBW処理はモード系統で異なります。Sweep SAとTime Analyzer系は4次Butterworth complex IQ filterを電力化前に適用します。指定RBWは両側3 dB bandwidthです。RealTime SA、WideBand RT SA、Calibrationは現時点ではHann窓付きFFT後のpower spectrumへGaussianカーネルを畳み込む旧方式であり、今後overlap FFT filter bankへ移行します。
 
 表示値には最終段で次の補正を加算します。
 

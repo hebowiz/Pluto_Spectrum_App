@@ -37,8 +37,11 @@ from pluto_sa.sdr.trigger import (
     TriggerSlope,
 )
 from pluto_sa.sdr.trigger_acquisition import TriggerAcquisitionController
-from pluto_sa.signal.detector import DetectorMode, apply_detector
-from pluto_sa.signal.rbw import apply_rbw_weighting, make_gaussian_rbw_kernel, resolve_rbw_hz
+from pluto_sa.signal.detector import DetectorMode
+from pluto_sa.signal.measurement_filter import (
+    StatefulIQMeasurementFilter,
+    reduce_filtered_iq_power,
+)
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.ui.calibration_controller import CalibrationController
 from pluto_sa.ui import sweep_like_progress as slp
@@ -304,6 +307,9 @@ class HighSpeedTAAnalysisJob:
     trigger_sample_offset: int = 0
     trigger_forced: bool = False
     trigger_measured_value: float | None = None
+    stream_id: int = 0
+    start_sample_index: int = 0
+    discontinuity_reason: str | None = None
 
 
 @dataclass
@@ -924,6 +930,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 return result
 
     def _high_speed_ta_analysis_worker(self) -> None:
+        measurement_filter: StatefulIQMeasurementFilter | None = None
+        filter_key: tuple[float, float] | None = None
+        previous_stream_id: int | None = None
+        previous_end_sample_index: int | None = None
         while not self._high_speed_ta_analysis_stop_event.is_set():
             try:
                 job = self._high_speed_ta_analysis_jobs.get(timeout=0.1)
@@ -932,7 +942,32 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.config.sweep_profile_logging:
                 print(f"HighSpeedTAJob start sweep_id={int(job.sweep_id)}")
             try:
-                result = self._run_high_speed_ta_analysis_job(job)
+                requested_rbw_hz = (
+                    float(job.rbw_hz)
+                    if job.rbw_hz is not None
+                    else float(job.sample_rate_hz) * 0.98
+                )
+                current_key = (float(job.sample_rate_hz), requested_rbw_hz)
+                record_is_contiguous = (
+                    job.discontinuity_reason is None
+                    and not job.remove_dc_offset
+                    and previous_stream_id == int(job.stream_id)
+                    and previous_end_sample_index == int(job.start_sample_index)
+                )
+                if measurement_filter is None or filter_key != current_key or not record_is_contiguous:
+                    measurement_filter = StatefulIQMeasurementFilter(*current_key)
+                    first_iq = job.iq_blocks[0] if job.iq_blocks else np.empty(0)
+                    if len(first_iq) > 0:
+                        measurement_filter.reset(initial_sample=complex(first_iq[0]))
+                    filter_key = current_key
+                result = self._run_high_speed_ta_analysis_job(
+                    job,
+                    measurement_filter=measurement_filter,
+                )
+                previous_stream_id = int(job.stream_id)
+                previous_end_sample_index = int(job.start_sample_index) + int(
+                    job.capture_total_samples
+                )
             except Exception as exc:
                 self._hsta_debug_log(
                     "analysis_worker_exception",
@@ -6578,6 +6613,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trigger_sample_offset=int(record.trigger_sample_offset),
             trigger_forced=bool(record.trigger.forced),
             trigger_measured_value=record.trigger.measured_value,
+            stream_id=int(record.stream_id),
+            start_sample_index=int(record.start_sample_index),
+            discontinuity_reason=record.discontinuity_reason,
         )
 
     def _flush_high_speed_ta_pending_jobs(self) -> bool:
@@ -6602,6 +6640,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             calibration_offset_db=float(self.calibration_offset_db),
             input_correction_db=float(self.config.input_correction_db),
             y_min=float(self.y_min),
+            remove_dc_offset=bool(self.config.remove_dc_offset),
         )
 
     @staticmethod
@@ -6616,42 +6655,53 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         calibration_offset_db: float,
         input_correction_db: float,
         y_min: float,
+        remove_dc_offset: bool = False,
     ) -> float:
         if len(iq) > fft_n:
             iq = iq[-fft_n:]
         elif len(iq) < fft_n:
             return float(y_min)
 
-        n = len(iq)
-        if len(window) != n:
-            return float(y_min)
-        iq_processed = iq - np.mean(iq) if self.config.remove_dc_offset else iq
-        iq_windowed = iq_processed * window
-        spectrum = np.fft.fftshift(np.fft.fft(iq_windowed))
-        coherent_gain = np.sum(window) / n
-        spectrum = spectrum / n
-        spectrum = spectrum / coherent_gain
-        power_spectrum = np.abs(spectrum) ** 2
-        ta_bin_width_hz = float(sample_rate_hz) / max(1, int(fft_n))
-        ta_effective_rbw_hz = resolve_rbw_hz(rbw_hz, ta_bin_width_hz)
-        ta_rbw_kernel = make_gaussian_rbw_kernel(ta_effective_rbw_hz, ta_bin_width_hz)
-        power_linear_full = apply_rbw_weighting(power_spectrum, ta_rbw_kernel)
-        if len(power_linear_full) == 0:
-            return float(y_min)
-        ta_detector_series = SweepController._build_detector_observation_series_core(
-            iq=iq,
-            effective_rbw_hz=ta_effective_rbw_hz,
-            sample_rate_hz=float(sample_rate_hz),
-            remove_dc_offset=bool(self.config.remove_dc_offset),
+        iq_processed = iq - np.mean(iq) if remove_dc_offset else iq
+        requested_rbw_hz = (
+            float(rbw_hz) if rbw_hz is not None else float(sample_rate_hz) * 0.98
         )
-        ta_detector_equivalent_linear = float(apply_detector(ta_detector_series, detector_mode))
+        measurement_filter = StatefulIQMeasurementFilter(
+            float(sample_rate_hz),
+            requested_rbw_hz,
+        )
+        measurement_filter.reset(initial_sample=complex(iq_processed[0]))
+        filtered_iq = measurement_filter.process(iq_processed)
+        ta_detector_equivalent_linear = float(
+            reduce_filtered_iq_power(filtered_iq, detector_mode)
+        )
         ta_detector_equivalent_db = 10.0 * np.log10(ta_detector_equivalent_linear + 1e-20)
         ta_display_detector_equivalent_db = float(ta_detector_equivalent_db + calibration_offset_db + input_correction_db)
         return ta_display_detector_equivalent_db
 
+    def _ensure_time_analyzer_measurement_filter(self) -> StatefulIQMeasurementFilter:
+        """Return the legacy TA filter, preserving state between capture blocks."""
+        sample_rate_hz = max(1.0, float(self.config.sample_rate_hz))
+        requested_rbw_hz = (
+            float(self.config.rbw_hz)
+            if self.config.rbw_hz is not None
+            else sample_rate_hz * 0.98
+        )
+        key = (sample_rate_hz, requested_rbw_hz)
+        measurement_filter = getattr(self, "_time_analyzer_measurement_filter", None)
+        if (
+            measurement_filter is None
+            or getattr(self, "_time_analyzer_measurement_filter_key", None) != key
+        ):
+            measurement_filter = StatefulIQMeasurementFilter(*key)
+            self._time_analyzer_measurement_filter = measurement_filter
+            self._time_analyzer_measurement_filter_key = key
+        return measurement_filter
+
     def _run_high_speed_ta_analysis_job(
         self,
         job: HighSpeedTAAnalysisJob,
+        measurement_filter: StatefulIQMeasurementFilter | None = None,
     ) -> HighSpeedTAAnalysisResult:
         process_start = time.perf_counter()
         if not job.iq_blocks or not job.block_timestamps_s:
@@ -6749,74 +6799,30 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             iq_all = iq_all[:usable_samples]
 
         sample_rate_hz = max(1.0, float(job.sample_rate_hz))
-        frames = iq_all.reshape(window_count, fft_n).astype(np.complex64, copy=False)
-        effective_rbw_hz = resolve_rbw_hz(job.rbw_hz, sample_rate_hz / float(fft_n))
-
-        # Build Sweep-equivalent detector observation series in vectorized batches.
-        # Same definition as SweepController._build_detector_observation_series_core,
-        # but computed for all FFT windows at once.
-        segment_length = 1 << int(np.floor(np.log2(max(2, fft_n // 2))))
-        segment_length = max(256, segment_length)
-        segment_length = min(segment_length, fft_n)
-        if segment_length < 2:
-            segment_length = fft_n
-        step = max(1, segment_length // 2)
-        starts = list(range(0, max(1, fft_n - segment_length + 1), step))
-        if not starts:
-            starts = [0]
-        if starts[-1] != fft_n - segment_length:
-            starts.append(fft_n - segment_length)
-
-        segment_window = np.hanning(segment_length).astype(np.float64, copy=False)
-        segment_coherent_gain = float(np.sum(segment_window)) / float(segment_length)
-        if not np.isfinite(segment_coherent_gain) or abs(segment_coherent_gain) < 1e-20:
-            segment_coherent_gain = 1.0
-        segment_bin_width_hz = sample_rate_hz / float(segment_length)
-        segment_kernel = make_gaussian_rbw_kernel(effective_rbw_hz, segment_bin_width_hz).astype(
-            np.float64,
-            copy=False,
-        )
-        segment_center_idx = int(segment_length // 2)
-        segment_offsets = np.arange(segment_kernel.shape[0], dtype=np.int64) - (
-            segment_kernel.shape[0] // 2
-        )
-        segment_indices = segment_center_idx + segment_offsets
-        segment_valid = (segment_indices >= 0) & (segment_indices < segment_length)
-
-        observation_values = np.empty((window_count, len(starts)), dtype=np.float64)
         remove_dc_offset = bool(job.remove_dc_offset)
-        for obs_idx, start in enumerate(starts):
-            segment_frames = frames[:, start : start + segment_length]
-            if remove_dc_offset:
-                segment_frames = segment_frames - np.mean(segment_frames, axis=1, keepdims=True)
-            segment_windowed = segment_frames * segment_window.reshape(1, -1)
-            segment_fft = np.fft.fftshift(
-                np.fft.fft(segment_windowed, axis=1),
-                axes=1,
+        if remove_dc_offset:
+            iq_all = iq_all - np.mean(iq_all)
+        if measurement_filter is None:
+            requested_rbw_hz = (
+                float(job.rbw_hz)
+                if job.rbw_hz is not None
+                else sample_rate_hz * 0.98
             )
-            segment_fft = segment_fft / float(segment_length)
-            segment_fft = segment_fft / float(segment_coherent_gain)
-            segment_power = np.abs(segment_fft) ** 2
-            if not np.any(segment_valid):
-                observation_values[:, obs_idx] = 0.0
-            else:
-                segment_center_slice = segment_power[:, segment_indices[segment_valid]]
-                observation_values[:, obs_idx] = np.sum(
-                    segment_center_slice * segment_kernel[segment_valid].reshape(1, -1),
-                    axis=1,
-                    dtype=np.float64,
-                )
-
-        resolved_detector_mode = DetectorMode(job.detector_mode)
-        if resolved_detector_mode is DetectorMode.SAMPLE:
-            detector_linear = observation_values[:, -1]
-        elif resolved_detector_mode is DetectorMode.PEAK:
-            detector_linear = np.max(observation_values, axis=1)
-        else:
-            detector_linear = np.sqrt(
-                np.mean(np.square(observation_values, dtype=np.float64), axis=1),
-                dtype=np.float64,
+            measurement_filter = StatefulIQMeasurementFilter(
+                sample_rate_hz,
+                requested_rbw_hz,
             )
+            measurement_filter.reset(initial_sample=complex(iq_all[0]))
+        filtered_iq = measurement_filter.process(iq_all)
+        filtered_frames = filtered_iq.reshape(window_count, fft_n)
+        detector_linear = np.asarray(
+            reduce_filtered_iq_power(
+                filtered_frames,
+                job.detector_mode,
+                axis=1,
+            ),
+            dtype=np.float64,
+        )
 
         # Preserve TA/Sweep-aligned amplitude definition through detector-equivalent value.
         y_values = 10.0 * np.log10(detector_linear + 1e-20)
@@ -7316,6 +7322,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         iq = iq_block.iq
         if iq is None or len(iq) == 0:
             return
+        iq_processed = iq - np.mean(iq) if self.config.remove_dc_offset else iq
+        measurement_filter = self._ensure_time_analyzer_measurement_filter()
+        filtered_iq = measurement_filter.process(iq_processed)
         sample_timestamp = time.perf_counter()
         self._hide_time_analyzer_progress_symbol()
         if self._time_analyzer_discard_samples_remaining > 0:
@@ -7351,7 +7360,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         n = len(iq)
         window = self.processor.window
-        iq_processed = iq - np.mean(iq) if self.config.remove_dc_offset else iq
         iq_windowed = iq_processed * window
         spectrum = np.fft.fftshift(np.fft.fft(iq_windowed))
         coherent_gain = np.sum(window) / n
@@ -7359,14 +7367,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         spectrum = spectrum / coherent_gain
         raw_power_full = np.abs(spectrum) ** 2
 
-        power_linear_full = self.processor.compute_filtered_power(iq)
-        if len(power_linear_full) == 0:
-            return
         center_index = max(0, int(self.config.fft_size) // 2)
-        if center_index >= len(power_linear_full):
-            center_index = len(power_linear_full) // 2
+        if center_index >= len(raw_power_full):
+            center_index = len(raw_power_full) // 2
         raw_center_power_linear = float(raw_power_full[center_index])
-        center_power_linear = float(power_linear_full[center_index])
+        center_power_linear = float(np.abs(filtered_iq[-1]) ** 2)
         center_power_db = 10.0 * np.log10(center_power_linear + 1e-20)
         corrected_center_db = float(
             self._apply_display_power_correction_with_frequency(
@@ -7374,16 +7379,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 frequency_hz=float(self.config.center_freq_hz),
             )[0]
         )
-        ta_bin_width_hz = float(self.config.sample_rate_hz) / max(1, int(self.config.fft_size))
-        ta_effective_rbw_hz = resolve_rbw_hz(self.config.rbw_hz, ta_bin_width_hz)
-        ta_detector_series = SweepController._build_detector_observation_series_core(
-            iq=iq,
-            effective_rbw_hz=ta_effective_rbw_hz,
-            sample_rate_hz=float(self.config.sample_rate_hz),
-            remove_dc_offset=bool(self.config.remove_dc_offset),
-        )
         ta_detector_equivalent_linear = float(
-            apply_detector(ta_detector_series, self.config.sweep_detector_mode)
+            reduce_filtered_iq_power(
+                filtered_iq,
+                self.config.sweep_detector_mode,
+            )
         )
         ta_detector_equivalent_db = 10.0 * np.log10(ta_detector_equivalent_linear + 1e-20)
         ta_display_detector_equivalent_db = float(

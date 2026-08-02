@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 52 tests passed。対象はリング、epoch、複数cursor、overrun、latest window、任意長windowと余剰sample carry、FFT frame整列、不連続時のpartial破棄、Power Triggerのblock境界/qualification/hysteresis/holdoff、pre/poststore、Free Run/Power Auto/Normal/Single acquisition、forced timeout/rearm、post-trigger中の再arm抑止、HighSpeed TA queueのFIFO/backpressure/generation分離、Trigger/acquisition metadata contract、Fake Plutoによる同期/連続発行、互換しない二重startの拒否、停止待ちworkerの保持、USB優先/URI上書き、終了時RX buffer破棄、HSTA Single/Continuous再開始時のcursor無効化です。
+2026-08-02時点: 62 tests passed。従来対象に加え、complex IQ filterのblock境界state、両側3 dB RBW、帯域外抑圧、ENBW/settling metadata、linear-power detector定義、Sweep/HSTA統合を検証しています。
 
 ## 現在の実装構成
 
@@ -189,7 +189,7 @@ python -m pytest -q
 
 ## 次に行う作業
 
-1. HighSpeed TAへstateful IQ-domain measurement filterによる`Filtered Envelope`経路を追加する。
+1. HighSpeed TAのdisplay bucket幅をFFT sizeから分離する。
 2. Trigger位置の表示と、minimum duration/holdoff/hysteresisのUI設定を追加する。
 3. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
 4. 実機でblock sizeを掃引し、既知信号の長時間相関で欠落を検証する。
@@ -240,4 +240,7 @@ python -m pytest -q
 - HighSpeed TAの窓生成を`IQAcquisitionRecord`へ移行し、Trigger基本設定UIを追加。
 - Power Auto forced recordとPower Normal natural recordをdirect USB実機で確認。
 - 現行RBWがFFT後のpower spectrumへ非正規化Gaussian convolutionを行う方式であることを監査し、TA/Sweepはstateful IQ-domain measurement filterへ分離する方針を決定。
+- SciPy SOSによる共通4次Butterworth complex IQ filterを追加し、Sweep SA、HighSpeed TA、旧Time Analyzerをpower化前のRBW処理へ移行。
+- RBWを両側3 dB bandwidthとして定義し、ENBWとsettling samplesをfilter metadata化。RMS Detectorはlinear powerの平均へ修正。
+- HighSpeed TAは連続するrecord間でfilter stateを保持。不連続・設定変更・record重複時はresetする。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

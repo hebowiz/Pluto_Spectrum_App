@@ -4,7 +4,11 @@ from collections import deque
 from queue import Queue
 from types import MethodType, SimpleNamespace
 
+import numpy as np
+import pytest
+
 from pluto_sa.ui.main_window import (
+    HighSpeedTAAnalysisJob,
     RealtimeSpectrumWindow,
     SWEEP_STATE_RUNNING,
 )
@@ -127,3 +131,50 @@ def test_hsta_power_trigger_builds_fft_aligned_positioned_record() -> None:
     assert acquisition.config.pretrigger_samples == 3_072
     assert acquisition.config.posttrigger_samples == 9_215
     assert acquisition.config.auto_timeout_samples == 200_000
+
+
+def _analysis_job(iq: np.ndarray) -> HighSpeedTAAnalysisJob:
+    return HighSpeedTAAnalysisJob(
+        iq_blocks=[iq],
+        block_timestamps_s=[len(iq) / 1_000_000.0],
+        gap_times_s=[],
+        capture_total_s=len(iq) / 1_000_000.0,
+        capture_call_count=1,
+        capture_call_total_s=0.0,
+        capture_total_samples=len(iq),
+        block_sample_counts=[len(iq)],
+        gap_count=0,
+        gap_ratio_sum=0.0,
+        max_gap_ratio=0.0,
+        sample_rate_hz=1_000_000.0,
+        fft_size=256,
+        rbw_hz=100_000.0,
+        detector_mode="RMS",
+        calibration_offset_db=0.0,
+        frequency_dependent_offset_db=0.0,
+        input_correction_db=0.0,
+        window=np.hanning(256),
+        y_min=-200.0,
+        remove_dc_offset=False,
+        single_shot=False,
+        sweep_id=0,
+    )
+
+
+def test_hsta_analysis_uses_iq_filter_before_power_detection() -> None:
+    n = np.arange(4096, dtype=np.float64)
+    center_iq = np.ones(4096, dtype=np.complex64)
+    rejected_iq = np.exp(2j * np.pi * 200_000.0 * n / 1_000_000.0).astype(np.complex64)
+
+    center = RealtimeSpectrumWindow._run_high_speed_ta_analysis_job(
+        None,
+        _analysis_job(center_iq),
+    )
+    rejected = RealtimeSpectrumWindow._run_high_speed_ta_analysis_job(
+        None,
+        _analysis_job(rejected_iq),
+    )
+
+    assert len(center.sweep_y_db) == 16
+    assert center.sweep_y_db[-1] == pytest.approx(0.0, abs=1e-6)
+    assert rejected.sweep_y_db[-1] < -45.0

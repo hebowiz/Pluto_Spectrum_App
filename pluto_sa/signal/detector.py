@@ -16,7 +16,7 @@ class DetectorMode(str, Enum):
 
 
 def apply_detector(values: np.ndarray, mode: DetectorMode | str) -> float:
-    """Reduce a data series to one representative detector value."""
+    """Reduce a linear-power series to one representative detector value."""
     if values.size == 0:
         raise ValueError("detector input must not be empty")
 
@@ -27,6 +27,8 @@ def apply_detector(values: np.ndarray, mode: DetectorMode | str) -> float:
     if resolved_mode is DetectorMode.PEAK:
         return float(np.max(values))
     if resolved_mode is DetectorMode.RMS:
-        return float(np.sqrt(np.mean(np.square(values))))
+        # Input is already squared voltage (linear power). An RMS voltage
+        # detector therefore reports its arithmetic mean in power units.
+        return float(np.mean(values))
 
     raise ValueError(f"unsupported detector mode: {mode}")

@@ -71,6 +71,22 @@ python -m tools.validate_common_iq_stream --sample-rate 6000000 --duration 5
 
 ## HighSpeed TA統合検証
 
+### IQ Filter統合後（2026-08-02）
+
+4次Butterworth complex IQ filterへ移行後、direct USB `usb:1.54.5`、4 MSPS、RBW 1 MHz、Free Runで再検証しました。
+
+- Time Span 100 ms、Continuous 2秒: 18 records、各98 display points、7,929,856 samples受信
+- ring overwritten blocks: 0
+- analysis job queue最大使用量: 1、終了時pending/job/result: 0
+- Single途中からContinuousへ変更: 6 records更新
+- Time Span 100 msから50 msへ変更して再開始: 13 records更新、各49 display points
+- 変更後もring overwritten blocks: 0、例外なし
+- host上の合成complex64 4,000,000 samplesに対するIQ filter単体処理: 約45 ms
+
+Sweep SAは2.440 GHz、RBW 1 MHz、RMS Detectorで1 point取得を実施し、256 samplesの自動取得、IQ filter後detector系列生成、結果出力まで例外なく完了しました。入力信号が既知ではないため、振幅精度と3 dB帯域の実機検証には含めません。
+
+この結果は処理統合と短時間の追従性確認です。既知CW/noise/burstによるRBW shape、ENBW、rise/fall time、旧校正との差は未検証です。
+
 Qtをoffscreenで動かし、実際の`RealtimeSpectrumWindow`、共通Producer、window assembler、解析job/result queue、描画publishまでを通しました。Time Spanは0.1秒です。
 
 | Mode | 条件 | 主な結果 |

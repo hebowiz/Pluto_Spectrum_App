@@ -24,9 +24,9 @@
 各IQブロックについて次を実施します。
 
 1. 必要に応じてDC平均値を除去
-2. Hann窓とFFTを適用
-3. Gaussian RBW処理後の中心bin電力を取得
-4. Sweep SAと共通のDetector観測系列も生成
+2. block境界をまたいで状態を保持する4次Butterworth complex IQ filterを適用
+3. filter出力を`I² + Q²`へ変換
+4. Sample/Peak/RMS Detectorで代表値を生成
 5. Detector代表値へ固定補正、入力補正、周波数別補正を適用
 6. 取得時刻を時間軸位置として作業バッファへ格納
 

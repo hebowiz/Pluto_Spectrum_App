@@ -2,7 +2,21 @@
 
 最終更新: 2026-08-02
 
-## 現行実装
+## 実装状況（2026-08-02）
+
+| 経路 | 現在のRBW方式 |
+|---|---|
+| Sweep SA | 4次Butterworth stateful complex IQ filterへ移行済み |
+| HighSpeed TA | 4次Butterworth stateful complex IQ filterへ移行済み |
+| 旧Time Analyzer | 同じIQ filterへ移行済み（UI非表示） |
+| RealTime SA / WideBand RT SA | 従来のFFT後power-domain Gaussian、overlap FFT filter bankへ移行予定 |
+| Calibration | 従来のRealTime SA系処理を継続 |
+
+実装は`pluto_sa/signal/measurement_filter.py`へ集約しました。指定RBWはcomplex basebandの負周波数側から正周波数側までを含む「両側3 dB bandwidth」と定義し、内部low-pass cutoffは`RBW / 2`です。DC gainは1で、filter metadataとして数値積分したENBWと8 time constants相当のsettling sample数を保持します。
+
+以下の「旧実装」はRealTime SA/WideBand RT SAと、移行前のSweep/TAを説明した監査記録です。
+
+## 旧実装
 
 Pluto Spectrum AppのRBWは、IQへ時間領域filterを適用する実装ではありません。RealTime SA、WideBand RT SA、Sweep SA、Time Analyzer、HighSpeed TAは基本的に次の演算です。
 
@@ -122,8 +136,7 @@ raw trigger recordを正本として保持し、解析段でchannel selection fi
 
 ## 推奨する次の段階
 
-1. HighSpeed TAへ`FFT Power`と`Filtered Envelope`の処理方式を選択できる内部APIを追加する。
-2. stateful complex FIRとENBW metadataを追加する。
-3. 表示は全sample描画ではなく、時間pixel bucketごとのPeak/RMSを選べるようにする。
-4. 既知CW/noise/burstで旧FFT方式と比較する。
-5. 結果確定後、TA UIの`RBW`と`RF BW`を`Measurement BW`と`Acquisition BW`へ整理する。
+1. HighSpeed TAの表示bucket幅をFFT sizeから分離し、pixel/time bucketごとのSample/Peak/RMSを選べるようにする。
+2. 既知CW/noise/burstを実機入力し、3 dB bandwidth、ENBW、rise/fall time、校正差を検証する。
+3. TA UIの`RBW`と`RF BW`を`Measurement BW`と`Acquisition BW`へ整理する。
+4. RealTime SAをrecord長・window・overlapでRBWを定義するFFT filter bankへ移行する。

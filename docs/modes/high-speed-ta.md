@@ -22,7 +22,7 @@ target bandwidth = max(4 × RBW, 521 kHz)
 FFT size = RBW条件とguard条件を満たす64～16384の2のべき乗
 ```
 
-共通IQ Producerの1ブロックは現在65536 samplesです。FFT sizeとは独立しており、解析時にFFT size単位へ分割します。
+共通IQ Producerの1ブロックは現在65536 samplesです。FFT sizeとは独立しています。FFT sizeは現在も時間表示のdetector bucket幅として使用しますが、RBW演算には使用しません。
 
 ## スレッド構成
 
@@ -34,7 +34,7 @@ GUIスレッド
   └─ TriggerAcquisitionController → IQAcquisitionRecord → bounded解析queue → 結果描画
 
 解析スレッド
-  └─ job queueから連続windowを取得 → FFT/RBW/Detector処理 → result queue
+  └─ job queueから連続windowを取得 → stateful IQ Filter → Power/Detector → result queue
 ```
 
 HighSpeed TA consumerは独立cursorでブロックを読みます。受信開始直後または設定変更後は5ブロックをwarm-upとして解析対象から除外します。
@@ -80,7 +80,11 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 
 ## 振幅処理
 
-各ブロックに対してFFT/RBW処理を行い、中心周波数の電力またはSweep相当のDetector値を表示値へ変換します。固定補正、入出力補正、Center Frequencyにおける周波数別校正を適用します。
+record全体へ4次Butterworth complex IQ low-passを適用してから`I² + Q²`へ変換します。指定RBWは両側3 dB bandwidthであり、内部cutoffは`RBW / 2`です。Free Run等で前recordの終了sampleと次recordの開始sampleが連続している場合はfilter stateを引き継ぎ、overrun、設定変更、trigger recordの重複・空白がある場合はresetします。
+
+DetectorはFFT size samplesごとの時間bucketへ適用します。Sampleは最後のpower、Peakは最大power、RMSはIQの平均二乗powerです。したがって表示sample間隔は現在も`FFT size / Sample Rate`であり、RBW filter化だけでは以前確認した64 µs等の間隔は変わりません。display bucketの独立化は次段です。
+
+最後に固定補正、入出力補正、Center Frequencyにおける周波数別校正を適用します。Power Triggerは引き続きfilter前のraw IQ magnitudeを評価するため、表示RBWとTrigger bandwidthはまだ独立です。
 
 ## 制限・注意事項
 

@@ -11,10 +11,9 @@ import numpy as np
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.detector import DetectorMode, apply_detector
-from pluto_sa.signal.rbw import (
-    apply_rbw_weighting,
-    make_gaussian_rbw_kernel,
-    resolve_rbw_hz,
+from pluto_sa.signal.measurement_filter import (
+    StatefulIQMeasurementFilter,
+    design_iq_rbw_filter,
 )
 
 
@@ -353,11 +352,23 @@ class SweepController:
         return flush_reads, flushed_total, actual_per_read
 
     def _resolve_capture_samples(self) -> int:
-        if self.config.sweep_capture_samples_override is not None:
-            return max(1, int(self.config.sweep_capture_samples_override))
         effective_rbw_hz = self._resolve_effective_rbw_hz()
-        observation_ratio = self.config.sweep_sample_rate_hz / effective_rbw_hz
-        min_samples = max(256, int(np.ceil(observation_ratio * 8.0)))
+        _, filter_design = design_iq_rbw_filter(
+            float(self.config.sweep_sample_rate_hz),
+            effective_rbw_hz,
+        )
+        observation_samples = int(
+            np.ceil(4.0 * float(self.config.sweep_sample_rate_hz) / effective_rbw_hz)
+        )
+        min_samples = max(
+            256,
+            filter_design.settling_samples + observation_samples,
+        )
+        if self.config.sweep_capture_samples_override is not None:
+            min_samples = max(
+                min_samples,
+                int(self.config.sweep_capture_samples_override),
+            )
         capture_samples = 1 << int(np.ceil(np.log2(min_samples)))
         return int(capture_samples)
 
@@ -366,23 +377,50 @@ class SweepController:
         return bin_indices * (self.config.sweep_sample_rate_hz / sample_count)
 
     def _resolve_effective_rbw_hz(self) -> float:
-        min_bin_width_hz = self.config.sweep_sample_rate_hz / 4096.0
-        return resolve_rbw_hz(self.config.rbw_hz, min_bin_width_hz)
+        requested_rbw_hz = (
+            float(self.config.rbw_hz)
+            if self.config.rbw_hz is not None
+            else float(self.config.sweep_sample_rate_hz)
+        )
+        _, design = design_iq_rbw_filter(
+            float(self.config.sweep_sample_rate_hz),
+            requested_rbw_hz,
+        )
+        return design.effective_rbw_hz
 
     def _measure_point_power(
         self,
         iq: np.ndarray,
     ) -> tuple[float, float, float, int, int, float, int, float, np.ndarray, bool, int, float, float]:
-        n_target = max(2, int(self.config.fft_size))
-        if len(iq) > n_target:
-            iq = iq[-n_target:]
-        elif len(iq) < n_target:
-            iq_padded = np.zeros(n_target, dtype=np.complex64)
-            iq_padded[-len(iq) :] = iq
-            iq = iq_padded
+        iq_capture = np.asarray(iq)
+        if iq_capture.ndim != 1 or len(iq_capture) == 0:
+            raise ValueError("iq capture must contain complex samples")
         dc_removal_applied = bool(self.config.remove_dc_offset)
         if dc_removal_applied:
-            iq = iq - np.mean(iq)
+            iq_capture = iq_capture - np.mean(iq_capture)
+
+        effective_rbw_hz = self._resolve_effective_rbw_hz()
+        detector_input = self._build_detector_observation_series_core(
+            iq=iq_capture,
+            effective_rbw_hz=effective_rbw_hz,
+            sample_rate_hz=float(self.config.sweep_sample_rate_hz),
+            remove_dc_offset=False,
+        )
+        measured_power_linear = float(
+            apply_detector(detector_input, self.config.sweep_detector_mode)
+        )
+
+        # Retain FFT information for the existing debug/probe interface only.
+        # It no longer participates in Sweep SA RBW or detector processing.
+        n_target = max(2, int(self.config.fft_size))
+        if len(iq_capture) > n_target:
+            iq = iq_capture[-n_target:]
+        elif len(iq_capture) < n_target:
+            iq_padded = np.zeros(n_target, dtype=np.complex64)
+            iq_padded[-len(iq_capture) :] = iq_capture
+            iq = iq_padded
+        else:
+            iq = iq_capture
         n = len(iq)
 
         window = np.hanning(n)
@@ -400,22 +438,17 @@ class SweepController:
         bin_width_hz = self.config.sweep_sample_rate_hz / n
         freq_axis_hz = self._build_signed_frequency_axis_hz(n)
         power_spectrum_unshifted = np.abs(spectrum_unshifted) ** 2
-        effective_rbw_hz = resolve_rbw_hz(self.config.rbw_hz, bin_width_hz)
-        rbw_kernel = make_gaussian_rbw_kernel(effective_rbw_hz, bin_width_hz)
-        filtered_power = apply_rbw_weighting(power_spectrum, rbw_kernel)
 
         center_idx = n_target // 2
-        if center_idx >= len(filtered_power):
-            center_idx = len(filtered_power) // 2
-        detector_input = self._build_detector_observation_series(iq, effective_rbw_hz)
-        measured_power_linear = apply_detector(detector_input, self.config.sweep_detector_mode)
+        if center_idx >= len(power_spectrum):
+            center_idx = len(power_spectrum) // 2
         peak_bin_index_unshifted = int(np.argmax(power_spectrum_unshifted))
         peak_bin_index_shifted = int(np.argmax(power_spectrum))
         peak_frequency_relative_hz = float(freq_axis_hz[peak_bin_index_shifted])
         rbw_center_bin_index = center_idx
         rbw_center_frequency_hz = float(freq_axis_hz[center_idx])
         raw_center_power_linear = float(power_spectrum[center_idx])
-        filtered_center_power_linear = float(filtered_power[center_idx])
+        filtered_center_power_linear = measured_power_linear
         return (
             measured_power_linear,
             effective_rbw_hz,
@@ -452,45 +485,24 @@ class SweepController:
         sample_rate_hz: float,
         remove_dc_offset: bool = True,
     ) -> np.ndarray:
-        """Core detector-series builder shared by Sweep and comparison paths."""
-        total_samples = len(iq)
-        if total_samples < 2:
+        """Return time-ordered power after the common complex-IQ RBW filter."""
+        values = np.asarray(iq)
+        if values.ndim != 1 or len(values) == 0:
             return np.asarray([0.0], dtype=np.float64)
+        if remove_dc_offset:
+            values = values - np.mean(values)
 
-        segment_length = 1 << int(np.floor(np.log2(max(2, total_samples // 2))))
-        segment_length = max(256, segment_length)
-        segment_length = min(segment_length, total_samples)
-        if segment_length < 2:
-            segment_length = total_samples
-
-        step = max(1, segment_length // 2)
-        starts = list(range(0, max(1, total_samples - segment_length + 1), step))
-        if not starts:
-            starts = [0]
-        if starts[-1] != total_samples - segment_length:
-            starts.append(total_samples - segment_length)
-
-        observation_values: list[float] = []
-        for start in starts:
-            segment = iq[start : start + segment_length]
-            if len(segment) < segment_length:
-                continue
-
-            if remove_dc_offset:
-                segment = segment - np.mean(segment)
-            window = np.hanning(segment_length)
-            coherent_gain = np.sum(window) / segment_length
-            spectrum = np.fft.fftshift(np.fft.fft(segment * window))
-            spectrum = spectrum / segment_length
-            spectrum = spectrum / coherent_gain
-
-            power_spectrum = np.abs(spectrum) ** 2
-            segment_bin_width_hz = sample_rate_hz / segment_length
-            rbw_kernel = make_gaussian_rbw_kernel(effective_rbw_hz, segment_bin_width_hz)
-            filtered_power = apply_rbw_weighting(power_spectrum, rbw_kernel)
-            center_idx = len(filtered_power) // 2
-            observation_values.append(float(filtered_power[center_idx]))
-
-        if not observation_values:
-            observation_values.append(0.0)
-        return np.asarray(observation_values, dtype=np.float64)
+        measurement_filter = StatefulIQMeasurementFilter(
+            sample_rate_hz=float(sample_rate_hz),
+            rbw_hz=float(effective_rbw_hz),
+        )
+        measurement_filter.reset(initial_sample=complex(values[0]))
+        filtered_iq = measurement_filter.process(values)
+        settling = min(
+            measurement_filter.design.settling_samples,
+            max(0, len(filtered_iq) - 1),
+        )
+        settled_iq = filtered_iq[settling:]
+        if len(settled_iq) == 0:
+            settled_iq = filtered_iq[-1:]
+        return np.asarray(np.abs(settled_iq) ** 2, dtype=np.float64)
