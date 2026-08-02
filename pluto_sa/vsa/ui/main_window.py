@@ -102,7 +102,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         return dock
 
     def _build_results(self) -> None:
-        self.zero_span_plot = self._make_plot("Capture Power", "Power (dBFS)", "Time (ms)")
+        self.zero_span_plot = self._make_plot("Capture Power", "IQ Power (dBm)", "Time (ms)")
         self.setCentralWidget(self.zero_span_plot)
 
         self.spectrum_plot = self._make_plot("Spectrum", "Magnitude (dBFS)", "Relative Frequency (MHz)")
@@ -302,6 +302,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                     f"Mod: {signal.modulation.value}",
                     f"Symbol Rate: {signal.symbol_rate_hz / 1e6:.3f} MSym/s",
                     f"TX Filter: {signal.tx_filter}",
+                    "Amplitude: Cal" if recording.amplitude_calibrated else "Amplitude: Uncal",
                     "SGL",
                 )
             )
@@ -316,7 +317,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.zero_span_plot.clear()
         self.zero_span_plot.plot(
             result.time_s[capture_slice] * 1e3,
-            result.power_dbfs[capture_slice],
+            result.power_dbm[capture_slice],
             pen=pg.mkPen("y", width=1),
         )
         self.spectrum_plot.clear()

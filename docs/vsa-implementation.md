@@ -18,7 +18,7 @@ python -m pluto_sa.vsa.main
 
 - GFSK、QPSK、pi/4-DQPSKのtest waveform生成。
 - NumPy `.npy` / `.npz`およびraw complex IQの読込み。
-- Capture Power（Zero Span）、Spectrum表示。
+- IQ Power（Zero Span、dBm）、Spectrum表示。
 - FSKのinstantaneous frequency表示。
 - PSKのConstellation表示。
 - symbol tableとbasic EVMまたはfrequency errorのsummary表示。
@@ -32,6 +32,19 @@ python -m pluto_sa.vsa.main
 `pluto_sa/vsa/model.py`にsource-independentなimmutable IQ recordを追加しました。IQ、sample rate、center frequency、usable bandwidth、full scale、source、sample index、trigger位置、gap理由、metadataを保持します。
 
 `recording_from_acquisition()`により、既存HighSpeed TA/Power Triggerの`IQAcquisitionRecord`をVSA recordへ変換できます。Pluto固有型を解析DSPへ渡さない境界です。
+
+振幅換算条件として`full_scale`、base calibration offset、frequency-dependent offset、input correction、校正済みflagも保持します。Zero SpanのIQ Powerは既存TA/Power Triggerと同じ規約で次のようにdBmへ換算します。
+
+```text
+power_dbfs = 20 log10(|IQ| / full_scale)
+power_dbm  = power_dbfs
+           + 20 log10(full_scale)
+           + calibration_offset_db
+           + frequency_dependent_offset_db
+           + input_correction_db
+```
+
+生成IQは0 dBm基準の校正済みtest sourceとして扱います。校正metadataを持たないfile IQも数値配列としては`power_dbm`を生成しますが、correctionが0 dBの仮値であるためUIに`Amplitude: Uncal`と表示します。絶対電力として使う前に校正条件を設定する必要があります。
 
 ### Signal Description
 
@@ -99,6 +112,7 @@ python -m pytest tests/test_vsa_core.py -q
 - ideal QPSKとpi/4-DQPSKのsymbol decode/basic EVM。
 - session invalidation。
 - `.npz` round trip。
+- Zero Span IQ PowerのdBm換算と既存TA補正規約との一致。
 - spectrum frequency axis。
 - 1 capture内のFSK/PSK segment一括解析と共通時間軸。
 

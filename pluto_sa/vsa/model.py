@@ -72,6 +72,10 @@ class IQRecording:
     usable_bandwidth_hz: float | None = None
     source: str = "unknown"
     full_scale: float = 1.0
+    calibration_offset_db: float = 0.0
+    frequency_dependent_offset_db: float = 0.0
+    input_correction_db: float = 0.0
+    amplitude_calibrated: bool = False
     start_sample_index: int = 0
     trigger_sample_index: int | None = None
     discontinuity_reason: str | None = None
@@ -86,6 +90,13 @@ class IQRecording:
             raise ValueError("usable_bandwidth_hz must be positive when provided")
         if not np.isfinite(self.full_scale) or self.full_scale <= 0.0:
             raise ValueError("full_scale must be positive")
+        corrections = (
+            self.calibration_offset_db,
+            self.frequency_dependent_offset_db,
+            self.input_correction_db,
+        )
+        if not all(np.isfinite(value) for value in corrections):
+            raise ValueError("amplitude correction values must be finite")
         owned = _readonly_complex64(self.iq)
         if owned.size == 0:
             raise ValueError("IQ recording must contain at least one sample")
@@ -110,6 +121,16 @@ class IQRecording:
     @property
     def is_contiguous(self) -> bool:
         return self.discontinuity_reason is None
+
+    @property
+    def dbfs_to_dbm_offset_db(self) -> float:
+        """Offset matching the common TA/Power Trigger amplitude convention."""
+        return float(
+            20.0 * np.log10(self.full_scale)
+            + self.calibration_offset_db
+            + self.frequency_dependent_offset_db
+            + self.input_correction_db
+        )
 
 
 @dataclass(frozen=True)
@@ -192,6 +213,7 @@ class VSAAnalysisResult:
     time_s: np.ndarray
     iq: np.ndarray
     power_dbfs: np.ndarray
+    power_dbm: np.ndarray
     spectrum_frequency_hz: np.ndarray
     spectrum_dbfs: np.ndarray
     instantaneous_frequency_hz: np.ndarray
@@ -209,6 +231,7 @@ class VSAAnalysisResult:
             "time_s": (self.time_s, np.float64),
             "iq": (self.iq, np.complex64),
             "power_dbfs": (self.power_dbfs, np.float64),
+            "power_dbm": (self.power_dbm, np.float64),
             "spectrum_frequency_hz": (self.spectrum_frequency_hz, np.float64),
             "spectrum_dbfs": (self.spectrum_dbfs, np.float64),
             "instantaneous_frequency_hz": (self.instantaneous_frequency_hz, np.float64),

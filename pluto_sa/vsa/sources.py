@@ -69,6 +69,7 @@ class GeneratedIQSource:
             sample_rate_hz=sample_rate_hz,
             usable_bandwidth_hz=0.8 * sample_rate_hz,
             source="Generated FSK",
+            amplitude_calibrated=True,
             metadata={"generated_symbols": symbols, "seed": int(seed)},
         )
         signal = SignalDescription(
@@ -115,6 +116,7 @@ class GeneratedIQSource:
             sample_rate_hz=sample_rate_hz,
             usable_bandwidth_hz=0.8 * sample_rate_hz,
             source="Generated PSK",
+            amplitude_calibrated=True,
             metadata={"generated_symbols": symbols, "seed": int(seed)},
         )
         signal = SignalDescription(
@@ -157,12 +159,41 @@ class FileIQSource:
                     sample_rate_hz = float(np.asarray(container["sample_rate_hz"]).item())
                 if center_frequency_hz == 0.0 and "center_frequency_hz" in container.files:
                     center_frequency_hz = float(np.asarray(container["center_frequency_hz"]).item())
+                calibration_offset_db = (
+                    float(np.asarray(container["calibration_offset_db"]).item())
+                    if "calibration_offset_db" in container.files
+                    else 0.0
+                )
+                frequency_dependent_offset_db = (
+                    float(np.asarray(container["frequency_dependent_offset_db"]).item())
+                    if "frequency_dependent_offset_db" in container.files
+                    else 0.0
+                )
+                input_correction_db = (
+                    float(np.asarray(container["input_correction_db"]).item())
+                    if "input_correction_db" in container.files
+                    else 0.0
+                )
+                amplitude_calibrated = (
+                    bool(np.asarray(container["amplitude_calibrated"]).item())
+                    if "amplitude_calibrated" in container.files
+                    else False
+                )
                 metadata["container_key"] = key
         else:
             dtype = np.dtype(raw_dtype)
             if dtype.kind != "c":
                 raise ValueError("raw_dtype must be a complex NumPy dtype")
             iq = np.fromfile(resolved, dtype=dtype)
+            calibration_offset_db = 0.0
+            frequency_dependent_offset_db = 0.0
+            input_correction_db = 0.0
+            amplitude_calibrated = False
+        if suffix == ".npy":
+            calibration_offset_db = 0.0
+            frequency_dependent_offset_db = 0.0
+            input_correction_db = 0.0
+            amplitude_calibrated = False
         if sample_rate_hz is None:
             raise ValueError("sample_rate_hz is required when the file has no metadata")
         return IQRecording(
@@ -171,6 +202,10 @@ class FileIQSource:
             center_frequency_hz=float(center_frequency_hz),
             usable_bandwidth_hz=0.8 * float(sample_rate_hz),
             source=f"File: {resolved.name}",
+            calibration_offset_db=calibration_offset_db,
+            frequency_dependent_offset_db=frequency_dependent_offset_db,
+            input_correction_db=input_correction_db,
+            amplitude_calibrated=amplitude_calibrated,
             metadata=metadata,
         )
 
@@ -181,10 +216,23 @@ class FileIQSource:
             iq=recording.iq,
             sample_rate_hz=np.float64(recording.sample_rate_hz),
             center_frequency_hz=np.float64(recording.center_frequency_hz),
+            calibration_offset_db=np.float64(recording.calibration_offset_db),
+            frequency_dependent_offset_db=np.float64(
+                recording.frequency_dependent_offset_db
+            ),
+            input_correction_db=np.float64(recording.input_correction_db),
+            amplitude_calibrated=np.bool_(recording.amplitude_calibrated),
         )
 
 
-def recording_from_acquisition(record: IQAcquisitionRecord) -> IQRecording:
+def recording_from_acquisition(
+    record: IQAcquisitionRecord,
+    *,
+    calibration_offset_db: float = 0.0,
+    frequency_dependent_offset_db: float = 0.0,
+    input_correction_db: float = 0.0,
+    amplitude_calibrated: bool = False,
+) -> IQRecording:
     """Adapt the common Pluto trigger record without coupling DSP to Pluto."""
     return IQRecording(
         iq=record.iq,
@@ -193,6 +241,10 @@ def recording_from_acquisition(record: IQAcquisitionRecord) -> IQRecording:
         usable_bandwidth_hz=record.metadata.rf_bandwidth_hz,
         source=record.metadata.source,
         full_scale=record.metadata.iq_full_scale,
+        calibration_offset_db=float(calibration_offset_db),
+        frequency_dependent_offset_db=float(frequency_dependent_offset_db),
+        input_correction_db=float(input_correction_db),
+        amplitude_calibrated=bool(amplitude_calibrated),
         start_sample_index=record.start_sample_index,
         trigger_sample_index=record.trigger_sample_index,
         discontinuity_reason=record.discontinuity_reason,

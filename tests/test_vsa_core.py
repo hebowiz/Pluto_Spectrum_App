@@ -25,6 +25,25 @@ def test_recording_owns_read_only_iq() -> None:
         recording.iq[0] = 0.0
 
 
+def test_zero_span_power_uses_common_dbm_correction_convention() -> None:
+    recording = IQRecording(
+        np.full(32, 256.0 + 0.0j, dtype=np.complex64),
+        sample_rate_hz=1_000_000.0,
+        full_scale=2048.0,
+        calibration_offset_db=-62.0,
+        frequency_dependent_offset_db=1.25,
+        input_correction_db=-3.0,
+        amplitude_calibrated=True,
+    )
+    signal = SignalDescription(ModulationKind.FSK2, symbol_rate_hz=100_000.0)
+
+    result = VSAAnalyzer().analyze(recording, signal, VSASettings(remove_dc=False))
+
+    expected_dbm = 20.0 * np.log10(256.0) - 62.0 + 1.25 - 3.0
+    np.testing.assert_allclose(result.power_dbm, expected_dbm, atol=1e-10)
+    np.testing.assert_allclose(result.power_dbfs, 20.0 * np.log10(256.0 / 2048.0))
+
+
 def test_composite_signal_preserves_order_and_rejects_overlap() -> None:
     signal = SignalDescription(ModulationKind.GFSK, symbol_rate_hz=1_000_000.0)
     first = ModulationSegment(0, 100, signal, name="FSK")

@@ -93,6 +93,7 @@ class VSAAnalyzer:
         power_dbfs = 20.0 * np.log10(
             np.maximum(np.abs(iq) / float(recording.full_scale), _EPSILON)
         )
+        power_dbm = power_dbfs + recording.dbfs_to_dbm_offset_db
         frequency_hz, spectrum_dbfs = _spectrum(
             iq / float(recording.full_scale), sample_rate_hz, resolved.fft_size
         )
@@ -109,6 +110,7 @@ class VSAAnalyzer:
                 iq,
                 time_s,
                 power_dbfs,
+                power_dbm,
                 frequency_hz,
                 spectrum_dbfs,
                 inst_frequency_hz,
@@ -121,6 +123,7 @@ class VSAAnalyzer:
             iq,
             time_s,
             power_dbfs,
+            power_dbm,
             frequency_hz,
             spectrum_dbfs,
             inst_frequency_hz,
@@ -149,6 +152,10 @@ class VSAAnalyzer:
                 usable_bandwidth_hz=recording.usable_bandwidth_hz,
                 source=recording.source,
                 full_scale=recording.full_scale,
+                calibration_offset_db=recording.calibration_offset_db,
+                frequency_dependent_offset_db=recording.frequency_dependent_offset_db,
+                input_correction_db=recording.input_correction_db,
+                amplitude_calibrated=recording.amplitude_calibrated,
                 start_sample_index=recording.start_sample_index + segment.start_sample,
                 discontinuity_reason=recording.discontinuity_reason,
                 metadata={
@@ -185,6 +192,7 @@ class VSAAnalyzer:
         iq: np.ndarray,
         time_s: np.ndarray,
         power_dbfs: np.ndarray,
+        power_dbm: np.ndarray,
         spectrum_frequency_hz: np.ndarray,
         spectrum_dbfs: np.ndarray,
         instantaneous_frequency_hz: np.ndarray,
@@ -213,6 +221,7 @@ class VSAAnalyzer:
             time_s=time_s,
             iq=iq,
             power_dbfs=power_dbfs,
+            power_dbm=power_dbm,
             spectrum_frequency_hz=spectrum_frequency_hz,
             spectrum_dbfs=spectrum_dbfs,
             instantaneous_frequency_hz=instantaneous_frequency_hz,
@@ -227,6 +236,7 @@ class VSAAnalyzer:
                 "modulation": signal.modulation.value,
                 "samples_per_symbol": samples_per_symbol,
                 "estimated_deviation_hz": deviation,
+                "amplitude_calibrated": recording.amplitude_calibrated,
             },
         )
 
@@ -237,6 +247,7 @@ class VSAAnalyzer:
         iq: np.ndarray,
         time_s: np.ndarray,
         power_dbfs: np.ndarray,
+        power_dbm: np.ndarray,
         spectrum_frequency_hz: np.ndarray,
         spectrum_dbfs: np.ndarray,
         instantaneous_frequency_hz: np.ndarray,
@@ -263,6 +274,7 @@ class VSAAnalyzer:
             time_s=time_s,
             iq=iq,
             power_dbfs=power_dbfs,
+            power_dbm=power_dbm,
             spectrum_frequency_hz=spectrum_frequency_hz,
             spectrum_dbfs=spectrum_dbfs,
             instantaneous_frequency_hz=instantaneous_frequency_hz,
@@ -277,5 +289,6 @@ class VSAAnalyzer:
                 "modulation": signal.modulation.value,
                 "samples_per_symbol": recording.sample_rate_hz / signal.symbol_rate_hz,
                 "differential": signal.modulation.differential,
+                "amplitude_calibrated": recording.amplitude_calibrated,
             },
         )
