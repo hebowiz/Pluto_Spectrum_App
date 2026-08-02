@@ -9,7 +9,8 @@
 - 横軸: Time [ms]
 - 縦軸: Amplitude [dBm]
 - 表示はSpectrum Onlyへ固定
-- Time Span入力範囲: 0.01～10000秒
+- Time Span下限: 100 µs
+- Time Span上限: `min(10000 s, 4,194,304 / Sample Rate)`
 - Time Span初期値: 10 ms
 - 表示点数: 最大1000 points
 - 4トレース、4マーカーを利用可能
@@ -17,7 +18,7 @@
 
 ## RBW連動設定
 
-RBWは100 Hz～3 MHzです。Sample Rate、RF bandwidth、FFT sizeはSweep SAと共通の式で自動決定します。
+RBWは100 Hz～5 MHzです。Sample Rate、RF bandwidth、FFT sizeはSweep SAと共通の式で自動決定します。RBW 4 MHzで16 MSPS、RBW 5 MHzで20 MSPSとなります。
 
 ```text
 target bandwidth = max(4 × RBW, 521 kHz)
@@ -25,6 +26,8 @@ FFT size = RBW条件とguard条件を満たす64～16384の2のべき乗
 ```
 
 共通IQ Producerの1ブロックは現在65536 samplesです。取得record長、RBW filter、表示bucketはいずれもFFT sizeから分離されています。
+
+Time Span上限はrecord保持量を4,194,304 IQ samples以内へ制限するためSample Rateに反比例します。代表値は521 kSPSで約8.051秒、12 MSPSで約349.5 ms、16 MSPSで262.144 ms、20 MSPSで約209.7 msです。高速sample rateで非現実的な長時間raw IQを確保しません。
 
 例外として、SingleかつFree Runでは有限長Snapshotを使用します。`round(Time Span × Sample Rate)`が4,194,304 samples以下なら、1 record全体と同じ長さのRX bufferを使用し、warm-up 5 buffersと本取得1 bufferの計6 buffersでProducer自身が終了します。これによりUSBの持続throughputを超えるsample rateでも、本取得recordが単一device/DMA buffer内で連続している可能性を利用できます。上限超過時、Continuous、Power Triggerは65536-sample streamへ戻ります。
 

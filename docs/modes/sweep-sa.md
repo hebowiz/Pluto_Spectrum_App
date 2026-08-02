@@ -21,7 +21,7 @@ Sweep Pointsの入力範囲は11～1001です。周波数点はStartとStopを�
 
 ## RBW連動取得設定
 
-RBWは100 Hz～3 MHzへ制限されます。RBW変更時はサンプルレート、RF bandwidth、FFT size、取得サンプル数を自動決定します。
+RBWは100 Hz～5 MHzへ制限されます。RBW変更時はサンプルレート、RF bandwidth、FFT size、取得サンプル数を自動決定します。最大RBW 5 MHzではSample Rate/RF bandwidthが20 MHzになります。
 
 ```text
 target bandwidth = max(4 × RBW, 521 kHz)

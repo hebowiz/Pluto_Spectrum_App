@@ -12,7 +12,7 @@
 - 縦軸: Amplitude [dBm]
 - Spectrum Only表示
 - 固定長1000点の作業バッファを使用
-- Time Span: 0.01～10000秒
+- Time Span: 0.0001～10000秒
 - GUIタイマーごとにFFTサイズ分のIQを共通`IQBlock` APIから同期取得
 - 取得開始または設定変更後に5回分をwarm-upとして破棄
 - Time Span到達時に完成した時間窓をまとめて描画

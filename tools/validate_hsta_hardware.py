@@ -26,6 +26,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--uri", default=None)
     parser.add_argument("--sample-rate", type=int, default=4_000_000)
+    parser.add_argument("--rbw", type=float, default=1_000_000.0)
     parser.add_argument("--time-span", type=float, default=0.1)
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--continuous-duration", type=float, default=0.0)
@@ -43,6 +44,7 @@ def main() -> None:
         time_analyzer_sample_rate_hz=args.sample_rate,
         time_analyzer_rf_bandwidth_hz=min(args.sample_rate, 20_000_000),
         time_analyzer_time_span_s=args.time_span,
+        rbw_hz=args.rbw,
         fft_size=4096,
         sdr_uri=args.uri,
         hsta_trigger_kind=args.trigger_kind,
@@ -162,6 +164,7 @@ def main() -> None:
             "error": error,
             "elapsed_s": elapsed_s,
             "requested_sample_rate_hz": args.sample_rate,
+            "requested_rbw_hz": args.rbw,
             "requested_time_span_s": args.time_span,
             "continuous_duration_s": args.continuous_duration,
             "trigger_kind": args.trigger_kind,

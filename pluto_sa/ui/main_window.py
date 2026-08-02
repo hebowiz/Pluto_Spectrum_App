@@ -57,7 +57,7 @@ PLUTO_MAX_CENTER_FREQ_MHZ = 6000.0
 MIN_SPAN_MHZ = 0.001
 MIN_RBW_KHZ = 0.0
 MIN_SWEEP_RBW_HZ = 100.0
-MAX_SWEEP_RBW_HZ = 3_000_000.0
+MAX_SWEEP_RBW_HZ = 5_000_000.0
 MAX_REALTIME_RBW_HZ = 55_000_000.0
 MAX_REALTIME_FFT_SIZE = 16_384
 MIN_TIME_ANALYZER_SAMPLE_RATE_HZ = 521_000
@@ -85,7 +85,7 @@ HIGH_SPEED_TA_STREAM_READ_BLOCKS = 8
 HIGH_SPEED_TA_GAP_RATIO_THRESHOLD = 1.2
 HIGH_SPEED_TA_PEAK_MIN_PROMINENCE_DB = 3.0
 HSTA_DEBUG_THROTTLE_S = 1.0
-MIN_TIME_ANALYZER_TIME_SPAN_S = 0.01
+MIN_TIME_ANALYZER_TIME_SPAN_S = 0.0001
 MAX_TIME_ANALYZER_TIME_SPAN_S = 10_000.0
 CALIBRATION_FIXED_SPAN_HZ = 10_000_000
 CALIBRATION_FIXED_RBW_HZ = 1_000_000.0
@@ -806,14 +806,26 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _time_analyzer_time_span_s(self) -> float:
         if self._is_high_speed_time_analyzer_mode():
+            minimum_s, maximum_s = self._high_speed_ta_time_span_limits_s()
             return self._clamp_float(
                 float(self.config.time_analyzer_time_span_s),
-                MIN_TIME_ANALYZER_TIME_SPAN_S,
-                MAX_TIME_ANALYZER_TIME_SPAN_S,
+                minimum_s,
+                maximum_s,
             )
         if self._time_analyzer_time_axis_s is None or len(self._time_analyzer_time_axis_s) == 0:
             return 1.0
         return max(1e-6, float(self._time_analyzer_time_axis_s[-1]))
+
+    def _high_speed_ta_time_span_limits_s(self) -> tuple[float, float]:
+        sample_rate_hz = max(1.0, float(self.config.sample_rate_hz))
+        maximum_s = min(
+            float(MAX_TIME_ANALYZER_TIME_SPAN_S),
+            float(HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES) / sample_rate_hz,
+        )
+        return float(MIN_TIME_ANALYZER_TIME_SPAN_S), max(
+            float(MIN_TIME_ANALYZER_TIME_SPAN_S),
+            maximum_s,
+        )
 
     def _reset_time_analyzer_time_window(self, *, start_timestamp: float | None = None) -> None:
         # Time Analyzer uses fixed-window sweep semantics:
@@ -1210,6 +1222,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.time_analyzer_sample_rate_hz = int(target_bw_hz)
         self.config.time_analyzer_rf_bandwidth_hz = int(target_bw_hz)
         self.config.fft_size = int(fft_size)
+        if self._is_high_speed_time_analyzer_mode():
+            minimum_s, maximum_s = self._high_speed_ta_time_span_limits_s()
+            self.config.time_analyzer_time_span_s = self._clamp_float(
+                float(self.config.time_analyzer_time_span_s),
+                minimum_s,
+                maximum_s,
+            )
         self._time_analyzer_discard_samples_remaining = int(TIME_ANALYZER_WARMUP_DISCARD_COUNT)
         self._high_speed_time_analyzer.discard_samples_remaining = int(
             TIME_ANALYZER_WARMUP_DISCARD_COUNT
@@ -3789,10 +3808,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         requested_time_span_s = (float(value) * 1e-3) if is_high_speed_ta else float(value)
+        minimum_s, maximum_s = (
+            self._high_speed_ta_time_span_limits_s()
+            if is_high_speed_ta
+            else (MIN_TIME_ANALYZER_TIME_SPAN_S, MAX_TIME_ANALYZER_TIME_SPAN_S)
+        )
         self.config.time_analyzer_time_span_s = self._clamp_float(
             requested_time_span_s,
-            MIN_TIME_ANALYZER_TIME_SPAN_S,
-            MAX_TIME_ANALYZER_TIME_SPAN_S,
+            minimum_s,
+            maximum_s,
         )
         self._reset_plot_state()
         if previous_state == SWEEP_STATE_RUNNING:
@@ -3870,10 +3894,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 return
 
             requested_time_span_s = float(value) * 1e-3
+            minimum_s, maximum_s = self._high_speed_ta_time_span_limits_s()
             self.config.time_analyzer_time_span_s = self._clamp_float(
                 requested_time_span_s,
-                MIN_TIME_ANALYZER_TIME_SPAN_S,
-                MAX_TIME_ANALYZER_TIME_SPAN_S,
+                minimum_s,
+                maximum_s,
             )
             self._reset_plot_state()
             self._update_sweep_controls()
@@ -5787,10 +5812,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             else 1.0 / 60.0
         )
         if self._is_high_speed_time_analyzer_mode():
+            minimum_s, maximum_s = self._high_speed_ta_time_span_limits_s()
             time_span_s = self._clamp_float(
                 float(self.config.time_analyzer_time_span_s),
-                MIN_TIME_ANALYZER_TIME_SPAN_S,
-                MAX_TIME_ANALYZER_TIME_SPAN_S,
+                minimum_s,
+                maximum_s,
             )
             self.config.time_analyzer_time_span_s = float(time_span_s)
             freq_axis_display_ghz = np.array([0.0, time_span_s], dtype=float)

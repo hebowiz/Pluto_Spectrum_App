@@ -104,9 +104,14 @@ def test_hsta_single_restart_invalidates_existing_stream_cursor() -> None:
     assert owner._high_speed_ta_single_waiting_result is False
 
 
-def _snapshot_owner(*, trigger_kind: str = "free_run", time_span_s: float = 0.01):
+def _snapshot_owner(
+    *,
+    trigger_kind: str = "free_run",
+    time_span_s: float = 0.01,
+    sample_rate_hz: int = 12_000_000,
+):
     config = SimpleNamespace(
-        sample_rate_hz=12_000_000,
+        sample_rate_hz=sample_rate_hz,
         hsta_trigger_kind=trigger_kind,
     )
     owner = SimpleNamespace(
@@ -146,6 +151,38 @@ def test_hsta_oversized_single_record_falls_back_to_stream_blocks() -> None:
     samples = RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(owner)
 
     assert samples == HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES
+
+
+def test_hsta_time_span_limits_follow_sample_rate_and_allow_100us() -> None:
+    owner = _snapshot_owner(sample_rate_hz=16_000_000)
+
+    minimum_s, maximum_s = RealtimeSpectrumWindow._high_speed_ta_time_span_limits_s(
+        owner
+    )
+
+    assert minimum_s == pytest.approx(100e-6)
+    assert maximum_s == pytest.approx(HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES / 16_000_000)
+
+
+def test_hsta_100us_snapshot_at_16msps_uses_1600_samples() -> None:
+    owner = _snapshot_owner(time_span_s=100e-6, sample_rate_hz=16_000_000)
+
+    samples = RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(owner)
+
+    assert samples == 1_600
+
+
+def test_four_mhz_rbw_resolves_to_16msps() -> None:
+    owner = SimpleNamespace()
+    owner._clip_sweep_rbw = MethodType(RealtimeSpectrumWindow._clip_sweep_rbw, owner)
+    owner._clamp_int = RealtimeSpectrumWindow._clamp_int
+
+    rbw_hz, sample_rate_hz, _, _ = (
+        RealtimeSpectrumWindow._resolve_sweep_like_capture_from_rbw(owner, 4_000_000.0)
+    )
+
+    assert rbw_hz == 4_000_000.0
+    assert sample_rate_hz == 16_000_000
 
 
 def test_hsta_power_trigger_builds_exact_time_positioned_record() -> None:

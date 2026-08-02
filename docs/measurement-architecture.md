@@ -172,6 +172,7 @@ Power Level Triggerの初期実装は各complex IQ sampleのmagnitudeを明示�
 - `record samples = round(Time Span × Fs)`と同じ長さのbufferを先にarmする。Gaussian IQ Filterはrecord間stateを使わず、先頭sampleを定常初期値として解析する。
 - warm-up 5 buffersと本取得1 bufferの計6回に制限したSingle専用Producerとし、取得後にoffline解析する。最大record長は4,194,304 samplesで、超過時は従来streamへfallbackする。
 - 12 MSPSでは10 msが120,000 complex samples（wire上のI/Q int16で約480 kB、host complex64で約960 kB）、100 msが1,200,000 samples（約4.8 MB / 9.6 MB）となる。
+- HighSpeed TAのTime Span下限は100 µs、上限は`4,194,304 / Fs`を基本とする。RBW上限を5 MHzへ広げ、既存の4×規則により16 MSPS（RBW 4 MHz）と20 MSPS（RBW 5 MHz）をUIから選択できる。
 - 単一buffer内部の連続性、最大buffer長、再arm間のblind timeをcounter/PRBSまたは位相連続CWで実機検証する。配列長とhost sample indexだけを連続性の証明に使わない。
 - host software triggerをリアルタイム評価するには全sampleの連続転送が必要である。USB帯域超過時の任意event pre/post-triggerを保証するには、Pluto側の循環buffer/FPGA trigger、またはcapture-then-searchが必要となる。
 

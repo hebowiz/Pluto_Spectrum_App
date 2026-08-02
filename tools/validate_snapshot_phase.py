@@ -22,8 +22,12 @@ def analyze_block(iq: np.ndarray, sample_rate_hz: float) -> dict:
     residual_center_rad = float(np.median(residual_rad))
     absolute_residual_rad = np.abs(residual_rad - residual_center_rad)
     mad_rad = float(1.4826 * np.median(absolute_residual_rad))
-    threshold_rad = max(np.deg2rad(10.0), 10.0 * mad_rad)
+    threshold_rad = max(np.deg2rad(10.0), 6.0 * mad_rad)
     outlier_indices = np.flatnonzero(absolute_residual_rad > threshold_rad)
+    slip_threshold_rad = max(threshold_rad, 0.75 * abs(mean_step_rad))
+    slip_candidate_indices = np.flatnonzero(
+        absolute_residual_rad > slip_threshold_rad
+    )
     top_indices = np.argsort(absolute_residual_rad)[-5:][::-1]
 
     window = np.hanning(len(centered))
@@ -56,6 +60,8 @@ def analyze_block(iq: np.ndarray, sample_rate_hz: float) -> dict:
         "phase_residual_max_deg": float(np.rad2deg(np.max(absolute_residual_rad))),
         "phase_outlier_threshold_deg": float(np.rad2deg(threshold_rad)),
         "phase_outlier_count": int(outlier_indices.size),
+        "sample_slip_threshold_deg": float(np.rad2deg(slip_threshold_rad)),
+        "sample_slip_candidate_count": int(slip_candidate_indices.size),
         "largest_phase_residuals": [
             {
                 "after_sample": int(index),
@@ -76,6 +82,7 @@ def main() -> None:
     parser.add_argument("--samples", type=int, default=120_000)
     parser.add_argument("--blocks", type=int, default=6)
     parser.add_argument("--gain", type=int, default=30)
+    parser.add_argument("--summary-only", action="store_true")
     args = parser.parse_args()
 
     sdr = adi.Pluto(uri=args.uri)
@@ -117,21 +124,40 @@ def main() -> None:
             }
         )
 
-    print(
-        json.dumps(
-            {
-                "uri": args.uri,
-                "center_frequency_hz": int(args.center_frequency),
-                "sample_rate_hz": int(args.sample_rate),
-                "samples_per_block": int(args.samples),
-                "expected_block_duration_ms": args.samples / args.sample_rate * 1e3,
-                "capture_elapsed_ms": [value * 1e3 for value in elapsed_s],
-                "blocks": analyses,
-                "boundary_phase": boundary_residuals,
-            },
-            indent=2,
-        )
-    )
+    result = {
+        "uri": args.uri,
+        "center_frequency_hz": int(args.center_frequency),
+        "sample_rate_hz": int(args.sample_rate),
+        "samples_per_block": int(args.samples),
+        "expected_block_duration_ms": args.samples / args.sample_rate * 1e3,
+        "capture_elapsed_ms": [value * 1e3 for value in elapsed_s],
+        "blocks": analyses,
+        "boundary_phase": boundary_residuals,
+    }
+    if args.summary_only:
+        result = {
+            "uri": args.uri,
+            "center_frequency_hz": int(args.center_frequency),
+            "sample_rate_hz": int(args.sample_rate),
+            "samples_per_block": int(args.samples),
+            "expected_block_duration_ms": args.samples / args.sample_rate * 1e3,
+            "capture_elapsed_ms": [value * 1e3 for value in elapsed_s],
+            "phase_outlier_counts": [item["phase_outlier_count"] for item in analyses],
+            "sample_slip_threshold_deg": [
+                item["sample_slip_threshold_deg"] for item in analyses
+            ],
+            "sample_slip_candidate_counts": [
+                item["sample_slip_candidate_count"] for item in analyses
+            ],
+            "phase_residual_max_deg": [item["phase_residual_max_deg"] for item in analyses],
+            "phase_step_deg": [item["mean_phase_step_deg"] for item in analyses],
+            "fft_peak_snr_db": [item["fft_peak_snr_db"] for item in analyses],
+            "adc_clip_fraction": [item["adc_clip_fraction"] for item in analyses],
+            "boundary_phase_residual_deg": [
+                item["phase_residual_deg"] for item in boundary_residuals
+            ],
+        }
+    print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

@@ -76,9 +76,26 @@ LiteVNAから2441 MHz CWを入力し、Pluto Center 2440 MHz、12 MSPS、RF BW 1
 | 10 ms、120,000 samples × 6 buffers | 各buffer内outlier 0、本取得buffer最大残差3.86°、ADC clip 0%、FFT peak SNR約95 dB |
 | 100 ms、1,200,000 samples × 6 buffers | 各buffer内outlier 0、全buffer最大残差7.17°、本取得buffer最大5.72°、ADC clip 0%、FFT peak SNR約103 dB |
 
-平均位相進行は約31.07°/sampleであり、単発1 sample slipなら同程度の位相ジャンプになる条件です。判定閾値約24.9°に対し検出は0件でした。10 ms試験では5→6 buffer境界に155.9°の不連続が1回あり、100 ms試験の境界は最大2.75°でした。Single Snapshotはbuffer境界をrecord内へ含めないため、前者も本record内部には影響しません。
+平均位相進行は約31.07°/sampleであり、単発1 sample slipなら同程度の位相ジャンプになる条件です。noise MADの6倍と位相進行75%の大きい方をsample slip候補閾値とし、検出は0件でした。10 ms試験では5→6 buffer境界に155.9°の不連続が1回あり、100 ms試験の境界は最大2.75°でした。Single Snapshotはbuffer境界をrecord内へ含めないため、前者も本record内部には影響しません。
 
 この結果は12 MSPSで10/100 msの単一buffer内部が位相連続であることを強く支持します。ただしCW位相は2π周期なので、位相回転が偶然整数周期に近くなる複数sample欠落を原理的に見逃す可能性があります。最終的な無欠落保証にはPRBS/counterが必要です。再現用に`python -m tools.validate_snapshot_phase`を追加しました。
+
+#### 16～40 MSPS追加試験
+
+4 Msymbol/s解析を想定して16 MSPSを本命条件とし、20 MSPSまで10/100 ms、余裕確認として30/40 MSPSを10 msで試験しました。30/40 MSPSでは1 sample slipの位相を大きくするためPluto Centerを2438 MHzとし、約+3.04 MHz IFで評価しました。
+
+| Sample Rate | Snapshot | buffer内結果 | 本取得buffer最大残差 |
+|---:|---:|---|---:|
+| 16 MSPS | 10 ms / 160,000 samples | 6 buffers全てslip候補0 | 3.21°（1 sample進行23.28°） |
+| 16 MSPS | 100 ms / 1,600,000 samples | 6 buffers全てslip候補0 | 6.89° |
+| 20 MSPS | 10 ms / 200,000 samples | 6 buffers全てslip候補0 | 3.16°（1 sample進行18.62°） |
+| 20 MSPS | 100 ms / 2,000,000 samples | 6 buffers全てslip候補0 | 12.08°未満、slip閾値約13.97° |
+| 30 MSPS | 10 ms / 300,000 samples | 6 buffers全てslip候補0 | 5.55°（1 sample進行36.42°） |
+| 40 MSPS | 10 ms / 400,000 samples | 6 buffers全てslip候補0 | 3.44°（1 sample進行27.30°） |
+
+ADC clipは全条件0、FFT peak SNRは概ね91～104 dBでした。16/20/30 MSPSでは後半buffer境界に最大約120～180°の位相飛びがあり、40 MSPSでも最大約46°でした。高sample rateでも単一buffer内部は良好ですが、buffer連結を無欠落recordとして扱わない制約は維持します。
+
+実アプリ統合経路では16 MSPS、RBW 4 MHzについて、100 µs（1,600 IQ samples、約0.021秒）と10 ms（160,000 samples、約0.189秒）をSingle表示まで確認しました。いずれも6 blocks、ring上書き0、analysis queue最大1、終了時滞留0です。
 
 再実行例:
 

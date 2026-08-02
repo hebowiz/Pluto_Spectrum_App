@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 76 tests passed。従来対象に加え、Gaussian complex IQ filterのblock境界state、狭RBW FFT convolutionの分割同値性、両側3 dB RBW、帯域外抑圧、ENBW/settling/group-delay metadata、Butterworth明示選択、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離、Single Snapshotのrecord長選択・fallback・有限block Producer、CW位相jump検出を検証しています。
+2026-08-02時点: 79 tests passed。従来対象に加え、Gaussian complex IQ filterのblock境界state、狭RBW FFT convolutionの分割同値性、両側3 dB RBW、帯域外抑圧、ENBW/settling/group-delay metadata、Butterworth明示選択、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離、Single Snapshotのrecord長選択・fallback・有限block Producer、100 µs下限、Sample Rate依存上限、RBW 4 MHz→16 MSPS設定、CW位相jump/slip候補検出を検証しています。
 
 ## 現在の実装構成
 
@@ -247,4 +247,5 @@ python -m pytest -q
 - Sweep/TA共通IQ Filterのデフォルトを4次Butterworthからlinear-phase Gaussian FIRへ変更。両側3 dB RBW、ENBW約1.0645倍、tap数、群遅延をmetadata化し、狭RBWではstateful FFT convolutionへ自動切替。Butterworthは明示指定時の比較用として維持。
 - HighSpeed TAのSingle Free Runへexact-record RX Snapshotを追加。4,194,304 samples以下を単一bufferとし、warm-up 5＋本取得1 blockでProducerを自動終了。12 MSPSの10/100 ms recordを実機で解析・表示まで確認。
 - LiteVNA 2441 MHz CWをPluto Center 2440 MHzで12 MSPS Snapshot取得し、10 ms/100 ms双方の単一buffer内で位相jump 0を確認。CWの2π ambiguityを残すため最終判定はPRBS/counter待ち。
+- HighSpeed TAのTime Span下限を100 µs、上限を4,194,304 samples相当へ変更し、RBW上限5 MHzにより16/20 MSPSを選択可能化。LiteVNA CWで16/20 MSPSの10/100 ms、30/40 MSPSの10 msを検証し、全単一bufferでsample slip候補0を確認。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。
