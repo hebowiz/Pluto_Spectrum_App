@@ -35,6 +35,7 @@ PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリン�
 - Spectrum、Waterfall、または両方を選択できます。
 - Waterfallの初期履歴は300行、入力範囲は1～1000行です。
 - Waterfallは周波数方向を4点ごとに間引きます。
+- Waterfallは測定レンジの80%でRedへ到達し、それ以上の値もRedへ飽和表示します。
 - Persistenceを利用でき、Fast／Medium／Slowの減衰を選択できます。
 - Live、Max Hold、Averageの4トレースと4マーカーを利用できます。
 - 約1秒ごとにステータス表示を更新します。

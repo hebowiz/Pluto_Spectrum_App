@@ -156,6 +156,7 @@ GRAPH_VIEW_OPTIONS = [
     GRAPH_VIEW_WATERFALL_ONLY,
     GRAPH_VIEW_SPECTRUM_ONLY,
 ]
+WATERFALL_RED_SATURATION_FRACTION = 0.8
 SWEEP_STATE_RUNNING = "running"
 SWEEP_STATE_SINGLE = "single"
 SWEEP_STATE_STOPPED = "stopped"
@@ -163,6 +164,16 @@ TRACE_TYPE_LIVE = "Live"
 TRACE_TYPE_MAX_HOLD = "Max Hold"
 TRACE_TYPE_AVERAGE = "Average"
 TRACE_TYPE_OPTIONS = [TRACE_TYPE_LIVE, TRACE_TYPE_MAX_HOLD, TRACE_TYPE_AVERAGE]
+
+
+def resolve_waterfall_color_levels(y_min: float, y_max: float) -> tuple[float, float]:
+    """Map the upper 20% of the measurement range to saturated red."""
+    color_max = float(y_min) + WATERFALL_RED_SATURATION_FRACTION * (
+        float(y_max) - float(y_min)
+    )
+    return float(y_min), color_max
+
+
 TRACE_COLORS = ["#FFFC12", "#78FFEC", "#FC05FF", "#00FF07"]
 FFT_SIZE_OPTIONS = [str(2**power) for power in range(6, 15)]
 SWEEP_DETECTOR_OPTIONS = [
@@ -1942,7 +1953,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             ),
         ).getLookupTable(0.0, 1.0, 256)
         self.waterfall_img.setLookupTable(lut)
-        self.waterfall_img.setLevels((self.y_min, self.y_max))
+        self.waterfall_img.setLevels(
+            resolve_waterfall_color_levels(self.y_min, self.y_max)
+        )
 
         layout.addWidget(self.waterfall_plot)
 
@@ -5991,7 +6004,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _apply_display_scale(self) -> None:
         self.spectrum_plot.setYRange(self.y_min, self.y_max, padding=Y_AXIS_PADDING)
-        self.waterfall_img.setLevels((self.y_min, self.y_max))
+        self.waterfall_img.setLevels(
+            resolve_waterfall_color_levels(self.y_min, self.y_max)
+        )
         self._clear_persistence()
         self._update_fixed_ticks()
 

@@ -14,6 +14,7 @@ from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.ui.main_window import (
     MAX_REALTIME_FFT_SIZE,
     RealtimeSpectrumWindow,
+    resolve_waterfall_color_levels,
 )
 
 
@@ -165,3 +166,7 @@ def test_realtime_rbw_expansion_stops_at_supported_fft_limit() -> None:
     assert config.fft_size == MAX_REALTIME_FFT_SIZE
     processor = SpectrumProcessor(config)
     assert processor.filterbank_design.rbw_limited_by_fft_size is True
+
+
+def test_waterfall_reaches_red_at_80_percent_of_measurement_range() -> None:
+    assert resolve_waterfall_color_levels(-100.0, 0.0) == (-100.0, -20.0)
