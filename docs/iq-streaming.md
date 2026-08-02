@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 102 tests passed。従来対象に加え、Gaussian complex IQ filterのblock境界state、狭RBW FFT convolutionの分割同値性、両側3 dB RBW、帯域外抑圧、ENBW/settling/group-delay metadata、Butterworth明示選択、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離、Single Snapshotのrecord長選択・fallback・有限block Producer、100 µs下限、Sample Rate依存上限、RBW 4 MHz→16 MSPS設定、Free Run/Power Buffer Islandのrecord整列、host-timed forced event、buffer端未完成eventのreset、dBm/dBFS往復変換、Trigger line表示条件、Power Triggerベクトル化と逐次状態機械の同値性、filtered trigger/raw record分離、Trigger Level modal中の停止・再開、CW位相jump/slip候補検出、RTSA/WB共通Gaussian FFT filter bankの3 dB応答・ENBW・tone gain・FFT長制限、Waterfallの80% Red飽和点を検証しています。
+2026-08-02時点: 103 tests passed。従来対象に加え、Gaussian complex IQ filterのblock境界state、狭RBW FFT convolutionの分割同値性、両側3 dB RBW、帯域外抑圧、ENBW/settling/group-delay metadata、Butterworth明示選択、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離、Single Snapshotのrecord長選択・fallback・有限block Producer、100 µs下限、Sample Rate依存上限、RBW 4 MHz→16 MSPS設定、Free Run/Power Buffer Islandのrecord整列、host-timed forced event、buffer端未完成eventのreset、dBm/dBFS往復変換、Trigger line表示条件、Power Triggerベクトル化と逐次状態機械の同値性、filtered trigger/raw record分離、Trigger Level modal中の停止・再開、CW位相jump/slip候補検出、RTSA/WB共通Gaussian FFT filter bankの3 dB応答・ENBW・tone gain・FFT長制限、Waterfallの下端15% Navy固定と80% Red飽和点を検証しています。
 
 ## 現在の実装構成
 
@@ -255,4 +255,5 @@ python -m pytest -q
 - Power Trigger判定をraw瞬時IQから表示と同じGaussian IQ RBW filter後へ変更し、raw IQ record保持と分離。Trigger Level dialog中はProducer/timerを停止してqueueを破棄し、未確定入力中の古いrecord表示を防止。
 - RealTime SA、WideBand RT SA、Calibrationを、FFT後power convolutionからSweep/TAと同じGaussian FIR係数を用いるFFT filter bankへ移行。狭RBW時のFFT自動拡張、実効RBW/ENBW表示、処理方式付き校正CSVを追加。overlap STFTは次段階。
 - Waterfallの色スケール上限を測定レンジの80%へ変更し、80～100%をRedへ飽和表示。SpectrumのY軸範囲は従来どおり維持。
+- Waterfallの測定レンジ下端15%を暗いNavyへ固定し、noise floorの色変化を抑制。15～80%だけをBlue→Cyan→Green→Yellow→Redへ展開。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

@@ -157,6 +157,7 @@ GRAPH_VIEW_OPTIONS = [
     GRAPH_VIEW_SPECTRUM_ONLY,
 ]
 WATERFALL_RED_SATURATION_FRACTION = 0.8
+WATERFALL_NAVY_SATURATION_FRACTION = 0.15
 SWEEP_STATE_RUNNING = "running"
 SWEEP_STATE_SINGLE = "single"
 SWEEP_STATE_STOPPED = "stopped"
@@ -172,6 +173,37 @@ def resolve_waterfall_color_levels(y_min: float, y_max: float) -> tuple[float, f
         float(y_max) - float(y_min)
     )
     return float(y_min), color_max
+
+
+def make_waterfall_lookup_table() -> np.ndarray:
+    """Keep the lower 15% dark and map the useful range through red."""
+    measurement_range_stops = np.array(
+        [
+            0.0,
+            WATERFALL_NAVY_SATURATION_FRACTION,
+            0.30,
+            0.55,
+            0.70,
+            WATERFALL_RED_SATURATION_FRACTION,
+        ]
+    )
+    color_map_positions = (
+        measurement_range_stops / WATERFALL_RED_SATURATION_FRACTION
+    )
+    return pg.ColorMap(
+        pos=color_map_positions,
+        color=np.array(
+            [
+                [0, 0, 128, 255],
+                [0, 0, 128, 255],
+                [0, 255, 255, 255],
+                [0, 255, 0, 255],
+                [255, 255, 0, 255],
+                [255, 0, 0, 255],
+            ],
+            dtype=np.ubyte,
+        ),
+    ).getLookupTable(0.0, 1.0, 256)
 
 
 TRACE_COLORS = ["#FFFC12", "#78FFEC", "#FC05FF", "#00FF07"]
@@ -1939,20 +1971,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.waterfall_plot.setYRange(0.0, float(self.config.waterfall_history), padding=0.0)
         self._update_waterfall_ticks()
 
-        lut = pg.ColorMap(
-            pos=np.array([0.0, 0.25, 0.5, 0.75, 1.0]),
-            color=np.array(
-                [
-                    [0, 0, 128, 255],
-                    [0, 255, 255, 255],
-                    [0, 255, 0, 255],
-                    [255, 255, 0, 255],
-                    [255, 0, 0, 255],
-                ],
-                dtype=np.ubyte,
-            ),
-        ).getLookupTable(0.0, 1.0, 256)
-        self.waterfall_img.setLookupTable(lut)
+        self.waterfall_img.setLookupTable(make_waterfall_lookup_table())
         self.waterfall_img.setLevels(
             resolve_waterfall_color_levels(self.y_min, self.y_max)
         )

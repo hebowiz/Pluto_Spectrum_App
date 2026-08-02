@@ -14,6 +14,7 @@ from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.ui.main_window import (
     MAX_REALTIME_FFT_SIZE,
     RealtimeSpectrumWindow,
+    make_waterfall_lookup_table,
     resolve_waterfall_color_levels,
 )
 
@@ -170,3 +171,15 @@ def test_realtime_rbw_expansion_stops_at_supported_fft_limit() -> None:
 
 def test_waterfall_reaches_red_at_80_percent_of_measurement_range() -> None:
     assert resolve_waterfall_color_levels(-100.0, 0.0) == (-100.0, -20.0)
+
+
+def test_waterfall_keeps_lower_15_percent_dark_navy() -> None:
+    lookup_table = make_waterfall_lookup_table()
+    navy_end_index = int(np.floor((0.15 / 0.80) * 255))
+
+    np.testing.assert_array_equal(lookup_table[0], [0, 0, 128])
+    np.testing.assert_array_equal(
+        lookup_table[: navy_end_index + 1],
+        np.tile(lookup_table[0], (navy_end_index + 1, 1)),
+    )
+    np.testing.assert_array_equal(lookup_table[-1], [255, 0, 0])
