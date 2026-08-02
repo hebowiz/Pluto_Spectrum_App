@@ -45,10 +45,15 @@ python -m pluto_sa.main
 | direct USB | 6.5 MSPS | 約6.04 MSPS | saturated |
 | direct USB | 7 MSPS | 約6.01 MSPS | saturated |
 | direct USB | 8 MSPS | 約6.07 MSPS | saturated |
+| direct USB | 12 MSPS | 約6.02 MSPS | saturated（要求の50.2%） |
 | RNDIS | 1 / 4 / 5 MSPS | 要求値とほぼ一致 | sustainable |
 | RNDIS | 6 MSPS | 約5.37 MSPS | saturated |
 
 この個体・PC・libiio構成における短時間試験上の境界は、direct USBが6 MSPS、RNDISが5 MSPSです。安全な製品上限として確定するまでは余裕を見てdirect USB 5 MSPS以下を推奨します。
+
+12 MSPS、65536 samples/block、2秒の追加試験では184回、12,058,624 samplesを取得し、実効6.0215 MSPSでした。1 blockの標本時間は5.461 msですが、`rx()` refillは平均10.878 ms、p95 11.102 ms、最大11.351 msで、全184回が期待時間の1.2倍を超えました。pyadi-iioは要求長の配列を返すため、現行アプリのsequence/sample indexだけではPluto/DMAC/libiio/USB段の欠落位置を識別できません。
+
+この条件では各DMA buffer内部が連続で、buffer間に約1 block相当のblind timeが生じる可能性が高いものの、既知counter/PRBSなしには保証できません。HighSpeed TAはblock受領後にアプリ連番を付けるため、物理的に欠落したblock間も論理上連続に見える可能性があります。timestamp gapは検出できますが、現在はrecordを無効化していません。
 
 再実行例:
 
