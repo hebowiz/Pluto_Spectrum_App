@@ -10,6 +10,19 @@ VSAは現行Spectrum Analyzerの単純な追加モードではなく、同じrep
 
 R&S FPL VSAの用語、設定順序、result分類をUXの参照モデルとします。ただしPluto、SCPI instrument、保存IQという異なるsourceを同じ解析器へ接続できるよう、hardware固有設定は`IQSource` adapterへ分離します。
 
+### 1.1 当面の対象信号
+
+R&S VSAの全機能・全standard presetの再現は目標にしません。初期開発は次へ集中します。
+
+- FSK family: 2-FSK、GFSKおよび連続位相FSKを扱える共通demodulator contract。
+- PSK family: BPSK、QPSK、OQPSK、差動PSK、pi/4-DQPSK、8DPSK。
+- 想定用途: DECT、Bluetooth BR/EDRの観測、復調、symbol/packet解析。
+- 将来拡張: QAM familyを同じsymbol/result contractへ追加。
+
+DECT/Bluetoothは固定値をDSPへ埋め込まず、symbol rate、modulation、mapping、BT/Alpha、preamble/sync word、packet structure等をまとめた`AnalysisProfile`として実装します。profile値は対象規格・modeごとに定義し、manual設定で上書きできるようにします。
+
+Bluetooth EDRのように1 packet内で変調方式が切り替わる信号を最終到達点とします。このため、1 captureまたは1 result rangeにつきmodulationは1種類、という制約をarchitectureへ持ち込みません。
+
 ## 2. R&Sから採用する主要モデル
 
 ### 2.0 操作互換性の目標
@@ -102,6 +115,16 @@ Capture Buffer
 - Result Range: capture、burst、またはpattern waveformへalignし、指定symbol数を切り出す解析record。
 - Evaluation Range: Result Rangeの一部または全部。EVM、MER、phase/magnitude error、power等を集計する範囲。
 
+複数変調packetでは、Result Range内に複数の`ModulationSegment`を持ちます。各segmentはsample範囲、変調設定、同期条件、reference、evaluation rangeを個別に所有し、packet全体の時間軸とsample indexは共通に保ちます。
+
+```text
+Capture Buffer
+  └─ Result Range / Packet
+       ├─ Modulation Segment 0: FSK settings + Evaluation Range
+       ├─ Modulation Segment 1: PSK settings + Evaluation Range
+       └─ Packet-level decoded fields / status
+```
+
 R&SのResult Rangeはcapture/burst/patternへのreference、alignment、offset、symbol numberを持ち（manual pp.215-217）、Evaluation Rangeはsymbol start/stopを持ちます（manual pp.227-228）。この区別を採用し、画面のzoom範囲と測定範囲を混同しません。
 
 ## 3. Input Source
@@ -155,7 +178,9 @@ R&SのSignal Description（manual pp.164-181）に合わせ、次を独立設定
 - frame/subframe structure（将来）
 - known data / PRBS（将来）
 
-最初の対応modulationはBPSK、QPSK、OQPSK、8PSKとし、差動PSK、QAM、FSK等は同じcontractへ後から追加します。
+最初の対応modulation familyはFSKとPSKです。FSKは周波数偏移、modulation index、Gaussian BT、連続位相を設定可能にし、PSKはabsolute/differential mappingとphase ambiguityを明示的に扱います。QAMは同じsymbol/reference/result contractへ将来追加します。
+
+単一変調の`SignalDescription`に加え、複数のdescriptionと時間区間を束ねる`CompositeSignalDescription`を定義します。規格profileはpacket detector、segment boundary、各segmentのSignal Description、既知pattern、field decoderを提供します。
 
 ## 5. Sample Rateとbandwidth
 
@@ -187,20 +212,26 @@ Capture Buffer
   → integrity / overload check
   → burst search
   → I/Q pattern waveform search
-  → result range extraction
-  → frequency shift / resampling
-  → coarse timing, scale, carrier frequency and phase sync
-  → internal RX/ISI filter
-  → symbol decisions
-  → pattern symbol check / phase ambiguity resolution
-  → ideal reference generation
-  → measurement filtering (Meas and Ref)
-  → fine synchronization
-  → optional equalizer
-  → error/result calculation
+  → result range / packet extraction
+  → packet structure detection
+  → ModulationSegment[] creation
+      → frequency shift / resampling
+      → family-specific synchronization and demodulation
+      → symbol decisions
+      → pattern symbol check / ambiguity resolution
+      → ideal reference generation
+      → measurement filtering (Meas and Ref)
+      → fine synchronization
+      → optional equalizer
+      → segment error/result calculation
+  → decoded fields and packet-level result composition
 ```
 
 各stageの入力・出力・設定・statusを型として分離し、中間結果をpytestで検証できるようにします。
+
+family-specific stageでは共通の入力/output contractを使い、FSKはinstantaneous frequency、frequency/timing recovery、frequency decisionを中心に処理し、PSKはcarrier phase/timing recovery、complex symbol decisionを中心に処理します。表示側は両者を共通のsymbol table、decoded bits、error trace、summaryとして扱えます。
+
+segment boundaryは段階的に、manual指定、known patternからの相対位置、profile detectorによる自動判定へ拡張します。境界付近のfilter transientを評価範囲へ含めるかどうかもsegment metadataへ残します。
 
 ## 7. TX/RX/Measurement/Reference Filter
 
@@ -292,6 +323,8 @@ Predefined Display Configurationとして最低限次を用意します。
 - Typical PSK: Constellation、Symbol Table、EVM vs Symbol、Result Summary
 - Sync Debug: Capture、correlation、carrier/timing estimate、symbol decision
 - Filter/Equalizer: Meas/Ref Spectrum、Error Spectrum、channel/equalizer response
+- FSK Analysis: Instantaneous Frequency、FSK Eye、Symbol/Bit Table、Frequency Error
+- Packet Overview: packet全体のPower/Frequency、segment境界、segment別summary、decoded fields
 
 ## 11. Demodulation / compensation properties
 
@@ -321,15 +354,16 @@ R&Sの設定（manual pp.217-224）を参照し、段階的に次を扱います
 
 - VSA packageと別entry pointを作成。
 - source、record、session、settings、result contractを定義。
+- `CompositeSignalDescription`と`ModulationSegment`のcontractをこの段階で定義。
 - HighSpeed TAからVSAへ再利用する取得処理をUIから分離。
 
-### Phase 1: Offline PSK VSA
+### Phase 1: Offline FSK/PSK VSA
 
 - generated/file IQ source。
 - Capture/Result/Evaluation Range。
 - Zero Span、Spectrum、Spectrogram、Vector/Constellation。
-- BPSK/QPSK、RRC、manual symbol rate。
-- symbol table、basic EVM。
+- 2-FSK/GFSK、BPSK/QPSKと差動PSK、Gaussian/RRC、manual symbol rate。
+- instantaneous frequency、symbol/bit table、PSK basic EVM、FSK error metrics。
 
 ### Phase 2: Synchronizationとpattern
 
@@ -337,6 +371,7 @@ R&Sの設定（manual pp.217-224）を参照し、段階的に次を扱います
 - I/Q waveform correlation。
 - pattern symbol checkとphase ambiguity解消。
 - burst search、result gating。
+- DECT/Bluetooth向け`AnalysisProfile`の基礎。
 
 ### Phase 3: Live source
 
@@ -355,12 +390,22 @@ R&Sの設定（manual pp.217-224）を参照し、段階的に次を扱います
 - Meas/Ref/error filter chain。
 - EVM normalization variants。
 - compensation、equalizer、limit check、statistics。
--既知vectorと実機によるcross-validation。
+- 既知vectorと実機によるcross-validation。
+
+### Phase 6: Composite / packet analysis
+
+- `CompositeSignalDescription`と`ModulationSegment[]`。
+- manualおよびprofile-driven segment boundary。
+- Bluetooth EDRを想定したFSK/PSK区間の一括解析。
+- segment別同期・復調結果とpacket-level decoded fieldの統合表示。
+- capture全体、segment別、packet全体の測定結果を同じsession snapshotへ保持。
 
 ## 13. 検証方針
 
 - 理想symbol列からIQ waveformを生成し、TX/RX filter、timing/carrier error、AWGN、IQ imbalance、droop、multipathを個別注入する。
+- FSKはfrequency offset/deviation、BT、modulation index、連続位相、symbol timing errorを個別に注入する。
 - 各stageの推定誤差、decoded symbol、EVMをpytestで固定する。
+- FSK→PSKの合成waveformを生成し、segment境界、各blockのdecoded bits、sample index対応が保たれることを固定testにする。
 - source adapterごとに同じrecordを入力し、解析結果が一致することを確認する。
 - R&Sから同じIQ dataと設定で得たResult Summary、symbol table、EVM traceと比較する。
 - 補正、filter、normalization、evaluation rangeを一致させずにEVM値だけを比較しない。
@@ -368,10 +413,10 @@ R&Sの設定（manual pp.217-224）を参照し、段階的に次を扱います
 ## 14. 当面の対象外
 
 - 全R&S standard presetの再現。
-- FSK/QAM/APSK/MSKの初期実装。
+- QAM/APSKと高度なmulti-carrier modulationの初期実装。
 - hardware external trigger。
 - R&S固有file/commandの全機種共通化。
 - multi-channel/MIMO。
 - RTSA overlap/POIとの統合。
 
-これらを後から追加できるcontractにはしますが、最初のPSK VSA完成を妨げないよう段階化します。
+これらを後から追加できるcontractにはしますが、最初のFSK/PSK VSA完成を妨げないよう段階化します。
