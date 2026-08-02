@@ -187,6 +187,14 @@ def main() -> None:
             "pending_jobs": len(window._high_speed_ta_pending_analysis_jobs),
             "max_job_queue_size": max_job_queue_size,
             "max_result_queue_size": max_result_queue_size,
+            "island_blocks": window._high_speed_time_analyzer.island_blocks,
+            "island_records": window._high_speed_time_analyzer.island_records,
+            "island_edge_rejections": (
+                window._high_speed_time_analyzer.island_edge_rejections
+            ),
+            "island_blind_time_s": (
+                window._high_speed_time_analyzer.island_blind_time_s
+            ),
             "transition_publish_counts": transition_publish_counts,
         }
         print(json.dumps(result, indent=2))

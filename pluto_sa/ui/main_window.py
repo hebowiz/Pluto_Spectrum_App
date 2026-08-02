@@ -279,6 +279,10 @@ class HighSpeedTimeAnalyzerCaptureState:
     gap_times_s: list[float] = field(default_factory=list)
     last_peak_time_s: float | None = None
     sweep_id: int = 0
+    island_blocks: int = 0
+    island_records: int = 0
+    island_edge_rejections: int = 0
+    island_blind_time_s: float = 0.0
 
 
 @dataclass
@@ -404,6 +408,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             maxsize=HIGH_SPEED_TA_RESULT_QUEUE_SIZE
         )
         self._high_speed_ta_single_waiting_result = False
+        self._high_speed_ta_island_auto_deadline_s: float | None = None
         self._hsta_debug_last_log_s: dict[str, float] = {}
         # Prioritize regular marker visibility in High Speed TA.
         # Gap scatter can be re-enabled later when marker behavior is stabilized.
@@ -875,6 +880,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         state.gap_times_s.clear()
         state.last_peak_time_s = None
         state.sweep_id = 0
+        state.island_blocks = 0
+        state.island_records = 0
+        state.island_edge_rejections = 0
+        state.island_blind_time_s = 0.0
+        self._high_speed_ta_island_auto_deadline_s = None
         if reset_discard:
             state.discard_samples_remaining = int(TIME_ANALYZER_WARMUP_DISCARD_COUNT)
         if self.config.sweep_profile_logging:
@@ -1026,7 +1036,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._hsta_debug_log("stream_start_request", force=True)
         self._start_high_speed_ta_analysis_thread()
         snapshot_enabled = self._use_high_speed_ta_snapshot()
-        continuous_island_enabled = self._use_high_speed_ta_continuous_islands()
+        buffer_island_enabled = self._use_high_speed_ta_buffer_islands()
         capture_block_samples = self._resolve_high_speed_ta_capture_block_samples()
         if snapshot_enabled:
             self._hsta_debug_log(
@@ -1037,9 +1047,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 ),
                 force=True,
             )
-        elif continuous_island_enabled:
+        elif buffer_island_enabled:
             self._hsta_debug_log(
-                "continuous_island_start",
+                "buffer_island_start",
                 message=f"samples={capture_block_samples}",
                 force=True,
             )
@@ -1058,19 +1068,25 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _resolve_high_speed_ta_capture_block_samples(self) -> int:
         """Use one exact RX buffer for bounded Single Free Run records."""
         if not self._use_high_speed_ta_snapshot():
-            if not self._use_high_speed_ta_continuous_islands():
+            if not self._use_high_speed_ta_buffer_islands():
                 return int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES)
             record_samples = resolve_time_window_samples(
                 self._time_analyzer_time_span_s(),
                 max(1.0, float(self.config.sample_rate_hz)),
             )
-            records_per_block = min(
-                int(HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_RECORDS),
-                max(
+            if TriggerKind(self.config.hsta_trigger_kind) is TriggerKind.POWER_LEVEL:
+                records_per_block = max(
                     1,
-                    int(np.ceil(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES / record_samples)),
-                ),
-            )
+                    int(HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_SAMPLES) // record_samples,
+                )
+            else:
+                records_per_block = min(
+                    int(HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_RECORDS),
+                    max(
+                        1,
+                        int(np.ceil(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES / record_samples)),
+                    ),
+                )
             return int(record_samples * records_per_block)
         return int(
             resolve_time_window_samples(
@@ -1101,13 +1117,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return False
         return True
 
-    def _use_high_speed_ta_continuous_islands(self) -> bool:
+    def _use_high_speed_ta_buffer_islands(self) -> bool:
+        trigger_kind = TriggerKind(self.config.hsta_trigger_kind)
         if (
-            self.sweep_state != SWEEP_STATE_RUNNING
-            or TriggerKind(self.config.hsta_trigger_kind) is not TriggerKind.FREE_RUN
-            or float(self.config.sample_rate_hz)
+            float(self.config.sample_rate_hz)
             <= float(HIGH_SPEED_TA_CONTINUOUS_MAX_SAMPLE_RATE_HZ)
         ):
+            return False
+        if trigger_kind is TriggerKind.FREE_RUN:
+            if self.sweep_state != SWEEP_STATE_RUNNING:
+                return False
+        elif trigger_kind is TriggerKind.POWER_LEVEL:
+            if self.sweep_state not in {SWEEP_STATE_RUNNING, SWEEP_STATE_SINGLE}:
+                return False
+        else:
             return False
         record_samples = resolve_time_window_samples(
             self._time_analyzer_time_span_s(),
@@ -6208,6 +6231,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         line3 = self._make_fft_info_status_line()
         line4 = f"Detector: {self.config.sweep_detector_mode}"
+        if (
+            self._is_high_speed_time_analyzer_mode()
+            and self._high_speed_time_analyzer.island_blocks > 0
+        ):
+            state = self._high_speed_time_analyzer
+            line4 += (
+                f"   Islands: {state.island_blocks}"
+                f"   Island Records: {state.island_records}"
+                f"   Edge Reject: {state.island_edge_rejections}"
+                f"   Blind: {state.island_blind_time_s * 1e3:.1f} ms"
+            )
         return f"{line1}\n{line2}\n{line3}\n{line4}"
 
     def _make_correction_status_text(self) -> str:
@@ -6662,6 +6696,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.sweep_state == SWEEP_STATE_SINGLE
             else TriggerRunMode(self.config.hsta_trigger_run_mode)
         )
+        power_island = (
+            trigger_kind is TriggerKind.POWER_LEVEL
+            and self._use_high_speed_ta_buffer_islands()
+        )
         trigger_config = TriggerConfig(
             kind=trigger_kind,
             run_mode=run_mode,
@@ -6677,6 +6715,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 )
                 if trigger_kind == TriggerKind.POWER_LEVEL
                 and run_mode == TriggerRunMode.AUTO
+                and not power_island
                 else None
             ),
         )
@@ -7246,6 +7285,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 )
                 if expected_dt_s > 0.0:
                     gap_ratio = actual_dt_s / expected_dt_s
+                    if self._use_high_speed_ta_buffer_islands():
+                        state.island_blind_time_s += max(
+                            0.0,
+                            actual_dt_s - expected_dt_s,
+                        )
                     if gap_ratio > HIGH_SPEED_TA_GAP_RATIO_THRESHOLD:
                         state.gap_count += 1
                         state.gap_ratio_sum += float(gap_ratio)
@@ -7259,13 +7303,52 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                         )
             state.prev_block_timestamp_s = sample_timestamp
 
-            continuous_island = self._use_high_speed_ta_continuous_islands()
-            if continuous_island:
+            buffer_island = self._use_high_speed_ta_buffer_islands()
+            if buffer_island:
                 # At rates above sustainable USB throughput, each returned RX
                 # buffer is treated as its own contiguous island. Never let a
                 # partial record or measurement-filter state cross its edge.
+                state.island_edge_rejections += int(
+                    acquisition.recorder.pending_records
+                )
                 acquisition.reset()
-            records = acquisition.feed(block)
+                state.island_blocks += 1
+            forced_sample_index: int | None = None
+            trigger_kind = TriggerKind(self.config.hsta_trigger_kind)
+            if (
+                buffer_island
+                and trigger_kind is TriggerKind.POWER_LEVEL
+                and self.sweep_state == SWEEP_STATE_RUNNING
+                and TriggerRunMode(self.config.hsta_trigger_run_mode)
+                is TriggerRunMode.AUTO
+            ):
+                now_s = time.perf_counter()
+                if self._high_speed_ta_island_auto_deadline_s is None:
+                    self._high_speed_ta_island_auto_deadline_s = (
+                        now_s + float(self.config.hsta_trigger_auto_timeout_s)
+                    )
+                if now_s >= self._high_speed_ta_island_auto_deadline_s:
+                    forced_sample_index = (
+                        int(block.start_sample_index)
+                        + int(acquisition.config.pretrigger_samples)
+                    )
+            records = acquisition.feed(
+                block,
+                forced_sample_index=forced_sample_index,
+            )
+            if buffer_island:
+                state.island_records += len(records)
+            if (
+                records
+                and trigger_kind is TriggerKind.POWER_LEVEL
+                and self.sweep_state == SWEEP_STATE_RUNNING
+                and TriggerRunMode(self.config.hsta_trigger_run_mode)
+                is TriggerRunMode.AUTO
+            ):
+                self._high_speed_ta_island_auto_deadline_s = (
+                    time.perf_counter()
+                    + float(self.config.hsta_trigger_auto_timeout_s)
+                )
             if not records:
                 continue
             single_shot = self.sweep_state == SWEEP_STATE_SINGLE
@@ -7278,8 +7361,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                         capture_call_elapsed_s=float(block.capture_elapsed_s),
                         single_shot=single_shot,
                         discontinuity_reason=(
-                            "continuous_rx_buffer_boundary"
-                            if continuous_island and record_index == 0
+                            "rx_buffer_island_boundary"
+                            if buffer_island and record_index == 0
                             else None
                         ),
                     )

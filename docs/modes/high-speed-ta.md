@@ -29,9 +29,11 @@ FFT size = RBW条件とguard条件を満たす64～16384の2のべき乗
 
 Time Span上限はrecord保持量を4,194,304 IQ samples以内へ制限するためSample Rateに反比例します。代表値は521 kSPSで約8.051秒、12 MSPSで約349.5 ms、16 MSPSで262.144 ms、20 MSPSで約209.7 msです。高速sample rateで非現実的な長時間raw IQを確保しません。
 
-例外として、SingleかつFree Runでは有限長Snapshotを使用します。`round(Time Span × Sample Rate)`が4,194,304 samples以下なら、1 record全体と同じ長さのRX bufferを使用し、warm-up 5 buffersと本取得1 bufferの計6 buffersでProducer自身が終了します。これによりUSBの持続throughputを超えるsample rateでも、本取得recordが単一device/DMA buffer内で連続している可能性を利用できます。Single上限超過時とPower Triggerは65536-sample streamへ戻り、短時間Continuous Free Runは次のIsland方式を使用します。
+例外として、SingleかつFree Runでは有限長Snapshotを使用します。`round(Time Span × Sample Rate)`が4,194,304 samples以下なら、1 record全体と同じ長さのRX bufferを使用し、warm-up 5 buffersと本取得1 bufferの計6 buffersでProducer自身が終了します。これによりUSBの持続throughputを超えるsample rateでも、本取得recordが単一device/DMA buffer内で連続している可能性を利用できます。Single上限超過時は65536-sample streamへ戻ります。短時間のFree Run ContinuousとPower Triggerは次のBuffer Island方式を使用します。
 
-6 MSPSを超えるContinuous Free Runでは、record長が262,144 samples以下の場合にContinuous Island方式を使用します。約65,536 samples以上となる最小のrecord整数倍をRX buffer長とし、最大4 recordsを1 bufferへ格納します。各buffer先頭でtrigger recorderとGaussian filter stateをresetし、buffer内の完成recordだけを公開します。buffer間にはblind timeがありますが、不連続な境界をrecordへ混入させません。16 MSPS・2 msは32,000 samples×3、3 msは48,000 samples×2で、どちらも96,000-sample bufferになります。
+6 MSPSを超え、record長が262,144 samples以下の場合にBuffer Island方式を使用します。Free Run Continuousでは約65,536 samples以上となる最小のrecord整数倍をRX buffer長とし、最大4 recordsを1 bufferへ格納します。16 MSPS・2 msは32,000 samples×3、3 msは48,000 samples×2で、どちらも96,000-sample bufferです。
+
+Power TriggerのSingle/Continuousでは、262,144 samples以下に収まる最大のrecord整数倍をRX buffer長とします。16 MSPS・2 msは32,000 samples×8＝256,000 samples、3 msは48,000 samples×5＝240,000 samplesです。各bufferを取得後に全sampleからtrigger edgeを探索し、pre/post sampleが同じbuffer内で完成するeventだけを公開します。buffer端で未完成のeventは棄却し、次buffer先頭でtrigger recorderとGaussian filter stateをresetします。buffer間にはUSB転送中のblind timeがありますが、不連続な境界をrecordへ混入させません。
 
 ## スレッド構成
 
@@ -73,10 +75,12 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 - Main MenuのSingleはTrigger条件成立後にpre/postを含む1 recordを完成して停止します。SingleではAuto timeoutを使用しません。
 - Positionから指定Time Spanに対応するrecord長をpre/post sample数へ分配します。
 - Levelは校正済みdBmではありません。`iq_full_scale=2048`で正規化したsample magnitudeのdBFSです。
+- 6 MSPS超のPower Islandでは、Auto Timeoutをsample数ではなくhostの単調時計で評価します。timeout時は取得済みbuffer内の安全な位置へforced eventを置き、完全なpre/post recordを生成します。
+- Power Islandが監視できるのは各RX buffer内部だけです。buffer間blind timeに発生したevent、およびbuffer端でpre/postが完成しないeventは捕捉できません。周期信号や再試行可能なevent向けであり、希少なone-shot eventの捕捉は保証しません。
 
 ## 時間recordと解析
 
-- `TriggerAcquisitionController`がブロック境界をまたぐpre/post-trigger recordを作ります。
+- 通常streamでは`TriggerAcquisitionController`がブロック境界をまたぐpre/post-trigger recordを作ります。Buffer Islandでは境界をまたがず、同一buffer内で完成するrecordだけを作ります。
 - window長は`round(Time Span × Sample Rate)`です。FFT frameへの切り上げと解析時の端数sample破棄はありません。
 - ブロック間隔が期待時間の1.2倍を超えた場合、gapとして統計へ記録します。
 - 1つの時間窓が完成すると取得データのスナップショットを最大4件の解析job queueへ渡します。
@@ -87,7 +91,7 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 - consumerが512ブロックより遅れた場合はoverrunとして明示し、不連続をまたいだ時間窓を破棄します。
 - Singleは正確な1 recordが完成した時点でProducerを停止し、解析・表示完了後に測定を終了します。
 - Single Free Run SnapshotのProducerは最大6 buffersで自動停止するため、GUI停止時に巨大bufferがring容量まで増え続けません。
-- Continuous Islandでは同一buffer内のrecord間だけIQ Filter stateを継続し、次buffer先頭recordへ`continuous_rx_buffer_boundary`を付けてresetします。
+- Buffer Islandでは同一buffer内のrecord間だけIQ Filter stateを継続し、次buffer先頭recordへ`rx_buffer_island_boundary`を付けてresetします。
 
 ## 振幅処理
 
@@ -117,5 +121,5 @@ filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落な�
 - 512×65536 samplesのcomplex64保持は最大約256 MiBです。
 - USB/libiio内部の欠落はアプリ側連番だけでは検出できないため、実機の既知信号による連続性検証が必要です。
 - Snapshotは単一buffer長、record長、解析完了を保証しますが、buffer内部の物理的なsample連続性はまだ保証しません。counter/PRBSまたは位相連続な既知CWによる検証が必要です。
-- Continuous Islandは連続した時間軸を保証する方式ではなく、連続bufferから得た個別のcontiguous record列です。buffer間blind time、破棄時間、実効観測率のUI表示は未実装です。
+- Buffer Islandは連続した時間軸を保証する方式ではなく、連続bufferから得た個別のcontiguous record列です。ヘッダーへ`Islands`、`Island Records`、`Edge Reject`、推定`Blind ms`を表示します。blind timeはhost受領間隔から引いた標本時間の概算であり、Pluto内部の正確な欠落位置を示すものではありません。
 - Single/Continuous切替やSweep Time変更時は、既存RX workerとstream cursorを同時に無効化して新しいepochで再開します。

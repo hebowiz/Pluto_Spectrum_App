@@ -125,8 +125,8 @@ def _snapshot_owner(
         RealtimeSpectrumWindow._use_high_speed_ta_snapshot,
         owner,
     )
-    owner._use_high_speed_ta_continuous_islands = MethodType(
-        RealtimeSpectrumWindow._use_high_speed_ta_continuous_islands,
+    owner._use_high_speed_ta_buffer_islands = MethodType(
+        RealtimeSpectrumWindow._use_high_speed_ta_buffer_islands,
         owner,
     )
     return owner
@@ -140,12 +140,28 @@ def test_hsta_single_free_run_uses_one_exact_snapshot_buffer() -> None:
     assert samples == 120_000
 
 
-def test_hsta_power_trigger_keeps_continuous_stream_blocks() -> None:
+def test_hsta_high_rate_power_trigger_uses_large_record_aligned_island() -> None:
     owner = _snapshot_owner(trigger_kind="power_level")
 
     samples = RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(owner)
 
-    assert samples == HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES
+    assert samples == 240_000
+
+
+@pytest.mark.parametrize("sweep_state", (SWEEP_STATE_SINGLE, SWEEP_STATE_RUNNING))
+def test_16msps_2ms_power_trigger_uses_256k_island(sweep_state: str) -> None:
+    owner = _snapshot_owner(
+        trigger_kind="power_level",
+        time_span_s=0.002,
+        sample_rate_hz=16_000_000,
+        sweep_state=sweep_state,
+    )
+
+    assert RealtimeSpectrumWindow._use_high_speed_ta_buffer_islands(owner)
+    assert (
+        RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(owner)
+        == 256_000
+    )
 
 
 def test_hsta_oversized_single_record_falls_back_to_stream_blocks() -> None:
@@ -205,7 +221,7 @@ def test_16msps_continuous_uses_record_aligned_iq_islands(
         sweep_state=SWEEP_STATE_RUNNING,
     )
 
-    assert RealtimeSpectrumWindow._use_high_speed_ta_continuous_islands(owner)
+    assert RealtimeSpectrumWindow._use_high_speed_ta_buffer_islands(owner)
     block_samples = RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(
         owner
     )
@@ -236,6 +252,7 @@ def test_hsta_power_trigger_builds_exact_time_positioned_record() -> None:
         _high_speed_ta_generation=0,
         _time_analyzer_time_span_s=lambda: config.time_analyzer_time_span_s,
         _clear_high_speed_ta_analysis_queues=lambda: None,
+        _use_high_speed_ta_buffer_islands=lambda: False,
     )
 
     acquisition = RealtimeSpectrumWindow._ensure_high_speed_ta_trigger_acquisition(owner)

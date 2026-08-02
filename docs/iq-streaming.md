@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 81 tests passed。従来対象に加え、Gaussian complex IQ filterのblock境界state、狭RBW FFT convolutionの分割同値性、両側3 dB RBW、帯域外抑圧、ENBW/settling/group-delay metadata、Butterworth明示選択、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離、Single Snapshotのrecord長選択・fallback・有限block Producer、100 µs下限、Sample Rate依存上限、RBW 4 MHz→16 MSPS設定、Continuous Islandの2/3 ms record整列、CW位相jump/slip候補検出を検証しています。
+2026-08-02時点: 85 tests passed。従来対象に加え、Gaussian complex IQ filterのblock境界state、狭RBW FFT convolutionの分割同値性、両側3 dB RBW、帯域外抑圧、ENBW/settling/group-delay metadata、Butterworth明示選択、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離、Single Snapshotのrecord長選択・fallback・有限block Producer、100 µs下限、Sample Rate依存上限、RBW 4 MHz→16 MSPS設定、Free Run/Power Buffer Islandのrecord整列、host-timed forced event、buffer端未完成eventのreset、CW位相jump/slip候補検出を検証しています。
 
 ## 現在の実装構成
 
@@ -249,4 +249,5 @@ python -m pytest -q
 - LiteVNA 2441 MHz CWをPluto Center 2440 MHzで12 MSPS Snapshot取得し、10 ms/100 ms双方の単一buffer内で位相jump 0を確認。CWの2π ambiguityを残すため最終判定はPRBS/counter待ち。
 - HighSpeed TAのTime Span下限を100 µs、上限を4,194,304 samples相当へ変更し、RBW上限5 MHzにより16/20 MSPSを選択可能化。LiteVNA CWで16/20 MSPSの10/100 ms、30/40 MSPSの10 msを検証し、全単一bufferでsample slip候補0を確認。
 - 6 MSPS超のFree Run Continuousへbuffer-isolated record生成を追加。16 MSPS・2 msは3 records、3 msは2 recordsを各96,000-sample buffer内だけから作り、buffer境界でtrigger/filter stateをreset。実機でring上書き・queue滞留0とCW slip候補0を確認。
+- 6 MSPS超のPower Trigger Single/ContinuousへBuffer Islandを追加。262,144 samples以下の最大record整数倍をoffline走査し、同一bufferでpre/postが完成するeventだけを採用。端eventを棄却し、Auto timeoutはhost時刻から安全なforced eventを生成する。16 MSPSの2 ms Autoと3 ms Normal Singleを実機確認。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

@@ -64,7 +64,12 @@ class TriggerAcquisitionController:
         self._arm_ready_index = None
         self._auto_deadline_index = None
 
-    def feed(self, block: IQBlock) -> tuple[IQAcquisitionRecord, ...]:
+    def feed(
+        self,
+        block: IQBlock,
+        *,
+        forced_sample_index: int | None = None,
+    ) -> tuple[IQAcquisitionRecord, ...]:
         """Consume one ordered block and return any records completed by it."""
         if self.stopped:
             return ()
@@ -76,7 +81,13 @@ class TriggerAcquisitionController:
         if not contiguous:
             self._reset_timeline(block)
 
-        if self.config.kind == TriggerKind.FREE_RUN:
+        if forced_sample_index is not None:
+            if self.config.kind != TriggerKind.POWER_LEVEL:
+                raise ValueError("forced_sample_index requires a power trigger")
+            events = (
+                self._event_at(block, int(forced_sample_index), forced=True),
+            )
+        elif self.config.kind == TriggerKind.FREE_RUN:
             events = self._free_run_events(block)
         else:
             assert self.detector is not None

@@ -116,6 +116,53 @@ def test_power_auto_forces_record_at_sample_timeout() -> None:
     assert records[0].trigger_sample_offset == 2
 
 
+def test_power_trigger_accepts_host_timed_forced_event_inside_island() -> None:
+    config = TriggerConfig(
+        kind=TriggerKind.POWER_LEVEL,
+        run_mode=TriggerRunMode.AUTO,
+        level_dbfs=-3.0,
+        pretrigger_samples=2,
+        posttrigger_samples=3,
+        auto_timeout_samples=None,
+    )
+    controller = TriggerAcquisitionController(config, metadata())
+    stream = IQStreamBuffer(capacity_blocks=8)
+    stream.begin_stream()
+    block = publish(stream, [0.01] * 12)
+
+    records = controller.feed(
+        block,
+        forced_sample_index=block.start_sample_index + 2,
+    )
+
+    assert len(records) == 1
+    assert records[0].trigger.forced is True
+    assert records[0].trigger_sample_offset == 2
+    assert records[0].sample_count == 6
+
+
+def test_power_trigger_edge_record_is_pending_until_island_reset() -> None:
+    config = TriggerConfig(
+        kind=TriggerKind.POWER_LEVEL,
+        run_mode=TriggerRunMode.NORMAL,
+        slope=TriggerSlope.RISING,
+        level_dbfs=-10.0,
+        pretrigger_samples=2,
+        posttrigger_samples=3,
+    )
+    controller = TriggerAcquisitionController(config, metadata())
+    stream = IQStreamBuffer(capacity_blocks=8)
+    stream.begin_stream()
+    low = 10 ** (-30 / 20)
+    high = 10 ** (-5 / 20)
+
+    assert controller.feed(publish(stream, [low] * 6 + [high, high])) == ()
+    assert controller.recorder.pending_records == 1
+
+    controller.reset()
+    assert controller.recorder.pending_records == 0
+
+
 def test_power_auto_can_rearm_multiple_times_inside_one_large_block() -> None:
     config = TriggerConfig(
         kind=TriggerKind.POWER_LEVEL,

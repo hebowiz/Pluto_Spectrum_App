@@ -110,6 +110,19 @@ ADC clipは全条件0、FFT peak SNRは概ね91～104 dBでした。16/20/30 MSP
 
 同じ96,000-sample bufferを20回連続取得したLiteVNA CW試験では、全20 buffersでsample slip候補0、buffer内最大位相残差7.54°、1 sample進行約23.29°でした。一方、19個のbuffer境界では最大約164°の位相飛びを確認しました。この結果はbuffer内部recordだけを採用し、境界でtimeline/filterをresetする設計を支持します。
 
+#### 16 MSPS Power Trigger Buffer Island（2～3 ms）
+
+Power Triggerではevent探索範囲を広げるため、262,144 samples以下に収まる最大のrecord整数倍を1 RX bufferとしました。
+
+| 条件 | buffer構成 | 実機結果 |
+|---|---:|---|
+| Auto Continuous、2 ms、Level +20 dBFS、timeout 200 ms | 32,000 samples × 8＝256,000 | 1.55秒で24 buffers、forced 3、natural 0、6,144,000 samples、ring上書き0、job/result queue最大1、終了時滞留0 |
+| Normal Single、3 ms、Level -100 dBFS、Position 50% | 48,000 samples × 5＝240,000 | 0.327秒で7 buffers、natural 1、forced 0、1,680,000 samples、ring上書き0、job queue最大1、終了時滞留0 |
+
+Autoは到達不能なlevelでもhost時刻timeoutにより完全な2 ms recordを生成し、Normal Singleは自然edgeからpre/postを同一buffer内で完成して停止しました。この試験はPower Islandの制御・解析経路を確認するもので、buffer間blind time中のevent捕捉は保証しません。
+
+統計出力追加後の再試験でも、Auto Continuousは23 islands、forced 3、ring上書き0、edge棄却0、推定blind time 1.219秒、Normal Singleは1 measurement island、natural 1、ring上書き0、edge棄却0で完了しました。Autoの推定blind timeは、各bufferのhost受領間隔からbuffer標本時間を差し引いた累積値です。
+
 再実行例:
 
 ```powershell
