@@ -134,6 +134,14 @@ Autoは到達不能なlevelでもhost時刻timeoutにより完全な2 ms record�
 
 100 dBmは到達不能levelとしてAuto timeoutを、-100 dBmは自然triggerを確認する診断条件です。両条件とも校正・入出力補正を含む変換値がcontrollerへ渡り、グラフ線はユーザー指定dBmを保持しました。
 
+#### Power Trigger GUI処理時間短縮（2026-08-02）
+
+Power Trigger detectorがGUIスレッド上でcomplex IQを1 sampleずつPython判定しており、合成bufferの単体測定で96,000 samplesは29.8 ms、240,000 samplesは81.5 ms、256,000 samplesは88.5 msを占有していました。minimum duration 1 sampleの判定をNumPy threshold検索へ置き換えた結果、同条件はそれぞれ1.45 ms、3.70 ms、4.12 msとなりました。
+
+Rising/Falling/Eitherについて、ランダム2,000 samplesを2 blocksへ分割し、hysteresis 2.5 dB、holdoff 7 samplesのベクトル化結果を旧sample状態機械と比較してevent位置・測定値が一致することをpytestで確認しました。
+
+16 MSPS、2 ms、Power Normal Continuous、-100 dBmの実機負荷試験では、1秒にnatural 186 recordsを描画する意図的な高負荷条件でもGUI update callbackはp95 2.38 ms、最大16.70 ms、ring上書き0でした。Auto 100 dBmのtimeout試験ではp95 0.25 ms、最大0.76 msでした。
+
 再実行例:
 
 ```powershell

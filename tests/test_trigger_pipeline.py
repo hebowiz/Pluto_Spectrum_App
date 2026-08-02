@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pluto_sa.sdr.iq_stream import IQStreamBuffer
 from pluto_sa.sdr.trigger import (
@@ -82,6 +83,54 @@ def test_power_trigger_requires_hysteresis_rearm_and_holdoff() -> None:
     events = detector.process(block)
 
     assert [event.sample_index for event in events] == [1, 5]
+
+
+@pytest.mark.parametrize(
+    "slope",
+    (TriggerSlope.RISING, TriggerSlope.FALLING, TriggerSlope.EITHER),
+)
+def test_vectorized_single_sample_trigger_matches_sample_state_machine(
+    slope: TriggerSlope,
+) -> None:
+    rng = np.random.default_rng(20260802)
+    values_dbfs = rng.uniform(-30.0, -2.0, size=2000)
+    config = TriggerConfig(
+        kind=TriggerKind.POWER_LEVEL,
+        slope=slope,
+        level_dbfs=-12.0,
+        hysteresis_db=2.5,
+        holdoff_samples=7,
+    )
+    stream = IQStreamBuffer(capacity_blocks=8)
+    stream.begin_stream()
+    blocks = (
+        publish(stream, iq_at_dbfs(values_dbfs[:731].tolist())),
+        publish(stream, iq_at_dbfs(values_dbfs[731:].tolist())),
+    )
+    vectorized = PowerLevelTriggerDetector(config, full_scale=1.0)
+    reference = PowerLevelTriggerDetector(config, full_scale=1.0)
+
+    actual = [event for block in blocks for event in vectorized.process(block)]
+    expected: list[tuple[int, float]] = []
+    for block in blocks:
+        metric = 20.0 * np.log10(np.maximum(np.abs(block.iq), np.finfo(float).tiny))
+        for offset, value in enumerate(metric):
+            event = reference._process_sample(
+                float(value),
+                block.start_sample_index + offset,
+                block.sequence,
+                offset,
+            )
+            if event is not None:
+                expected.append((event[0], event[1]))
+
+    assert [event.sample_index for event in actual] == [item[0] for item in expected]
+    np.testing.assert_allclose(
+        [event.measured_value for event in actual],
+        [item[1] for item in expected],
+        rtol=0.0,
+        atol=1e-6,
+    )
 
 
 def test_power_trigger_discards_partial_qualification_at_epoch_boundary() -> None:

@@ -56,6 +56,12 @@ class PowerLevelTriggerDetector:
         metric_dbfs = 20.0 * np.log10(
             np.maximum(magnitude / self.full_scale, np.finfo(np.float64).tiny)
         )
+        if int(self.config.minimum_duration_samples) == 1:
+            events = self._process_single_sample_qualification(block, metric_dbfs)
+            self._stream_id = block.stream_id
+            self._expected_sample_index = block.end_sample_index
+            return events
+
         events: list[TriggerEvent] = []
         for offset, metric in enumerate(metric_dbfs):
             sample_index = block.start_sample_index + offset
@@ -80,6 +86,89 @@ class PowerLevelTriggerDetector:
 
         self._stream_id = block.stream_id
         self._expected_sample_index = block.end_sample_index
+        return tuple(events)
+
+    def _process_single_sample_qualification(
+        self,
+        block: IQBlock,
+        metric_dbfs: np.ndarray,
+    ) -> tuple[TriggerEvent, ...]:
+        """Vectorized threshold search for the UI's one-sample qualification mode."""
+        metric = np.asarray(metric_dbfs, dtype=np.float64)
+        events: list[TriggerEvent] = []
+        cursor = 0
+        sample_count = len(metric)
+        threshold = float(self.config.level_dbfs)
+        hysteresis = float(self.config.hysteresis_db)
+        block_start = int(block.start_sample_index)
+
+        def first_true(mask: np.ndarray, start: int) -> int | None:
+            matches = np.flatnonzero(mask[start:])
+            return None if len(matches) == 0 else start + int(matches[0])
+
+        while cursor < sample_count:
+            if not self._armed:
+                cursor = max(cursor, int(self._holdoff_until) - block_start + 1)
+                if cursor >= sample_count:
+                    break
+                if self.config.slope == TriggerSlope.RISING:
+                    rearm_at = first_true(metric <= threshold - hysteresis, cursor)
+                    if rearm_at is None:
+                        break
+                    cursor = rearm_at
+                elif self.config.slope == TriggerSlope.FALLING:
+                    rearm_at = first_true(metric >= threshold + hysteresis, cursor)
+                    if rearm_at is None:
+                        break
+                    cursor = rearm_at
+                else:
+                    self._update_stable_side(float(metric[cursor]))
+                self._armed = True
+
+            if self.config.slope == TriggerSlope.RISING:
+                event_at = first_true(metric >= threshold, cursor)
+                slope = TriggerSlope.RISING
+            elif self.config.slope == TriggerSlope.FALLING:
+                event_at = first_true(metric <= threshold, cursor)
+                slope = TriggerSlope.FALLING
+            elif self._stable_side < 0:
+                event_at = first_true(metric >= threshold, cursor)
+                slope = TriggerSlope.RISING
+            elif self._stable_side > 0:
+                event_at = first_true(metric <= threshold, cursor)
+                slope = TriggerSlope.FALLING
+            else:
+                low_at = first_true(metric <= threshold - hysteresis, cursor)
+                high_at = first_true(metric >= threshold + hysteresis, cursor)
+                candidates = [index for index in (low_at, high_at) if index is not None]
+                if not candidates:
+                    break
+                stable_at = min(candidates)
+                self._stable_side = -1 if stable_at == low_at else 1
+                cursor = stable_at + 1
+                continue
+
+            if event_at is None:
+                break
+            sample_index = block_start + event_at
+            events.append(
+                TriggerEvent(
+                    stream_id=block.stream_id,
+                    sample_index=sample_index,
+                    sequence=block.sequence,
+                    offset_in_block=event_at,
+                    kind=TriggerKind.POWER_LEVEL,
+                    measured_value=float(metric[event_at]),
+                )
+            )
+            self._armed = False
+            self._holdoff_until = sample_index + int(self.config.holdoff_samples)
+            self._candidate_start = None
+            self._candidate_value = None
+            self._candidate_slope = None
+            self._stable_side = 1 if slope == TriggerSlope.RISING else -1
+            cursor = event_at + 1
+
         return tuple(events)
 
     def _process_sample(

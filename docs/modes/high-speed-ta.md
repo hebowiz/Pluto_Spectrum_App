@@ -93,6 +93,7 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 - Singleは正確な1 recordが完成した時点でProducerを停止し、解析・表示完了後に測定を終了します。
 - Single Free Run SnapshotのProducerは最大6 buffersで自動停止するため、GUI停止時に巨大bufferがring容量まで増え続けません。
 - Buffer Islandでは同一buffer内のrecord間だけIQ Filter stateを継続し、次buffer先頭recordへ`rx_buffer_island_boundary`を付けてresetします。
+- Power Level detectorの通常設定（minimum duration 1 sample）は、buffer全sampleのdBFS変換とthreshold候補検索をNumPyで行います。Rising/Falling/Either、hysteresis、holdoffの状態はsample-domain状態機械と同じです。minimum durationが2 samples以上の場合は互換性を優先して従来のsample逐次判定へ戻ります。
 
 ## 振幅処理
 

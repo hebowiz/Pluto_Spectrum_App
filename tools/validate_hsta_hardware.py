@@ -7,6 +7,8 @@ import json
 import os
 import time
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyqtgraph as pg
@@ -75,6 +77,7 @@ def main() -> None:
     transition_publish_counts: dict[str, int] = {}
     forced_trigger_count = 0
     natural_trigger_count = 0
+    update_call_durations_ms: list[float] = []
     original_publish = window._publish_high_speed_ta_analysis_result
 
     def counted_publish(result) -> None:
@@ -88,13 +91,21 @@ def main() -> None:
         original_publish(result)
 
     window._publish_high_speed_ta_analysis_result = counted_publish
+
+    def update_hsta() -> None:
+        update_started = time.perf_counter()
+        window._update_high_speed_time_analyzer_spectrum()
+        update_call_durations_ms.append(
+            (time.perf_counter() - update_started) * 1000.0
+        )
+
     try:
         if args.exercise_transitions:
             window._enter_single_high_speed_time_analyzer_mode()
             single_started = time.perf_counter()
             while (time.perf_counter() - single_started) < min(0.03, args.time_span * 0.25):
                 app.processEvents()
-                window._update_high_speed_time_analyzer_spectrum()
+                update_hsta()
                 time.sleep(0.001)
 
             before_continuous = publish_count
@@ -102,7 +113,7 @@ def main() -> None:
             continuous_deadline = time.perf_counter() + max(0.75, args.time_span * 4.0)
             while time.perf_counter() < continuous_deadline:
                 app.processEvents()
-                window._update_high_speed_time_analyzer_spectrum()
+                update_hsta()
                 time.sleep(0.001)
             transition_publish_counts["single_to_continuous"] = (
                 publish_count - before_continuous
@@ -114,7 +125,7 @@ def main() -> None:
             restart_deadline = time.perf_counter() + max(0.75, args.time_span * 4.0)
             while time.perf_counter() < restart_deadline:
                 app.processEvents()
-                window._update_high_speed_time_analyzer_spectrum()
+                update_hsta()
                 time.sleep(0.001)
             transition_publish_counts["sweep_time_restart"] = (
                 publish_count - before_sweep_time_restart
@@ -128,7 +139,7 @@ def main() -> None:
                 window._enter_single_high_speed_time_analyzer_mode()
             while (time.perf_counter() - started) < args.timeout:
                 app.processEvents()
-                window._update_high_speed_time_analyzer_spectrum()
+                update_hsta()
                 max_job_queue_size = max(
                     max_job_queue_size,
                     window._high_speed_ta_analysis_jobs.qsize(),
@@ -198,6 +209,16 @@ def main() -> None:
             "pending_jobs": len(window._high_speed_ta_pending_analysis_jobs),
             "max_job_queue_size": max_job_queue_size,
             "max_result_queue_size": max_result_queue_size,
+            "gui_update_p95_ms": (
+                0.0
+                if not update_call_durations_ms
+                else float(np.percentile(update_call_durations_ms, 95.0))
+            ),
+            "gui_update_max_ms": (
+                0.0
+                if not update_call_durations_ms
+                else float(max(update_call_durations_ms))
+            ),
             "island_blocks": window._high_speed_time_analyzer.island_blocks,
             "island_records": window._high_speed_time_analyzer.island_records,
             "island_edge_rejections": (
