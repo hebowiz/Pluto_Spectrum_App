@@ -97,6 +97,19 @@ ADC clipは全条件0、FFT peak SNRは概ね91～104 dBでした。16/20/30 MSP
 
 実アプリ統合経路では16 MSPS、RBW 4 MHzについて、100 µs（1,600 IQ samples、約0.021秒）と10 ms（160,000 samples、約0.189秒）をSingle表示まで確認しました。いずれも6 blocks、ring上書き0、analysis queue最大1、終了時滞留0です。
 
+#### 16 MSPS Continuous Island（2～3 ms）
+
+16 MSPS、RBW 4 MHz、Free Run Continuousで、96,000-sample RX buffer内部だけからrecordを生成しました。
+
+| Time Span | buffer構成 | 実機結果 |
+|---:|---|---|
+| 2 ms | 32,000 samples × 3 records | 1秒で60 buffers受信、warm-up後164 records表示、ring上書き0、analysis queue最大3 |
+| 3 ms | 48,000 samples × 2 records | 2秒で122 buffers受信、warm-up後234 records表示、ring上書き0、analysis queue最大2 |
+
+両条件とも終了時job/result/pending queueは0、例外なしでした。record数は2 msで`(60 - 5 warm-up) × 3 = 165`に対し停止時刻の関係で164、3 msでは`(122 - 5) × 2 = 234`と一致しています。
+
+同じ96,000-sample bufferを20回連続取得したLiteVNA CW試験では、全20 buffersでsample slip候補0、buffer内最大位相残差7.54°、1 sample進行約23.29°でした。一方、19個のbuffer境界では最大約164°の位相飛びを確認しました。この結果はbuffer内部recordだけを採用し、境界でtimeline/filterをresetする設計を支持します。
+
 再実行例:
 
 ```powershell

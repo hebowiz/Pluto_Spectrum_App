@@ -79,6 +79,9 @@ TIME_ANALYZER_BUFFER_POINTS = 1000
 TIME_ANALYZER_WARMUP_DISCARD_COUNT = 5
 HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES = 65_536
 HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES = 4_194_304
+HIGH_SPEED_TA_CONTINUOUS_MAX_SAMPLE_RATE_HZ = 6_000_000
+HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_SAMPLES = 262_144
+HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_RECORDS = 4
 HIGH_SPEED_TA_ANALYSIS_QUEUE_SIZE = 4
 HIGH_SPEED_TA_RESULT_QUEUE_SIZE = 4
 HIGH_SPEED_TA_STREAM_READ_BLOCKS = 8
@@ -1023,6 +1026,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._hsta_debug_log("stream_start_request", force=True)
         self._start_high_speed_ta_analysis_thread()
         snapshot_enabled = self._use_high_speed_ta_snapshot()
+        continuous_island_enabled = self._use_high_speed_ta_continuous_islands()
         capture_block_samples = self._resolve_high_speed_ta_capture_block_samples()
         if snapshot_enabled:
             self._hsta_debug_log(
@@ -1031,6 +1035,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     f"samples={capture_block_samples} "
                     f"duration_ms={capture_block_samples / max(1.0, float(self.config.sample_rate_hz)) * 1e3:.3f}"
                 ),
+                force=True,
+            )
+        elif continuous_island_enabled:
+            self._hsta_debug_log(
+                "continuous_island_start",
+                message=f"samples={capture_block_samples}",
                 force=True,
             )
         self._high_speed_ta_stream_cursor = self.receiver.start(
@@ -1048,7 +1058,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _resolve_high_speed_ta_capture_block_samples(self) -> int:
         """Use one exact RX buffer for bounded Single Free Run records."""
         if not self._use_high_speed_ta_snapshot():
-            return int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES)
+            if not self._use_high_speed_ta_continuous_islands():
+                return int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES)
+            record_samples = resolve_time_window_samples(
+                self._time_analyzer_time_span_s(),
+                max(1.0, float(self.config.sample_rate_hz)),
+            )
+            records_per_block = min(
+                int(HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_RECORDS),
+                max(
+                    1,
+                    int(np.ceil(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES / record_samples)),
+                ),
+            )
+            return int(record_samples * records_per_block)
         return int(
             resolve_time_window_samples(
                 self._time_analyzer_time_span_s(),
@@ -1077,6 +1100,20 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
             return False
         return True
+
+    def _use_high_speed_ta_continuous_islands(self) -> bool:
+        if (
+            self.sweep_state != SWEEP_STATE_RUNNING
+            or TriggerKind(self.config.hsta_trigger_kind) is not TriggerKind.FREE_RUN
+            or float(self.config.sample_rate_hz)
+            <= float(HIGH_SPEED_TA_CONTINUOUS_MAX_SAMPLE_RATE_HZ)
+        ):
+            return False
+        record_samples = resolve_time_window_samples(
+            self._time_analyzer_time_span_s(),
+            max(1.0, float(self.config.sample_rate_hz)),
+        )
+        return record_samples <= int(HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_SAMPLES)
 
     def _stop_high_speed_ta_stream(self, *, stop_analysis_thread: bool = False) -> None:
         self._hsta_debug_log(
@@ -6666,6 +6703,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         block_timestamp_s: float,
         capture_call_elapsed_s: float,
         single_shot: bool,
+        discontinuity_reason: str | None = None,
     ) -> HighSpeedTAAnalysisJob:
         state = self._high_speed_time_analyzer
         sweep_id = int(state.sweep_id)
@@ -6707,7 +6745,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             trigger_measured_value=record.trigger.measured_value,
             stream_id=int(record.stream_id),
             start_sample_index=int(record.start_sample_index),
-            discontinuity_reason=record.discontinuity_reason,
+            discontinuity_reason=(
+                record.discontinuity_reason or discontinuity_reason
+            ),
         )
 
     def _flush_high_speed_ta_pending_jobs(self) -> bool:
@@ -7219,17 +7259,29 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                         )
             state.prev_block_timestamp_s = sample_timestamp
 
+            continuous_island = self._use_high_speed_ta_continuous_islands()
+            if continuous_island:
+                # At rates above sustainable USB throughput, each returned RX
+                # buffer is treated as its own contiguous island. Never let a
+                # partial record or measurement-filter state cross its edge.
+                acquisition.reset()
             records = acquisition.feed(block)
             if not records:
                 continue
             single_shot = self.sweep_state == SWEEP_STATE_SINGLE
-            for record in (records[:1] if single_shot else records):
+            selected_records = records[:1] if single_shot else records
+            for record_index, record in enumerate(selected_records):
                 self._high_speed_ta_pending_analysis_jobs.append(
                     self._build_high_speed_ta_job_from_record(
                         record,
                         block_timestamp_s=sample_timestamp,
                         capture_call_elapsed_s=float(block.capture_elapsed_s),
                         single_shot=single_shot,
+                        discontinuity_reason=(
+                            "continuous_rx_buffer_boundary"
+                            if continuous_island and record_index == 0
+                            else None
+                        ),
                     )
                 )
             if single_shot:

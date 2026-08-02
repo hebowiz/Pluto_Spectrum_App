@@ -109,6 +109,7 @@ def _snapshot_owner(
     trigger_kind: str = "free_run",
     time_span_s: float = 0.01,
     sample_rate_hz: int = 12_000_000,
+    sweep_state: str = SWEEP_STATE_SINGLE,
 ):
     config = SimpleNamespace(
         sample_rate_hz=sample_rate_hz,
@@ -116,12 +117,16 @@ def _snapshot_owner(
     )
     owner = SimpleNamespace(
         config=config,
-        sweep_state=SWEEP_STATE_SINGLE,
+        sweep_state=sweep_state,
         _time_analyzer_time_span_s=lambda: time_span_s,
         _hsta_debug_log=lambda *args, **kwargs: None,
     )
     owner._use_high_speed_ta_snapshot = MethodType(
         RealtimeSpectrumWindow._use_high_speed_ta_snapshot,
+        owner,
+    )
+    owner._use_high_speed_ta_continuous_islands = MethodType(
+        RealtimeSpectrumWindow._use_high_speed_ta_continuous_islands,
         owner,
     )
     return owner
@@ -183,6 +188,29 @@ def test_four_mhz_rbw_resolves_to_16msps() -> None:
 
     assert rbw_hz == 4_000_000.0
     assert sample_rate_hz == 16_000_000
+
+
+@pytest.mark.parametrize(
+    ("time_span_s", "record_samples", "records_per_block"),
+    ((0.002, 32_000, 3), (0.003, 48_000, 2)),
+)
+def test_16msps_continuous_uses_record_aligned_iq_islands(
+    time_span_s: float,
+    record_samples: int,
+    records_per_block: int,
+) -> None:
+    owner = _snapshot_owner(
+        time_span_s=time_span_s,
+        sample_rate_hz=16_000_000,
+        sweep_state=SWEEP_STATE_RUNNING,
+    )
+
+    assert RealtimeSpectrumWindow._use_high_speed_ta_continuous_islands(owner)
+    block_samples = RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(
+        owner
+    )
+
+    assert block_samples == record_samples * records_per_block == 96_000
 
 
 def test_hsta_power_trigger_builds_exact_time_positioned_record() -> None:

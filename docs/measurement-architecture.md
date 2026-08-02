@@ -178,6 +178,8 @@ Power Level Triggerの初期実装は各complex IQ sampleのmagnitudeを明示�
 
 このSnapshot経路は現在TA Free RunのSingle record向けであり、Continuousの欠落を解消するものではありません。Power Triggerはevent監視に連続streamが必要なため対象外です。Sweep SAはLO pointごとの有限長bufferが連続なら掃引全体を連続転送する必要がなく、主な影響は各pointの転送待ちによるSweep Time増加です。
 
+6 MSPS超の短時間Continuous Free Runについては、record境界へRX buffer長を合わせるContinuous Island方式を実装しました。各RX bufferを独立した連続区間として扱い、buffer内だけで複数のexact-length recordを生成します。buffer境界ではtrigger timelineとmeasurement filterをresetするため、USB blind timeを含むrecordを正常データとして公開しません。現時点の対象は262,144 samples以下のFree Run recordで、Power Triggerと長時間recordは対象外です。
+
 現在のPersistenceはtrace残光表現であり、一般的なRTSAのdensity/probability表示と同一ではありません。
 
 ## 5. VSA実装への要件

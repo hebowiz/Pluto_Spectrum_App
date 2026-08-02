@@ -29,7 +29,9 @@ FFT size = RBW条件とguard条件を満たす64～16384の2のべき乗
 
 Time Span上限はrecord保持量を4,194,304 IQ samples以内へ制限するためSample Rateに反比例します。代表値は521 kSPSで約8.051秒、12 MSPSで約349.5 ms、16 MSPSで262.144 ms、20 MSPSで約209.7 msです。高速sample rateで非現実的な長時間raw IQを確保しません。
 
-例外として、SingleかつFree Runでは有限長Snapshotを使用します。`round(Time Span × Sample Rate)`が4,194,304 samples以下なら、1 record全体と同じ長さのRX bufferを使用し、warm-up 5 buffersと本取得1 bufferの計6 buffersでProducer自身が終了します。これによりUSBの持続throughputを超えるsample rateでも、本取得recordが単一device/DMA buffer内で連続している可能性を利用できます。上限超過時、Continuous、Power Triggerは65536-sample streamへ戻ります。
+例外として、SingleかつFree Runでは有限長Snapshotを使用します。`round(Time Span × Sample Rate)`が4,194,304 samples以下なら、1 record全体と同じ長さのRX bufferを使用し、warm-up 5 buffersと本取得1 bufferの計6 buffersでProducer自身が終了します。これによりUSBの持続throughputを超えるsample rateでも、本取得recordが単一device/DMA buffer内で連続している可能性を利用できます。Single上限超過時とPower Triggerは65536-sample streamへ戻り、短時間Continuous Free Runは次のIsland方式を使用します。
+
+6 MSPSを超えるContinuous Free Runでは、record長が262,144 samples以下の場合にContinuous Island方式を使用します。約65,536 samples以上となる最小のrecord整数倍をRX buffer長とし、最大4 recordsを1 bufferへ格納します。各buffer先頭でtrigger recorderとGaussian filter stateをresetし、buffer内の完成recordだけを公開します。buffer間にはblind timeがありますが、不連続な境界をrecordへ混入させません。16 MSPS・2 msは32,000 samples×3、3 msは48,000 samples×2で、どちらも96,000-sample bufferになります。
 
 ## スレッド構成
 
@@ -85,6 +87,7 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 - consumerが512ブロックより遅れた場合はoverrunとして明示し、不連続をまたいだ時間窓を破棄します。
 - Singleは正確な1 recordが完成した時点でProducerを停止し、解析・表示完了後に測定を終了します。
 - Single Free Run SnapshotのProducerは最大6 buffersで自動停止するため、GUI停止時に巨大bufferがring容量まで増え続けません。
+- Continuous Islandでは同一buffer内のrecord間だけIQ Filter stateを継続し、次buffer先頭recordへ`continuous_rx_buffer_boundary`を付けてresetします。
 
 ## 振幅処理
 
@@ -114,4 +117,5 @@ filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落な�
 - 512×65536 samplesのcomplex64保持は最大約256 MiBです。
 - USB/libiio内部の欠落はアプリ側連番だけでは検出できないため、実機の既知信号による連続性検証が必要です。
 - Snapshotは単一buffer長、record長、解析完了を保証しますが、buffer内部の物理的なsample連続性はまだ保証しません。counter/PRBSまたは位相連続な既知CWによる検証が必要です。
+- Continuous Islandは連続した時間軸を保証する方式ではなく、連続bufferから得た個別のcontiguous record列です。buffer間blind time、破棄時間、実効観測率のUI表示は未実装です。
 - Single/Continuous切替やSweep Time変更時は、既存RX workerとstream cursorを同時に無効化して新しいepochで再開します。
