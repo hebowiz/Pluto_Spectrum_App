@@ -189,10 +189,11 @@ python -m pytest -q
 
 ## 次に行う作業
 
-1. Trigger位置の表示と、minimum duration/holdoff/hysteresisのUI設定を追加する。
-2. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
-3. 実機でblock sizeを掃引し、既知信号の長時間相関で欠落を検証する。
-4. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
+1. HighSpeed TAへstateful IQ-domain measurement filterによる`Filtered Envelope`経路を追加する。
+2. Trigger位置の表示と、minimum duration/holdoff/hysteresisのUI設定を追加する。
+3. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
+4. 実機でblock sizeを掃引し、既知信号の長時間相関で欠落を検証する。
+5. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
 
 ### PlutoSDR実機
 
@@ -238,4 +239,5 @@ python -m pytest -q
 - Free Run/Power Levelのarm、Auto forced timeout、Normal、Single、rearmを統括する共通acquisition controllerを追加。
 - HighSpeed TAの窓生成を`IQAcquisitionRecord`へ移行し、Trigger基本設定UIを追加。
 - Power Auto forced recordとPower Normal natural recordをdirect USB実機で確認。
+- 現行RBWがFFT後のpower spectrumへ非正規化Gaussian convolutionを行う方式であることを監査し、TA/Sweepはstateful IQ-domain measurement filterへ分離する方針を決定。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。
