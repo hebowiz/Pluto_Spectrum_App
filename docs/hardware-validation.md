@@ -67,6 +67,19 @@ HighSpeed TAのSingle Free Runでrecord全体を単一RX bufferへ収める有�
 
 両条件ともrecord長とRX buffer長が一致し、IQ Filter、Detector、表示まで完了しました。USB転送時間が標本時間を超えても、buffer間blind timeをrecord内へ連結しない構造です。ただしこの試験は単一buffer内部の無欠落を証明しません。既知counter/PRBSまたは位相連続CWによるsample slip検証が残っています。
 
+#### LiteVNA 2441 MHz CW位相連続性
+
+LiteVNAから2441 MHz CWを入力し、Pluto Center 2440 MHz、12 MSPS、RF BW 12 MHz、manual gain 30 dBで+約1.036 MHz IFとして取得しました。PlutoとLiteVNAの基準clockは非同期のため、公称1 MHzとの差と緩やかなdriftは許容し、各sampleの複素積`x[n] × conj(x[n-1])`から平均位相進行を除いた残差を評価しました。
+
+| Snapshot | 結果 |
+|---|---|
+| 10 ms、120,000 samples × 6 buffers | 各buffer内outlier 0、本取得buffer最大残差3.86°、ADC clip 0%、FFT peak SNR約95 dB |
+| 100 ms、1,200,000 samples × 6 buffers | 各buffer内outlier 0、全buffer最大残差7.17°、本取得buffer最大5.72°、ADC clip 0%、FFT peak SNR約103 dB |
+
+平均位相進行は約31.07°/sampleであり、単発1 sample slipなら同程度の位相ジャンプになる条件です。判定閾値約24.9°に対し検出は0件でした。10 ms試験では5→6 buffer境界に155.9°の不連続が1回あり、100 ms試験の境界は最大2.75°でした。Single Snapshotはbuffer境界をrecord内へ含めないため、前者も本record内部には影響しません。
+
+この結果は12 MSPSで10/100 msの単一buffer内部が位相連続であることを強く支持します。ただしCW位相は2π周期なので、位相回転が偶然整数周期に近くなる複数sample欠落を原理的に見逃す可能性があります。最終的な無欠落保証にはPRBS/counterが必要です。再現用に`python -m tools.validate_snapshot_phase`を追加しました。
+
 再実行例:
 
 ```powershell
