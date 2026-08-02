@@ -26,6 +26,8 @@ FFT size = RBW条件とguard条件を満たす64～16384の2のべき乗
 
 共通IQ Producerの1ブロックは現在65536 samplesです。取得record長、RBW filter、表示bucketはいずれもFFT sizeから分離されています。
 
+例外として、SingleかつFree Runでは有限長Snapshotを使用します。`round(Time Span × Sample Rate)`が4,194,304 samples以下なら、1 record全体と同じ長さのRX bufferを使用し、warm-up 5 buffersと本取得1 bufferの計6 buffersでProducer自身が終了します。これによりUSBの持続throughputを超えるsample rateでも、本取得recordが単一device/DMA buffer内で連続している可能性を利用できます。上限超過時、Continuous、Power Triggerは65536-sample streamへ戻ります。
+
 ## スレッド構成
 
 ```text
@@ -79,6 +81,7 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 - job queueが満杯の場合は完成windowを保持して新しいIQを読まず、backpressureを共通リングへ伝えます。
 - consumerが512ブロックより遅れた場合はoverrunとして明示し、不連続をまたいだ時間窓を破棄します。
 - Singleは正確な1 recordが完成した時点でProducerを停止し、解析・表示完了後に測定を終了します。
+- Single Free Run SnapshotのProducerは最大6 buffersで自動停止するため、GUI停止時に巨大bufferがring容量まで増え続けません。
 
 ## 振幅処理
 
@@ -107,4 +110,5 @@ filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落な�
 - Gaussian FIRの群遅延はmetadata化済みですが、表示時刻およびTrigger markerの補正は未実装です。raw trigger判定は入力sample timeline、表示powerは遅延したfilter出力である点に注意が必要です。
 - 512×65536 samplesのcomplex64保持は最大約256 MiBです。
 - USB/libiio内部の欠落はアプリ側連番だけでは検出できないため、実機の既知信号による連続性検証が必要です。
+- Snapshotは単一buffer長、record長、解析完了を保証しますが、buffer内部の物理的なsample連続性はまだ保証しません。counter/PRBSまたは位相連続な既知CWによる検証が必要です。
 - Single/Continuous切替やSweep Time変更時は、既存RX workerとstream cursorを同時に無効化して新しいepochで再開します。

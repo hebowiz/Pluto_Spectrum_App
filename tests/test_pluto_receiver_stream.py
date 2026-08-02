@@ -95,6 +95,33 @@ def test_continuous_worker_publishes_to_common_stream(monkeypatch) -> None:
         assert current.start_sample_index == previous.end_sample_index
 
 
+def test_finite_worker_stops_after_requested_block_count(monkeypatch) -> None:
+    receiver = build_receiver(monkeypatch)
+    cursor = receiver.start(
+        block_size=8,
+        source="high_speed_ta",
+        max_blocks=3,
+    )
+    deadline = time.perf_counter() + 1.0
+    while receiver._rx_thread is not None and receiver._rx_thread.is_alive():
+        if time.perf_counter() >= deadline:
+            pytest.fail("finite receive worker did not stop")
+        time.sleep(0.005)
+
+    result = receiver.read_iq_stream(cursor)
+    assert receiver.stop()
+
+    assert len(result.blocks) == 3
+    assert sum(block.sample_count for block in result.blocks) == 24
+
+
+def test_finite_worker_rejects_non_positive_block_limit(monkeypatch) -> None:
+    receiver = build_receiver(monkeypatch)
+
+    with pytest.raises(ValueError, match="max_blocks"):
+        receiver.start(max_blocks=0)
+
+
 def test_running_worker_rejects_incompatible_second_start(monkeypatch) -> None:
     receiver = build_receiver(monkeypatch)
     receiver.start(block_size=8, source="high_speed_ta")

@@ -55,6 +55,18 @@ python -m pluto_sa.main
 
 この条件では各DMA buffer内部が連続で、buffer間に約1 block相当のblind timeが生じる可能性が高いものの、既知counter/PRBSなしには保証できません。HighSpeed TAはblock受領後にアプリ連番を付けるため、物理的に欠落したblock間も論理上連続に見える可能性があります。timestamp gapは検出できますが、現在はrecordを無効化していません。
 
+### 12 MSPS Single Snapshot（2026-08-02）
+
+HighSpeed TAのSingle Free Runでrecord全体を単一RX bufferへ収める有限長Snapshotを実装し、direct USBで検証しました。Producerは120,000または1,200,000 samplesのbufferを5回warm-upとして破棄し、6回目を本recordとして発行した時点で自動終了します。
+
+| 条件 | 結果 |
+|---|---|
+| 12 MSPS、10 ms、120,000 samples/record | 約0.148秒、1 record/1000 plot points、6 blocks/720,000受信samples |
+| 12 MSPS、100 ms、1,200,000 samples/record | 約1.354秒、1 record/1000 plot points、6 blocks/7,200,000受信samples |
+| 共通 | ring上書き0、analysis queue最大1、終了時queue滞留0、例外なし |
+
+両条件ともrecord長とRX buffer長が一致し、IQ Filter、Detector、表示まで完了しました。USB転送時間が標本時間を超えても、buffer間blind timeをrecord内へ連結しない構造です。ただしこの試験は単一buffer内部の無欠落を証明しません。既知counter/PRBSまたは位相連続CWによるsample slip検証が残っています。
+
 再実行例:
 
 ```powershell

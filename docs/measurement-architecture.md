@@ -165,17 +165,17 @@ Power Level Triggerの初期実装は各complex IQ sampleのmagnitudeを明示�
 - Persistenceはtrace holdではなく、frequency-amplitude cellの発生頻度を蓄積するdensity表示として将来分離します。
 - producer overrun、consumer lag、FFT処理率、最大見逃しevent時間を計測指標にします。
 
-### USB帯域を超えるSingle Snapshot（計画）
+### USB帯域を超えるSingle Snapshot（TA Free Run実装済み）
 
-12 MSPS等、持続USB throughputを超えるsample rateはContinuous modeとして無欠落にできません。一方、Free RunのSingle取得またはcapture後にoffline trigger searchするVSA用途では、1 record全体を単一のdevice/DMA bufferへ収め、取得完了後にUSB転送する有限長Snapshot経路を評価します。
+12 MSPS等、持続USB throughputを超えるsample rateはContinuous modeとして無欠落にできません。一方、HighSpeed TAのSingle Free Runでは1 record全体を単一のdevice/DMA bufferへ収め、取得完了後にUSB転送する有限長Snapshot経路を実装しました。capture後にoffline trigger searchするVSA用途へ再利用できます。
 
-- `record samples = round(Time Span × Fs)`にfilter settling/解析guardを加えたbufferを先にarmする。
-- buffer refill中に次bufferへ継続しないSingle専用経路とし、取得後にProducerを停止してoffline解析する。
+- `record samples = round(Time Span × Fs)`と同じ長さのbufferを先にarmする。Gaussian IQ Filterはrecord間stateを使わず、先頭sampleを定常初期値として解析する。
+- warm-up 5 buffersと本取得1 bufferの計6回に制限したSingle専用Producerとし、取得後にoffline解析する。最大record長は4,194,304 samplesで、超過時は従来streamへfallbackする。
 - 12 MSPSでは10 msが120,000 complex samples（wire上のI/Q int16で約480 kB、host complex64で約960 kB）、100 msが1,200,000 samples（約4.8 MB / 9.6 MB）となる。
 - 単一buffer内部の連続性、最大buffer長、再arm間のblind timeをcounter/PRBSまたは位相連続CWで実機検証する。配列長とhost sample indexだけを連続性の証明に使わない。
 - host software triggerをリアルタイム評価するには全sampleの連続転送が必要である。USB帯域超過時の任意event pre/post-triggerを保証するには、Pluto側の循環buffer/FPGA trigger、またはcapture-then-searchが必要となる。
 
-このSnapshot経路はTA/VSAのSingle record向けであり、Continuousの欠落を解消するものではありません。Sweep SAはLO pointごとの有限長bufferが連続なら掃引全体を連続転送する必要がなく、主な影響は各pointの転送待ちによるSweep Time増加です。
+このSnapshot経路は現在TA Free RunのSingle record向けであり、Continuousの欠落を解消するものではありません。Power Triggerはevent監視に連続streamが必要なため対象外です。Sweep SAはLO pointごとの有限長bufferが連続なら掃引全体を連続転送する必要がなく、主な影響は各pointの転送待ちによるSweep Time増加です。
 
 現在のPersistenceはtrace残光表現であり、一般的なRTSAのdensity/probability表示と同一ではありません。
 

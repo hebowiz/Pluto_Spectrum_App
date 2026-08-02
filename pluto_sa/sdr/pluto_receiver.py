@@ -37,6 +37,7 @@ class PlutoReceiver:
         self._lifecycle_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._rx_thread: threading.Thread | None = None
+        self._capture_max_blocks: int | None = None
         self._sweep_config_signature: tuple[int, int, int] | None = None
         self._stream_source = "continuous"
         self.iq_stream = IQStreamBuffer(
@@ -85,12 +86,16 @@ class PlutoReceiver:
         *,
         block_size: int | None = None,
         source: str = "continuous",
+        max_blocks: int | None = None,
     ) -> IQStreamCursor:
         resolved_block_size = max(
             1,
             int(self.config.rx_buffer_size if block_size is None else block_size),
         )
         resolved_source = str(source)
+        resolved_max_blocks = None if max_blocks is None else int(max_blocks)
+        if resolved_max_blocks is not None and resolved_max_blocks <= 0:
+            raise ValueError("max_blocks must be positive when provided")
         with self._lifecycle_lock:
             if self._closed:
                 raise RuntimeError("receiver is closed")
@@ -100,6 +105,7 @@ class PlutoReceiver:
                 if (
                     self._capture_block_size != resolved_block_size
                     or self._stream_source != resolved_source
+                    or self._capture_max_blocks != resolved_max_blocks
                 ):
                     raise RuntimeError(
                         "receive worker is already running with different settings"
@@ -116,6 +122,7 @@ class PlutoReceiver:
                             pass
                 self._capture_block_size = resolved_block_size
                 self._stream_source = resolved_source
+                self._capture_max_blocks = resolved_max_blocks
                 self.iq_stream.begin_stream(clear=True)
                 cursor = self.iq_stream.create_cursor(start="latest")
             self._stop_event.clear()
@@ -339,6 +346,7 @@ class PlutoReceiver:
                 pass
 
     def _rx_worker(self) -> None:
+        published_blocks = 0
         while not self._stop_event.is_set() and not self._closed:
             with self._iq_lock:
                 capture_started_at = time.perf_counter()
@@ -353,3 +361,9 @@ class PlutoReceiver:
                     capture_elapsed_s=capture_elapsed_s,
                 )
                 self.received_samples_total += n
+                published_blocks += 1
+                if (
+                    self._capture_max_blocks is not None
+                    and published_blocks >= self._capture_max_blocks
+                ):
+                    break

@@ -8,8 +8,11 @@ import numpy as np
 import pytest
 
 from pluto_sa.ui.main_window import (
+    HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES,
+    HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES,
     HighSpeedTAAnalysisJob,
     RealtimeSpectrumWindow,
+    SWEEP_STATE_SINGLE,
     SWEEP_STATE_RUNNING,
     format_hsta_sampling_status,
 )
@@ -99,6 +102,50 @@ def test_hsta_single_restart_invalidates_existing_stream_cursor() -> None:
     assert calls[0] == ("stop", {"stop_analysis_thread": False})
     assert calls[-1] == "start"
     assert owner._high_speed_ta_single_waiting_result is False
+
+
+def _snapshot_owner(*, trigger_kind: str = "free_run", time_span_s: float = 0.01):
+    config = SimpleNamespace(
+        sample_rate_hz=12_000_000,
+        hsta_trigger_kind=trigger_kind,
+    )
+    owner = SimpleNamespace(
+        config=config,
+        sweep_state=SWEEP_STATE_SINGLE,
+        _time_analyzer_time_span_s=lambda: time_span_s,
+        _hsta_debug_log=lambda *args, **kwargs: None,
+    )
+    owner._use_high_speed_ta_snapshot = MethodType(
+        RealtimeSpectrumWindow._use_high_speed_ta_snapshot,
+        owner,
+    )
+    return owner
+
+
+def test_hsta_single_free_run_uses_one_exact_snapshot_buffer() -> None:
+    owner = _snapshot_owner(time_span_s=0.01)
+
+    samples = RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(owner)
+
+    assert samples == 120_000
+
+
+def test_hsta_power_trigger_keeps_continuous_stream_blocks() -> None:
+    owner = _snapshot_owner(trigger_kind="power_level")
+
+    samples = RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(owner)
+
+    assert samples == HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES
+
+
+def test_hsta_oversized_single_record_falls_back_to_stream_blocks() -> None:
+    owner = _snapshot_owner(
+        time_span_s=(HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES + 1) / 12_000_000.0
+    )
+
+    samples = RealtimeSpectrumWindow._resolve_high_speed_ta_capture_block_samples(owner)
+
+    assert samples == HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES
 
 
 def test_hsta_power_trigger_builds_exact_time_positioned_record() -> None:

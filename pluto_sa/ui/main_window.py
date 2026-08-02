@@ -78,6 +78,7 @@ WIDEBAND_FLUSH_READS = 5
 TIME_ANALYZER_BUFFER_POINTS = 1000
 TIME_ANALYZER_WARMUP_DISCARD_COUNT = 5
 HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES = 65_536
+HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES = 4_194_304
 HIGH_SPEED_TA_ANALYSIS_QUEUE_SIZE = 4
 HIGH_SPEED_TA_RESULT_QUEUE_SIZE = 4
 HIGH_SPEED_TA_STREAM_READ_BLOCKS = 8
@@ -1009,12 +1010,61 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
         self._hsta_debug_log("stream_start_request", force=True)
         self._start_high_speed_ta_analysis_thread()
+        snapshot_enabled = self._use_high_speed_ta_snapshot()
+        capture_block_samples = self._resolve_high_speed_ta_capture_block_samples()
+        if snapshot_enabled:
+            self._hsta_debug_log(
+                "snapshot_start",
+                message=(
+                    f"samples={capture_block_samples} "
+                    f"duration_ms={capture_block_samples / max(1.0, float(self.config.sample_rate_hz)) * 1e3:.3f}"
+                ),
+                force=True,
+            )
         self._high_speed_ta_stream_cursor = self.receiver.start(
-            block_size=int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES),
+            block_size=capture_block_samples,
             source="high_speed_ta",
+            max_blocks=(
+                int(TIME_ANALYZER_WARMUP_DISCARD_COUNT) + 1
+                if snapshot_enabled
+                else None
+            ),
         )
         if self.config.sweep_profile_logging:
             print("HighSpeedTAThread start")
+
+    def _resolve_high_speed_ta_capture_block_samples(self) -> int:
+        """Use one exact RX buffer for bounded Single Free Run records."""
+        if not self._use_high_speed_ta_snapshot():
+            return int(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES)
+        return int(
+            resolve_time_window_samples(
+                self._time_analyzer_time_span_s(),
+                max(1.0, float(self.config.sample_rate_hz)),
+            )
+        )
+
+    def _use_high_speed_ta_snapshot(self) -> bool:
+        if (
+            self.sweep_state != SWEEP_STATE_SINGLE
+            or TriggerKind(self.config.hsta_trigger_kind) is not TriggerKind.FREE_RUN
+        ):
+            return False
+        record_samples = resolve_time_window_samples(
+            self._time_analyzer_time_span_s(),
+            max(1.0, float(self.config.sample_rate_hz)),
+        )
+        if record_samples > HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES:
+            self._hsta_debug_log(
+                "snapshot_fallback",
+                message=(
+                    f"samples={record_samples} "
+                    f"limit={HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES}"
+                ),
+                force=True,
+            )
+            return False
+        return True
 
     def _stop_high_speed_ta_stream(self, *, stop_analysis_thread: bool = False) -> None:
         self._hsta_debug_log(
