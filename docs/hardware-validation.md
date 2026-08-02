@@ -278,6 +278,12 @@ Sweep/TAと同じGaussian FIR係数を用いるFFT filter bankへ移行後、dir
 
 Windows上では同一process内でdirect USB contextを閉じて直ちに再openするとlibiioの解放問題があるため、検証toolは`--mode rtsa`と`--mode wideband`を別processで実行できます。今回の入力レベルは管理していないため、これは取得・解析・合成経路とmetadataの統合確認です。Gaussianの3 dB shape、ENBW、絶対振幅、旧校正との差は既知CW/noiseによる追加検証が必要です。
 
+### WideBand Chunk Width 40 MHz（2026-08-02）
+
+direct USB `usb:1.54.5`、Center 2.440 GHz、測定Span 80 MHz、Chunk Width 40 MHz、FFT 4096、RBW 1 MHzを検証しました。下端から2 chunksで合成を完了し、6030 pointsを出力しました。Pluto実設定はSR 54,347,825 Hz、RF BW 54,347,826 Hz、実効RBW 1 MHz、ENBW約1.06457 MHz、Gaussian support 117 samples、FFT制限なしです。
+
+これは最大Chunk Widthにおける設定受付・リチューン・2 chunk合成の確認です。入力信号を管理していないため、広幅時のノイズフロア、mirror、roll-off、chunk境界振幅差の定量評価ではありません。
+
 ## 解釈上の注意と次の検証
 
 - アプリのsequence/sample indexは、libiioから正常に返ったブロックへ付ける連番です。Pluto、USB、libiio内部でデータが抜けても、常に検出できるわけではありません。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import os
 import time
@@ -17,11 +18,21 @@ from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
-from pluto_sa.ui.main_window import RealtimeSpectrumWindow
+from pluto_sa.ui.main_window import (
+    RealtimeSpectrumWindow,
+    resolve_wideband_chunk_capture_span_hz,
+)
 
 
 def build_window(config: SpectrumConfig) -> tuple[RealtimeSpectrumWindow, PlutoReceiver]:
-    receiver = PlutoReceiver(config)
+    receiver_config = config
+    if config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA:
+        receiver_config = deepcopy(config)
+        receiver_config.analyzer_mode = AnalyzerMode.REALTIME_SA
+        receiver_config.display_span_hz = resolve_wideband_chunk_capture_span_hz(
+            config.wideband_chunk_width_hz
+        )
+    receiver = PlutoReceiver(receiver_config)
     processor = SpectrumProcessor(config)
     window = RealtimeSpectrumWindow(
         config,
@@ -98,6 +109,7 @@ def run_wideband(app, args) -> dict:
         fft_size=args.fft_size,
         rbw_hz=args.rbw,
         sdr_uri=args.uri,
+        wideband_chunk_width_hz=args.chunk_width,
     )
     window, receiver = build_window(config)
     try:
@@ -117,6 +129,9 @@ def run_wideband(app, args) -> dict:
             "completed": window._last_current_display_db is not None,
             "connection_uri": receiver.connection_uri,
             "chunk_count": 0 if runtime is None else int(len(runtime.chunk_centers_hz)),
+            "chunk_width_hz": int(config.wideband_chunk_width_hz),
+            "sample_rate_hz": receiver.get_current_sample_rate_hz(),
+            "rf_bandwidth_hz": receiver.get_current_rf_bandwidth_hz(),
             "effective_rbw_hz": None if design is None else design.effective_rbw_hz,
             "enbw_hz": None if design is None else design.noise_equivalent_bandwidth_hz,
             "support_samples": None if design is None else design.support_samples,
@@ -136,6 +151,12 @@ def main() -> None:
     parser.add_argument("--span", type=int, default=20_000_000)
     parser.add_argument("--fft-size", type=int, default=4096)
     parser.add_argument("--rbw", type=float, default=1_000_000.0)
+    parser.add_argument(
+        "--chunk-width",
+        type=int,
+        choices=(10_000_000, 20_000_000, 30_000_000, 40_000_000),
+        default=10_000_000,
+    )
     parser.add_argument("--timeout", type=float, default=5.0)
     args = parser.parse_args()
 

@@ -18,6 +18,8 @@
 
 周波数の基本入力範囲は70 MHz～6 GHzです。ただしWideBand RT SAは80 MHz～5.990 GHzへ制限されます。
 
+WideBand RT SAのFrequencyメニューではChunk Widthを10／20／30／40 MHzから選択できます。初期値10 MHzはPluto瞬時帯域の中央部を優先し、広い設定は速度と引き換えにノイズフロアの盛り上がり、mirror、帯域端特性の影響を受けやすくなります。
+
 ## 2. 振幅処理
 
 RBW処理は全モードで同じGaussian complex IQ FIR特性を共有します。Sweep SAとTime Analyzer系はstateful FIRを電力化前に直接適用し、RealTime SA、WideBand RT SA、Calibrationは同じFIR係数を解析窓とするGaussian FFT filter bankを使います。指定RBWは両側3 dB bandwidth、ENBWは約1.0645倍です。RTSA系のoverlap FFTは次段階です。

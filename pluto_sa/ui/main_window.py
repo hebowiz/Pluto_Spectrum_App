@@ -22,6 +22,7 @@ from pluto_sa.config.spectrum_config import (
     MAX_INTERNAL_GAIN_DB,
     MIN_INTERNAL_GAIN_DB,
     SpectrumConfig,
+    WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ,
 )
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
@@ -75,10 +76,7 @@ MIN_WIDEBAND_SPAN_HZ = 10_000_000
 MAX_WIDEBAND_SPAN_HZ = 6_000_000_000
 MIN_WIDEBAND_START_HZ = 80_000_000
 MAX_WIDEBAND_STOP_HZ = 5_990_000_000
-WIDEBAND_EFFECTIVE_SPAN_HZ = 10_000_000
-WIDEBAND_CHUNK_CAPTURE_SPAN_HZ = 20_000_000
-WIDEBAND_CHUNK_STEP_HZ = 10_000_000
-WIDEBAND_EDGE_OFFSET_HZ = 5_000_000
+WIDEBAND_SIDE_GUARD_HZ = 5_000_000
 WIDEBAND_LO_SETTLE_US = 200
 WIDEBAND_FLUSH_READS = 5
 TIME_ANALYZER_BUFFER_POINTS = 1000
@@ -204,6 +202,36 @@ def make_waterfall_lookup_table() -> np.ndarray:
             dtype=np.ubyte,
         ),
     ).getLookupTable(0.0, 1.0, 256)
+
+
+def resolve_wideband_chunk_capture_span_hz(chunk_width_hz: int) -> int:
+    """Return selected chunk width plus the fixed 5 MHz guard on each side."""
+    resolved_width_hz = int(chunk_width_hz)
+    if resolved_width_hz not in WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ:
+        raise ValueError("unsupported WideBand chunk width")
+    return resolved_width_hz + 2 * WIDEBAND_SIDE_GUARD_HZ
+
+
+def plan_wideband_chunks(
+    start_hz: int,
+    stop_hz: int,
+    chunk_width_hz: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Place full-width chunks from the measurement lower edge upward."""
+    resolved_width_hz = int(chunk_width_hz)
+    if resolved_width_hz not in WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ:
+        raise ValueError("unsupported WideBand chunk width")
+    chunk_start_hz = np.arange(
+        int(start_hz),
+        int(stop_hz),
+        resolved_width_hz,
+        dtype=np.int64,
+    )
+    if chunk_start_hz.size == 0:
+        chunk_start_hz = np.array([int(start_hz)], dtype=np.int64)
+    chunk_center_hz = chunk_start_hz + resolved_width_hz // 2
+    chunk_stop_hz = np.minimum(chunk_start_hz + resolved_width_hz, int(stop_hz))
+    return chunk_start_hz, chunk_center_hz, chunk_stop_hz
 
 
 TRACE_COLORS = ["#FFFC12", "#78FFEC", "#FC05FF", "#00FF07"]
@@ -543,6 +571,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.trace_type_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
         self.marker_trace_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
         self.fft_size_option_buttons: dict[str, QtWidgets.QPushButton] = {}
+        self.wideband_chunk_width_option_buttons: dict[int, QtWidgets.QPushButton] = {}
         self.sweep_detector_option_buttons: dict[DetectorMode, QtWidgets.QPushButton] = {}
         self.persistence_decay_option_buttons: dict[str, QtWidgets.QPushButton] = {}
 
@@ -1401,10 +1430,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _build_wideband_chunk_config(self, *, center_freq_hz: int | None = None) -> SpectrumConfig:
         chunk_config = deepcopy(self.config)
         chunk_config.analyzer_mode = AnalyzerMode.REALTIME_SA
-        chunk_config.display_span_hz = WIDEBAND_CHUNK_CAPTURE_SPAN_HZ
+        chunk_width_hz = int(self.config.wideband_chunk_width_hz)
+        chunk_config.display_span_hz = resolve_wideband_chunk_capture_span_hz(
+            chunk_width_hz
+        )
         if center_freq_hz is None:
             start_hz, _stop_hz = self._get_wideband_start_stop_hz()
-            center_freq_hz = int(start_hz + WIDEBAND_EDGE_OFFSET_HZ)
+            center_freq_hz = int(start_hz + chunk_width_hz // 2)
         chunk_config.center_freq_hz = int(center_freq_hz)
         chunk_config.use_start_stop_freq = False
         chunk_config.display_start_freq_hz = None
@@ -1415,15 +1447,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _initialize_wideband_runtime(self) -> None:
         start_hz, stop_hz = self._get_wideband_start_stop_hz()
-        chunk_start_hz_values = np.arange(
+        chunk_width_hz = int(self.config.wideband_chunk_width_hz)
+        (
+            chunk_start_hz_values,
+            chunk_centers_hz,
+            chunk_stop_hz_values,
+        ) = plan_wideband_chunks(
             start_hz,
             stop_hz,
-            WIDEBAND_CHUNK_STEP_HZ,
-            dtype=np.int64,
+            chunk_width_hz,
         )
-        if chunk_start_hz_values.size == 0:
-            chunk_start_hz_values = np.array([int(start_hz)], dtype=np.int64)
-        chunk_centers_hz = chunk_start_hz_values + WIDEBAND_EDGE_OFFSET_HZ
 
         chunk_config = self._build_wideband_chunk_config(
             center_freq_hz=int(chunk_centers_hz[0])
@@ -1440,7 +1473,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if full_chunk_bin_count > 1:
             bin_step_ghz = float(first_chunk_axis_ghz[1] - first_chunk_axis_ghz[0])
         else:
-            bin_step_ghz = WIDEBAND_CHUNK_SPAN_HZ / 1e9
+            bin_step_ghz = (
+                resolve_wideband_chunk_capture_span_hz(chunk_width_hz) / 1e9
+            )
 
         chunk_slice_ranges: list[tuple[int, int]] = []
         chunk_freq_ranges_hz: list[tuple[int, int]] = []
@@ -1449,11 +1484,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         next_dest_start_idx = 0
         for index, chunk_start_hz in enumerate(chunk_start_hz_values):
             is_last_chunk = index == len(chunk_start_hz_values) - 1
-            chunk_stop_hz = (
-                stop_hz
-                if is_last_chunk
-                else min(int(chunk_start_hz) + WIDEBAND_EFFECTIVE_SPAN_HZ, stop_hz)
-            )
+            chunk_stop_hz = int(chunk_stop_hz_values[index])
             self._wideband_chunk_processor.update_center_frequency(int(chunk_centers_hz[index]))
             chunk_axis_ghz = self._wideband_chunk_processor.get_display_freq_axis_ghz().copy()
             chunk_axis_hz = chunk_axis_ghz * 1e9
@@ -2243,6 +2274,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.main_menu_page = self._build_main_menu_page()
         self.analyzer_mode_page = self._build_analyzer_mode_page()
         self.freq_channel_page = self._build_freq_channel_page()
+        self.wideband_chunk_width_page = self._build_wideband_chunk_width_page()
         self.amptd_y_scale_page = self._build_amptd_y_scale_page()
         self.input_page = self._build_input_page()
         self.bw_page = self._build_bw_page()
@@ -2273,6 +2305,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.control_stack.addWidget(self.main_menu_page)
         self.control_stack.addWidget(self.analyzer_mode_page)
         self.control_stack.addWidget(self.freq_channel_page)
+        self.control_stack.addWidget(self.wideband_chunk_width_page)
         self.control_stack.addWidget(self.amptd_y_scale_page)
         self.control_stack.addWidget(self.input_page)
         self.control_stack.addWidget(self.bw_page)
@@ -2526,6 +2559,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.freq_center_left_button = self._make_control_button("<-")
         self.freq_center_right_button = self._make_control_button("->")
         self.freq_start_stop_button = self._make_control_button("Start/Stop")
+        self.wideband_chunk_width_button = self._make_value_control_button(
+            "Chunk Width"
+        )
 
         center_nudge_layout = QtWidgets.QHBoxLayout()
         center_nudge_layout.setContentsMargins(0, 0, 0, 0)
@@ -2538,6 +2574,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.addLayout(center_nudge_layout)
         page_layout.addWidget(self.freq_span_button)
         page_layout.addWidget(self.freq_start_stop_button)
+        page_layout.addWidget(self.wideband_chunk_width_button)
         page_layout.addStretch(1)
 
         self.freq_center_button.clicked.connect(self._on_freq_channel_clicked)
@@ -2550,6 +2587,34 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             lambda _checked=False: self._nudge_center_frequency(1)
         )
         self.freq_start_stop_button.clicked.connect(self._on_freq_start_stop_clicked)
+        self.wideband_chunk_width_button.clicked.connect(
+            lambda: self._show_control_page(
+                "Chunk Width",
+                self.wideband_chunk_width_page,
+            )
+        )
+        return page
+
+    def _build_wideband_chunk_width_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for chunk_width_hz in WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ:
+            button = self._make_control_button(
+                f"{int(chunk_width_hz // 1_000_000)} MHz"
+            )
+            button.clicked.connect(
+                lambda _checked=False, selected_width=chunk_width_hz: (
+                    self._select_wideband_chunk_width(int(selected_width))
+                )
+            )
+            self.wideband_chunk_width_option_buttons[int(chunk_width_hz)] = button
+            page_layout.addWidget(button)
+
+        page_layout.addStretch(1)
+        self._update_wideband_chunk_width_selection_page()
         return page
 
     def _build_span_x_scale_page(self) -> QtWidgets.QWidget:
@@ -3985,6 +4050,48 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_fft_menu_controls()
         return True
 
+    def _select_wideband_chunk_width(self, chunk_width_hz: int) -> None:
+        if not self._is_wideband_mode():
+            return
+        resolved_width_hz = int(chunk_width_hz)
+        if resolved_width_hz not in WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ:
+            return
+        if resolved_width_hz == int(self.config.wideband_chunk_width_hz):
+            self._update_wideband_chunk_width_selection_page()
+            return
+
+        should_resume = (
+            self._current_sweep_state() == SWEEP_STATE_RUNNING
+            and self.timer.isActive()
+        )
+        self.timer.stop()
+        self.config.wideband_chunk_width_hz = resolved_width_hz
+
+        chunk_config = self._build_wideband_chunk_config()
+        if self.config.rbw_hz is not None:
+            required_fft_size = required_gaussian_fft_size(
+                float(chunk_config.sample_rate_hz),
+                float(self.config.rbw_hz),
+            )
+            self.config.fft_size = min(
+                max(int(self.config.fft_size), int(required_fft_size)),
+                MAX_REALTIME_FFT_SIZE,
+            )
+            chunk_config = self._build_wideband_chunk_config()
+
+        self._invalidate_wideband_runtime()
+        self.receiver.reconfigure_span(chunk_config)
+        self.processor.update_span_related(self.config)
+        self._reset_plot_state()
+        self._update_realtime_sa_controls()
+        self._update_wideband_chunk_width_selection_page()
+        self._refresh_status_label()
+        if should_resume:
+            self._start_wideband_continuous()
+        else:
+            self.sweep_state = SWEEP_STATE_STOPPED
+            self._update_continuous_button()
+
     def _select_fft_size(self, fft_size: int) -> None:
         if self._is_calibration_mode():
             self._refresh_status_label()
@@ -4609,6 +4716,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.freq_span_button.setVisible(not is_high_speed_ta)
         if hasattr(self, "freq_start_stop_button"):
             self.freq_start_stop_button.setVisible(not is_high_speed_ta)
+        if hasattr(self, "wideband_chunk_width_button"):
+            self.wideband_chunk_width_button.setVisible(self._is_wideband_mode())
+            self.wideband_chunk_width_button.setEnabled(self._is_wideband_mode())
         self.freq_span_button.setEnabled((not is_time_analyzer) and (not self._is_calibration_mode()))
         display_span_mhz = float(self.config.display_span_hz) / 1e6
         self.freq_span_button.setText(f"Freq Span\n{display_span_mhz:.3f} MHz")
@@ -5063,6 +5173,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 else UNSELECTED_BUTTON_PREFIX
             )
             button.setText(f"{prefix}{fft_size}")
+
+    def _update_wideband_chunk_width_selection_page(self) -> None:
+        current_width_hz = int(self.config.wideband_chunk_width_hz)
+        for chunk_width_hz, button in self.wideband_chunk_width_option_buttons.items():
+            prefix = (
+                SELECTED_BUTTON_PREFIX
+                if int(chunk_width_hz) == current_width_hz
+                else UNSELECTED_BUTTON_PREFIX
+            )
+            button.setText(f"{prefix}{int(chunk_width_hz // 1_000_000)} MHz")
 
     def _reset_trace_runtime_buffers(self) -> None:
         for trace_state in self.trace_states:
@@ -6188,6 +6308,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 f"Start: {start_hz / 1e6:.3f} MHz\n"
                 f"Stop: {stop_hz / 1e6:.3f} MHz"
             )
+        if hasattr(self, "wideband_chunk_width_button"):
+            self._set_labeled_button_value(
+                self.wideband_chunk_width_button,
+                "Chunk Width",
+                f"{self.config.wideband_chunk_width_hz / 1e6:.0f} MHz",
+            )
+            self._update_wideband_chunk_width_selection_page()
         if hasattr(self, "ref_level_button"):
             self._set_labeled_button_value(
                 self.ref_level_button,

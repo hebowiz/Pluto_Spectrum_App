@@ -9,6 +9,12 @@ from pluto_sa.modes.analyzer_mode import AnalyzerMode
 MAX_DISPLAY_SPAN_HZ = 55_000_000
 MIN_INTERNAL_GAIN_DB = 0
 MAX_INTERNAL_GAIN_DB = 40
+WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ = (
+    10_000_000,
+    20_000_000,
+    30_000_000,
+    40_000_000,
+)
 
 
 @dataclass
@@ -45,6 +51,7 @@ class SpectrumConfig:
     capture_buffer_blocks: int = 512
     drop_threshold_factor: float = 2.5
     drop_judge_window: int = 30
+    wideband_chunk_width_hz: int = 10_000_000
 
     # Sweep SA settings
     sweep_points: int = 201
@@ -82,6 +89,8 @@ class SpectrumConfig:
             self.rx_gain_db = MIN_INTERNAL_GAIN_DB
         if self.rx_gain_db > MAX_INTERNAL_GAIN_DB:
             self.rx_gain_db = MAX_INTERNAL_GAIN_DB
+        if int(self.wideband_chunk_width_hz) not in WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ:
+            self.wideband_chunk_width_hz = WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ[0]
 
     @property
     def sample_rate_hz(self) -> int:

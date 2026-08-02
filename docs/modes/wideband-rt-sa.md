@@ -14,20 +14,29 @@ PlutoSDRの瞬時帯域を超える周波数範囲を複数チャンクに分割
 
 ## チャンク構成
 
-| 項目 | 値 |
+Frequencyメニューの`Chunk Width`から10／20／30／40 MHzを選択できます。初期値は10 MHzです。選択幅は合成結果へ採用する帯域幅とchunk間隔を兼ね、測定帯域の下端から上端方向へ順番に配置します。最後のchunkだけ測定Stop位置で切り詰めます。
+
+採用帯域の左右へ各5 MHzを追加した範囲をFFTの表示解析Spanとし、さらに従来どおり外側4%をFFT guardとして確保します。このためPlutoへ設定するSR/RF BWは`(Chunk Width + 10 MHz) / 0.92`です。
+
+| Chunk Width | FFT表示解析Span | SR / RF BW（公称） | LO中心 |
+|---:|---:|---:|---:|
+| 10 MHz | 20 MHz | 約21.739 MHz | chunk開始 + 5 MHz |
+| 20 MHz | 30 MHz | 約32.609 MHz | chunk開始 + 10 MHz |
+| 30 MHz | 40 MHz | 約43.478 MHz | chunk開始 + 15 MHz |
+| 40 MHz | 50 MHz | 約54.348 MHz | chunk開始 + 20 MHz |
+
+| 共通項目 | 値 |
 |---|---:|
-| 1回の取得Span | 20 MHz |
-| 1チャンクの採用帯域 | 10 MHz |
-| チャンク間隔 | 10 MHz |
-| LO中心 | 各チャンク開始周波数 + 5 MHz |
+| 採用帯域外の固定guard | 左右各5 MHz |
+| FFT外周guard | 左右各4% |
 | LO settle | 200 µs |
 | リチューン後flush | FFTサイズのブロックを5回 |
 
-各チャンクではRealTime SAと同じGaussian FFT filter bankを実行し、採用する10 MHz部分だけを合成バッファへ書き込みます。全チャンクの取得完了後に1フレームとして公開します。RBWは両側3 dB bandwidth、ENBWは約`1.0645 × RBW`で、FFT電力化後のGaussian畳み込みは行いません。
+各チャンクではRealTime SAと同じGaussian FFT filter bankを実行し、選択したChunk Width部分だけを合成バッファへ書き込みます。全チャンクの取得完了後に1フレームとして公開します。RBWは両側3 dB bandwidth、ENBWは約`1.0645 × RBW`で、FFT電力化後のGaussian畳み込みは行いません。
 
 ## 処理フロー
 
-1. 指定帯域を10 MHz単位のチャンクへ分割
+1. 指定帯域を選択したChunk Width単位のチャンクへ分割
 2. 対象チャンクのLOへリチューン
 3. 200 µs待機
 4. RXバッファを5回読み捨て
@@ -52,3 +61,4 @@ PlutoSDRの瞬時帯域を超える周波数範囲を複数チャンクに分割
 - 各チャンク内も現段階では1 FFT frameであり、overlap STFTによる全sample被覆は未実装です。
 - 狭いRBWではFFT Sizeを最大16384まで自動拡張し、なお不足する場合はステータスの`Eff RBW`へ`limited`を表示します。
 - Spanが大きいほど1フレーム完成までの時間が長くなります。
+- Chunk Widthを広げるほど1フレームのchunk数とリチューン回数は減りますが、Plutoのusable bandwidth中央部から離れた領域も採用します。ノイズフロアの盛り上がり、DC/LO由来の像、mirror、帯域端roll-off、周波数別振幅誤差が増える可能性を理解した上で使用してください。既定10 MHzは品質優先設定です。
