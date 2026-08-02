@@ -20,7 +20,7 @@
 
 ## 2. 振幅処理
 
-RBW処理はモード系統で異なります。Sweep SAとTime Analyzer系は4次Butterworth complex IQ filterを電力化前に適用します。指定RBWは両側3 dB bandwidthです。RealTime SA、WideBand RT SA、Calibrationは現時点ではHann窓付きFFT後のpower spectrumへGaussianカーネルを畳み込む旧方式であり、今後overlap FFT filter bankへ移行します。
+RBW処理はモード系統で異なります。Sweep SAとTime Analyzer系はGaussian complex IQ FIRを電力化前に適用します。指定RBWは両側3 dB bandwidth、ENBWは約1.0645倍です。RealTime SA、WideBand RT SA、Calibrationは現時点ではHann窓付きFFT後のpower spectrumへGaussianカーネルを畳み込む旧方式であり、今後overlap FFT filter bankへ移行します。
 
 表示値には最終段で次の補正を加算します。
 

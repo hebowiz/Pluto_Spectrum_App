@@ -24,7 +24,7 @@
 各IQブロックについて次を実施します。
 
 1. 必要に応じてDC平均値を除去
-2. block境界をまたいで状態を保持する4次Butterworth complex IQ filterを適用
+2. block境界をまたいで状態を保持するGaussian complex IQ FIRを適用
 3. filter出力を`I² + Q²`へ変換
 4. Sample/Peak/RMS Detectorで代表値を生成
 5. Detector代表値へ固定補正、入力補正、周波数別補正を適用

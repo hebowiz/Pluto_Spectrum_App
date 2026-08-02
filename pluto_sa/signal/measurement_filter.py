@@ -6,21 +6,25 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
-from scipy.signal import butter, sosfilt, sosfilt_zi, sosfreqz
+from scipy.signal import butter, fftconvolve, lfilter, sosfilt, sosfilt_zi, sosfreqz
 
 from pluto_sa.signal.detector import DetectorMode
 
 
 DEFAULT_IQ_FILTER_ORDER = 4
+DEFAULT_IQ_FILTER_SHAPE = "gaussian"
 _MAX_TWO_SIDED_RBW_RATIO = 0.98
+_GAUSSIAN_TRUNCATION_SIGMA = 4.0
+_DIRECT_FIR_MAX_TAPS = 256
 
 
 @dataclass(frozen=True)
 class IQFilterDesign:
     """Resolved characteristics of a complex-baseband RBW filter.
 
-    ``effective_rbw_hz`` is the full two-sided 3 dB bandwidth. The SciPy
-    low-pass cutoff is consequently half that value on either side of DC.
+    ``effective_rbw_hz`` is the full two-sided 3 dB bandwidth. The low-pass
+    cutoff is consequently half that value on either side of DC. IIR group
+    delay is frequency-dependent and is reported as ``None``.
     """
 
     sample_rate_hz: float
@@ -30,6 +34,9 @@ class IQFilterDesign:
     order: int
     noise_equivalent_bandwidth_hz: float
     settling_samples: int
+    filter_shape: str
+    tap_count: int
+    group_delay_samples: float | None
 
 
 @lru_cache(maxsize=128)
@@ -37,6 +44,7 @@ def _design_cached(
     sample_rate_hz: float,
     requested_rbw_hz: float,
     order: int,
+    shape: str,
 ) -> tuple[np.ndarray, IQFilterDesign]:
     if not np.isfinite(sample_rate_hz) or sample_rate_hz <= 0.0:
         raise ValueError("sample_rate_hz must be positive")
@@ -44,31 +52,61 @@ def _design_cached(
         raise ValueError("rbw_hz must be positive")
     if int(order) <= 0:
         raise ValueError("order must be positive")
+    if shape not in {"gaussian", "butterworth"}:
+        raise ValueError("shape must be 'gaussian' or 'butterworth'")
 
     effective_rbw_hz = min(
         float(requested_rbw_hz),
         float(sample_rate_hz) * _MAX_TWO_SIDED_RBW_RATIO,
     )
     cutoff_hz = effective_rbw_hz / 2.0
-    sos = butter(
-        int(order),
-        cutoff_hz,
-        btype="lowpass",
-        fs=float(sample_rate_hz),
-        output="sos",
-    )
+    if shape == "gaussian":
+        # A Gaussian impulse with this standard deviation has a power response
+        # of -3.0103 dB at +/- RBW/2. Truncating at +/-4 sigma keeps the error
+        # negligible while bounding processing cost.
+        sigma_samples = (
+            np.sqrt(np.log(2.0))
+            * float(sample_rate_hz)
+            / (np.pi * effective_rbw_hz)
+        )
+        half_width = max(
+            1,
+            int(np.ceil(_GAUSSIAN_TRUNCATION_SIGMA * sigma_samples)),
+        )
+        sample_indices = np.arange(-half_width, half_width + 1, dtype=np.float64)
+        coefficients = np.exp(-0.5 * (sample_indices / sigma_samples) ** 2)
+        coefficients /= np.sum(coefficients)
+        enbw_hz = float(np.sum(coefficients**2) * float(sample_rate_hz))
+        settling_samples = int(coefficients.size - 1)
+        tap_count = int(coefficients.size)
+        group_delay_samples = float(half_width)
+    else:
+        coefficients = butter(
+            int(order),
+            cutoff_hz,
+            btype="lowpass",
+            fs=float(sample_rate_hz),
+            output="sos",
+        )
 
-    # Integrate the complete 0..Fs response. Its upper half represents the
-    # negative-frequency side of this complex-baseband low-pass.
-    _, response = sosfreqz(sos, worN=32_768, whole=True, fs=float(sample_rate_hz))
-    enbw_hz = float(np.mean(np.abs(response) ** 2) * float(sample_rate_hz))
+        # Integrate the complete 0..Fs response. Its upper half represents the
+        # negative-frequency side of this complex-baseband low-pass.
+        _, response = sosfreqz(
+            coefficients,
+            worN=32_768,
+            whole=True,
+            fs=float(sample_rate_hz),
+        )
+        enbw_hz = float(np.mean(np.abs(response) ** 2) * float(sample_rate_hz))
 
-    # Eight time constants is a conservative state/warm-up indicator. It is
-    # metadata, not an automatic sample discard performed by the filter.
-    settling_samples = max(
-        int(order) * 4,
-        int(np.ceil(8.0 * float(sample_rate_hz) / (np.pi * effective_rbw_hz))),
-    )
+        # Eight time constants is a conservative state/warm-up indicator. It is
+        # metadata, not an automatic sample discard performed by the filter.
+        settling_samples = max(
+            int(order) * 4,
+            int(np.ceil(8.0 * float(sample_rate_hz) / (np.pi * effective_rbw_hz))),
+        )
+        tap_count = 0
+        group_delay_samples = None
     design = IQFilterDesign(
         sample_rate_hz=float(sample_rate_hz),
         requested_rbw_hz=float(requested_rbw_hz),
@@ -77,32 +115,66 @@ def _design_cached(
         order=int(order),
         noise_equivalent_bandwidth_hz=enbw_hz,
         settling_samples=settling_samples,
+        filter_shape=shape,
+        tap_count=tap_count,
+        group_delay_samples=group_delay_samples,
     )
-    sos.setflags(write=False)
-    return sos, design
+    coefficients.setflags(write=False)
+    return coefficients, design
 
 
 def design_iq_rbw_filter(
     sample_rate_hz: float,
     rbw_hz: float,
     order: int = DEFAULT_IQ_FILTER_ORDER,
+    shape: str = DEFAULT_IQ_FILTER_SHAPE,
 ) -> tuple[np.ndarray, IQFilterDesign]:
-    """Return SOS coefficients and metadata for a centered IQ RBW filter."""
-    sos, design = _design_cached(float(sample_rate_hz), float(rbw_hz), int(order))
-    return np.array(sos, copy=True), design
+    """Return coefficients and metadata for a centered IQ RBW filter.
+
+    Gaussian coefficients are one-dimensional FIR taps. Butterworth
+    coefficients use SciPy's second-order-section representation.
+    """
+    normalized_shape = str(shape).strip().lower()
+    coefficients, design = _design_cached(
+        float(sample_rate_hz),
+        float(rbw_hz),
+        int(order),
+        normalized_shape,
+    )
+    return np.array(coefficients, copy=True), design
 
 
 class StatefulIQMeasurementFilter:
-    """Complex Butterworth low-pass whose state survives input block boundaries."""
+    """Complex IQ low-pass whose state survives input block boundaries."""
 
     def __init__(
         self,
         sample_rate_hz: float,
         rbw_hz: float,
         order: int = DEFAULT_IQ_FILTER_ORDER,
+        shape: str = DEFAULT_IQ_FILTER_SHAPE,
     ) -> None:
-        self.sos, self.design = design_iq_rbw_filter(sample_rate_hz, rbw_hz, order)
-        self._steady_state_zi = sosfilt_zi(self.sos).astype(np.complex128)
+        self.coefficients, self.design = design_iq_rbw_filter(
+            sample_rate_hz,
+            rbw_hz,
+            order,
+            shape,
+        )
+        self.sos: np.ndarray | None = None
+        self.taps: np.ndarray | None = None
+        self._history: np.ndarray | None = None
+        if self.design.filter_shape == "butterworth":
+            self.sos = self.coefficients
+            self._steady_state_zi = sosfilt_zi(self.sos).astype(np.complex128)
+        else:
+            self.taps = self.coefficients
+            # lfilter uses a transposed direct-form state. For a constant input,
+            # zi[k] is the sum of all taps following tap k.
+            self._steady_state_zi = np.cumsum(self.taps[:0:-1])[::-1].astype(
+                np.complex128
+            )
+            if self.taps.size > _DIRECT_FIR_MAX_TAPS:
+                self._history = np.zeros(self.taps.size - 1, dtype=np.complex128)
         self._zi = np.zeros_like(self._steady_state_zi)
 
     def reset(self, initial_sample: complex | None = None) -> None:
@@ -111,6 +183,9 @@ class StatefulIQMeasurementFilter:
             self._zi = np.zeros_like(self._steady_state_zi)
         else:
             self._zi = self._steady_state_zi * complex(initial_sample)
+        if self._history is not None:
+            fill = 0.0j if initial_sample is None else complex(initial_sample)
+            self._history.fill(fill)
 
     def process(self, iq: np.ndarray) -> np.ndarray:
         """Filter one block and retain final state for the next block."""
@@ -121,7 +196,21 @@ class StatefulIQMeasurementFilter:
             raise ValueError("iq must contain complex samples")
         if values.size == 0:
             return np.empty(0, dtype=np.complex128)
-        output, self._zi = sosfilt(self.sos, values, zi=self._zi)
+        if self.sos is not None:
+            output, self._zi = sosfilt(self.sos, values, zi=self._zi)
+        elif self._history is None:
+            output, self._zi = lfilter(
+                self.taps,
+                np.asarray([1.0]),
+                values,
+                zi=self._zi,
+            )
+        else:
+            extended = np.concatenate((self._history, values.astype(np.complex128)))
+            convolution = fftconvolve(extended, self.taps, mode="full")
+            start = int(self.taps.size - 1)
+            output = convolution[start : start + values.size]
+            self._history = np.asarray(extended[-start:], dtype=np.complex128)
         return np.asarray(output, dtype=np.complex128)
 
 

@@ -107,6 +107,20 @@ Time Span初期値を10 msへ変更し、record長とdisplay bucketをFFT size�
 
 ヘッダーを`IQ Samples / Plot Points / Plot dt`へ分離後、同じ4 MSPS、10 ms、1000 pointsで0.3秒のoffscreen GUI統合試験を実施しました。19 recordsを更新し、1,114,112 samples受信、ring上書き0、queue最大2、例外なしでした。
 
+### Gaussian IQ Filterデフォルト化後（2026-08-02）
+
+Sweep/TA共通IQ Filterを4次ButterworthからGaussian FIRへ変更後、direct USB `usb:1.54.5`、4 MSPS、RBW 1 MHz、Time Span 10 ms、Free Run Continuousを2秒実行しました。
+
+- Gaussian FIR: 11 taps、群遅延5 samples、ENBW約1.0645 MHz
+- publish: 188 records、各1000 points
+- RX: 121 blocks、7,929,856 samples
+- ring overwritten blocks: 0
+- analysis job queue最大使用量: 2
+- 終了時pending/job/result queue: 0
+- 例外なし
+
+同条件のButterworth時と同じrecord数・受信sample数・queue最大値で、短時間の処理追従性低下は見られませんでした。pytestではCWの両側3 dB幅、ENBW、tap対称性/DC gain、direct FIRと狭RBW FFT convolution双方のblock分割同値性を検証しています。既知CW/noiseを用いた実機shape/ENBW測定は未実施です。
+
 Qtをoffscreenで動かし、実際の`RealtimeSpectrumWindow`、共通Producer、window assembler、解析job/result queue、描画publishまでを通しました。Time Spanは0.1秒です。
 
 | Mode | 条件 | 主な結果 |

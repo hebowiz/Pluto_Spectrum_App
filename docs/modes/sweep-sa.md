@@ -47,12 +47,12 @@ capture samples
 4. 指定回数だけ受信データを読み捨て
 5. IQブロックを取得
 6. 必要に応じてDC平均値を除去
-7. LO pointごとに初期化した4次Butterworth complex IQ filterを適用
+7. LO pointごとに初期化したGaussian complex IQ FIRを適用
 8. filterのsettling区間後に`I² + Q²`の時間系列を生成
 9. Detectorで代表値へ集約
 10. dB変換後、掃引結果へ格納
 
-RBWはcomplex basebandの両側3 dB bandwidthです。FFTはピーク周波数などのdebug情報には残していますが、掃引点の測定電力には使用しません。
+RBWはcomplex basebandの両側3 dB bandwidthです。Gaussian FIRはDC gain 1、ENBW約`1.0645 × RBW`で、linear-phase群遅延と全tap分のsettling区間を除いてからDetectorへ渡します。FFTはピーク周波数などのdebug情報には残していますが、掃引点の測定電力には使用しません。
 
 ## Detector
 

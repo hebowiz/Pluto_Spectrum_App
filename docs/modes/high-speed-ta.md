@@ -82,13 +82,13 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 
 ## 振幅処理
 
-record全体へ4次Butterworth complex IQ low-passを適用してから`I² + Q²`へ変換します。指定RBWは両側3 dB bandwidthであり、内部cutoffは`RBW / 2`です。Free Run等で前recordの終了sampleと次recordの開始sampleが連続している場合はfilter stateを引き継ぎ、overrun、設定変更、trigger recordの重複・空白がある場合はresetします。
+record全体へGaussian complex IQ FIR low-passを適用してから`I² + Q²`へ変換します。指定RBWは両側3 dB bandwidthであり、中心から±`RBW / 2`で電力が約-3.0103 dB、ENBWは約`1.0645 × RBW`です。FIRはlinear phaseで、群遅延は`(tap数 - 1) / 2 samples`です。Free Run等で前recordの終了sampleと次recordの開始sampleが連続している場合はfilter stateを引き継ぎ、overrun、設定変更、trigger recordの重複・空白がある場合はresetします。
 
 filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落なく分配し、各bucketへDetectorを適用します。Sampleは最後のpower、Peakは最大power、RMSはIQの平均二乗powerです。bucketの時間位置は中央sampleです。
 
 表示間隔は概ね`Time Span / display points`です。初期10 ms、1000 pointsでは約10 µsとなり、FFT sizeを変えても表示間隔は変化しません。recordが1000 samples未満の場合は1 sampleを1 pointとして表示します。
 
-40 samples/bucketは4 MSPS、10 ms、1000 pointsから得られる初期条件であり、固定値でも理論上の必須値でもありません。実装上の最小bucketは1 raw IQ sampleです。ただし意味のある時間分解能は`1 / Sample Rate`だけでなくIQ RBW filterの過渡応答にも制限されます。4 MSPSにおける現行4次Butterworth filterの合成step応答では、10–90% rise timeはRBW 1 MHzで約0.75 µs、100 kHzで約7.75 µs、10 kHzで約77.25 µsです。
+40 samples/bucketは4 MSPS、10 ms、1000 pointsから得られる初期条件であり、固定値でも理論上の必須値でもありません。実装上の最小bucketは1 raw IQ sampleです。ただし意味のある時間分解能は`1 / Sample Rate`だけでなくIQ RBW filterの過渡応答にも制限されます。4 MSPSにおける現行Gaussian FIRの電力step応答では、10–90% rise timeはRBW 1 MHzで約0.5 µs、100 kHzで約5.5 µs、10 kHzで約56 µsです。
 
 1000 pointsは描画負荷を一定にする表示上限です。Peak Detectorはbucket内の短いeventの最大値を保持しますが時刻はbucket幅へ量子化され、RMSは平均化します。raw IQおよびtriggerのsample timeline自体が10 µsへ間引かれるわけではありません。
 
@@ -104,6 +104,7 @@ filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落な�
 - 実効Time Spanはsample整数化のため、指定値に対して最大約0.5 sample周期の丸め差を持ちます。
 - 解析が取得より継続的に遅い場合、job/result queueから共通リングへbackpressureが伝わり、最終的にring overrunとなる可能性があります。この場合は不連続を明示してpartial windowを破棄します。
 - Trigger位置の縦線表示、minimum duration/holdoff/hysteresisのUI設定、Frequency Mask Triggerは未実装です。
+- Gaussian FIRの群遅延はmetadata化済みですが、表示時刻およびTrigger markerの補正は未実装です。raw trigger判定は入力sample timeline、表示powerは遅延したfilter出力である点に注意が必要です。
 - 512×65536 samplesのcomplex64保持は最大約256 MiBです。
 - USB/libiio内部の欠落はアプリ側連番だけでは検出できないため、実機の既知信号による連続性検証が必要です。
 - Single/Continuous切替やSweep Time変更時は、既存RX workerとstream cursorを同時に無効化して新しいepochで再開します。

@@ -6,13 +6,17 @@
 
 | 経路 | 現在のRBW方式 |
 |---|---|
-| Sweep SA | 4次Butterworth stateful complex IQ filterへ移行済み |
-| HighSpeed TA | 4次Butterworth stateful complex IQ filterへ移行済み |
+| Sweep SA | Gaussian FIR stateful complex IQ filterへ移行済み |
+| HighSpeed TA | Gaussian FIR stateful complex IQ filterへ移行済み |
 | 旧Time Analyzer | 同じIQ filterへ移行済み（UI非表示） |
 | RealTime SA / WideBand RT SA | 従来のFFT後power-domain Gaussian、overlap FFT filter bankへ移行予定 |
 | Calibration | 従来のRealTime SA系処理を継続 |
 
-実装は`pluto_sa/signal/measurement_filter.py`へ集約しました。指定RBWはcomplex basebandの負周波数側から正周波数側までを含む「両側3 dB bandwidth」と定義し、内部low-pass cutoffは`RBW / 2`です。DC gainは1で、filter metadataとして数値積分したENBWと8 time constants相当のsettling sample数を保持します。
+実装は`pluto_sa/signal/measurement_filter.py`へ集約しました。指定RBWはcomplex basebandの負周波数側から正周波数側までを含む「両側3 dB bandwidth」と定義し、内部low-pass cutoffは`RBW / 2`です。
+
+デフォルトshapeは掃引型SAに近い裾の滑らかな選択度を優先し、linear-phase Gaussian FIRとしました。Gaussian impulseの標準偏差を`√ln(2) × Fs / (π × RBW)`とし、±4σで打ち切ってDC gainを1へ正規化します。この定義ではCWが中心から±RBW/2で約-3.0103 dB、ENBWが約`1.0645 × RBW`です。tap数、群遅延`(tap数 - 1) / 2`、有限インパルス応答全長をmetadataとして保持します。通常RBWの短いFIRはdirect filter、狭RBWで256 tapsを超える場合はFFT convolutionを使い、いずれもblock境界stateを維持します。
+
+従来の4次Butterworth IIRは比較・将来のchannel filter候補として`shape="butterworth"`を明示した場合のみ利用できます。UIのfilter shape選択はまだなく、Sweep SA/TAはGaussian固定です。Gaussianは一般的なSAらしい公称shapeを意図しますが、特定メーカーの実機RBW filterを完全再現するものではありません。
 
 以下の「旧実装」はRealTime SA/WideBand RT SAと、移行前のSweep/TAを説明した監査記録です。
 

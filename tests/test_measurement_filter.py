@@ -52,11 +52,57 @@ def test_out_of_band_tone_is_rejected() -> None:
 
 
 def test_design_reports_enbw_and_settling() -> None:
-    _, design = design_iq_rbw_filter(1_000_000.0, 100_000.0)
+    taps, design = design_iq_rbw_filter(1_000_000.0, 100_000.0)
     assert design.effective_rbw_hz == 100_000.0
     assert design.cutoff_hz == 50_000.0
-    assert design.noise_equivalent_bandwidth_hz > design.effective_rbw_hz
+    assert design.filter_shape == "gaussian"
+    assert design.tap_count == taps.size
+    assert design.group_delay_samples == (taps.size - 1) / 2
+    assert design.noise_equivalent_bandwidth_hz / design.effective_rbw_hz == pytest.approx(
+        1.0645,
+        rel=2e-3,
+    )
     assert design.settling_samples >= 16
+
+
+def test_default_gaussian_filter_has_symmetric_unit_gain_taps() -> None:
+    taps, design = design_iq_rbw_filter(4_000_000.0, 1_000_000.0)
+
+    np.testing.assert_allclose(taps, taps[::-1], rtol=0.0, atol=0.0)
+    assert np.sum(taps) == pytest.approx(1.0)
+    assert design.tap_count == 11
+
+
+def test_narrow_gaussian_fft_filter_is_continuous_across_blocks() -> None:
+    sample_rate_hz = 521_000.0
+    iq = _tone(sample_rate_hz, 200.0, 12_000)
+    whole = StatefulIQMeasurementFilter(sample_rate_hz, 1_000.0)
+    split = StatefulIQMeasurementFilter(sample_rate_hz, 1_000.0)
+
+    expected = whole.process(iq)
+    actual = np.concatenate(
+        (split.process(iq[:317]), split.process(iq[317:4099]), split.process(iq[4099:]))
+    )
+
+    assert whole.design.tap_count > 256
+    np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_butterworth_remains_available_as_an_explicit_shape() -> None:
+    coefficients, design = design_iq_rbw_filter(
+        1_000_000.0,
+        100_000.0,
+        shape="butterworth",
+    )
+    measurement_filter = StatefulIQMeasurementFilter(
+        1_000_000.0,
+        100_000.0,
+        shape="butterworth",
+    )
+
+    assert coefficients.ndim == 2
+    assert design.filter_shape == "butterworth"
+    assert measurement_filter.sos is not None
 
 
 def test_rms_detector_returns_mean_complex_power() -> None:
