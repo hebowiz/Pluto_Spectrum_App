@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 65 tests passed。従来対象に加え、complex IQ filterのblock境界state、両側3 dB RBW、帯域外抑圧、ENBW/settling metadata、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆を検証しています。
+2026-08-02時点: 66 tests passed。従来対象に加え、complex IQ filterのblock境界state、両側3 dB RBW、帯域外抑圧、ENBW/settling metadata、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離を検証しています。
 
 ## 現在の実装構成
 
@@ -243,4 +243,5 @@ python -m pytest -q
 - RBWを両側3 dB bandwidthとして定義し、ENBWとsettling samplesをfilter metadata化。RMS Detectorはlinear powerの平均へ修正。
 - HighSpeed TAは連続するrecord間でfilter stateを保持。不連続・設定変更・record重複時はresetする。
 - HighSpeed TAのrecord長とdisplay bucketをFFT sizeから分離。Time Span初期値を10 ms、表示上限を1000 pointsとし、各IQ sampleをDetector bucketへ一度ずつ割り当てる。
+- HSTAヘッダーの曖昧な`Samples`/`Avg dt`を`IQ Samples`、`Plot Points`、`Plot dt`へ分離。内部秒座標とms tick変換が既に整合していることを再確認。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

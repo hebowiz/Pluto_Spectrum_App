@@ -11,6 +11,7 @@ from pluto_sa.ui.main_window import (
     HighSpeedTAAnalysisJob,
     RealtimeSpectrumWindow,
     SWEEP_STATE_RUNNING,
+    format_hsta_sampling_status,
 )
 
 
@@ -176,3 +177,8 @@ def test_hsta_analysis_uses_iq_filter_before_power_detection() -> None:
     assert len(center.sweep_y_db) == 16
     assert center.sweep_y_db[-1] == pytest.approx(0.0, abs=1e-6)
     assert rejected.sweep_y_db[-1] < -45.0
+
+
+def test_hsta_status_distinguishes_iq_samples_and_plot_points() -> None:
+    status = format_hsta_sampling_status(40_000, 1000, 10e-6)
+    assert status == "IQ Samples: 40000   Plot Points: 1000   Plot dt: 0.010 ms"

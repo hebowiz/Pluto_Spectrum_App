@@ -88,6 +88,12 @@ filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落な�
 
 表示間隔は概ね`Time Span / display points`です。初期10 ms、1000 pointsでは約10 µsとなり、FFT sizeを変えても表示間隔は変化しません。recordが1000 samples未満の場合は1 sampleを1 pointとして表示します。
 
+40 samples/bucketは4 MSPS、10 ms、1000 pointsから得られる初期条件であり、固定値でも理論上の必須値でもありません。実装上の最小bucketは1 raw IQ sampleです。ただし意味のある時間分解能は`1 / Sample Rate`だけでなくIQ RBW filterの過渡応答にも制限されます。4 MSPSにおける現行4次Butterworth filterの合成step応答では、10–90% rise timeはRBW 1 MHzで約0.75 µs、100 kHzで約7.75 µs、10 kHzで約77.25 µsです。
+
+1000 pointsは描画負荷を一定にする表示上限です。Peak Detectorはbucket内の短いeventの最大値を保持しますが時刻はbucket幅へ量子化され、RMSは平均化します。raw IQおよびtriggerのsample timeline自体が10 µsへ間引かれるわけではありません。
+
+ヘッダーは`IQ Samples`、`Plot Points`、`Plot dt`を別々に表示します。横軸の内部単位は秒ですが、HighSpeed TAの固定tick labelは1000倍してms表示します。
+
 最後に固定補正、入出力補正、Center Frequencyにおける周波数別校正を適用します。Power Triggerは引き続きfilter前のraw IQ magnitudeを評価するため、表示RBWとTrigger bandwidthはまだ独立です。
 
 ## 制限・注意事項

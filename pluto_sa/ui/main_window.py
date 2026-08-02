@@ -261,6 +261,7 @@ class HighSpeedTimeAnalyzerCaptureState:
     capture_start_timestamp: float | None = None
     discard_samples_remaining: int = 0
     last_sweep_samples: int = 0
+    last_iq_samples: int = 0
     last_sweep_avg_dt_s: float | None = None
     capture_call_count: int = 0
     capture_call_total_s: float = 0.0
@@ -342,6 +343,20 @@ class FrequencyAxisItem(pg.AxisItem):
 
     def tickStrings(self, values, scale, spacing):
         return [f"{value:.3f}" for value in values]
+
+
+def format_hsta_sampling_status(
+    iq_samples: int,
+    plot_points: int,
+    plot_dt_s: float | None,
+) -> str:
+    """Format distinct acquisition and display sampling statistics."""
+    plot_dt_text = "--" if plot_dt_s is None else f"{float(plot_dt_s) * 1e3:.3f} ms"
+    return (
+        f"IQ Samples: {max(0, int(iq_samples))}   "
+        f"Plot Points: {max(0, int(plot_points))}   "
+        f"Plot dt: {plot_dt_text}"
+    )
 
 
 class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
@@ -784,6 +799,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _initialize_high_speed_time_analyzer_runtime(self) -> None:
         self._high_speed_time_analyzer.last_sweep_samples = 0
+        self._high_speed_time_analyzer.last_iq_samples = 0
         self._high_speed_time_analyzer.last_sweep_avg_dt_s = None
         self._reset_high_speed_time_analyzer_capture_window(start_timestamp=None, reset_discard=True)
 
@@ -1031,10 +1047,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._time_analyzer_last_sweep_avg_dt_s = None
         self._refresh_status_label()
 
-    def _finalize_high_speed_time_analyzer_sweep_stats(self, sweep_x_s: np.ndarray) -> None:
+    def _finalize_high_speed_time_analyzer_sweep_stats(
+        self,
+        sweep_x_s: np.ndarray,
+        iq_samples: int,
+    ) -> None:
         state = self._high_speed_time_analyzer
         count = int(len(sweep_x_s))
         state.last_sweep_samples = count
+        state.last_iq_samples = max(0, int(iq_samples))
         if count >= 2:
             elapsed = float(sweep_x_s[-1] - sweep_x_s[0])
             state.last_sweep_avg_dt_s = max(0.0, elapsed / float(count - 1))
@@ -6027,17 +6048,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         rbw_text = self._format_rbw_text()
         if self._is_high_speed_time_analyzer_mode():
-            avg_dt_text = (
-                f"{(self._high_speed_time_analyzer.last_sweep_avg_dt_s * 1000.0):.3f} ms"
-                if self._high_speed_time_analyzer.last_sweep_avg_dt_s is not None
-                else "--"
+            sampling_status = format_hsta_sampling_status(
+                self._high_speed_time_analyzer.last_iq_samples,
+                self._high_speed_time_analyzer.last_sweep_samples,
+                self._high_speed_time_analyzer.last_sweep_avg_dt_s,
             )
             line1 = (
                 f"{freq_label_1}: {freq_value_1}   "
                 f"{freq_label_2}: {freq_value_2}   "
                 f"RBW: {rbw_text}   "
-                f"Samples: {self._high_speed_time_analyzer.last_sweep_samples}   "
-                f"Avg dt: {avg_dt_text}"
+                f"{sampling_status}"
             )
         elif self.config.analyzer_mode == AnalyzerMode.TIME_ANALYZER:
             avg_dt_text = (
@@ -6871,7 +6891,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self,
         analysis_result: HighSpeedTAAnalysisResult,
     ) -> None:
-        self._finalize_high_speed_time_analyzer_sweep_stats(analysis_result.sweep_x_s)
+        self._finalize_high_speed_time_analyzer_sweep_stats(
+            analysis_result.sweep_x_s,
+            analysis_result.capture_total_samples,
+        )
         publish_start = time.perf_counter()
         self._publish_high_speed_time_analyzer_sweep(
             analysis_result.sweep_x_s,

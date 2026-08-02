@@ -105,6 +105,8 @@ Time Span初期値を10 msへ変更し、record長とdisplay bucketをFFT size�
 
 100 records/s、各1000 pointsに近い条件でも短時間は受信へ追従しました。長時間動作、画面表示環境でのCPU/GPU負荷、既知burstのPeak保持は未検証です。
 
+ヘッダーを`IQ Samples / Plot Points / Plot dt`へ分離後、同じ4 MSPS、10 ms、1000 pointsで0.3秒のoffscreen GUI統合試験を実施しました。19 recordsを更新し、1,114,112 samples受信、ring上書き0、queue最大2、例外なしでした。
+
 Qtをoffscreenで動かし、実際の`RealtimeSpectrumWindow`、共通Producer、window assembler、解析job/result queue、描画publishまでを通しました。Time Spanは0.1秒です。
 
 | Mode | 条件 | 主な結果 |
