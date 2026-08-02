@@ -29,6 +29,66 @@ VSAは位相を保持したIQ time recordを解析対象にします。一般的
 
 解析・描画より先に連続time recordを保存することで、同じIQを異なる設定で再解析できます。Keysightの資料も、処理間にgapがあるblock-mode VSAと、処理前にgapのないwaveformを保存して再生解析するtime captureを区別しています。
 
+## 1.1 実機メーカー資料から整理したZero SpanとVSAの違い
+
+### Zero Span / Time Domain Power
+
+一般的なZero SpanはLOを1周波数へ固定し、選択したRBWまたはchannel filterを通過した信号の電力を時間に対して表示します。基本経路は次のとおりで、各時間点にFFTは必須ではありません。
+
+```text
+RF/IFまたはDDC後IQ
+    → RBW / channel filter
+    → envelope or power (I² + Q²)
+    → detector (sample / peak / RMS等)
+    → optional VBW / averaging
+    → time bucket / display trace
+```
+
+- RBWは測定対象帯域とnoise bandwidthを決め、filterのimpulse responseが立上がり時間と実効時間分解能を制限する。
+- Sample Rateは内部時刻量子化を決めるが、独立した電力測定点の時間分解能が必ず`1 / Sample Rate`になるわけではない。
+- Sweep Timeは観測record長、trace pointsは表示またはdetector bucket数であり、ADC/IQ sample数と同じとは限らない。
+- 現代のRTSAではRBW/channel filter、power trigger、time traceをDDC後IQからデジタル実装できる。FFT/DPX/Frequency Maskは同じIQから分岐する別処理である。
+
+Rohde & SchwarzはZero Spanを「固定したRBW filterでpower versus timeを表示する測定」と説明し、time-domain powerではRBWが測定帯域を決め、Gaussian RBWだけでなくchannel filterも使用できるとしています。TektronixのRTSA構成もADC→correction→DDC/decimation→IQを基点に、filtered power level trigger、FMT/DPX、capture、post-acquisition analysisへ分岐しています。
+
+### VSA
+
+VSAは電力包絡線ではなく、位相を保持したIQ time recordを正本にします。
+
+```text
+RF front end / LO / ADC
+    → DDC / decimation / calibrated complex IQ
+    → trigger + raw/search time record
+    → frequency shift / resampling / measurement filter
+    → burst/frame search
+    → carrier and symbol timing lock
+    → measured IQ and ideal reference IQ
+    → EVM / magnitude error / phase error / constellation / spectrum
+```
+
+- Raw Main Time、Search Time、解析対象Time recordを区別する。
+- Hardware取得点数はresampling filterのsettling分だけ解析recordより多い場合がある。
+- Digital demodulationではsymbol rateとpoints/symbolへresampleし、carrier lock、symbol lock、IQ offset補償、measurement filterを適用する。
+- 理想symbolからreference IQを再構成し、measured IQとの差をEVM等として評価する。
+- Spectrum traceが必要な場合は選択windowをtime recordへ適用してFFTするが、demodulationの全処理が「短いFFT frameごとの電力値」ではない。
+- Digital demodulationのResBWは独立したZero Span RBW knobとは異なり、time record長とwindow ENBWから決まる場合がある。
+
+### 本アプリへの判断
+
+HighSpeed TA、RTSA、VSAは共通IQ Producerとsample timelineを共有しつつ、解析分岐を分けます。
+
+```text
+continuous calibrated IQ
+    ├─ raw magnitude → software Power Trigger
+    ├─ Zero Span TA
+    │    ├─ Fast Envelope: RF/acquisition BW → I²+Q² → detector/bucket
+    │    └─ Filtered Power: digital measurement filter (known ENBW) → detector/bucket
+    ├─ RTSA: overlap FFT → spectrum/density/Frequency Mask
+    └─ VSA: trigger record → DDC/resample/filter/sync/demod/EVM
+```
+
+Plutoの`rx_rf_bandwidth`はfront-end/acquisition bandwidthとして使用できますが、filter shape、ENBW、settling、校正を定義しない限り、従来の測定器RBWと同一とは呼びません。HighSpeed TAにはFFT方式に加えてFast EnvelopeとFiltered Powerを設け、画面には全IQ sampleを直接渡さず、pixel/time bucket単位のPeak/RMS等で短いeventを保持する方針が妥当です。
+
 ## 2. 本アプリで採用する信号経路
 
 ```text
@@ -141,6 +201,11 @@ Power Level Triggerの初期実装は各complex IQ sampleのmagnitudeを明示�
 
 ## 参考資料
 
+- [Rohde & Schwarz: Understanding Zero Span](https://www.rohde-schwarz.com/ca/knowledge-center/videos/understanding-zero-span_251220-1614806.html)
+- [Rohde & Schwarz: Speeding up Spectrum Analyzer Measurements](https://scdn.rohde-schwarz.com/ur/pws/dl_downloads/dl_application/application_notes/1ef90_speeding_up_sa_measurements/1EF90_2e_Speeding_up_SA_Measurements.pdf)
+- [Tektronix: Fundamentals of Real-Time Spectrum Analysis](https://download.tek.com/document/37W_17249_6_Fundamentals_of_RealTime_Spectrum_Analysis_0.pdf)
+- [Keysight 89600 VSA: Understanding Time and Frequency Parameters](https://helpfiles.keysight.com/csg/89600B/Webhelp/Subsystems/gui/content/understandingtimeandfreqparameters.htm)
+- [Keysight 89600 VSA: IQ Meas Time and IQ Ref Time](https://helpfiles.keysight.com/csg/89600B/Webhelp/Subsystems/customIq/content/mnu_trdata_iqmeastimiqreftim_custiq.htm)
 - [Rohde & Schwarz: Implementation of Real-Time Spectrum Analysis](https://scdn.rohde-schwarz.com/ur/pws/dl_downloads/dl_application/application_notes/1ef77/1EF77_3e_Real-time_Spectrum_Analysis.pdf)
 - [Tektronix: Real-Time Spectrum Analysis for EMI Diagnostics](https://www.tek.com/en/documents/application-note/real-time-spectrum-analysis-emi-diagnostics)
 - [Keysight: Capturing Signals for Measurement](https://www.keysight.com/bw/en/assets/9018-02562/user-manuals/9018-02562.pdf)
