@@ -19,13 +19,16 @@ PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリン�
 ## 信号処理
 
 1. 必要に応じてIQ平均値を減算
-2. Hann窓を適用
+2. Sweep SA／TAと同じGaussian complex IQ FIR係数をFFT長へゼロ埋めした解析窓を適用
 3. FFTとfftshift
 4. FFTサイズおよびcoherent gainで正規化
 5. 絶対値二乗で電力化
-6. Gaussian RBWカーネルを畳み込み
-7. FFT両端のguard領域を除外
-8. dB変換と表示補正
+6. FFT両端のguard領域を除外
+7. dB変換と表示補正
+
+各FFT binは、中心周波数だけが異なる同一Gaussian複素フィルターの出力に相当します。RBWは両側3 dB bandwidth、ENBWは約`1.0645 × RBW`です。従来のFFT電力化後のGaussian畳み込みはRBW経路から除外しました。
+
+指定RBWのGaussian係数が現在のFFT長へ収まらない場合は、FFT Sizeを最大16384まで自動拡張します。それでも収まらない場合は収まる最小RBWへ制限し、ステータスの`Eff RBW`へ実効値と`limited`を表示します。
 
 ## 表示
 
@@ -57,4 +60,5 @@ PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリン�
 
 - 55 MHzを超えるSpanはモード移行時または設定反映時に55 MHzへ制限されます。
 - フレーム落ち判定用の統計はありますが、取得データを再送・補間する機能ではありません。
+- 現段階ではGUI更新ごとに最新のFFTサイズ分を解析し、overlap STFTは未実装です。したがってGaussian filter bankの周波数特性は適用済みですが、一般的RTSA相当のPOIや全sampleの時間被覆はまだ保証しません。
 - 表示値は校正された相対的なFFT電力をdBmとして扱う実装で、絶対精度は校正条件に依存します。

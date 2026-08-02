@@ -267,6 +267,17 @@ python -m tools.validate_hsta_hardware --sample-rate 4000000 --time-span 0.1 --e
 python -m tools.validate_hsta_hardware --sample-rate 4000000 --time-span 0.1 --continuous-duration 1.5 --trigger-kind power_level --trigger-run-mode auto --trigger-level-dbm 100 --trigger-auto-timeout 0.2
 ```
 
+### RTSA/WideBand Gaussian FFT filter bank（2026-08-02）
+
+Sweep/TAと同じGaussian FIR係数を用いるFFT filter bankへ移行後、direct USB `usb:1.54.5`、Center 2.440 GHz、Span 20 MHz、FFT 4096、RBW 1 MHzで各モードを別processから確認しました。
+
+| モード | 結果 |
+|---|---|
+| RealTime SA | 完了、8 blocks、ring上書き0、3768 points、実効RBW 1 MHz、ENBW 1.0645109 MHz、support 49 samples、FFT制限なし |
+| WideBand RT SA | 完了、2 chunks、3770 points、実効RBW 1 MHz、ENBW 1.0645109 MHz、support 49 samples、FFT制限なし |
+
+Windows上では同一process内でdirect USB contextを閉じて直ちに再openするとlibiioの解放問題があるため、検証toolは`--mode rtsa`と`--mode wideband`を別processで実行できます。今回の入力レベルは管理していないため、これは取得・解析・合成経路とmetadataの統合確認です。Gaussianの3 dB shape、ENBW、絶対振幅、旧校正との差は既知CW/noiseによる追加検証が必要です。
+
 ## 解釈上の注意と次の検証
 
 - アプリのsequence/sample indexは、libiioから正常に返ったブロックへ付ける連番です。Pluto、USB、libiio内部でデータが抜けても、常に検出できるわけではありません。

@@ -40,6 +40,10 @@ from pluto_sa.sdr.trigger import (
 )
 from pluto_sa.sdr.trigger_acquisition import TriggerAcquisitionController
 from pluto_sa.signal.detector import DetectorMode
+from pluto_sa.signal.fft_filterbank import (
+    FFT_FILTERBANK_PROCESSING_SIGNATURE,
+    required_gaussian_fft_size,
+)
 from pluto_sa.signal.measurement_filter import (
     StatefulIQMeasurementFilter,
     reduce_filtered_iq_power,
@@ -3849,6 +3853,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         else:
             rbw_hz = self._clip_realtime_rbw(rbw_hz)
         self.config.rbw_hz = rbw_hz
+        realtime_fft_changed = False
+        if self.config.analyzer_mode in (
+            AnalyzerMode.REALTIME_SA,
+            AnalyzerMode.WIDEBAND_REALTIME_SA,
+        ):
+            realtime_fft_changed = self._expand_realtime_fft_for_rbw()
         if is_time_analyzer_mode:
             self._apply_time_analyzer_rbw_driven_capture_settings()
         elif is_high_speed_ta_mode:
@@ -3866,6 +3876,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.receiver.invalidate_sweep_configuration()
             self._reset_sweep_display_and_restore_state(previous_state)
         else:
+            if realtime_fft_changed and not is_wideband_mode:
+                self.receiver.reconfigure_span(self.config)
             self._rebuild_processor_only()
         if is_wideband_mode:
             self.timer.stop()
@@ -3925,6 +3937,21 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if rbw_hz is None:
             return None
         return min(max(rbw_hz, 0.0), MAX_REALTIME_RBW_HZ)
+
+    def _expand_realtime_fft_for_rbw(self) -> bool:
+        """Increase RTSA FFT size when needed to contain the Gaussian window."""
+        if self.config.rbw_hz is None:
+            return False
+        required_size = required_gaussian_fft_size(
+            float(self.config.sample_rate_hz),
+            float(self.config.rbw_hz),
+        )
+        resolved_size = min(int(required_size), int(MAX_REALTIME_FFT_SIZE))
+        if resolved_size <= int(self.config.fft_size):
+            return False
+        self.config.fft_size = resolved_size
+        self._update_fft_menu_controls()
+        return True
 
     def _select_fft_size(self, fft_size: int) -> None:
         if self._is_calibration_mode():
@@ -4799,6 +4826,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 csv_file.write("# Calibration Result File\n")
                 csv_file.write(f"# Int Gain [dB]: {int(self.config.rx_gain_db)}\n")
                 csv_file.write(f"# RBW [Hz]: {int(round(float(self.config.rbw_hz or 0.0)))}\n")
+                csv_file.write(
+                    f"# Processing: {FFT_FILTERBANK_PROCESSING_SIGNATURE}\n"
+                )
+                filterbank_design = self.processor.filterbank_design
+                csv_file.write("# RBW Definition: two-sided 3 dB bandwidth\n")
+                csv_file.write(
+                    "# Effective RBW [Hz]: "
+                    f"{filterbank_design.effective_rbw_hz:.6f}\n"
+                )
+                csv_file.write(
+                    "# ENBW [Hz]: "
+                    f"{filterbank_design.noise_equivalent_bandwidth_hz:.6f}\n"
+                )
                 csv_file.write(f"# Ext ATT [dB]: {float(self.config.ext_att_db):.1f}\n")
                 csv_file.write(f"# Ext Gain [dB]: {float(self.config.ext_gain_db):.1f}\n")
                 csv_file.write(f"# Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -6300,6 +6340,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.WIDEBAND_REALTIME_SA,
         ):
             return base_text
+
+        active_processor = self.processor
+        if (
+            self.config.analyzer_mode == AnalyzerMode.WIDEBAND_REALTIME_SA
+            and self._wideband_chunk_processor is not None
+        ):
+            active_processor = self._wideband_chunk_processor
+        filterbank_design = active_processor.filterbank_design
+        effective_rbw_text = self._format_frequency_value_hz_compact(
+            filterbank_design.effective_rbw_hz
+        )
+        rbw_limit_suffix = " limited" if filterbank_design.rbw_limited_by_fft_size else ""
+        base_text += f"   Eff RBW: {effective_rbw_text}{rbw_limit_suffix}"
 
         fps_value = self._estimate_realtime_fps()
         if fps_value > 0.0:

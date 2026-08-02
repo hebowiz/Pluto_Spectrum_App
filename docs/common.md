@@ -20,7 +20,7 @@
 
 ## 2. 振幅処理
 
-RBW処理はモード系統で異なります。Sweep SAとTime Analyzer系はGaussian complex IQ FIRを電力化前に適用します。指定RBWは両側3 dB bandwidth、ENBWは約1.0645倍です。RealTime SA、WideBand RT SA、Calibrationは現時点ではHann窓付きFFT後のpower spectrumへGaussianカーネルを畳み込む旧方式であり、今後overlap FFT filter bankへ移行します。
+RBW処理は全モードで同じGaussian complex IQ FIR特性を共有します。Sweep SAとTime Analyzer系はstateful FIRを電力化前に直接適用し、RealTime SA、WideBand RT SA、Calibrationは同じFIR係数を解析窓とするGaussian FFT filter bankを使います。指定RBWは両側3 dB bandwidth、ENBWは約1.0645倍です。RTSA系のoverlap FFTは次段階です。
 
 表示値には最終段で次の補正を加算します。
 

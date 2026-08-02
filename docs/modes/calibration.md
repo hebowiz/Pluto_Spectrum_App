@@ -63,6 +63,10 @@ calibration_offset_db = reference_power_dbm - measured_power_dbm
 # Calibration Result File
 # Int Gain [dB]: 30
 # RBW [Hz]: 1000000
+# Processing: gaussian_fft_filterbank_v1
+# RBW Definition: two-sided 3 dB bandwidth
+# Effective RBW [Hz]: 1000000.000000
+# ENBW [Hz]: 1064510.932704
 # Ext ATT [dB]: 30.0
 # Ext Gain [dB]: 0.0
 # Date: YYYY-MM-DD HH:MM:SS
@@ -88,3 +92,4 @@ frequency_hz,calibration_offset_db
 - 保存先パスを絶対パスで記録するため、プロジェクト移動後は起動時の自動読込に失敗する場合があります。
 - 校正精度は基準信号源、外部ATT/Gain設定、PlutoSDR個体差、温度、配線条件に依存します。
 - 各フレームの同期取得結果は`source=calibration`の共通`IQBlock`として発行されます。
+- Calibrationの測定スペクトラムもRealTime SAと同じGaussian FFT filter bankを使用します。旧Hann窓＋power-domain Gaussian畳み込みで作成したCSVには処理方式ヘッダーがなく、振幅応答の差が既存offsetへ含まれます。旧CSVは読込可能ですが、新方式で絶対振幅を扱う場合は再校正してください。

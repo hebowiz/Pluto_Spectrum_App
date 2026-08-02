@@ -159,8 +159,9 @@ Power Level TriggerのUIとグラフ線は最終表示と同じ補正済みdBm�
 
 ## 4. RTSA表示処理
 
-- FFT frameは連続sampleから生成し、必要なPOIに応じてoverlap率を設定します。
-- RBWは解析window/FFT bin幅/デジタルfilterの関係を明示します。
+- 第1段階として、Sweep/TAと同じGaussian complex IQ FIR係数をゼロ埋め解析窓へ使うFFT filter bankへ移行済みです。RBWは両側3 dB bandwidth、ENBWは約`1.0645 × RBW`で、旧power-domain smoothingは除外しました。
+- 指定RBWのfilter supportが収まるようFFT長を最大16384まで自動拡張し、不足時は実効RBWを表示します。
+- 次段階ではFFT frameを連続sampleから生成し、必要なPOIに応じてhop／overlap率を設定します。
 - Spectrogramの1行へ複数FFTを集約する場合、Sample/Positive Peak/Negative Peak/Average等のdetectorを適用します。
 - Persistenceはtrace holdではなく、frequency-amplitude cellの発生頻度を蓄積するdensity表示として将来分離します。
 - producer overrun、consumer lag、FFT処理率、最大見逃しevent時間を計測指標にします。
