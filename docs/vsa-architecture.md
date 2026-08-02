@@ -4,6 +4,8 @@
 
 参照モデル: `FPL_K70_VSA_UserManual_en_12.pdf`（R&S FPL1-K70 VSA User Manual、551 pages）
 
+実装済み範囲と既知の制約: [vsa-implementation.md](vsa-implementation.md)
+
 ## 1. 基本判断
 
 VSAは現行Spectrum Analyzerの単純な追加モードではなく、同じrepository内の別application shellとして実装します。取得、IQ record、trigger、calibration、共通plot部品は共有し、VSA session、demodulation、result model、multi-window UIはVSA側で所有します。
