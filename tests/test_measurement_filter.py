@@ -5,6 +5,7 @@ from pluto_sa.signal.measurement_filter import (
     StatefulIQMeasurementFilter,
     design_iq_rbw_filter,
     reduce_filtered_iq_power,
+    reduce_filtered_iq_power_buckets,
 )
 
 
@@ -63,3 +64,16 @@ def test_rms_detector_returns_mean_complex_power() -> None:
     assert reduce_filtered_iq_power(iq, "RMS") == pytest.approx(2.5)
     assert reduce_filtered_iq_power(iq, "Peak") == pytest.approx(4.0)
     assert reduce_filtered_iq_power(iq, "Sample") == pytest.approx(4.0)
+
+
+def test_bucket_detector_covers_every_sample_once() -> None:
+    iq = np.arange(1, 11, dtype=np.float64).astype(np.complex64)
+
+    rms, centers = reduce_filtered_iq_power_buckets(iq, "RMS", max_points=4)
+    peak, _ = reduce_filtered_iq_power_buckets(iq, "Peak", max_points=4)
+    sample, _ = reduce_filtered_iq_power_buckets(iq, "Sample", max_points=4)
+
+    np.testing.assert_allclose(rms, [2.5, 50.0 / 3.0, 85.0 / 2.0, 245.0 / 3.0])
+    np.testing.assert_allclose(peak, [4.0, 25.0, 49.0, 100.0])
+    np.testing.assert_allclose(sample, [4.0, 25.0, 49.0, 100.0])
+    np.testing.assert_allclose(centers, [0.5, 3.0, 5.5, 8.0])

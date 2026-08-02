@@ -27,7 +27,7 @@ from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.sdr.iq_stream import IQStreamCursor
-from pluto_sa.sdr.iq_window import resolve_fft_aligned_window_samples
+from pluto_sa.sdr.iq_window import resolve_time_window_samples
 from pluto_sa.sdr.trigger import (
     AcquisitionMetadata,
     IQAcquisitionRecord,
@@ -41,6 +41,7 @@ from pluto_sa.signal.detector import DetectorMode
 from pluto_sa.signal.measurement_filter import (
     StatefulIQMeasurementFilter,
     reduce_filtered_iq_power,
+    reduce_filtered_iq_power_buckets,
 )
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.ui.calibration_controller import CalibrationController
@@ -291,14 +292,12 @@ class HighSpeedTAAnalysisJob:
     gap_ratio_sum: float
     max_gap_ratio: float
     sample_rate_hz: float
-    fft_size: int
+    display_points: int
     rbw_hz: float | None
     detector_mode: str
     calibration_offset_db: float
     frequency_dependent_offset_db: float
     input_correction_db: float
-    window: np.ndarray
-    y_min: float
     remove_dc_offset: bool
     single_shot: bool
     sweep_id: int
@@ -6509,10 +6508,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _ensure_high_speed_ta_trigger_acquisition(self) -> TriggerAcquisitionController:
         sample_rate_hz = max(1.0, float(self.config.sample_rate_hz))
-        window_samples = resolve_fft_aligned_window_samples(
+        window_samples = resolve_time_window_samples(
             self._time_analyzer_time_span_s(),
             sample_rate_hz,
-            int(self.config.fft_size),
         )
         trigger_kind = TriggerKind(self.config.hsta_trigger_kind)
         if trigger_kind == TriggerKind.POWER_LEVEL:
@@ -6593,7 +6591,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             gap_ratio_sum=0.0,
             max_gap_ratio=0.0,
             sample_rate_hz=sample_rate_hz,
-            fft_size=int(self.config.fft_size),
+            display_points=max(1, int(self.config.time_analyzer_display_points)),
             rbw_hz=self.config.rbw_hz,
             detector_mode=self.config.sweep_detector_mode,
             calibration_offset_db=float(self.calibration_offset_db),
@@ -6603,8 +6601,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 )
             ),
             input_correction_db=float(self.config.input_correction_db),
-            window=self.processor.window.copy(),
-            y_min=float(self.y_min),
             remove_dc_offset=bool(self.config.remove_dc_offset),
             single_shot=bool(single_shot),
             sweep_id=sweep_id,
@@ -6761,42 +6757,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         block_timestamps_s = [job.block_timestamps_s[int(i)] for i in valid_indices]
         block_lengths = block_lengths[valid_mask]
 
-        fft_n = max(1, int(job.fft_size))
-        total_samples = int(np.sum(block_lengths))
-        window_count = total_samples // fft_n
-        if window_count <= 0:
-            process_blocks_ms = (time.perf_counter() - process_start) * 1000.0
-            return HighSpeedTAAnalysisResult(
-                sweep_x_s=np.empty(0, dtype=float),
-                sweep_y_db=np.empty(0, dtype=float),
-                gap_times_s=list(job.gap_times_s),
-                process_blocks_ms=process_blocks_ms,
-                capture_total_s=float(job.capture_total_s),
-                capture_call_count=int(job.capture_call_count),
-                capture_call_total_s=float(job.capture_call_total_s),
-                capture_total_samples=int(job.capture_total_samples),
-                block_sample_counts=list(job.block_sample_counts),
-                block_timestamps_s=list(block_timestamps_s),
-                gap_count=int(job.gap_count),
-                gap_ratio_sum=float(job.gap_ratio_sum),
-                max_gap_ratio=float(job.max_gap_ratio),
-                single_shot=bool(job.single_shot),
-                sweep_id=int(job.sweep_id),
-                generation=int(job.generation),
-                trigger_kind=job.trigger_kind,
-                trigger_sample_offset=int(job.trigger_sample_offset),
-                trigger_forced=bool(job.trigger_forced),
-                trigger_measured_value=job.trigger_measured_value,
-            )
-
         iq_all = (
             np.asarray(iq_blocks[0])
             if len(iq_blocks) == 1
             else np.concatenate(iq_blocks, axis=0)
         )
-        usable_samples = window_count * fft_n
-        if len(iq_all) > usable_samples:
-            iq_all = iq_all[:usable_samples]
 
         sample_rate_hz = max(1.0, float(job.sample_rate_hz))
         remove_dc_offset = bool(job.remove_dc_offset)
@@ -6814,14 +6779,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
             measurement_filter.reset(initial_sample=complex(iq_all[0]))
         filtered_iq = measurement_filter.process(iq_all)
-        filtered_frames = filtered_iq.reshape(window_count, fft_n)
-        detector_linear = np.asarray(
-            reduce_filtered_iq_power(
-                filtered_frames,
-                job.detector_mode,
-                axis=1,
-            ),
-            dtype=np.float64,
+        detector_linear, center_sample_indices = reduce_filtered_iq_power_buckets(
+            filtered_iq,
+            job.detector_mode,
+            max_points=max(1, int(job.display_points)),
         )
 
         # Preserve TA/Sweep-aligned amplitude definition through detector-equivalent value.
@@ -6839,8 +6800,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         block_start_times = block_end_times - (block_lengths.astype(float) / sample_rate_hz)
         origin_time = float(block_start_times[0])
 
-        start_indices = np.arange(window_count, dtype=np.float64) * float(fft_n)
-        center_sample_indices = start_indices + (float(fft_n) / 2.0)
         block_indices = np.searchsorted(block_ends, center_sample_indices, side="right").astype(np.int64)
         block_indices = np.clip(block_indices, 0, len(block_lengths) - 1)
         sample_in_block = center_sample_indices - block_starts[block_indices].astype(np.float64)

@@ -6,6 +6,7 @@ from pluto_sa.sdr.iq_stream import IQStreamBuffer
 from pluto_sa.sdr.iq_window import (
     IQWindowAssembler,
     resolve_fft_aligned_window_samples,
+    resolve_time_window_samples,
 )
 
 
@@ -86,3 +87,7 @@ def test_fft_aligned_window_covers_requested_time_without_partial_frame() -> Non
     assert samples == 12_288
     assert samples % 4096 == 0
     assert samples >= 10_000
+
+
+def test_time_window_uses_requested_sample_count_without_fft_alignment() -> None:
+    assert resolve_time_window_samples(0.010, 4_000_000) == 40_000

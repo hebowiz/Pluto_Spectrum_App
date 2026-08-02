@@ -63,7 +63,8 @@ class SpectrumConfig:
     # Time Analyzer settings
     time_analyzer_sample_rate_hz: int = 2_000_000
     time_analyzer_rf_bandwidth_hz: int = 2_000_000
-    time_analyzer_time_span_s: float = 1.0
+    time_analyzer_time_span_s: float = 0.010
+    time_analyzer_display_points: int = 1000
     hsta_trigger_kind: str = "free_run"
     hsta_trigger_run_mode: str = "auto"
     hsta_trigger_slope: str = "rising"

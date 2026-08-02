@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 62 tests passed。従来対象に加え、complex IQ filterのblock境界state、両側3 dB RBW、帯域外抑圧、ENBW/settling metadata、linear-power detector定義、Sweep/HSTA統合を検証しています。
+2026-08-02時点: 65 tests passed。従来対象に加え、complex IQ filterのblock境界state、両側3 dB RBW、帯域外抑圧、ENBW/settling metadata、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆を検証しています。
 
 ## 現在の実装構成
 
@@ -171,7 +171,7 @@ python -m pytest -q
 ### 現時点で保証できること
 
 - HighSpeed TAは時間窓完成時および解析中にRX workerを意図的に停止しない。
-- HighSpeed TA consumerは解析と並行してIQを読み、FFT frame整数倍の連続windowをFIFO解析queueへ投入する。
+- HighSpeed TA consumerは解析と並行してIQを読み、指定Time Spanに対応する正確なsample数の連続windowをFIFO解析queueへ投入する。
 - job/result queue満杯時は無通知上書きせず、backpressureを共通IQ ringへ伝える。
 - 1つのプロセス内で発行済みブロックの順序とepoch内sample位置を追跡できる。
 - consumer遅延でリング上書きが起きた場合、欠落を黙って隠さない。
@@ -183,17 +183,16 @@ python -m pytest -q
 
 - Pluto/libiio/USBより前または内部で発生した欠落。アプリ連番は取得成功したblockに付ける番号であり、ハードウェア連続性の証明ではない。
 - 長時間相関試験で保証できるSample Rate上限。短時間の転送試験ではdirect USB 6 MSPS、RNDIS 5 MSPSが境界だった。
-- 指定Time Spanそのものではなく、解析可能なFFT frame整数倍へ最大1 frame弱切り上げる。
+- Time Spanはsample整数へ丸めるため最大約0.5 sample周期の差を持つが、FFT frame整数倍への切り上げは廃止済み。
 - 解析がリング保持時間より長い場合の無欠落。現在はoverrunを検出してwindowを破棄する。
 - Sweep/WideBandはLO切替を伴うため、帯域全体の時間・位相連続性は設計上存在しない。
 
 ## 次に行う作業
 
-1. HighSpeed TAのdisplay bucket幅をFFT sizeから分離する。
-2. Trigger位置の表示と、minimum duration/holdoff/hysteresisのUI設定を追加する。
-3. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
-4. 実機でblock sizeを掃引し、既知信号の長時間相関で欠落を検証する。
-5. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
+1. Trigger位置の表示と、minimum duration/holdoff/hysteresisのUI設定を追加する。
+2. RX refill時間、実効sample/s、ring使用量、consumer lag、job/result queue使用量、overrunをUI/ログへ公開する。
+3. 実機でblock sizeを掃引し、既知信号の長時間相関で欠落を検証する。
+4. 結果に基づいて安全な最大Sample Rate、block size、kernel buffer数を決める。
 
 ### PlutoSDR実機
 
@@ -243,4 +242,5 @@ python -m pytest -q
 - SciPy SOSによる共通4次Butterworth complex IQ filterを追加し、Sweep SA、HighSpeed TA、旧Time Analyzerをpower化前のRBW処理へ移行。
 - RBWを両側3 dB bandwidthとして定義し、ENBWとsettling samplesをfilter metadata化。RMS Detectorはlinear powerの平均へ修正。
 - HighSpeed TAは連続するrecord間でfilter stateを保持。不連続・設定変更・record重複時はresetする。
+- HighSpeed TAのrecord長とdisplay bucketをFFT sizeから分離。Time Span初期値を10 ms、表示上限を1000 pointsとし、各IQ sampleをDetector bucketへ一度ずつ割り当てる。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

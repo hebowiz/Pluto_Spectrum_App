@@ -10,6 +10,8 @@
 - 縦軸: Amplitude [dBm]
 - 表示はSpectrum Onlyへ固定
 - Time Span入力範囲: 0.01～10000秒
+- Time Span初期値: 10 ms
+- 表示点数: 最大1000 points
 - 4トレース、4マーカーを利用可能
 - マーカー位置は時間として扱います
 
@@ -22,7 +24,7 @@ target bandwidth = max(4 × RBW, 521 kHz)
 FFT size = RBW条件とguard条件を満たす64～16384の2のべき乗
 ```
 
-共通IQ Producerの1ブロックは現在65536 samplesです。FFT sizeとは独立しています。FFT sizeは現在も時間表示のdetector bucket幅として使用しますが、RBW演算には使用しません。
+共通IQ Producerの1ブロックは現在65536 samplesです。取得record長、RBW filter、表示bucketはいずれもFFT sizeから分離されています。
 
 ## スレッド構成
 
@@ -62,13 +64,13 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 - Power LevelのAutoは条件成立時にnatural record、timeout時にforced recordを生成して再armします。
 - Power LevelのNormalは条件成立まで表示recordを更新しません。
 - Main MenuのSingleはTrigger条件成立後にpre/postを含む1 recordを完成して停止します。SingleではAuto timeoutを使用しません。
-- PositionからFFT frame整数倍のrecord長をpre/post sample数へ分配します。
+- Positionから指定Time Spanに対応するrecord長をpre/post sample数へ分配します。
 - Levelは校正済みdBmではありません。`iq_full_scale=2048`で正規化したsample magnitudeのdBFSです。
 
 ## 時間recordと解析
 
 - `TriggerAcquisitionController`がブロック境界をまたぐpre/post-trigger recordを作ります。
-- window長は指定Time Spanを覆う最小のFFT frame整数倍です。これにより解析時に端数sampleを捨てません。
+- window長は`round(Time Span × Sample Rate)`です。FFT frameへの切り上げと解析時の端数sample破棄はありません。
 - ブロック間隔が期待時間の1.2倍を超えた場合、gapとして統計へ記録します。
 - 1つの時間窓が完成すると取得データのスナップショットを最大4件の解析job queueへ渡します。
 - 解析結果も最大4件のFIFO queueでGUIへ渡します。旧実装の単一pending/latest slotによる上書きはありません。
@@ -82,7 +84,9 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 
 record全体へ4次Butterworth complex IQ low-passを適用してから`I² + Q²`へ変換します。指定RBWは両側3 dB bandwidthであり、内部cutoffは`RBW / 2`です。Free Run等で前recordの終了sampleと次recordの開始sampleが連続している場合はfilter stateを引き継ぎ、overrun、設定変更、trigger recordの重複・空白がある場合はresetします。
 
-DetectorはFFT size samplesごとの時間bucketへ適用します。Sampleは最後のpower、Peakは最大power、RMSはIQの平均二乗powerです。したがって表示sample間隔は現在も`FFT size / Sample Rate`であり、RBW filter化だけでは以前確認した64 µs等の間隔は変わりません。display bucketの独立化は次段です。
+filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落なく分配し、各bucketへDetectorを適用します。Sampleは最後のpower、Peakは最大power、RMSはIQの平均二乗powerです。bucketの時間位置は中央sampleです。
+
+表示間隔は概ね`Time Span / display points`です。初期10 ms、1000 pointsでは約10 µsとなり、FFT sizeを変えても表示間隔は変化しません。recordが1000 samples未満の場合は1 sampleを1 pointとして表示します。
 
 最後に固定補正、入出力補正、Center Frequencyにおける周波数別校正を適用します。Power Triggerは引き続きfilter前のraw IQ magnitudeを評価するため、表示RBWとTrigger bandwidthはまだ独立です。
 
@@ -91,7 +95,7 @@ DetectorはFFT size samplesごとの時間bucketへ適用します。Sampleは�
 - gap検出用データは保持しますが、現時点ではgapマーカー表示を無効化しています。
 - ピークログも初期状態では無効です。
 - 大きなTime SpanではIQブロックと解析負荷が増加します。
-- 実効Time SpanはFFT frame単位へ切り上げるため、指定値より最大`(FFT size - 1) / Sample Rate`だけ長くなります。
+- 実効Time Spanはsample整数化のため、指定値に対して最大約0.5 sample周期の丸め差を持ちます。
 - 解析が取得より継続的に遅い場合、job/result queueから共通リングへbackpressureが伝わり、最終的にring overrunとなる可能性があります。この場合は不連続を明示してpartial windowを破棄します。
 - Trigger位置の縦線表示、minimum duration/holdoff/hysteresisのUI設定、Frequency Mask Triggerは未実装です。
 - 512×65536 samplesのcomplex64保持は最大約256 MiBです。

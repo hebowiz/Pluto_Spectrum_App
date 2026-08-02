@@ -150,3 +150,46 @@ def reduce_filtered_iq_power(
     if np.ndim(result) == 0:
         return float(result)
     return np.asarray(result, dtype=np.float64)
+
+
+def reduce_filtered_iq_power_buckets(
+    filtered_iq: np.ndarray,
+    mode: DetectorMode | str,
+    max_points: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce a filtered IQ record into nearly equal contiguous time buckets.
+
+    Returns linear-power detector values and the fractional center sample index
+    of every bucket. Every input sample belongs to exactly one bucket.
+    """
+    values = np.asarray(filtered_iq)
+    if values.ndim != 1:
+        raise ValueError("filtered_iq must be one-dimensional")
+    if values.size == 0:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+    if int(max_points) <= 0:
+        raise ValueError("max_points must be positive")
+
+    sample_count = int(values.size)
+    bucket_count = min(sample_count, int(max_points))
+    edges = np.floor(
+        np.arange(bucket_count + 1, dtype=np.float64)
+        * float(sample_count)
+        / float(bucket_count)
+    ).astype(np.int64)
+    edges[-1] = sample_count
+    starts = edges[:-1]
+    ends = edges[1:]
+    lengths = ends - starts
+    power = np.asarray(np.abs(values) ** 2, dtype=np.float64)
+
+    resolved_mode = DetectorMode(mode)
+    if resolved_mode is DetectorMode.SAMPLE:
+        detector_values = power[ends - 1]
+    elif resolved_mode is DetectorMode.PEAK:
+        detector_values = np.maximum.reduceat(power, starts)
+    else:
+        detector_values = np.add.reduceat(power, starts) / lengths
+
+    center_sample_indices = (starts.astype(np.float64) + ends.astype(np.float64) - 1.0) / 2.0
+    return np.asarray(detector_values), center_sample_indices

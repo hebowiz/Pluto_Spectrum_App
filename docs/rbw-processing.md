@@ -136,7 +136,6 @@ raw trigger recordを正本として保持し、解析段でchannel selection fi
 
 ## 推奨する次の段階
 
-1. HighSpeed TAの表示bucket幅をFFT sizeから分離し、pixel/time bucketごとのSample/Peak/RMSを選べるようにする。
-2. 既知CW/noise/burstを実機入力し、3 dB bandwidth、ENBW、rise/fall time、校正差を検証する。
-3. TA UIの`RBW`と`RF BW`を`Measurement BW`と`Acquisition BW`へ整理する。
-4. RealTime SAをrecord長・window・overlapでRBWを定義するFFT filter bankへ移行する。
+1. 既知CW/noise/burstを実機入力し、3 dB bandwidth、ENBW、rise/fall time、校正差を検証する。
+2. TA UIの`RBW`と`RF BW`を`Measurement BW`と`Acquisition BW`へ整理する。
+3. RealTime SAをrecord長・window・overlapでRBWを定義するFFT filter bankへ移行する。

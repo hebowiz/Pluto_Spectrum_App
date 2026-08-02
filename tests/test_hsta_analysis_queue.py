@@ -100,7 +100,7 @@ def test_hsta_single_restart_invalidates_existing_stream_cursor() -> None:
     assert owner._high_speed_ta_single_waiting_result is False
 
 
-def test_hsta_power_trigger_builds_fft_aligned_positioned_record() -> None:
+def test_hsta_power_trigger_builds_exact_time_positioned_record() -> None:
     config = SimpleNamespace(
         sample_rate_hz=1_000_000,
         fft_size=4096,
@@ -127,9 +127,9 @@ def test_hsta_power_trigger_builds_fft_aligned_positioned_record() -> None:
 
     acquisition = RealtimeSpectrumWindow._ensure_high_speed_ta_trigger_acquisition(owner)
 
-    assert acquisition.config.record_samples == 12_288
-    assert acquisition.config.pretrigger_samples == 3_072
-    assert acquisition.config.posttrigger_samples == 9_215
+    assert acquisition.config.record_samples == 10_000
+    assert acquisition.config.pretrigger_samples == 2_500
+    assert acquisition.config.posttrigger_samples == 7_499
     assert acquisition.config.auto_timeout_samples == 200_000
 
 
@@ -147,14 +147,12 @@ def _analysis_job(iq: np.ndarray) -> HighSpeedTAAnalysisJob:
         gap_ratio_sum=0.0,
         max_gap_ratio=0.0,
         sample_rate_hz=1_000_000.0,
-        fft_size=256,
+        display_points=16,
         rbw_hz=100_000.0,
         detector_mode="RMS",
         calibration_offset_db=0.0,
         frequency_dependent_offset_db=0.0,
         input_correction_db=0.0,
-        window=np.hanning(256),
-        y_min=-200.0,
         remove_dc_offset=False,
         single_shot=False,
         sweep_id=0,

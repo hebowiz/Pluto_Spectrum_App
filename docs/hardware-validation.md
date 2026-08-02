@@ -87,6 +87,24 @@ Sweep SAは2.440 GHz、RBW 1 MHz、RMS Detectorで1 point取得を実施し、25
 
 この結果は処理統合と短時間の追従性確認です。既知CW/noise/burstによるRBW shape、ENBW、rise/fall time、旧校正との差は未検証です。
 
+### FFT非依存display bucket（2026-08-02）
+
+Time Span初期値を10 msへ変更し、record長とdisplay bucketをFFT sizeから分離した後、direct USB、4 MSPS、RBW 1 MHz、Free Run Continuousを2秒実行しました。
+
+- record長: 40,000 samples（FFT整列なし）
+- display: 各record 1000 points、約10 µs/point
+- publish: 188 records
+- RX: 121 blocks、7,929,856 samples
+- ring overwritten blocks: 0
+- analysis job queue最大使用量: 2
+- 終了時pending/job/result queue: 0
+- 例外なし
+- Single途中からContinuousへの変更後: 65 records更新
+- Continuous中のTime Span再設定後: 65 records更新
+- Power Level Auto、level 0 dBFS、timeout 50 ms、1秒: forced 10 records、ring上書き0、queue滞留0
+
+100 records/s、各1000 pointsに近い条件でも短時間は受信へ追従しました。長時間動作、画面表示環境でのCPU/GPU負荷、既知burstのPeak保持は未検証です。
+
 Qtをoffscreenで動かし、実際の`RealtimeSpectrumWindow`、共通Producer、window assembler、解析job/result queue、描画publishまでを通しました。Time Spanは0.1秒です。
 
 | Mode | 条件 | 主な結果 |
