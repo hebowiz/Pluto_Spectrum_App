@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import numpy as np
+
 from pluto_sa.sdr.iq_stream import IQBlock
 from pluto_sa.sdr.trigger import (
     AcquisitionMetadata,
@@ -69,6 +71,7 @@ class TriggerAcquisitionController:
         block: IQBlock,
         *,
         forced_sample_index: int | None = None,
+        trigger_iq: np.ndarray | None = None,
     ) -> tuple[IQAcquisitionRecord, ...]:
         """Consume one ordered block and return any records completed by it."""
         if self.stopped:
@@ -91,7 +94,15 @@ class TriggerAcquisitionController:
             events = self._free_run_events(block)
         else:
             assert self.detector is not None
-            detected = self._detect_power_events(block)
+            detector_block = block
+            if trigger_iq is not None:
+                detector_iq = np.asarray(trigger_iq)
+                if detector_iq.shape != block.iq.shape:
+                    raise ValueError("trigger_iq must match the raw IQ block shape")
+                if not np.issubdtype(detector_iq.dtype, np.complexfloating):
+                    raise TypeError("trigger_iq must use a complex dtype")
+                detector_block = replace(block, iq=detector_iq)
+            detected = self._detect_power_events(detector_block)
             events = self._select_power_events(block, detected)
 
         records = self.recorder.feed(block, events)

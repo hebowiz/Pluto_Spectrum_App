@@ -6,6 +6,7 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pytest
+import pluto_sa.ui.main_window as main_window_module
 
 from pluto_sa.ui.main_window import (
     HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES,
@@ -341,3 +342,39 @@ def test_hsta_power_trigger_line_uses_configured_display_dbm() -> None:
 
     assert line.position == -37.5
     assert line.visible is True
+
+
+def test_trigger_level_dialog_pauses_and_resumes_continuous_capture(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeTimer:
+        def stop(self) -> None:
+            calls.append("timer_stop")
+
+    owner = SimpleNamespace(
+        sweep_state=SWEEP_STATE_RUNNING,
+        _high_speed_ta_stream_cursor=object(),
+        _high_speed_ta_generation=4,
+        timer=FakeTimer(),
+        config=SimpleNamespace(hsta_trigger_level_dbm=-20.0),
+        _stop_high_speed_ta_stream=lambda **kwargs: calls.append("stream_stop"),
+        _clear_high_speed_ta_analysis_queues=lambda: calls.append("queues_clear"),
+        _start_high_speed_time_analyzer_continuous=lambda: calls.append("resume"),
+    )
+
+    def cancel_dialog(*args, **kwargs):
+        assert calls == ["timer_stop", "stream_stop", "queues_clear"]
+        return -20.0, False
+
+    monkeypatch.setattr(
+        main_window_module.QtWidgets.QInputDialog,
+        "getDouble",
+        cancel_dialog,
+    )
+
+    RealtimeSpectrumWindow._on_hsta_trigger_level_clicked(owner)
+
+    assert calls[-1] == "resume"
+    assert owner.config.hsta_trigger_level_dbm == -20.0

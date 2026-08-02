@@ -26,7 +26,7 @@ from pluto_sa.config.spectrum_config import (
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
-from pluto_sa.sdr.iq_stream import IQStreamCursor
+from pluto_sa.sdr.iq_stream import IQBlock, IQStreamCursor
 from pluto_sa.sdr.iq_window import resolve_time_window_samples
 from pluto_sa.sdr.trigger import (
     AcquisitionMetadata,
@@ -399,6 +399,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._high_speed_time_analyzer = HighSpeedTimeAnalyzerCaptureState()
         self._high_speed_ta_stream_cursor: IQStreamCursor | None = None
         self._high_speed_ta_trigger_acquisition: TriggerAcquisitionController | None = None
+        self._high_speed_ta_trigger_filter: StatefulIQMeasurementFilter | None = None
+        self._high_speed_ta_trigger_filter_key: tuple[float, float] | None = None
+        self._high_speed_ta_trigger_filter_stream_id: int | None = None
+        self._high_speed_ta_trigger_filter_next_sample_index: int | None = None
         self._high_speed_ta_pending_analysis_jobs: deque[HighSpeedTAAnalysisJob] = deque()
         self._high_speed_ta_generation = 0
         self._high_speed_ta_analysis_stop_event = threading.Event()
@@ -866,6 +870,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     ) -> None:
         self._high_speed_ta_generation += 1
         self._high_speed_ta_trigger_acquisition = None
+        self._reset_high_speed_ta_trigger_filter()
         self._clear_high_speed_ta_analysis_queues()
         state = self._high_speed_time_analyzer
         state.iq_blocks.clear()
@@ -894,6 +899,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             print(f"HighSpeedTACaptureState reset sweep_id={int(state.sweep_id)}")
         self._hide_time_analyzer_progress_symbol()
         self._hide_high_speed_ta_gap_markers()
+
+    def _reset_high_speed_ta_trigger_filter(self) -> None:
+        self._high_speed_ta_trigger_filter = None
+        self._high_speed_ta_trigger_filter_key = None
+        self._high_speed_ta_trigger_filter_stream_id = None
+        self._high_speed_ta_trigger_filter_next_sample_index = None
 
     def _hsta_debug_log(
         self,
@@ -6750,6 +6761,45 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._high_speed_ta_trigger_acquisition = acquisition
         return acquisition
 
+    def _filter_high_speed_ta_trigger_iq(
+        self,
+        block: IQBlock,
+        *,
+        reset: bool,
+    ) -> np.ndarray:
+        """Apply the display RBW IQ filter before Power Level detection."""
+        sample_rate_hz = max(1.0, float(self.config.sample_rate_hz))
+        requested_rbw_hz = (
+            float(self.config.rbw_hz)
+            if self.config.rbw_hz is not None
+            else sample_rate_hz * 0.98
+        )
+        key = (sample_rate_hz, requested_rbw_hz)
+        contiguous = (
+            not reset
+            and not block.discontinuity_before
+            and self._high_speed_ta_trigger_filter_stream_id == int(block.stream_id)
+            and self._high_speed_ta_trigger_filter_next_sample_index
+            == int(block.start_sample_index)
+        )
+        measurement_filter = self._high_speed_ta_trigger_filter
+        if (
+            measurement_filter is None
+            or self._high_speed_ta_trigger_filter_key != key
+            or not contiguous
+        ):
+            measurement_filter = StatefulIQMeasurementFilter(*key)
+            if len(block.iq) > 0:
+                measurement_filter.reset(initial_sample=complex(block.iq[0]))
+            self._high_speed_ta_trigger_filter = measurement_filter
+            self._high_speed_ta_trigger_filter_key = key
+        filtered_iq = measurement_filter.process(block.iq)
+        self._high_speed_ta_trigger_filter_stream_id = int(block.stream_id)
+        self._high_speed_ta_trigger_filter_next_sample_index = int(
+            block.end_sample_index
+        )
+        return filtered_iq
+
     def _build_high_speed_ta_job_from_record(
         self,
         record: IQAcquisitionRecord,
@@ -7146,6 +7196,16 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_trigger_controls()
 
     def _on_hsta_trigger_level_clicked(self) -> None:
+        resume_continuous = self.sweep_state == SWEEP_STATE_RUNNING
+        resume_single = (
+            self.sweep_state == SWEEP_STATE_SINGLE
+            and self._high_speed_ta_stream_cursor is not None
+        )
+        if resume_continuous or resume_single:
+            self.timer.stop()
+            self._high_speed_ta_generation += 1
+            self._stop_high_speed_ta_stream(stop_analysis_thread=False)
+            self._clear_high_speed_ta_analysis_queues()
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Trigger Level",
@@ -7156,6 +7216,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             decimals=1,
         )
         if not accepted:
+            if resume_continuous:
+                self._start_high_speed_time_analyzer_continuous()
+            elif resume_single:
+                self._enter_single_high_speed_time_analyzer_mode()
+                self._restart_timer_for_current_mode()
             return
         self.config.hsta_trigger_level_dbm = float(value)
         self._restart_hsta_after_trigger_change()
@@ -7296,6 +7361,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     force=True,
                 )
                 acquisition.reset()
+                self._reset_high_speed_ta_trigger_filter()
                 self._high_speed_ta_pending_analysis_jobs.clear()
                 state.prev_block_timestamp_s = None
                 state.gap_count += int(stream_result.missed_blocks)
@@ -7372,9 +7438,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                         int(block.start_sample_index)
                         + int(acquisition.config.pretrigger_samples)
                     )
+            trigger_iq = None
+            if (
+                trigger_kind is TriggerKind.POWER_LEVEL
+                and forced_sample_index is None
+            ):
+                trigger_iq = self._filter_high_speed_ta_trigger_iq(
+                    block,
+                    reset=buffer_island,
+                )
             records = acquisition.feed(
                 block,
                 forced_sample_index=forced_sample_index,
+                trigger_iq=trigger_iq,
             )
             if buffer_island:
                 state.island_records += len(records)

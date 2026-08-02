@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pluto_sa.sdr.iq_stream import IQStreamBuffer
 from pluto_sa.sdr.trigger import (
@@ -139,6 +140,42 @@ def test_power_trigger_accepts_host_timed_forced_event_inside_island() -> None:
     assert records[0].trigger.forced is True
     assert records[0].trigger_sample_offset == 2
     assert records[0].sample_count == 6
+
+
+def test_power_trigger_detects_filtered_iq_but_records_raw_iq() -> None:
+    config = TriggerConfig(
+        kind=TriggerKind.POWER_LEVEL,
+        run_mode=TriggerRunMode.NORMAL,
+        level_dbfs=-10.0,
+        pretrigger_samples=0,
+        posttrigger_samples=0,
+    )
+    controller = TriggerAcquisitionController(config, metadata())
+    stream = IQStreamBuffer(capacity_blocks=8)
+    stream.begin_stream()
+    raw_iq = np.asarray([0.01, 0.01], dtype=np.complex64)
+    block = stream.publish(raw_iq, source="trigger_test")
+    filtered_iq = np.asarray([0.01, 0.5], dtype=np.complex64)
+
+    records = controller.feed(block, trigger_iq=filtered_iq)
+
+    assert len(records) == 1
+    assert records[0].trigger_sample_index == 1
+    assert records[0].trigger.measured_value == pytest.approx(
+        20.0 * np.log10(0.5)
+    )
+    np.testing.assert_array_equal(records[0].iq, raw_iq[1:])
+
+
+def test_power_trigger_rejects_mismatched_filtered_iq_shape() -> None:
+    config = TriggerConfig(kind=TriggerKind.POWER_LEVEL)
+    controller = TriggerAcquisitionController(config, metadata())
+    stream = IQStreamBuffer(capacity_blocks=8)
+    stream.begin_stream()
+    block = stream.publish(np.ones(4, dtype=np.complex64), source="trigger_test")
+
+    with pytest.raises(ValueError, match="shape"):
+        controller.feed(block, trigger_iq=np.ones(3, dtype=np.complex64))
 
 
 def test_power_trigger_edge_record_is_pending_until_island_reset() -> None:

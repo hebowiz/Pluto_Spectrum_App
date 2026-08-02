@@ -142,6 +142,19 @@ Rising/Falling/Eitherについて、ランダム2,000 samplesを2 blocksへ分�
 
 16 MSPS、2 ms、Power Normal Continuous、-100 dBmの実機負荷試験では、1秒にnatural 186 recordsを描画する意図的な高負荷条件でもGUI update callbackはp95 2.38 ms、最大16.70 ms、ring上書き0でした。Auto 100 dBmのtimeout試験ではp95 0.25 ms、最大0.76 msでした。
 
+#### RBW後Power Triggerへの修正（2026-08-02）
+
+Power Normal/Rising、Level -25 dBmで、RBW後traceが約-40～-31 dBmにもかかわらずnatural triggerする現象を再現しました。修正前は内部threshold -30.350 dBFSに対しraw発火sampleが-30.099～-27.116 dBFS（校正後約-24.75～-21.77 dBm）まで瞬間的に上昇する一方、同recordのRBW後表示最大は-30.735 dBmでした。dBm換算ではなく、filter前triggerとfilter後表示の経路差が原因です。
+
+Power Triggerへ表示と同じGaussian complex IQ RBW filterを適用し、判定用filtered IQと保存用raw IQを分離しました。16 MSPS、RBW 4 MHz、2 msで再試験した結果は次のとおりです。
+
+- Level -20 dBm、Normal Continuous、1秒: natural/forcedとも0件、23 buffers、ring上書き0。
+- Level -25 dBm、Normal Continuous、0.8秒: natural 8件。filter後発火sampleは-29.797～-27.518 dBFS（校正後約-24.45～-22.17 dBm）で全件threshold以上。record表示最大は-20.537 dBm。
+- 4 MSPS、RBW 1 MHz、10 ms、Level -25 dBm、Normal Continuous、0.8秒: natural/forcedとも0件、47 buffers、3,080,192 samples、ring上書き0。GUI callbackはp95 0.42 ms、最大4.37 ms。
+- 修正後のGUI callbackは-25 dBm試験でp95 0.29 ms、最大2.10 ms、-20 dBm試験でp95 0.31 ms、最大13.00 ms。
+
+TriggerはRBW filter後の各sampleを判定します。表示DetectorがSampleの場合はbucket末尾sampleだけを描くため短い超過が見えないことがあり、目視検証はPeak Detectorで行います。Trigger Level modalを開く前にProducer/timerを停止して解析queueを破棄する変更も加え、`-`等の未確定入力中に測定結果が進まないようにしました。
+
 再実行例:
 
 ```powershell

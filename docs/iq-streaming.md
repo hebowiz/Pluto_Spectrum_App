@@ -150,7 +150,7 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-2026-08-02時点: 90 tests passed。従来対象に加え、Gaussian complex IQ filterのblock境界state、狭RBW FFT convolutionの分割同値性、両側3 dB RBW、帯域外抑圧、ENBW/settling/group-delay metadata、Butterworth明示選択、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離、Single Snapshotのrecord長選択・fallback・有限block Producer、100 µs下限、Sample Rate依存上限、RBW 4 MHz→16 MSPS設定、Free Run/Power Buffer Islandのrecord整列、host-timed forced event、buffer端未完成eventのreset、dBm/dBFS往復変換、Trigger line表示条件、Power Triggerベクトル化と逐次状態機械の同値性、CW位相jump/slip候補検出を検証しています。
+2026-08-02時点: 93 tests passed。従来対象に加え、Gaussian complex IQ filterのblock境界state、狭RBW FFT convolutionの分割同値性、両側3 dB RBW、帯域外抑圧、ENBW/settling/group-delay metadata、Butterworth明示選択、linear-power detector定義、Sweep/HSTA統合、FFT非依存record長、display bucketの全sample被覆、IQ sample数とplot統計の表示分離、Single Snapshotのrecord長選択・fallback・有限block Producer、100 µs下限、Sample Rate依存上限、RBW 4 MHz→16 MSPS設定、Free Run/Power Buffer Islandのrecord整列、host-timed forced event、buffer端未完成eventのreset、dBm/dBFS往復変換、Trigger line表示条件、Power Triggerベクトル化と逐次状態機械の同値性、filtered trigger/raw record分離、Trigger Level modal中の停止・再開、CW位相jump/slip候補検出を検証しています。
 
 ## 現在の実装構成
 
@@ -252,4 +252,5 @@ python -m pytest -q
 - 6 MSPS超のPower Trigger Single/ContinuousへBuffer Islandを追加。262,144 samples以下の最大record整数倍をoffline走査し、同一bufferでpre/postが完成するeventだけを採用。端eventを棄却し、Auto timeoutはhost時刻から安全なforced eventを生成する。16 MSPSの2 ms Autoと3 ms Normal Singleを実機確認。
 - Power Trigger LevelをdBFS UIから最終表示と同じdBmへ変更。固定補正、Center Frequencyの周波数別補正、入出力補正、IQ full scaleを逆算して内部dBFS detectorへ渡し、HighSpeed TAのPower Level選択中はグラフへ黄色破線のTrigger levelを表示。
 - GUIスレッドを長時間占有していたPower Triggerのsample逐次走査を、minimum duration 1 sample時のNumPy threshold検索へ変更。256,000-sample判定を約88.5 msから約4.1 msへ短縮し、Rising/Falling/Eitherのevent同値性と16 MSPS実機GUI callback時間を確認。
+- Power Trigger判定をraw瞬時IQから表示と同じGaussian IQ RBW filter後へ変更し、raw IQ record保持と分離。Trigger Level dialog中はProducer/timerを停止してqueueを破棄し、未確定入力中の古いrecord表示を防止。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。

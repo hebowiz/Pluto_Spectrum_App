@@ -77,17 +77,29 @@ def main() -> None:
     transition_publish_counts: dict[str, int] = {}
     forced_trigger_count = 0
     natural_trigger_count = 0
+    natural_trigger_measured_dbfs: list[float] = []
+    published_display_min_dbm: list[float] = []
+    published_display_max_dbm: list[float] = []
     update_call_durations_ms: list[float] = []
     original_publish = window._publish_high_speed_ta_analysis_result
 
     def counted_publish(result) -> None:
         nonlocal publish_count, forced_trigger_count, natural_trigger_count
         publish_count += 1
+        finite_display = np.asarray(result.sweep_y_db, dtype=float)
+        finite_display = finite_display[np.isfinite(finite_display)]
+        if len(finite_display) > 0:
+            published_display_min_dbm.append(float(np.min(finite_display)))
+            published_display_max_dbm.append(float(np.max(finite_display)))
         if result.trigger_kind == "power_level":
             if result.trigger_forced:
                 forced_trigger_count += 1
             else:
                 natural_trigger_count += 1
+                if result.trigger_measured_value is not None:
+                    natural_trigger_measured_dbfs.append(
+                        float(result.trigger_measured_value)
+                    )
         original_publish(result)
 
     window._publish_high_speed_ta_analysis_result = counted_publish
@@ -196,6 +208,22 @@ def main() -> None:
             "publish_count": publish_count,
             "forced_trigger_count": forced_trigger_count,
             "natural_trigger_count": natural_trigger_count,
+            "natural_trigger_measured_dbfs_min": (
+                None
+                if not natural_trigger_measured_dbfs
+                else min(natural_trigger_measured_dbfs)
+            ),
+            "natural_trigger_measured_dbfs_max": (
+                None
+                if not natural_trigger_measured_dbfs
+                else max(natural_trigger_measured_dbfs)
+            ),
+            "published_display_dbm_min": (
+                None if not published_display_min_dbm else min(published_display_min_dbm)
+            ),
+            "published_display_dbm_max": (
+                None if not published_display_max_dbm else max(published_display_max_dbm)
+            ),
             "display_points": (
                 0
                 if window._last_current_display_db is None
