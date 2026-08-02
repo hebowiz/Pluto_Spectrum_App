@@ -65,6 +65,49 @@ Plutoの`rx_rf_bandwidth`はalias防止と粗いacquisition bandwidthに使用�
 
 power-domain smoothingは表示平均またはchannel-power integrationとしてRBWと別名称へ分離します。
 
+#### 実機RTSAで公開されているRBWモデル
+
+TektronixのRTSA資料では、連続digitizeしたIQ streamを選択RBWに応じた長さのtime recordへ分割し、各recordへwindow付きDFTを連続実行します。このDFTは入力をFFT bin中心周波数に並ぶband-pass filter bankへ通し、各filter出力のmagnitude/phaseをsampleする処理と数学的に等価です。
+
+```text
+continuous IQ at Fs
+  → L samplesのanalysis record（RBWで決定）
+  → window w[n]（filter shapeを決定）
+  → optional zero padding to Nfft（trace gridを決定）
+  → FFT = parallel complex filter-bank outputs
+  → |X[k]|² / detector / density / FMT
+  → H samples進めて次record（overlap = 1 - H/L）
+```
+
+- RBWは概ね`window bandwidth coefficient × Fs / L`で決まり、bin spacingだけではなくwindowの3 dB bandwidthまたはENBW定義を伴う。
+- trace points要求で`Nfft`を大きくしても、zero paddingは表示frequency gridを細かくするだけで、実分解能はrecord長`L`とwindowで決まる。
+- 狭いRBWは長いrecord/time constantを必要とし、transform rateと最短eventのfull-amplitude測定能力を下げる。
+- overlapはwindow端でeventが減衰または見逃される問題を抑える。50%固定ではなく、window、必要POI、full-amplitude条件からhopを決める。
+- DPX/densityは各FFT traceをfrequency-amplitude cellへ蓄積し、Frequency Mask Triggerは表示とは独立にoverlap FFTを全frame評価する。
+
+KeysightもRTSAのPOIへsampling bandwidth、連続処理、FFT overlapが影響すると説明しています。NI RFmxはGaussian/Flat RBWをデジタルでemulateでき、速度面ではFFT-based RBWを推奨しています。このため商用機の内部実装は機種ごとに、windowed FFT、zero padding、digital RBW emulation、filter bankを組み合わせると考えるべきで、単一アルゴリズムへ一般化しません。
+
+#### Pluto向けRTSA案（議論中）
+
+第一候補はFFT-based RBWです。
+
+1. `analysis_record_samples L`をrequested RBWとwindow ENBW/3 dB係数から決める。
+2. trace point数に必要な`Nfft >= L`を独立に決め、必要分をzero padする。
+3. Hann等のwindowを掛け、complex FFT後にtone coherent gainとnoise ENBWを別々に補正する。
+4. configurable hop/overlapで全IQ sampleを連続frame化する。
+5. detectorは同一frequency binの時間frame方向へ適用する。
+6. 現行Gaussian power convolutionはRBWから外し、必要なら`Frequency Smoothing`または`Channel Integration BW`として別設定にする。
+
+第二候補のpolyphase filter bankはfilter shape、channel isolation、decimationを明示しやすい一方、実装と計算量が大きいためFMT/POI要件でFFT方式が不足した場合に評価します。
+
+参考:
+
+- [Tektronix: Fundamentals of Real-Time Spectrum Analysis](https://download.tek.com/document/37W_17249_6_Fundamentals_of_RealTime_Spectrum_Analysis_0.pdf)
+- [Tektronix RSA5100B Help](https://download.tek.com/manual/RSA5100B-Real-Time-Spectrum-Analyzer-Help_EN-US_077-0899-07_077089907.pdf)
+- [Tektronix: Understanding FFT Overlap Processing](https://download.tek.com/document/37W_18839_1.pdf)
+- [Keysight: X-Series RTSA Technical Overview](https://www.keysight.com/us/en/assets/7018-03791/technical-overviews/5991-1748.pdf)
+- [NI RFmx SpecAn Spectrum / Zero Span](https://www.ni.com/docs/en-US/bundle/rfmx-specan/page/spectrum.html/)
+
 ### VSA
 
 raw trigger recordを正本として保持し、解析段でchannel selection filter、resampling、measurement filter、carrier/symbol synchronizationを適用します。RBWはSpectrum traceのwindow/record長またはdemodulation measurement filterとして扱い、Zero Span RBWと混同しません。
