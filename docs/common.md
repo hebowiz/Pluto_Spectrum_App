@@ -99,7 +99,7 @@ Sweep系では完了した掃引データを基準にマーカーを更新しま
 
 ## 8. 現在の制限
 
-- TriggerボタンはHighSpeed TAでFree Run/Power Level設定を開きます。他モードのTriggerは未実装です。
+- TriggerボタンはHighSpeed TAでFree Run/Power Level設定を開きます。Power Levelは最終表示と同じdBmで指定し、選択中はグラフへ水平Trigger lineを表示します。他モードのTriggerは未実装です。
 - 設定の多くは終了時に永続化されません。永続化対象は最後の校正CSVパスだけです。
 - SDRなしで実行できるIQストリーム単体テストがあります。GUI全体の自動テストはまだありません。
 - PlutoSDRなしで動かすモックまたはデモモードはありません。

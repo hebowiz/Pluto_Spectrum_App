@@ -123,6 +123,17 @@ Autoは到達不能なlevelでもhost時刻timeoutにより完全な2 ms record�
 
 統計出力追加後の再試験でも、Auto Continuousは23 islands、forced 3、ring上書き0、edge棄却0、推定blind time 1.219秒、Normal Singleは1 measurement island、natural 1、ring上書き0、edge棄却0で完了しました。Autoの推定blind timeは、各bufferのhost受領間隔からbuffer標本時間を差し引いた累積値です。
 
+#### dBm Trigger Level・グラフ線移行後（2026-08-02）
+
+周波数別校正CSVを自動loadした状態で、dBm設定から内部dBFSへの変換と水平線を含むoffscreen GUI経路を再検証しました。
+
+| 条件 | 換算・表示 | 実機結果 |
+|---|---|---|
+| 16 MSPS、2 ms、Auto Continuous、100 dBm、timeout 200 ms | 内部94.650 dBFS、Trigger line 100.0 dBm、visible | 0.8秒、forced 1、natural 0、ring上書き0 |
+| 16 MSPS、3 ms、Normal Single、-100 dBm | 内部-105.350 dBFS、Trigger line -100.0 dBm、visible | 0.386秒、natural 1、forced 0、ring上書き0 |
+
+100 dBmは到達不能levelとしてAuto timeoutを、-100 dBmは自然triggerを確認する診断条件です。両条件とも校正・入出力補正を含む変換値がcontrollerへ渡り、グラフ線はユーザー指定dBmを保持しました。
+
 再実行例:
 
 ```powershell
@@ -226,13 +237,13 @@ SingleからContinuousへの切替、およびContinuous中のSweep Time変更�
 | Power Auto、到達不能な+20 dBFS、timeout 200 ms、1.5秒 | 3 records、forced 3、natural 0、ring上書き0 |
 | Power Normal、-100 dBFS、Single | 1 record、forced 0、natural 1、ring上書き0 |
 
-前者は診断CLIからUI範囲外の+20 dBFSを指定し、自然eventが絶対に成立しない条件でforced timeoutだけを検証しています。通常UIのLevel上限は0 dBFSです。
+前者はdBm UI移行前の診断CLIから+20 dBFSを指定し、自然eventが絶対に成立しない条件でforced timeoutだけを検証した履歴です。現在のUI/CLIは補正済みdBmで指定し、内部で同等のdBFSへ変換します。
 
 ```powershell
 $env:QT_QPA_PLATFORM = 'offscreen'
 python -m tools.validate_hsta_hardware --sample-rate 6000000 --time-span 0.1 --continuous-duration 5 --timeout 7
 python -m tools.validate_hsta_hardware --sample-rate 4000000 --time-span 0.1 --exercise-transitions
-python -m tools.validate_hsta_hardware --sample-rate 4000000 --time-span 0.1 --continuous-duration 1.5 --trigger-kind power_level --trigger-run-mode auto --trigger-level-dbfs 20 --trigger-auto-timeout 0.2
+python -m tools.validate_hsta_hardware --sample-rate 4000000 --time-span 0.1 --continuous-duration 1.5 --trigger-kind power_level --trigger-run-mode auto --trigger-level-dbm 100 --trigger-auto-timeout 0.2
 ```
 
 ## 解釈上の注意と次の検証

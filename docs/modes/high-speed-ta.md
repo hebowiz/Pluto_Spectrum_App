@@ -64,7 +64,7 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 |---|---|
 | Source | Free Run / Power Level |
 | Mode | Auto / Normal |
-| Level | complex IQ magnitudeのdBFS、初期-20 dBFS |
+| Level | 最終表示と同じ補正済みdBm、初期-20 dBm |
 | Slope | Rising / Falling / Either |
 | Position | record内のpre-trigger比率、初期50% |
 | Auto Timeout | eventがない場合にforced recordを作る時間、初期1000 ms |
@@ -74,7 +74,8 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 - Power LevelのNormalは条件成立まで表示recordを更新しません。
 - Main MenuのSingleはTrigger条件成立後にpre/postを含む1 recordを完成して停止します。SingleではAuto timeoutを使用しません。
 - Positionから指定Time Spanに対応するrecord長をpre/post sample数へ分配します。
-- Levelは校正済みdBmではありません。`iq_full_scale=2048`で正規化したsample magnitudeのdBFSです。
+- Levelはグラフと同じdBmで設定します。内部では`iq_full_scale=2048`、固定補正、Center Frequencyの周波数別補正、入出力補正を逆算してraw IQ magnitudeのdBFS thresholdへ変換します。補正やInternal/External Gain/ATTを変更すると次の取得から内部thresholdも自動更新されます。
+- Power Level選択中はグラフへ黄色の破線と`Trigger n.n dBm` labelを表示します。Free RunおよびHighSpeed TA以外では非表示です。
 - 6 MSPS超のPower Islandでは、Auto Timeoutをsample数ではなくhostの単調時計で評価します。timeout時は取得済みbuffer内の安全な位置へforced eventを置き、完全なpre/post recordを生成します。
 - Power Islandが監視できるのは各RX buffer内部だけです。buffer間blind timeに発生したevent、およびbuffer端でpre/postが完成しないeventは捕捉できません。周期信号や再試行可能なevent向けであり、希少なone-shot eventの捕捉は保証しません。
 
@@ -108,6 +109,8 @@ filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落な�
 ヘッダーは`IQ Samples`、`Plot Points`、`Plot dt`を別々に表示します。横軸の内部単位は秒ですが、HighSpeed TAの固定tick labelは1000倍してms表示します。
 
 最後に固定補正、入出力補正、Center Frequencyにおける周波数別校正を適用します。Power Triggerは引き続きfilter前のraw IQ magnitudeを評価するため、表示RBWとTrigger bandwidthはまだ独立です。
+
+したがってTrigger lineは振幅校正上はグラフと同じdBmですが、RBW filter後の表示traceと完全に同一の判定信号ではありません。Center FrequencyのCWでは概ね一致しますが、広帯域noise、帯域外成分、Peak/RMS bucketではtraceが線を横切る時刻とraw trigger eventが異なる場合があります。
 
 ## 制限・注意事項
 

@@ -30,11 +30,13 @@ from pluto_sa.sdr.iq_stream import IQStreamCursor
 from pluto_sa.sdr.iq_window import resolve_time_window_samples
 from pluto_sa.sdr.trigger import (
     AcquisitionMetadata,
+    DEFAULT_IQ_FULL_SCALE,
     IQAcquisitionRecord,
     TriggerConfig,
     TriggerKind,
     TriggerRunMode,
     TriggerSlope,
+    power_trigger_display_dbm_to_dbfs,
 )
 from pluto_sa.sdr.trigger_acquisition import TriggerAcquisitionController
 from pluto_sa.signal.detector import DetectorMode
@@ -478,6 +480,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_progress_item: pg.ScatterPlotItem | None = None
         self.time_analyzer_progress_item: pg.ScatterPlotItem | None = None
         self.high_speed_ta_gap_item: pg.ScatterPlotItem | None = None
+        self.high_speed_ta_trigger_level_line: pg.InfiniteLine | None = None
         self.marker_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_controls: list[dict[str, QtWidgets.QPushButton]] = []
         self.trace_menu_buttons: list[QtWidgets.QPushButton] = []
@@ -1648,6 +1651,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self.sweep_menu_button.setEnabled(True)
         if hasattr(self, "sweep_time_button") and hasattr(self, "sweep_points_button"):
             self._update_sweep_controls()
+        self._update_hsta_trigger_level_line()
 
     def _apply_calibration_fixed_profile(self) -> None:
         self.config.display_span_hz = int(CALIBRATION_FIXED_SPAN_HZ)
@@ -1997,6 +2001,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         self.high_speed_ta_gap_item.setVisible(False)
         self.spectrum_plot.addItem(self.high_speed_ta_gap_item)
+        self.high_speed_ta_trigger_level_line = pg.InfiniteLine(
+            pos=float(self.config.hsta_trigger_level_dbm),
+            angle=0,
+            movable=False,
+            pen=pg.mkPen("#FFD60A", width=2, style=QtCore.Qt.PenStyle.DashLine),
+            label="Trigger {value:.1f} dBm",
+            labelOpts={"position": 0.95, "color": "#FFD60A"},
+        )
+        self.high_speed_ta_trigger_level_line.setZValue(20)
+        self.high_speed_ta_trigger_level_line.setVisible(False)
+        self.spectrum_plot.addItem(self.high_speed_ta_trigger_level_line)
 
         marker_colors = ["r", "c", "m", "g"]
         for index, color in enumerate(marker_colors):
@@ -6704,7 +6719,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             kind=trigger_kind,
             run_mode=run_mode,
             slope=TriggerSlope(self.config.hsta_trigger_slope),
-            level_dbfs=float(self.config.hsta_trigger_level_dbfs),
+            level_dbfs=self._hsta_trigger_level_dbfs(),
             hysteresis_db=float(self.config.hsta_trigger_hysteresis_db),
             pretrigger_samples=pretrigger_samples,
             posttrigger_samples=posttrigger_samples,
@@ -7134,15 +7149,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         value, accepted = QtWidgets.QInputDialog.getDouble(
             self,
             "Trigger Level",
-            "Level [dBFS]",
-            value=float(self.config.hsta_trigger_level_dbfs),
+            "Level [dBm]",
+            value=float(self.config.hsta_trigger_level_dbm),
             minValue=-200.0,
-            maxValue=0.0,
+            maxValue=100.0,
             decimals=1,
         )
         if not accepted:
             return
-        self.config.hsta_trigger_level_dbfs = float(value)
+        self.config.hsta_trigger_level_dbm = float(value)
         self._restart_hsta_after_trigger_change()
         self._update_trigger_controls()
 
@@ -7189,7 +7204,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"Mode\n{self.config.hsta_trigger_run_mode.title()}"
         )
         self.trigger_level_button.setText(
-            f"Level\n{float(self.config.hsta_trigger_level_dbfs):.1f} dBFS"
+            f"Level\n{float(self.config.hsta_trigger_level_dbm):.1f} dBm"
         )
         self.trigger_slope_button.setText(
             f"Slope\n{self.config.hsta_trigger_slope.title()}"
@@ -7205,6 +7220,31 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.trigger_slope_button.setEnabled(is_power)
         self.trigger_position_button.setEnabled(is_power)
         self.trigger_auto_timeout_button.setEnabled(is_power and is_auto)
+        self._update_hsta_trigger_level_line()
+
+    def _hsta_trigger_level_dbfs(self) -> float:
+        """Resolve the configured display dBm threshold onto raw IQ dBFS."""
+        frequency_offset_db = self.calibration_controller.get_frequency_offset_db(
+            float(self.config.center_freq_hz)
+        )
+        return power_trigger_display_dbm_to_dbfs(
+            float(self.config.hsta_trigger_level_dbm),
+            iq_full_scale=DEFAULT_IQ_FULL_SCALE,
+            calibration_offset_db=float(self.calibration_offset_db),
+            frequency_dependent_offset_db=float(frequency_offset_db),
+            input_correction_db=float(self.config.input_correction_db),
+        )
+
+    def _update_hsta_trigger_level_line(self) -> None:
+        line = getattr(self, "high_speed_ta_trigger_level_line", None)
+        if line is None:
+            return
+        is_visible = (
+            self._is_high_speed_time_analyzer_mode()
+            and self.config.hsta_trigger_kind == TriggerKind.POWER_LEVEL.value
+        )
+        line.setPos(float(self.config.hsta_trigger_level_dbm))
+        line.setVisible(is_visible)
 
     def _update_high_speed_time_analyzer_spectrum(self) -> None:
         if self.config.analyzer_mode != AnalyzerMode.HIGH_SPEED_TIME_ANALYZER:

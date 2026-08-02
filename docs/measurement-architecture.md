@@ -155,7 +155,7 @@ External hardware triggerは当面の対象外です。Triggerはすべて、Plu
 
 Trigger判定とrecord生成は状態機械として実装し、UIボタンの分岐へ埋め込みません。
 
-Power Level Triggerの初期実装は各complex IQ sampleのmagnitudeを明示的な`iq_full_scale`で正規化したdBFSを使用します。校正済みdBm triggerとは区別します。Pluto実機でraw code scaleを確認し、取得metadataへ保存したfull-scale値から判定を再現できるようにします。
+Power Level TriggerのUIとグラフ線は最終表示と同じ補正済みdBmを使用します。内部detectorは各complex IQ sampleのmagnitudeを`iq_full_scale=2048`で正規化したdBFSで動作するため、`dBFS = 設定dBm - (20log10(iq_full_scale) + 固定補正 + 周波数別補正 + 入出力補正)`で変換します。これにより表示単位と設定単位は一致し、raw thresholdも再現できます。現段階のtrigger判定はRBW filter前なので、振幅校正は表示と共通でもtrigger bandwidthは表示RBWと独立です。
 
 ## 4. RTSA表示処理
 

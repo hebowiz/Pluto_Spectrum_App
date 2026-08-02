@@ -9,6 +9,8 @@ from pluto_sa.sdr.trigger import (
     TriggerConfig,
     TriggerEvent,
     TriggerKind,
+    power_trigger_dbfs_to_display_dbm,
+    power_trigger_display_dbm_to_dbfs,
 )
 
 
@@ -25,6 +27,22 @@ def metadata() -> AcquisitionMetadata:
 def test_trigger_config_record_length_includes_trigger_sample() -> None:
     config = TriggerConfig(pretrigger_samples=10, posttrigger_samples=20)
     assert config.record_samples == 31
+
+
+def test_power_trigger_display_dbm_conversion_round_trips() -> None:
+    correction = {
+        "iq_full_scale": 2048.0,
+        "calibration_offset_db": -62.0,
+        "frequency_dependent_offset_db": 1.25,
+        "input_correction_db": -3.0,
+    }
+
+    level_dbfs = power_trigger_display_dbm_to_dbfs(-30.0, **correction)
+
+    assert level_dbfs == pytest.approx(-32.476599, abs=1e-6)
+    assert power_trigger_dbfs_to_display_dbm(level_dbfs, **correction) == pytest.approx(
+        -30.0
+    )
 
 
 @pytest.mark.parametrize(

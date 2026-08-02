@@ -33,7 +33,7 @@ def main() -> None:
     parser.add_argument("--exercise-transitions", action="store_true")
     parser.add_argument("--trigger-kind", choices=("free_run", "power_level"), default="free_run")
     parser.add_argument("--trigger-run-mode", choices=("auto", "normal"), default="auto")
-    parser.add_argument("--trigger-level-dbfs", type=float, default=-20.0)
+    parser.add_argument("--trigger-level-dbm", type=float, default=-20.0)
     parser.add_argument("--trigger-position-percent", type=float, default=50.0)
     parser.add_argument("--trigger-auto-timeout", type=float, default=1.0)
     args = parser.parse_args()
@@ -49,7 +49,7 @@ def main() -> None:
         sdr_uri=args.uri,
         hsta_trigger_kind=args.trigger_kind,
         hsta_trigger_run_mode=args.trigger_run_mode,
-        hsta_trigger_level_dbfs=args.trigger_level_dbfs,
+        hsta_trigger_level_dbm=args.trigger_level_dbm,
         hsta_trigger_position_percent=args.trigger_position_percent,
         hsta_trigger_auto_timeout_s=args.trigger_auto_timeout,
     )
@@ -169,7 +169,18 @@ def main() -> None:
             "continuous_duration_s": args.continuous_duration,
             "trigger_kind": args.trigger_kind,
             "trigger_run_mode": args.trigger_run_mode,
-            "trigger_level_dbfs": args.trigger_level_dbfs,
+            "trigger_level_dbm": args.trigger_level_dbm,
+            "trigger_level_internal_dbfs": window._hsta_trigger_level_dbfs(),
+            "trigger_line_dbm": (
+                None
+                if window.high_speed_ta_trigger_level_line is None
+                else float(window.high_speed_ta_trigger_level_line.value())
+            ),
+            "trigger_line_visible": (
+                False
+                if window.high_speed_ta_trigger_level_line is None
+                else bool(window.high_speed_ta_trigger_level_line.isVisible())
+            ),
             "trigger_position_percent": args.trigger_position_percent,
             "publish_count": publish_count,
             "forced_trigger_count": forced_trigger_count,

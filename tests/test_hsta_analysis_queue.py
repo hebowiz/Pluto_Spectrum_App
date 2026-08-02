@@ -237,7 +237,7 @@ def test_hsta_power_trigger_builds_exact_time_positioned_record() -> None:
         hsta_trigger_kind="power_level",
         hsta_trigger_run_mode="auto",
         hsta_trigger_slope="rising",
-        hsta_trigger_level_dbfs=-20.0,
+        hsta_trigger_level_dbm=-20.0,
         hsta_trigger_hysteresis_db=1.0,
         hsta_trigger_position_percent=25.0,
         hsta_trigger_auto_timeout_s=0.2,
@@ -253,6 +253,7 @@ def test_hsta_power_trigger_builds_exact_time_positioned_record() -> None:
         _time_analyzer_time_span_s=lambda: config.time_analyzer_time_span_s,
         _clear_high_speed_ta_analysis_queues=lambda: None,
         _use_high_speed_ta_buffer_islands=lambda: False,
+        _hsta_trigger_level_dbfs=lambda: -24.0,
     )
 
     acquisition = RealtimeSpectrumWindow._ensure_high_speed_ta_trigger_acquisition(owner)
@@ -261,6 +262,7 @@ def test_hsta_power_trigger_builds_exact_time_positioned_record() -> None:
     assert acquisition.config.pretrigger_samples == 2_500
     assert acquisition.config.posttrigger_samples == 7_499
     assert acquisition.config.auto_timeout_samples == 200_000
+    assert acquisition.config.level_dbfs == -24.0
 
 
 def _analysis_job(iq: np.ndarray) -> HighSpeedTAAnalysisJob:
@@ -311,3 +313,31 @@ def test_hsta_analysis_uses_iq_filter_before_power_detection() -> None:
 def test_hsta_status_distinguishes_iq_samples_and_plot_points() -> None:
     status = format_hsta_sampling_status(40_000, 1000, 10e-6)
     assert status == "IQ Samples: 40000   Plot Points: 1000   Plot dt: 0.010 ms"
+
+
+def test_hsta_power_trigger_line_uses_configured_display_dbm() -> None:
+    class FakeLine:
+        def __init__(self) -> None:
+            self.position = None
+            self.visible = None
+
+        def setPos(self, value: float) -> None:
+            self.position = value
+
+        def setVisible(self, visible: bool) -> None:
+            self.visible = visible
+
+    line = FakeLine()
+    owner = SimpleNamespace(
+        config=SimpleNamespace(
+            hsta_trigger_kind="power_level",
+            hsta_trigger_level_dbm=-37.5,
+        ),
+        high_speed_ta_trigger_level_line=line,
+        _is_high_speed_time_analyzer_mode=lambda: True,
+    )
+
+    RealtimeSpectrumWindow._update_hsta_trigger_level_line(owner)
+
+    assert line.position == -37.5
+    assert line.visible is True

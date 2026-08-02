@@ -68,7 +68,7 @@ class SpectrumConfig:
     hsta_trigger_kind: str = "free_run"
     hsta_trigger_run_mode: str = "auto"
     hsta_trigger_slope: str = "rising"
-    hsta_trigger_level_dbfs: float = -20.0
+    hsta_trigger_level_dbm: float = -20.0
     hsta_trigger_hysteresis_db: float = 1.0
     hsta_trigger_position_percent: float = 50.0
     hsta_trigger_auto_timeout_s: float = 1.0

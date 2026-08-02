@@ -8,6 +8,48 @@ from enum import Enum
 import numpy as np
 
 
+DEFAULT_IQ_FULL_SCALE = 2048.0
+
+
+def power_trigger_dbfs_to_display_dbm(
+    level_dbfs: float,
+    *,
+    iq_full_scale: float = DEFAULT_IQ_FULL_SCALE,
+    calibration_offset_db: float = 0.0,
+    frequency_dependent_offset_db: float = 0.0,
+    input_correction_db: float = 0.0,
+) -> float:
+    """Convert raw IQ magnitude dBFS into the calibrated display dBm scale."""
+    if float(iq_full_scale) <= 0.0:
+        raise ValueError("iq_full_scale must be positive")
+    return float(
+        float(level_dbfs)
+        + 20.0 * np.log10(float(iq_full_scale))
+        + float(calibration_offset_db)
+        + float(frequency_dependent_offset_db)
+        + float(input_correction_db)
+    )
+
+
+def power_trigger_display_dbm_to_dbfs(
+    level_dbm: float,
+    *,
+    iq_full_scale: float = DEFAULT_IQ_FULL_SCALE,
+    calibration_offset_db: float = 0.0,
+    frequency_dependent_offset_db: float = 0.0,
+    input_correction_db: float = 0.0,
+) -> float:
+    """Convert a calibrated display dBm threshold into raw IQ magnitude dBFS."""
+    display_zero_dbfs_dbm = power_trigger_dbfs_to_display_dbm(
+        0.0,
+        iq_full_scale=iq_full_scale,
+        calibration_offset_db=calibration_offset_db,
+        frequency_dependent_offset_db=frequency_dependent_offset_db,
+        input_correction_db=input_correction_db,
+    )
+    return float(level_dbm) - display_zero_dbfs_dbm
+
+
 class TriggerKind(str, Enum):
     """Trigger sources supported now or reserved by the common architecture."""
 
@@ -95,7 +137,7 @@ class AcquisitionMetadata:
     rf_bandwidth_hz: float
     gain_db: float
     source: str
-    iq_full_scale: float = 2048.0
+    iq_full_scale: float = DEFAULT_IQ_FULL_SCALE
 
     def __post_init__(self) -> None:
         if float(self.sample_rate_hz) <= 0.0:
