@@ -1,6 +1,6 @@
 # VSAアプリケーション設計方針
 
-最終更新: 2026-08-02
+最終更新: 2026-08-03
 
 参照モデル: `FPL_K70_VSA_UserManual_en_12.pdf`（R&S FPL1-K70 VSA User Manual、551 pages）
 
@@ -204,6 +204,25 @@ R&SはSample Rate設定をsamples/symbol（Capture Oversampling）として扱�
 - Demodulation BW: channel/measurement filter後に評価する帯域。
 - Display Points/Symbol: 表示密度であり推定点数とは別。
 - Estimation Points/Symbol: synchronization parameter推定へ使う点数。
+
+### 5.1 Manual analysis channel selection
+
+通常のsingle-channel VSAと同様に、capture内の全信号を自動復調対象にはしません。
+ユーザーが`Analysis Center`と`Analysis Bandwidth`を指定し、対象信号をDDC、
+complex FIR low-pass、integer decimationでbasebandへ切り出してから共通解析へ渡します。
+
+```text
+Wideband IQ recording
+  → user-selected Analysis CenterへDDC
+  → Analysis Bandwidthのcomplex LPF
+  → 約4 × Analysis Bandwidthを目安にdecimation
+  → FSK / PSK / profile demodulation
+```
+
+このstageはBluetooth固有ではなく、すべてのVSA modulation familyとinput sourceで
+共用します。複数channelが見える場合はfilter OFFのSpectrumで探索し、対象周波数を
+手動設定して解析します。全channel自動channelizerやhopping追従は、必要になった場合の
+追加機能とし、固定周波数test signalの復調を妨げないよう当面の必須要件から外します。
 
 ## 6. Demodulation pipeline
 

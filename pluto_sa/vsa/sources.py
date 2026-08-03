@@ -149,6 +149,7 @@ class FileIQSource:
         resolved = Path(path)
         suffix = resolved.suffix.lower()
         metadata: dict[str, object] = {"path": str(resolved.resolve())}
+        usable_bandwidth_hz: float | None = None
         if suffix == ".npy":
             iq = np.load(resolved, allow_pickle=False)
         elif suffix == ".npz":
@@ -159,6 +160,10 @@ class FileIQSource:
                     sample_rate_hz = float(np.asarray(container["sample_rate_hz"]).item())
                 if center_frequency_hz == 0.0 and "center_frequency_hz" in container.files:
                     center_frequency_hz = float(np.asarray(container["center_frequency_hz"]).item())
+                if "usable_bandwidth_hz" in container.files:
+                    usable_bandwidth_hz = float(
+                        np.asarray(container["usable_bandwidth_hz"]).item()
+                    )
                 calibration_offset_db = (
                     float(np.asarray(container["calibration_offset_db"]).item())
                     if "calibration_offset_db" in container.files
@@ -200,7 +205,11 @@ class FileIQSource:
             iq=iq,
             sample_rate_hz=float(sample_rate_hz),
             center_frequency_hz=float(center_frequency_hz),
-            usable_bandwidth_hz=0.8 * float(sample_rate_hz),
+            usable_bandwidth_hz=(
+                0.8 * float(sample_rate_hz)
+                if usable_bandwidth_hz is None
+                else usable_bandwidth_hz
+            ),
             source=f"File: {resolved.name}",
             calibration_offset_db=calibration_offset_db,
             frequency_dependent_offset_db=frequency_dependent_offset_db,
@@ -216,6 +225,11 @@ class FileIQSource:
             iq=recording.iq,
             sample_rate_hz=np.float64(recording.sample_rate_hz),
             center_frequency_hz=np.float64(recording.center_frequency_hz),
+            usable_bandwidth_hz=np.float64(
+                recording.sample_rate_hz
+                if recording.usable_bandwidth_hz is None
+                else recording.usable_bandwidth_hz
+            ),
             calibration_offset_db=np.float64(recording.calibration_offset_db),
             frequency_dependent_offset_db=np.float64(
                 recording.frequency_dependent_offset_db

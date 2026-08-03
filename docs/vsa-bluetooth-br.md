@@ -88,9 +88,13 @@ symbol timing、CFO/deviation推定、68-bit同期word復元まで動作する�
 Header/Payloadを持つ接続packetの復元は未検証です。
 
 最初に行った16 MSPS全帯域への直接相関では、相関0.888、2 bit error、偏移約
-1.82 MHzという不整合な候補を検出しました。複数の1 MHz channelを分離せずに
-wideband IQへ単一channel用GFSK復調器を適用すると誤検出し得ます。この結果からも、
-16 MSPS live sourceの前段には1 MHz Bluetooth channelizerが必要です。
+1.82 MHzという不整合な候補を検出しました。複数信号を含み得るwideband IQへ
+single-channel GFSK復調器を直接適用すべきではありません。通常のVSAと同じく、
+ユーザー指定のAnalysis Center/Bandwidthで対象channelをDDC/FIR抽出してから
+復調する設計へ変更しました。全channelの自動channelizerは当面実装しません。
+
+保存した実測IQをAnalysis Center 2460.750 MHz、Bandwidth 1.5 MHzで再解析し、
+相関0.99645、0 bit errorで同じGIACを復元できることも確認済みです。
 
 また、shortened Access Codeしかないpacketへdecision-directed drift refinementを
 適用すると、burst paddingを未知dataと誤認して既知bitを崩す問題を実測で確認しました。
@@ -101,6 +105,8 @@ drift refinementするよう修正済みです。
 
 ```powershell
 python -m tools.analyze_bluetooth_br_iq capture.npz `
+  --analysis-center-frequency 2441000000 `
+  --analysis-bandwidth 1500000 `
   --lap 0x9E8B33 `
   --clock 0x2B `
   --uap 0x47
@@ -120,6 +126,8 @@ python -m tools.analyze_bluetooth_br_iq capture.npz `
 python -m tools.capture_bluetooth_br_iq `
   --center-frequency 2441000000 `
   --sample-rate 16000000 `
+  --analysis-center-frequency 2443000000 `
+  --analysis-bandwidth 1500000 `
   --duration-ms 3 `
   --attempts 50 `
   --lap 0x9E8B33 `
@@ -127,13 +135,13 @@ python -m tools.capture_bluetooth_br_iq `
   --output bluetooth_capture.npz
 ```
 
-Bluetooth BRはfrequency hoppingするため、単一center frequencyでの捕捉は確率的です。16 MHz capture帯域内の複数channelを同時に受信できますが、現在のprofileはrecord全体を1 complex basebandとして検索し、channelizerはまだありません。実機試験でwideband直接相関の誤検出も確認したため、現状の確実な検証は4 MSPS / RF BW 3 MHzの狭帯域scanを使用します。捕捉成功時だけIQを保存します。
+`center-frequency`はPlutoのcapture center、`analysis-center-frequency`はそのIQ内で復調する信号の絶対周波数です。後者を中心に`analysis-bandwidth`のDDC/FIR処理を適用します。固定周波数test signalでは対象周波数を直接指定してください。Bluetooth BRの実trafficはfrequency hoppingするため、単一Analysis Centerでの捕捉は確率的です。捕捉成功時は再解析可能な元のwideband IQを保存します。
 
 接続中packetを狙う場合はCentral BD_ADDRのLAP、Header復元にはclock、HEC検証にはUAPが必要です。まずは既知GIACを使えるInquiry trafficでRF捕捉とbit timingを検証するのが安全です。
 
 ## 7. 未実装
 
-- 16 MHz内を1 MHz channelごとに分離するBluetooth channelizer。
+- 複数channel自動探索とfrequency hopping追従（手動single-channel選択は実装済み）。
 - unknown LAP discovery。
 - clock/UAPのcandidate searchと連続packet tracking。
 - actual packet TYPEに応じたPayload length判定。

@@ -198,12 +198,27 @@ class VSASettings:
     fft_size: int = 4096
     timing_offset_samples: float = 0.0
     remove_dc: bool = True
+    analysis_center_frequency_hz: float | None = None
+    analysis_bandwidth_hz: float | None = None
 
     def __post_init__(self) -> None:
         if int(self.fft_size) < 16:
             raise ValueError("fft_size must be at least 16")
         if not np.isfinite(self.timing_offset_samples):
             raise ValueError("timing_offset_samples must be finite")
+        if (
+            self.analysis_center_frequency_hz is not None
+            and not np.isfinite(self.analysis_center_frequency_hz)
+        ):
+            raise ValueError("analysis_center_frequency_hz must be finite")
+        if (
+            self.analysis_bandwidth_hz is not None
+            and (
+                not np.isfinite(self.analysis_bandwidth_hz)
+                or self.analysis_bandwidth_hz <= 0.0
+            )
+        ):
+            raise ValueError("analysis_bandwidth_hz must be positive when provided")
 
 
 @dataclass(frozen=True)

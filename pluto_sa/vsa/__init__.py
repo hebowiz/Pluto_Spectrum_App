@@ -1,6 +1,7 @@
 """Vector signal analysis contracts and offline processing."""
 
 from pluto_sa.vsa.analysis import VSAAnalyzer
+from pluto_sa.vsa.channel import extract_analysis_channel
 from pluto_sa.vsa.model import (
     CompositeSignalDescription,
     CompositeVSAAnalysisResult,
@@ -28,4 +29,5 @@ __all__ = [
     "VSASettings",
     "VSASegmentAnalysis",
     "VSASession",
+    "extract_analysis_channel",
 ]

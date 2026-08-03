@@ -20,6 +20,7 @@ python -m pluto_sa.vsa.main
 
 - GFSK、QPSK、pi/4-DQPSKのtest waveform生成。
 - NumPy `.npy` / `.npz`およびraw complex IQの読込み。
+- Analysis Center/Bandwidthによる手動single-channel選択。
 - IQ Power（Zero Span、dBm）、Spectrum表示。
 - FSKのinstantaneous frequency表示。
 - PSKのConstellation表示。
@@ -70,11 +71,16 @@ symbol rate、FSK deviation、TX filter、BT/Alpha相当parameter、mapping名�
 
 共通処理:
 
-1. optional DC除去。
-2. time/power trace生成。
-3. Hann window FFTとrelative frequency spectrum生成。
-4. instantaneous frequency生成。
-5. manual symbol rateとtiming offsetからsymbol center生成。
+1. optional Analysis CenterへのDDC、FIR low-pass、integer decimation。
+2. optional DC除去。
+3. time/power trace生成。
+4. Hann window FFTとrelative/absolute frequency spectrum生成。
+5. instantaneous frequency生成。
+6. manual symbol rateとtiming offsetからsymbol center生成。
+
+Analysis channel処理は`pluto_sa/vsa/channel.py`にsource/modulation非依存で実装済みです。
+出力sample rateはAnalysis Bandwidthの約4倍を目安に、input rateの整数分周から選びます。
+filter未選択時は元recordingをそのまま解析します。
 
 FSK:
 
@@ -96,7 +102,7 @@ PSK:
 - `FileIQSource`: `.npy`、`.npz`、raw complex file。
 - `recording_from_acquisition`: 共通Pluto acquisition record adapter。
 
-`.npz`は`iq`、`sample_rate_hz`、`center_frequency_hz`を保存/復元できます。`.npy`とraw IQはUIでsample rateを指定します。SigMF、R&S `.iq.tar`、SCPI instrumentは未実装です。
+`.npz`は`iq`、`sample_rate_hz`、`center_frequency_hz`、`usable_bandwidth_hz`、振幅補正条件を保存/復元できます。旧NPZにusable bandwidthがない場合は`0.8 * sample rate`をfallbackにします。`.npy`とraw IQはUIでsample rateを指定します。SigMF、R&S `.iq.tar`、SCPI instrumentは未実装です。
 
 ## 5. Test
 
@@ -117,6 +123,9 @@ python -m pytest tests/test_vsa_core.py -q
 - Zero Span IQ PowerのdBm換算と既存TA補正規約との一致。
 - spectrum frequency axis。
 - 1 capture内のFSK/PSK segment一括解析と共通時間軸。
+- DDC/FIR/decimation後の周波数軸とmetadata。
+- 強い隣接GFSK packetを含む16 MSPS IQから手動選択したGIACの0-error復元。
+- Pluto実測Inquiry IQをAnalysis Center/Bandwidth指定後も0-error復元。
 
 Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまでsmoke test済みです。
 
@@ -127,20 +136,20 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 - generated Gaussian waveformは開発用近似であり、規格reference/EVM用filterではありません。
 - PSK EVMはbasic decision-directed値。R&S相当のnormalization、同期、evaluation range、measurement filter条件をまだ満たしません。
 - FSK error metricsはfrequency error/deviationの基礎のみです。
-- burst/pattern search、packet field decode、DECT/Bluetooth profileは未実装。
+- 一般VSA用burst/pattern searchとDECT profileは未実装。Bluetooth BR profileには専用Access Code searchとHeader field decodeがあります。
 - VSA UIはoffline Single/Refreshのみ。処理はUI thread上で同期実行します。
 - Pluto live source、Power Trigger接続、SCPI sourceは未実装。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
 
-Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。16 MSPS wideband直接相関には誤検出があり、1 MHz channelizerが次の必須項目です。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
+Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。16 MSPS全帯域への直接相関は行わず、ユーザー指定Analysis Center/Bandwidthで1 channelを抽出してから復調します。全channel自動channelizerは当面の必須要件ではありません。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
 
 現在の数値を規格適合判定やR&SとのEVM比較へ使用してはいけません。
 
 ## 7. 次の推奨実装順
 
-1. 1 MHz Bluetooth channelizerと複数burst候補解析を追加。
-2. FHS decodeからLAP/UAP/clockを取得し、CAC packet trackingへ接続。
-3. packet TYPE別Payload length/FEC/CRCを追加。
+1. 固定周波数の通常BR test packetを取得し、既知LAP/clock/UAPでHeader/Payloadを実測検証。
+2. packet TYPE別Payload length/FEC/CRCを追加。
+3. FHS decodeからLAP/UAP/clockを取得し、必要になった段階でCAC packet trackingへ接続。
 4. pulse shaping/matched filter contractとPSK carrier/timing recoveryを追加。
 5. VSA analysis workerを追加しUI threadからDSPを分離。
 6. EDR guard/sync検出、Composite segment UI、EDR profileへ拡張。

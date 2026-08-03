@@ -147,6 +147,24 @@ class VSAWindow(QtWidgets.QMainWindow):
         source_layout.addWidget(qpsk_button)
         source_layout.addWidget(edr_button)
         source_layout.addWidget(open_button)
+        source_layout.addSpacing(12)
+        self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
+        self.analysis_center_spin = QtWidgets.QDoubleSpinBox()
+        self.analysis_center_spin.setRange(-100_000.0, 100_000.0)
+        self.analysis_center_spin.setDecimals(6)
+        self.analysis_center_spin.setSuffix(" MHz")
+        self.analysis_bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.analysis_bandwidth_spin.setRange(0.000001, 100.0)
+        self.analysis_bandwidth_spin.setDecimals(6)
+        self.analysis_bandwidth_spin.setValue(1.5)
+        self.analysis_bandwidth_spin.setSuffix(" MHz")
+        channel_form = QtWidgets.QFormLayout()
+        channel_form.addRow(self.channel_filter_check)
+        channel_form.addRow("Analysis Center", self.analysis_center_spin)
+        channel_form.addRow("Analysis Bandwidth", self.analysis_bandwidth_spin)
+        source_layout.addLayout(channel_form)
+        self.channel_filter_check.toggled.connect(self._sync_analysis_controls)
+        self._sync_analysis_controls()
         source_layout.addStretch(1)
         toolbox.addItem(source_page, "Input / Frontend")
 
@@ -199,6 +217,33 @@ class VSAWindow(QtWidgets.QMainWindow):
         modulation = self._selected_modulation()
         self.deviation_spin.setEnabled(modulation.family is ModulationFamily.FSK)
 
+    def _sync_analysis_controls(self) -> None:
+        enabled = self.channel_filter_check.isChecked()
+        self.analysis_center_spin.setEnabled(enabled)
+        self.analysis_bandwidth_spin.setEnabled(enabled)
+
+    def _set_analysis_controls_from_recording(self, recording: IQRecording) -> None:
+        self.analysis_center_spin.setValue(recording.center_frequency_hz / 1e6)
+        usable_hz = min(
+            recording.sample_rate_hz,
+            recording.usable_bandwidth_hz or recording.sample_rate_hz,
+        )
+        self.analysis_bandwidth_spin.setMaximum(
+            max(0.000001, usable_hz / 1e6 * 0.999)
+        )
+        self.analysis_bandwidth_spin.setValue(min(1.5, usable_hz / 1e6 * 0.8))
+
+    def _update_analysis_settings(self) -> None:
+        enabled = self.channel_filter_check.isChecked()
+        self.session.update_settings(
+            analysis_center_frequency_hz=(
+                self.analysis_center_spin.value() * 1e6 if enabled else None
+            ),
+            analysis_bandwidth_hz=(
+                self.analysis_bandwidth_spin.value() * 1e6 if enabled else None
+            ),
+        )
+
     def _signal_from_controls(self) -> SignalDescription:
         modulation = self._selected_modulation()
         return SignalDescription(
@@ -231,11 +276,13 @@ class VSAWindow(QtWidgets.QMainWindow):
             recording, signal = GeneratedIQSource.psk(modulation=modulation)
         self.session.set_recording(recording)
         self.session.set_signal(signal)
+        self._set_analysis_controls_from_recording(recording)
         self._set_controls_from_signal(signal)
         self._analyze()
 
     def load_recording(self, recording: IQRecording, signal: SignalDescription | None = None) -> None:
         self.session.set_recording(recording)
+        self._set_analysis_controls_from_recording(recording)
         if signal is not None:
             self.session.set_signal(signal)
             self._set_controls_from_signal(signal)
@@ -277,6 +324,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             return
         try:
             self.session.set_signal(self._signal_from_controls())
+            self._update_analysis_settings()
             result = self.session.analyze()
         except Exception as error:
             self.statusBar().showMessage(f"Analysis failed: {error}")
@@ -299,9 +347,23 @@ class VSAWindow(QtWidgets.QMainWindow):
                     f"Input: {recording.source}",
                     f"Capture: {recording.duration_s * 1e3:.3f} ms",
                     f"Fs: {recording.sample_rate_hz / 1e6:.3f} MS/s",
+                    (
+                        f"Center: {recording.center_frequency_hz / 1e6:.6f} MHz"
+                        if recording.center_frequency_hz
+                        else "Center: Baseband"
+                    ),
                     f"Mod: {signal.modulation.value}",
                     f"Symbol Rate: {signal.symbol_rate_hz / 1e6:.3f} MSym/s",
                     f"TX Filter: {signal.tx_filter}",
+                    *(
+                        (
+                            "Analysis: "
+                            f"{(self.session.settings.analysis_center_frequency_hz or recording.center_frequency_hz) / 1e6:.6f} MHz / "
+                            f"{self.session.settings.analysis_bandwidth_hz / 1e6:.3f} MHz",
+                        )
+                        if self.session.settings.analysis_bandwidth_hz is not None
+                        else ()
+                    ),
                     "Amplitude: Cal" if recording.amplitude_calibrated else "Amplitude: Uncal",
                     "SGL",
                 )
@@ -321,8 +383,17 @@ class VSAWindow(QtWidgets.QMainWindow):
             pen=pg.mkPen("y", width=1),
         )
         self.spectrum_plot.clear()
+        analysis_center_hz = float(
+            result.metadata.get("analysis_center_frequency_hz", 0.0) or 0.0
+        )
+        if analysis_center_hz:
+            spectrum_x = (result.spectrum_frequency_hz + analysis_center_hz) / 1e6
+            self.spectrum_plot.setLabel("bottom", "Frequency (MHz)")
+        else:
+            spectrum_x = result.spectrum_frequency_hz / 1e6
+            self.spectrum_plot.setLabel("bottom", "Relative Frequency (MHz)")
         self.spectrum_plot.plot(
-            result.spectrum_frequency_hz / 1e6,
+            spectrum_x,
             result.spectrum_dbfs,
             pen=pg.mkPen("c", width=1),
         )

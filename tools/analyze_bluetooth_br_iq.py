@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from pluto_sa.vsa.channel import extract_analysis_channel
 from pluto_sa.vsa.profiles.bluetooth_br import BluetoothBRProfile, access_code_bits
 from pluto_sa.vsa.sources import FileIQSource
 
@@ -19,6 +20,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("path", type=Path, help=".npz/.npy/raw complex IQ file")
     parser.add_argument("--sample-rate", type=float, default=None)
     parser.add_argument("--center-frequency", type=float, default=0.0)
+    parser.add_argument(
+        "--analysis-center-frequency",
+        type=float,
+        default=None,
+        help="absolute center frequency selected for demodulation",
+    )
+    parser.add_argument(
+        "--analysis-bandwidth",
+        type=float,
+        default=None,
+        help="DDC/FIR channel bandwidth; omitted to analyze the full recording",
+    )
     parser.add_argument("--raw-dtype", default="complex64")
     parser.add_argument(
         "--lap",
@@ -40,12 +53,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.analysis_center_frequency is not None and args.analysis_bandwidth is None:
+        raise SystemExit(
+            "--analysis-bandwidth is required with --analysis-center-frequency"
+        )
     recording = FileIQSource.load(
         args.path,
         sample_rate_hz=args.sample_rate,
         center_frequency_hz=args.center_frequency,
         raw_dtype=args.raw_dtype,
     )
+    input_recording = recording
+    if args.analysis_bandwidth is not None:
+        recording = extract_analysis_channel(
+            recording,
+            center_frequency_hz=(
+                recording.center_frequency_hz
+                if args.analysis_center_frequency is None
+                else args.analysis_center_frequency
+            ),
+            bandwidth_hz=args.analysis_bandwidth,
+        )
     profile = BluetoothBRProfile(
         access_code_bits(
             args.lap,
@@ -61,7 +89,11 @@ def main(argv: list[str] | None = None) -> int:
     demod = result.demodulation
     summary: dict[str, object] = {
         "source": recording.source,
+        "input_sample_rate_hz": input_recording.sample_rate_hz,
+        "input_center_frequency_hz": input_recording.center_frequency_hz,
         "sample_rate_hz": recording.sample_rate_hz,
+        "analysis_center_frequency_hz": recording.center_frequency_hz,
+        "analysis_bandwidth_hz": recording.usable_bandwidth_hz,
         "lap": f"0x{args.lap:06X}",
         "access_start_sample": demod.access_start_sample,
         "access_start_time_s": demod.access_start_sample / recording.sample_rate_hz,

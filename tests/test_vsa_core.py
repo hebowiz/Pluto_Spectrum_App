@@ -120,6 +120,7 @@ def test_npz_file_source_round_trip_preserves_capture_metadata(tmp_path) -> None
     np.testing.assert_array_equal(loaded.iq, recording.iq)
     assert loaded.sample_rate_hz == recording.sample_rate_hz
     assert loaded.center_frequency_hz == recording.center_frequency_hz
+    assert loaded.usable_bandwidth_hz == recording.usable_bandwidth_hz
 
 
 def test_spectrum_peak_uses_relative_frequency_axis() -> None:

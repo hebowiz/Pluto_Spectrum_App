@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import numpy as np
 
+from pluto_sa.vsa.channel import extract_analysis_channel
 from pluto_sa.vsa.model import (
     CompositeSignalDescription,
     CompositeVSAAnalysisResult,
@@ -85,17 +86,28 @@ class VSAAnalyzer:
         settings: VSASettings | None = None,
     ) -> VSAAnalysisResult:
         resolved = settings or VSASettings()
-        iq = np.asarray(recording.iq, dtype=np.complex128)
+        analysis_recording = recording
+        if resolved.analysis_bandwidth_hz is not None:
+            analysis_recording = extract_analysis_channel(
+                recording,
+                center_frequency_hz=(
+                    recording.center_frequency_hz
+                    if resolved.analysis_center_frequency_hz is None
+                    else resolved.analysis_center_frequency_hz
+                ),
+                bandwidth_hz=resolved.analysis_bandwidth_hz,
+            )
+        iq = np.asarray(analysis_recording.iq, dtype=np.complex128)
         if resolved.remove_dc:
             iq = iq - np.mean(iq)
-        sample_rate_hz = float(recording.sample_rate_hz)
+        sample_rate_hz = float(analysis_recording.sample_rate_hz)
         time_s = np.arange(iq.size, dtype=np.float64) / sample_rate_hz
         power_dbfs = 20.0 * np.log10(
-            np.maximum(np.abs(iq) / float(recording.full_scale), _EPSILON)
+            np.maximum(np.abs(iq) / float(analysis_recording.full_scale), _EPSILON)
         )
-        power_dbm = power_dbfs + recording.dbfs_to_dbm_offset_db
+        power_dbm = power_dbfs + analysis_recording.dbfs_to_dbm_offset_db
         frequency_hz, spectrum_dbfs = _spectrum(
-            iq / float(recording.full_scale), sample_rate_hz, resolved.fft_size
+            iq / float(analysis_recording.full_scale), sample_rate_hz, resolved.fft_size
         )
         inst_frequency_hz = _instantaneous_frequency(iq, sample_rate_hz)
         samples_per_symbol = sample_rate_hz / float(signal.symbol_rate_hz)
@@ -105,7 +117,7 @@ class VSAAnalyzer:
 
         if signal.modulation.family is ModulationFamily.FSK:
             return self._analyze_fsk(
-                recording,
+                analysis_recording,
                 signal,
                 iq,
                 time_s,
@@ -118,7 +130,7 @@ class VSAAnalyzer:
                 samples_per_symbol,
             )
         return self._analyze_psk(
-            recording,
+            analysis_recording,
             signal,
             iq,
             time_s,
@@ -237,6 +249,12 @@ class VSAAnalyzer:
                 "samples_per_symbol": samples_per_symbol,
                 "estimated_deviation_hz": deviation,
                 "amplitude_calibrated": recording.amplitude_calibrated,
+                "analysis_channel_applied": bool(
+                    recording.metadata.get("analysis_channel_applied", False)
+                ),
+                "analysis_center_frequency_hz": recording.center_frequency_hz,
+                "analysis_bandwidth_hz": recording.usable_bandwidth_hz,
+                "analysis_sample_rate_hz": recording.sample_rate_hz,
             },
         )
 
@@ -290,5 +308,11 @@ class VSAAnalyzer:
                 "samples_per_symbol": recording.sample_rate_hz / signal.symbol_rate_hz,
                 "differential": signal.modulation.differential,
                 "amplitude_calibrated": recording.amplitude_calibrated,
+                "analysis_channel_applied": bool(
+                    recording.metadata.get("analysis_channel_applied", False)
+                ),
+                "analysis_center_frequency_hz": recording.center_frequency_hz,
+                "analysis_bandwidth_hz": recording.usable_bandwidth_hz,
+                "analysis_sample_rate_hz": recording.sample_rate_hz,
             },
         )

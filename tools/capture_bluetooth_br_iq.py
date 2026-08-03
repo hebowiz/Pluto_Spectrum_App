@@ -10,6 +10,7 @@ import adi
 import iio
 import numpy as np
 
+from pluto_sa.vsa.channel import extract_analysis_channel
 from pluto_sa.vsa.model import IQRecording
 from pluto_sa.vsa.profiles.bluetooth_br import BluetoothBRProfile, access_code_bits
 from pluto_sa.vsa.sources import FileIQSource
@@ -34,6 +35,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--center-frequency", type=int, default=2_441_000_000)
     parser.add_argument("--sample-rate", type=int, default=16_000_000)
     parser.add_argument("--rf-bandwidth", type=int, default=16_000_000)
+    parser.add_argument(
+        "--analysis-center-frequency",
+        type=float,
+        default=None,
+        help="absolute center frequency selected from the captured bandwidth",
+    )
+    parser.add_argument(
+        "--analysis-bandwidth",
+        type=float,
+        default=None,
+        help="DDC/FIR channel bandwidth; omitted to search the full capture",
+    )
     parser.add_argument("--duration-ms", type=float, default=3.0)
     parser.add_argument("--gain", type=int, default=30)
     parser.add_argument("--attempts", type=int, default=50)
@@ -50,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.duration_ms <= 0.0 or args.attempts <= 0:
         raise SystemExit("duration-ms and attempts must be positive")
+    if args.analysis_center_frequency is not None and args.analysis_bandwidth is None:
+        raise SystemExit(
+            "--analysis-bandwidth is required with --analysis-center-frequency"
+        )
     samples = max(1024, int(round(args.sample_rate * args.duration_ms / 1000.0)))
     uri = args.uri or _default_uri()
     sdr = adi.Pluto(uri=uri) if uri is not None else adi.Pluto()
@@ -86,9 +103,20 @@ def main(argv: list[str] | None = None) -> int:
                     "attempt": attempt,
                 },
             )
+            analysis_recording = recording
+            if args.analysis_bandwidth is not None:
+                analysis_recording = extract_analysis_channel(
+                    recording,
+                    center_frequency_hz=(
+                        recording.center_frequency_hz
+                        if args.analysis_center_frequency is None
+                        else args.analysis_center_frequency
+                    ),
+                    bandwidth_hz=args.analysis_bandwidth,
+                )
             try:
                 result = profile.analyze(
-                    recording,
+                    analysis_recording,
                     clock_6_1=args.clock,
                     uap=args.uap,
                     minimum_correlation=args.minimum_correlation,
@@ -105,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
                 "output": str(args.output.resolve()),
                 "center_frequency_hz": int(sdr.rx_lo),
                 "sample_rate_hz": int(sdr.sample_rate),
+                "analysis_sample_rate_hz": analysis_recording.sample_rate_hz,
+                "analysis_center_frequency_hz": analysis_recording.center_frequency_hz,
+                "analysis_bandwidth_hz": analysis_recording.usable_bandwidth_hz,
                 "samples": int(iq.size),
                 "lap": f"0x{args.lap:06X}",
                 "access_correlation": demod.access_correlation,
