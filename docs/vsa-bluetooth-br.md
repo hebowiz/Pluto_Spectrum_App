@@ -46,6 +46,9 @@ coarse drift値は復調補正用であり、Bluetooth RF conformance measuremen
 - Header rate 1/3 FEC majority decode。
 - HEC生成/検証。
 - LT_ADDR、TYPE、FLOW、ARQN、SEQN抽出。
+- unknown CLK_6-1の64候補とWhiteningなしのHeader候補探索。
+- DH1 1-byte Payload Header、最大27-byte body、CRC-CCITT検証。
+- PRBS-9のphase、polarity、time direction、bit error探索。
 - known clock/UAPを使ったHeader dewhiteningとHEC validation。
 - test packet bitstream/GFSK waveform generator。
 
@@ -101,6 +104,29 @@ single-channel GFSK復調器を直接適用すべきではありません。通�
 既知Access Codeをtraining symbolとして固定し、十分なpost-access fieldがある場合だけ
 drift refinementするよう修正済みです。
 
+### 固定周波数BR/PRBS-9実機検証（2026-08-03）
+
+固定2441 MHzのBR test waveformを30 dB外部ATT経由でPlutoへ入力し、通常Access
+Code、Header、Payloadを解析しました。送信出力は0～10 dBmの範囲、Pluto RX gainは
+0 dBです。
+
+- Source Fs / RF BW: 16 MSPS / 16 MHz。
+- Analysis Center / Bandwidth: 2441 MHz / 1.5 MHz。
+- input peak: -31.27 dBFS。overloadなし。
+- LAP: `0xC6967E`、72-bit Access Code相関0.99731、0 bit error。
+- CFO: -4.39 kHz、推定GFSK deviation: 147.09 kHz。
+- 54 air-bit Headerは全18 FEC tripletが一致し、FEC correction 0。
+- Whitening OFF候補でTYPE=4（DH1）、Payload length=27 bytes。
+- Payload body 216 bitはPRBS-9 phase 0と完全一致し、0 bit error。
+- 回帰fixture: `tests/fixtures/bluetooth_br_prbs9_pluto_16msps.npz`。
+
+一方、入力されたBD_ADDR `00006BC6967E`から期待するUAP `0x6B`ではHeader HECが
+一致しません。Whitening OFFのHeader bit列から逆算するとHEC初期値は`0x5D`相当です。
+Payload CRCもreceived `72b4`、expected `df5d`で不一致でした。このため、このtest
+waveformはWhitening/CRC/HECの一部がdisabled、またはAccess Codeとは別のcheck初期値を
+使っている可能性があります。今回の結果はRF復調、Header FEC、DH1 length、PRBS-9
+Payload復元の実機検証として有効ですが、標準準拠packetのHEC/CRC成功例ではありません。
+
 ## 5. 保存IQの解析
 
 ```powershell
@@ -110,6 +136,17 @@ python -m tools.analyze_bluetooth_br_iq capture.npz `
   --lap 0x9E8B33 `
   --clock 0x2B `
   --uap 0x47
+```
+
+送信器のUAP/Clock/Whiteningが不明で、DH1/PRBS-9候補を診断する場合:
+
+```powershell
+python -m tools.analyze_bluetooth_br_iq capture.npz `
+  --lap 0xC6967E `
+  --analysis-center-frequency 2441000000 `
+  --analysis-bandwidth 1500000 `
+  --search-all-uap `
+  --payload-pattern prbs9
 ```
 
 Inquiry/Page IDの68-bit shortened Access Codeを検索する場合:
@@ -146,7 +183,7 @@ python -m tools.capture_bluetooth_br_iq `
 - clock/UAPのcandidate searchと連続packet tracking。
 - actual packet TYPEに応じたPayload length判定。
 - DM系Payloadのrate 2/3 FEC。
-- Payload CRC、暗号化状態、再送判定。
+- DH1以外のPayload decode、暗号化状態、再送判定（DH1 CRCは実装済み）。
 - FHS payloadからBD_ADDR/clockを取得しCAC trackingへ移行する処理。
 - EDR guard/sync検出とpi/4-DQPSK/8DPSK segment解析。
 - VSA GUIからのBluetooth profile設定・packet result表示。

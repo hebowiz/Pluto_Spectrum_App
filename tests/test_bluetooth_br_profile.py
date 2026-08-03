@@ -3,17 +3,23 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from pluto_sa.vsa.channel import extract_analysis_channel
 from pluto_sa.vsa.model import IQRecording
 from pluto_sa.vsa.profiles.bluetooth_br import (
     BLUETOOTH_GIAC_SYNC_WORD_HEX,
     BluetoothBRProfile,
     access_code_bits,
     build_packet_bits,
+    decode_dh1_payload,
     fec13_decode,
     fec13_encode,
+    find_dh1_candidates,
     giac_access_code_bits,
     header_error_check,
+    match_prbs9,
     modulate_packet_bits,
+    payload_crc_bytes,
+    prbs9_period,
     whitening_sequence,
 )
 
@@ -86,6 +92,48 @@ def test_pluto_smartphone_inquiry_capture_recovers_giac_without_errors() -> None
     )
 
 
+def test_pluto_fixed_br_capture_recovers_unwhitened_dh1_prbs9() -> None:
+    fixture = Path(__file__).with_name("fixtures") / "bluetooth_br_prbs9_pluto_16msps.npz"
+    with np.load(fixture, allow_pickle=False) as capture:
+        wideband = IQRecording(
+            capture["iq"],
+            sample_rate_hz=float(capture["sample_rate_hz"]),
+            center_frequency_hz=float(capture["center_frequency_hz"]),
+            usable_bandwidth_hz=float(capture["usable_bandwidth_hz"]),
+        )
+    recording = extract_analysis_channel(
+        wideband,
+        center_frequency_hz=2_441_000_000.0,
+        bandwidth_hz=1_500_000.0,
+    )
+    profile = BluetoothBRProfile(access_bits=access_code_bits(0xC6967E))
+
+    raw = profile.analyze(recording)
+    candidates = find_dh1_candidates(
+        raw.header_air_bits,
+        raw.payload_bits,
+        require_crc=False,
+    )
+    unwhitened = [item for item in candidates if not item.header.whitening_enabled]
+
+    assert raw.demodulation.access_correlation > 0.99
+    assert raw.demodulation.access_bit_errors == 0
+    assert len(unwhitened) == 1
+    candidate = unwhitened[0]
+    assert candidate.header.packet_type == 4
+    assert candidate.payload.length_bytes == 27
+    assert candidate.payload.crc_valid is False
+    body_bits = np.asarray(
+        [
+            (byte >> index) & 1
+            for byte in candidate.payload.body
+            for index in range(8)
+        ],
+        dtype=np.uint8,
+    )
+    assert match_prbs9(body_bits).bit_errors == 0
+
+
 @pytest.mark.parametrize(
     ("lap", "preamble", "sync_word", "trailer"),
     [
@@ -140,6 +188,88 @@ def test_rate_third_fec_majority_corrects_one_bit_per_triplet() -> None:
 
     np.testing.assert_array_equal(decoded, bits)
     assert corrected == bits.size
+
+
+def test_payload_crc_matches_bluetooth_sig_sample_vector() -> None:
+    data = bytes([0x4E, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    bits = np.asarray(
+        [(byte >> index) & 1 for byte in data for index in range(8)],
+        dtype=np.uint8,
+    )
+
+    assert payload_crc_bytes(bits, 0x47) == bytes.fromhex("6dd2")
+
+
+def test_decode_dh1_payload_matches_bluetooth_sig_complete_packet() -> None:
+    air_text = (
+        "01110100"
+        "10000000"
+        "01000000"
+        "11000000"
+        "00100000"
+        "10100000"
+        "11101100"
+        "00110110"
+    )
+    payload = decode_dh1_payload(
+        np.asarray([int(bit) for bit in air_text], dtype=np.uint8),
+        uap=0x47,
+    )
+
+    assert payload.logical_channel == 2
+    assert payload.flow == 1
+    assert payload.length_bytes == 5
+    assert payload.body == bytes([1, 2, 3, 4, 5])
+    assert payload.received_crc == bytes.fromhex("376c")
+    assert payload.crc_valid is True
+
+
+def test_find_dh1_candidate_uses_header_hec_and_payload_crc() -> None:
+    payload_header = np.asarray([0, 1, 1, 1, 0, 1, 0, 0], dtype=np.uint8)
+    body = np.asarray(
+        [(byte >> index) & 1 for byte in range(1, 6) for index in range(8)],
+        dtype=np.uint8,
+    )
+    crc_bytes = payload_crc_bytes(np.concatenate((payload_header, body)), 0x47)
+    crc = np.asarray(
+        [(byte >> index) & 1 for byte in crc_bytes for index in range(8)],
+        dtype=np.uint8,
+    )
+    packet_bits = build_packet_bits(
+        clock_6_1=0x2B,
+        uap=0x47,
+        payload_bits=np.concatenate((payload_header, body, crc)),
+        packet_type=4,
+    )
+    recording = IQRecording(
+        modulate_packet_bits(packet_bits, prefix_samples=23, suffix_samples=19),
+        sample_rate_hz=8_000_000.0,
+    )
+    raw = BluetoothBRProfile().analyze(recording)
+
+    candidates = find_dh1_candidates(
+        raw.header_air_bits,
+        raw.payload_bits,
+        uaps=(0x47,),
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].header.clock_6_1 == 0x2B
+    assert candidates[0].payload.body == bytes([1, 2, 3, 4, 5])
+
+
+def test_prbs9_match_finds_phase_polarity_and_bit_errors() -> None:
+    period = prbs9_period()
+    values = period[(np.arange(300) + 123) % period.size] ^ 1
+    values[[5, 99, 201]] ^= 1
+
+    match = match_prbs9(values)
+
+    assert match.bit_errors == 3
+    assert match.bit_count == 300
+    assert match.phase == 123
+    assert match.inverted is True
+    assert match.time_reversed is False
 
 
 def test_bluetooth_packet_recovers_header_and_payload_from_impaired_iq() -> None:

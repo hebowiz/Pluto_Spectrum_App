@@ -144,7 +144,8 @@ class BluetoothHeader:
     hec: int
     hec_valid: bool | None
     uap: int | None
-    clock_6_1: int
+    clock_6_1: int | None
+    whitening_enabled: bool
     corrected_fec_triplets: int
     bits: np.ndarray
 
@@ -167,6 +168,236 @@ class BluetoothBRPacketResult:
             owned = np.array(getattr(self, name), dtype=np.uint8, copy=True)
             owned.flags.writeable = False
             object.__setattr__(self, name, owned)
+
+
+@dataclass(frozen=True)
+class BluetoothACLPayload:
+    logical_channel: int
+    flow: int
+    length_bytes: int
+    body: bytes
+    received_crc: bytes
+    expected_crc: bytes
+    crc_valid: bool
+
+
+@dataclass(frozen=True)
+class BluetoothDH1Candidate:
+    header: BluetoothHeader
+    payload: BluetoothACLPayload
+
+
+@dataclass(frozen=True)
+class PRBS9Match:
+    bit_errors: int
+    bit_count: int
+    phase: int
+    inverted: bool
+    time_reversed: bool
+
+    @property
+    def ber(self) -> float:
+        return self.bit_errors / self.bit_count if self.bit_count else 0.0
+
+
+def decode_header_air_bits(
+    header_air_bits: np.ndarray,
+    *,
+    uap: int | None,
+    clock_6_1: int | None,
+    whitening_enabled: bool = True,
+) -> BluetoothHeader:
+    """Decode one complete 54-air-bit BR packet header."""
+    values = np.asarray(header_air_bits, dtype=np.uint8)
+    if values.shape != (BLUETOOTH_HEADER_AIR_BITS,) or np.any(values > 1):
+        raise ValueError("header_air_bits must contain exactly 54 binary bits")
+    if whitening_enabled and clock_6_1 is None:
+        raise ValueError("clock_6_1 is required when whitening is enabled")
+    fec_bits, corrected = fec13_decode(values)
+    if whitening_enabled:
+        header_bits = fec_bits ^ whitening_sequence(int(clock_6_1), fec_bits.size)
+    else:
+        header_bits = fec_bits
+    data = header_bits[:10]
+    packed = _bits_to_int_lsb(data)
+    received_hec = _bits_to_int_msb(header_bits[10:18])
+    hec_valid = (
+        None if uap is None else header_error_check(data, int(uap)) == received_hec
+    )
+    return BluetoothHeader(
+        lt_addr=packed & 0x7,
+        packet_type=(packed >> 3) & 0xF,
+        flow=(packed >> 7) & 1,
+        arqn=(packed >> 8) & 1,
+        seqn=(packed >> 9) & 1,
+        hec=received_hec,
+        hec_valid=hec_valid,
+        uap=None if uap is None else int(uap),
+        clock_6_1=None if not whitening_enabled else int(clock_6_1),
+        whitening_enabled=bool(whitening_enabled),
+        corrected_fec_triplets=corrected,
+        bits=header_bits,
+    )
+
+
+def find_header_candidates(
+    header_air_bits: np.ndarray,
+    *,
+    uap: int,
+    include_unwhitened: bool = True,
+) -> tuple[BluetoothHeader, ...]:
+    """Return CLK_6-1/no-whitening candidates whose decoded HEC is valid."""
+    candidates = [
+        header
+        for clock in range(64)
+        if (
+            header := decode_header_air_bits(
+                header_air_bits,
+                uap=int(uap),
+                clock_6_1=clock,
+            )
+        ).hec_valid
+    ]
+    if include_unwhitened:
+        unwhitened = decode_header_air_bits(
+            header_air_bits,
+            uap=int(uap),
+            clock_6_1=None,
+            whitening_enabled=False,
+        )
+        if unwhitened.hec_valid:
+            candidates.append(unwhitened)
+    return tuple(candidates)
+
+
+def payload_crc_bytes(bits: np.ndarray, uap: int) -> bytes:
+    """Calculate the transmitted BR/EDR payload CRC bytes."""
+    values = np.asarray(bits, dtype=np.uint8)
+    if values.ndim != 1 or np.any(values > 1):
+        raise ValueError("bits must be a one-dimensional binary array")
+    if not 0 <= int(uap) <= 0xFF:
+        raise ValueError("uap must be an eight-bit value")
+    register = int(uap)
+    for bit in values:
+        feedback = ((register >> 15) & 1) ^ int(bit)
+        register = (register << 1) & 0xFFFF
+        if feedback:
+            register ^= 0x1021
+    return bytes((_reverse_byte(register >> 8), _reverse_byte(register)))
+
+
+def _air_bits_to_bytes(bits: np.ndarray) -> bytes:
+    values = np.asarray(bits, dtype=np.uint8)
+    if values.ndim != 1 or values.size % 8 or np.any(values > 1):
+        raise ValueError("air bits must contain complete binary octets")
+    return bytes(
+        _bits_to_int_lsb(values[start : start + 8])
+        for start in range(0, values.size, 8)
+    )
+
+
+def decode_dh1_payload(payload_bits: np.ndarray, *, uap: int) -> BluetoothACLPayload:
+    """Decode an unwhitened DH1 payload header, body and CRC."""
+    values = np.asarray(payload_bits, dtype=np.uint8)
+    if values.ndim != 1 or np.any(values > 1) or values.size < 24:
+        raise ValueError("DH1 payload must contain a header and CRC")
+    payload_header = values[:8]
+    logical_channel = _bits_to_int_lsb(payload_header[:2])
+    flow = int(payload_header[2])
+    length_bytes = _bits_to_int_lsb(payload_header[3:8])
+    if length_bytes > 27:
+        raise ValueError("DH1 payload length exceeds 27 bytes")
+    payload_stop = 8 + length_bytes * 8
+    crc_stop = payload_stop + 16
+    if values.size < crc_stop:
+        raise ValueError("DH1 payload is shorter than its length field")
+    body_bits = values[8:payload_stop]
+    received_crc = _air_bits_to_bytes(values[payload_stop:crc_stop])
+    expected_crc = payload_crc_bytes(values[:payload_stop], int(uap))
+    return BluetoothACLPayload(
+        logical_channel=logical_channel,
+        flow=flow,
+        length_bytes=length_bytes,
+        body=_air_bits_to_bytes(body_bits),
+        received_crc=received_crc,
+        expected_crc=expected_crc,
+        crc_valid=received_crc == expected_crc,
+    )
+
+
+def find_dh1_candidates(
+    header_air_bits: np.ndarray,
+    payload_air_bits: np.ndarray,
+    *,
+    uaps: range | tuple[int, ...] = range(256),
+    include_unwhitened: bool = True,
+    require_crc: bool = True,
+) -> tuple[BluetoothDH1Candidate, ...]:
+    """Find HEC+CRC-valid DH1 candidates across unknown UAP/clock settings."""
+    payload_air = np.asarray(payload_air_bits, dtype=np.uint8)
+    matches: list[BluetoothDH1Candidate] = []
+    for uap in uaps:
+        for header in find_header_candidates(
+            header_air_bits,
+            uap=int(uap),
+            include_unwhitened=include_unwhitened,
+        ):
+            if header.packet_type != 4:
+                continue
+            if header.whitening_enabled:
+                whitening = whitening_sequence(
+                    int(header.clock_6_1), 18 + payload_air.size
+                )
+                payload = payload_air ^ whitening[18:]
+            else:
+                payload = payload_air
+            try:
+                decoded = decode_dh1_payload(payload, uap=int(uap))
+            except ValueError:
+                continue
+            if decoded.crc_valid or not require_crc:
+                matches.append(BluetoothDH1Candidate(header=header, payload=decoded))
+    return tuple(matches)
+
+
+def prbs9_period() -> np.ndarray:
+    """Return one 511-bit period of x^9 + x^5 + 1 from an all-one state."""
+    state = 0x1FF
+    output = np.empty(511, dtype=np.uint8)
+    for index in range(output.size):
+        output[index] = state & 1
+        feedback = ((state >> 0) ^ (state >> 4)) & 1
+        state = (state >> 1) | (feedback << 8)
+    output.flags.writeable = False
+    return output
+
+
+def match_prbs9(bits: np.ndarray) -> PRBS9Match:
+    """Find the best cyclic PRBS-9 phase, polarity and time direction."""
+    values = np.asarray(bits, dtype=np.uint8)
+    if values.ndim != 1 or values.size == 0 or np.any(values > 1):
+        raise ValueError("bits must be a non-empty one-dimensional binary array")
+    base = prbs9_period()
+    indices = np.arange(values.size, dtype=np.int64)
+    best: PRBS9Match | None = None
+    for time_reversed in (False, True):
+        sequence = base[::-1] if time_reversed else base
+        for inverted in (False, True):
+            candidate_sequence = sequence ^ int(inverted)
+            for phase in range(sequence.size):
+                expected = candidate_sequence[(indices + phase) % sequence.size]
+                errors = int(np.count_nonzero(values != expected))
+                candidate = PRBS9Match(
+                    bit_errors=errors,
+                    bit_count=int(values.size),
+                    phase=phase,
+                    inverted=inverted,
+                    time_reversed=time_reversed,
+                )
+                if best is None or candidate.bit_errors < best.bit_errors:
+                    best = candidate
+    assert best is not None
+    return best
 
 
 def _header_data_bits(
@@ -284,6 +515,7 @@ class BluetoothBRProfile:
         *,
         clock_6_1: int | None = None,
         uap: int | None = None,
+        whitening_enabled: bool = True,
         minimum_correlation: float = 0.65,
     ) -> BluetoothBRPacketResult:
         demodulation = demodulate_gfsk(
@@ -301,34 +533,23 @@ class BluetoothBRProfile:
         payload_air = packet_bits[header_stop:]
         header: BluetoothHeader | None = None
         payload = payload_air
-        if header_air.size == BLUETOOTH_HEADER_AIR_BITS and clock_6_1 is not None:
-            fec_bits, corrected = fec13_decode(header_air)
-            whitening = whitening_sequence(
-                int(clock_6_1), fec_bits.size + payload_air.size
+        can_decode_header = header_air.size == BLUETOOTH_HEADER_AIR_BITS and (
+            clock_6_1 is not None or not whitening_enabled
+        )
+        if can_decode_header:
+            header = decode_header_air_bits(
+                header_air,
+                uap=uap,
+                clock_6_1=clock_6_1,
+                whitening_enabled=whitening_enabled,
             )
-            header_bits = fec_bits ^ whitening[: fec_bits.size]
-            payload = payload_air ^ whitening[fec_bits.size :]
-            data = header_bits[:10]
-            packed = _bits_to_int_lsb(data)
-            received_hec = _bits_to_int_msb(header_bits[10:18])
-            hec_valid = (
-                None
-                if uap is None
-                else header_error_check(data, int(uap)) == received_hec
-            )
-            header = BluetoothHeader(
-                lt_addr=packed & 0x7,
-                packet_type=(packed >> 3) & 0xF,
-                flow=(packed >> 7) & 1,
-                arqn=(packed >> 8) & 1,
-                seqn=(packed >> 9) & 1,
-                hec=received_hec,
-                hec_valid=hec_valid,
-                uap=None if uap is None else int(uap),
-                clock_6_1=int(clock_6_1),
-                corrected_fec_triplets=corrected,
-                bits=header_bits,
-            )
+            if whitening_enabled:
+                whitening = whitening_sequence(
+                    int(clock_6_1), 18 + payload_air.size
+                )
+                payload = payload_air ^ whitening[18:]
+            else:
+                payload = payload_air
         return BluetoothBRPacketResult(
             demodulation=demodulation,
             access_code_bits=access,

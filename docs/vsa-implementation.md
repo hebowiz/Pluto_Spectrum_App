@@ -126,6 +126,9 @@ python -m pytest tests/test_vsa_core.py -q
 - DDC/FIR/decimation後の周波数軸とmetadata。
 - 強い隣接GFSK packetを含む16 MSPS IQから手動選択したGIACの0-error復元。
 - Pluto実測Inquiry IQをAnalysis Center/Bandwidth指定後も0-error復元。
+- Pluto実測固定BR波形から通常Access Code、無誤りHeader FEC、DH1 27-byte bodyを復元。
+- 実測DH1 body 216 bitとPRBS-9を0 bit errorで照合。
+- Bluetooth SIG公式vectorに対するPayload CRCとcomplete DH1 payload decode。
 
 Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまでsmoke test済みです。
 
@@ -141,14 +144,14 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 - Pluto live source、Power Trigger接続、SCPI sourceは未実装。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
 
-Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。16 MSPS全帯域への直接相関は行わず、ユーザー指定Analysis Center/Bandwidthで1 channelを抽出してから復調します。全channel自動channelizerは当面の必須要件ではありません。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
+Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出、DH1 Payload/CRC、PRBS-9照合までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。さらに固定2441 MHzのBR test waveformを16 MSPSで取得し、通常Access Code、Header FEC、DH1 27-byte body、PRBS-9 216 bitを0 bit errorで復元しました。このtest waveformはUAP `0x6B`のHECとPayload CRCが一致せず、Whitening OFFかつcheck初期値が別設定の可能性があります。16 MSPS全帯域への直接相関は行わず、ユーザー指定Analysis Center/Bandwidthで1 channelを抽出してから復調します。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
 
 現在の数値を規格適合判定やR&SとのEVM比較へ使用してはいけません。
 
 ## 7. 次の推奨実装順
 
-1. 固定周波数の通常BR test packetを取得し、既知LAP/clock/UAPでHeader/Payloadを実測検証。
-2. packet TYPE別Payload length/FEC/CRCを追加。
+1. 送信器でstandard Whitening/HEC/CRCを有効化できれば、同じ固定BR packetでvalid HEC/CRCを実測検証。
+2. packet TYPE別Payload length/FEC/CRCを追加（DH1は実装済み）。
 3. FHS decodeからLAP/UAP/clockを取得し、必要になった段階でCAC packet trackingへ接続。
 4. pulse shaping/matched filter contractとPSK carrier/timing recoveryを追加。
 5. VSA analysis workerを追加しUI threadからDSPを分離。
