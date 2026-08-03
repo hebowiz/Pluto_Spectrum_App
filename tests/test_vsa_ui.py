@@ -41,5 +41,28 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
             result.result_stop_time_s * 1e3 + 0.1 * duration_ms,
         ]
         assert window.zero_span_plot.viewRange()[0] == pytest.approx(expected_x)
+        assert window._meas_config_dialog.isModal()
+        assert window._meas_config_dialog.windowModality() != (
+            QtCore.Qt.WindowModality.NonModal
+        )
+        active_modal_widgets = []
+
+        def inspect_modality() -> None:
+            active_modal_widgets.append(QtWidgets.QApplication.activeModalWidget())
+            window._meas_config_dialog.reject()
+
+        window.show()
+        QtWidgets.QApplication.processEvents()
+        QtCore.QTimer.singleShot(0, inspect_modality)
+        window._open_meas_config()
+        assert active_modal_widgets == [window._meas_config_dialog]
+        assert window.corrected_carrier_action.isChecked()
+        assert "Carrier Corrected" in window.spectrum_plot.getPlotItem().titleLabel.text
+        assert "CFO:" in window.result_summary.text()
+
+        window.raw_carrier_action.trigger()
+
+        assert "Raw IQ" in window.spectrum_plot.getPlotItem().titleLabel.text
+        assert "Display: Raw IQ" in window.result_summary.text()
     finally:
         window.close()

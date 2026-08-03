@@ -80,6 +80,26 @@ class VSAWindow(QtWidgets.QMainWindow):
 
         display_menu = self.menuBar().addMenu("Display Config")
         self._display_menu = display_menu
+        display_menu.addSeparator()
+        carrier_menu = display_menu.addMenu("Carrier Display")
+        self.raw_carrier_action = QtGui.QAction("Raw IQ", self, checkable=True)
+        self.corrected_carrier_action = QtGui.QAction(
+            "Carrier Corrected", self, checkable=True
+        )
+        carrier_group = QtGui.QActionGroup(self)
+        carrier_group.setExclusive(True)
+        carrier_group.addAction(self.raw_carrier_action)
+        carrier_group.addAction(self.corrected_carrier_action)
+        self.corrected_carrier_action.setChecked(True)
+        self.raw_carrier_action.triggered.connect(self._refresh_display_only)
+        self.corrected_carrier_action.triggered.connect(self._refresh_display_only)
+        carrier_menu.addActions(carrier_group.actions())
+
+        meas_config_menu = self.menuBar().addMenu("Meas Config")
+        open_config_action = QtGui.QAction("Open Meas Config...", self)
+        open_config_action.setShortcut("Ctrl+M")
+        open_config_action.triggered.connect(self._open_meas_config)
+        meas_config_menu.addAction(open_config_action)
 
     def _build_summary_bar(self) -> None:
         toolbar = QtWidgets.QToolBar("Session Summary", self)
@@ -295,13 +315,15 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.bit_order_combo = QtWidgets.QComboBox()
         self.bit_order_combo.addItems(("MSB", "LSB"))
         self.compensate_drift_check = QtWidgets.QCheckBox("Carrier Frequency Drift")
-        self.compensate_drift_check.setChecked(True)
+        self.compensate_drift_check.setChecked(False)
+        self.compensate_drift_check.setToolTip(
+            "Experimental linear-drift compensation; CFO compensation is always applied."
+        )
         self.compensate_deviation_check = QtWidgets.QCheckBox("FSK Deviation Error")
         self.compensate_deviation_check.setChecked(True)
         for control in (
             self.coarse_sync_combo,
             self.fine_sync_combo,
-            self.compensate_drift_check,
             self.compensate_deviation_check,
         ):
             control.setEnabled(False)
@@ -322,17 +344,29 @@ class VSAWindow(QtWidgets.QMainWindow):
         run_layout.addStretch(1)
         toolbox.addItem(run_page, "Sweep / Run")
 
-        config_dock = QtWidgets.QDockWidget("Meas Config", self)
-        config_dock.setObjectName("vsa-meas-config")
-        config_dock.setWidget(toolbox)
-        config_dock.setMinimumWidth(280)
-        config_dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        self._meas_config_dialog = QtWidgets.QDialog(self)
+        self._meas_config_dialog.setWindowTitle("Meas Config")
+        self._meas_config_dialog.setModal(True)
+        self._meas_config_dialog.setWindowModality(
+            QtCore.Qt.WindowModality.WindowModal
         )
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, config_dock)
-        self._display_menu.addSeparator()
-        self._display_menu.addAction(config_dock.toggleViewAction())
+        self._meas_config_dialog.resize(520, 720)
+        dialog_layout = QtWidgets.QVBoxLayout(self._meas_config_dialog)
+        dialog_layout.addWidget(toolbox, 1)
+        close_buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close
+        )
+        close_buttons.rejected.connect(self._meas_config_dialog.reject)
+        dialog_layout.addWidget(close_buttons)
+
+    def _open_meas_config(self) -> None:
+        self._meas_config_dialog.exec()
+
+    def _refresh_display_only(self) -> None:
+        if self.session.result is None:
+            return
+        self._update_summary()
+        self._update_plots()
 
     def _selected_modulation(self) -> ModulationKind:
         return ModulationKind(str(self.modulation_combo.currentData()))
@@ -581,6 +615,17 @@ class VSAWindow(QtWidgets.QMainWindow):
                         )
                     ),
                     "SGL",
+                    *(
+                        (
+                            f"CFO: {self.session.pattern_result.carrier_frequency_offset_hz / 1e3:+.3f} kHz",
+                            (
+                                "Carrier: "
+                                f"{((self.session.settings.analysis_center_frequency_hz or recording.center_frequency_hz) + self.session.pattern_result.carrier_frequency_offset_hz) / 1e6:.6f} MHz"
+                            ),
+                        )
+                        if self.session.pattern_result is not None
+                        else ()
+                    ),
                 )
             )
         )
@@ -590,6 +635,13 @@ class VSAWindow(QtWidgets.QMainWindow):
         signal = self.session.signal
         if result is None or signal is None:
             return
+        show_corrected = (
+            self.corrected_carrier_action.isChecked()
+            and self.session.carrier_corrected_result is not None
+        )
+        display_result = (
+            self.session.carrier_corrected_result if show_corrected else result
+        )
         capture_slice = _decimation_indices(result.time_s.size)
         self.zero_span_plot.clear()
         self.zero_span_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
@@ -600,9 +652,17 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         self._add_pattern_range_overlay(self.zero_span_plot)
         self.spectrum_plot.clear()
-        spectrum_result = self.session.pattern_range_result or result
+        spectrum_result = (
+            self.session.carrier_corrected_pattern_range_result
+            if show_corrected
+            else self.session.pattern_range_result
+        ) or display_result
         self.spectrum_plot.setTitle(
-            "Spectrum (Result Range)"
+            (
+                "Spectrum (Result Range, Carrier Corrected)"
+                if show_corrected
+                else "Spectrum (Result Range, Raw IQ)"
+            )
             if self.session.pattern_range_result is not None
             else "Spectrum"
         )
@@ -630,8 +690,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.setLabel("bottom", "Time (ms)")
             self.modulation_plot.setAspectLocked(False)
             self.modulation_plot.plot(
-                result.time_s[capture_slice] * 1e3,
-                result.instantaneous_frequency_hz[capture_slice] / 1e3,
+                display_result.time_s[capture_slice] * 1e3,
+                display_result.instantaneous_frequency_hz[capture_slice] / 1e3,
                 pen=pg.mkPen("m", width=1),
             )
             if signal.frequency_deviation_hz is not None:
@@ -665,10 +725,14 @@ class VSAWindow(QtWidgets.QMainWindow):
             else result.decoded_symbols
         )
         if pattern_result is not None:
+            display_name = "Carrier Corrected" if show_corrected else "Raw IQ"
             self.result_summary.setText(
                 f"{signal.modulation.value} | Pattern Symbols Correct: "
                 f"{'Yes' if pattern_result.pattern_symbol_errors == 0 else 'No'} | "
                 f"I/Q Correlation: {pattern_result.correlation * 100.0:.2f}% | "
+                f"CFO: {pattern_result.carrier_frequency_offset_hz / 1e3:+.3f} kHz | "
+                f"Drift: {pattern_result.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms | "
+                f"Display: {display_name} | "
                 "Match: Strongest | "
                 f"Result Symbols: {symbols.size}"
             )

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from fractions import Fraction
 from types import MappingProxyType
@@ -142,6 +142,7 @@ class PatternSearchResult:
     timing_phase_samples: int
     analysis_sample_rate_hz: float
     recording_sample_rate_hz: float
+    carrier_reference_time_s: float
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -173,6 +174,47 @@ class PatternSearchResult:
             int(self.metadata["pattern_symbol_count"])
             / float(self.metadata["symbol_rate_hz"])
         )
+
+
+def carrier_correct_recording(
+    recording: IQRecording,
+    result: PatternSearchResult,
+    *,
+    compensate_drift: bool = True,
+) -> IQRecording:
+    """Remove the pattern-derived carrier phase model from every IQ sample."""
+    if recording.sample_rate_hz != result.recording_sample_rate_hz:
+        raise ValueError("recording sample rate does not match the pattern result")
+    time_s = np.arange(recording.sample_count, dtype=np.float64) / float(
+        recording.sample_rate_hz
+    )
+    relative_time_s = time_s - float(result.carrier_reference_time_s)
+    drift_hz_per_s = (
+        float(result.carrier_frequency_drift_hz_per_s)
+        if compensate_drift
+        else 0.0
+    )
+    phase_rad = 2.0 * np.pi * (
+        float(result.carrier_frequency_offset_hz) * relative_time_s
+        + 0.5 * drift_hz_per_s * relative_time_s**2
+    )
+    if result.phase_rotation_rad is not None:
+        phase_rad = phase_rad + float(result.phase_rotation_rad)
+    corrected = np.asarray(recording.iq) * np.exp(-1j * phase_rad)
+    return replace(
+        recording,
+        iq=corrected,
+        source=f"{recording.source} | Carrier Corrected",
+        metadata={
+            **dict(recording.metadata),
+            "carrier_corrected": True,
+            "carrier_frequency_offset_hz": result.carrier_frequency_offset_hz,
+            "carrier_frequency_drift_hz_per_s": drift_hz_per_s,
+            "carrier_drift_compensated": bool(compensate_drift),
+            "carrier_reference_time_s": result.carrier_reference_time_s,
+            "carrier_phase_rotation_rad": result.phase_rotation_rad,
+        },
+    )
 
 
 def _constellation(kind: ModulationKind) -> np.ndarray:
@@ -348,6 +390,10 @@ class PatternAnalyzer:
             timing_phase_samples=demodulation.timing_phase_samples,
             analysis_sample_rate_hz=demodulation.analysis_sample_rate_hz,
             recording_sample_rate_hz=recording.sample_rate_hz,
+            carrier_reference_time_s=(
+                demodulation.access_start_sample / recording.sample_rate_hz
+                + len(pattern.symbols) / (2.0 * signal.symbol_rate_hz)
+            ),
             metadata={
                 "pattern_name": pattern.name,
                 "pattern_symbol_count": len(pattern.symbols),
@@ -526,6 +572,11 @@ class PatternAnalyzer:
             timing_phase_samples=phase,
             analysis_sample_rate_hz=analysis_rate_hz,
             recording_sample_rate_hz=recording.sample_rate_hz,
+            carrier_reference_time_s=(
+                start_sample / recording.sample_rate_hz
+                + (1.0 if signal.modulation.differential else 0.5)
+                / signal.symbol_rate_hz
+            ),
             metadata={
                 "pattern_name": pattern.name,
                 "pattern_symbol_count": len(pattern.symbols),

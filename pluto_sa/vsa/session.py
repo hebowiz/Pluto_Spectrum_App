@@ -10,6 +10,7 @@ from pluto_sa.vsa.analysis import VSAAnalyzer
 from pluto_sa.vsa.channel import extract_analysis_channel
 from pluto_sa.vsa.model import IQRecording, SignalDescription, VSAAnalysisResult, VSASettings
 from pluto_sa.vsa.pattern import (
+    carrier_correct_recording,
     DemodulationSettings,
     PatternAnalyzer,
     PatternSearchResult,
@@ -30,6 +31,8 @@ class VSASession:
     demodulation: DemodulationSettings = field(default_factory=DemodulationSettings)
     pattern_result: PatternSearchResult | None = None
     pattern_range_result: VSAAnalysisResult | None = None
+    carrier_corrected_result: VSAAnalysisResult | None = None
+    carrier_corrected_pattern_range_result: VSAAnalysisResult | None = None
     pattern_error: str | None = None
     revision: int = 0
     _analyzer: VSAAnalyzer = field(default_factory=VSAAnalyzer, repr=False)
@@ -40,6 +43,8 @@ class VSASession:
         self.result = None
         self.pattern_result = None
         self.pattern_range_result = None
+        self.carrier_corrected_result = None
+        self.carrier_corrected_pattern_range_result = None
         self.pattern_error = None
         self.revision += 1
 
@@ -48,6 +53,8 @@ class VSASession:
         self.result = None
         self.pattern_result = None
         self.pattern_range_result = None
+        self.carrier_corrected_result = None
+        self.carrier_corrected_pattern_range_result = None
         self.pattern_error = None
         self.revision += 1
 
@@ -56,6 +63,8 @@ class VSASession:
         self.result = None
         self.pattern_result = None
         self.pattern_range_result = None
+        self.carrier_corrected_result = None
+        self.carrier_corrected_pattern_range_result = None
         self.pattern_error = None
         self.revision += 1
 
@@ -72,6 +81,8 @@ class VSASession:
             self.demodulation = demodulation
         self.pattern_result = None
         self.pattern_range_result = None
+        self.carrier_corrected_result = None
+        self.carrier_corrected_pattern_range_result = None
         self.pattern_error = None
         self.revision += 1
 
@@ -83,6 +94,8 @@ class VSASession:
         self.result = self._analyzer.analyze(self.recording, self.signal, self.settings)
         self.pattern_result = None
         self.pattern_range_result = None
+        self.carrier_corrected_result = None
+        self.carrier_corrected_pattern_range_result = None
         self.pattern_error = None
         if self.pattern_search is not None:
             pattern_recording = self.recording
@@ -116,6 +129,24 @@ class VSASession:
                     raise ValueError(
                         "pattern waveform matched but Pattern Symbols Correct is false"
                     )
+                selected_settings = replace(
+                    self.settings,
+                    remove_dc=False,
+                    analysis_center_frequency_hz=None,
+                    analysis_bandwidth_hz=None,
+                )
+                corrected_recording = carrier_correct_recording(
+                    pattern_recording,
+                    self.pattern_result,
+                    compensate_drift=(
+                        self.demodulation.compensate_carrier_frequency_drift
+                    ),
+                )
+                self.carrier_corrected_result = self._analyzer.analyze(
+                    corrected_recording,
+                    self.signal,
+                    selected_settings,
+                )
                 selected = pattern_recording.iq[
                     self.pattern_result.result_start_sample :
                     self.pattern_result.result_stop_sample
@@ -133,17 +164,33 @@ class VSASession:
                 self.pattern_range_result = self._analyzer.analyze(
                     range_recording,
                     self.signal,
-                    replace(
-                        self.settings,
-                        remove_dc=False,
-                        analysis_center_frequency_hz=None,
-                        analysis_bandwidth_hz=None,
+                    selected_settings,
+                )
+                corrected_selected = corrected_recording.iq[
+                    self.pattern_result.result_start_sample :
+                    self.pattern_result.result_stop_sample
+                ]
+                corrected_range_recording = replace(
+                    corrected_recording,
+                    iq=corrected_selected,
+                    start_sample_index=(
+                        corrected_recording.start_sample_index
+                        + self.pattern_result.result_start_sample
                     ),
+                    trigger_sample_index=None,
+                    source=f"{corrected_recording.source} | Result Range",
+                )
+                self.carrier_corrected_pattern_range_result = self._analyzer.analyze(
+                    corrected_range_recording,
+                    self.signal,
+                    selected_settings,
                 )
             except ValueError as error:
                 self.pattern_error = str(error)
                 if self.pattern_search.meas_only_if_pattern_symbols_correct:
                     self.pattern_result = None
                     self.pattern_range_result = None
+                    self.carrier_corrected_result = None
+                    self.carrier_corrected_pattern_range_result = None
                     raise
         return self.result

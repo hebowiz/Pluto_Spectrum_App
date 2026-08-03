@@ -17,6 +17,7 @@ from pluto_sa.vsa.model import (
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.pattern import (
     BitOrdering,
+    carrier_correct_recording,
     DemodulationSettings,
     KnownPattern,
     PatternAnalyzer,
@@ -34,6 +35,7 @@ __all__ = [
     "CompositeVSAAnalysisResult",
     "IQRecording",
     "BitOrdering",
+    "carrier_correct_recording",
     "DemodulationSettings",
     "KnownPattern",
     "ModulationFamily",

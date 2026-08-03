@@ -199,3 +199,51 @@ def test_generic_pattern_session_finds_real_pluto_br_capture():
     np.testing.assert_array_equal(
         session.pattern_result.decoded_symbols[: access.size], access
     )
+
+
+def test_session_builds_sample_level_carrier_corrected_results():
+    recording, signal = GeneratedIQSource.fsk(symbol_count=240, seed=211)
+    expected = np.asarray(recording.metadata["generated_symbols"])
+    carrier_offset_hz = 85_000.0
+    sample_index = np.arange(recording.sample_count)
+    offset_recording = IQRecording(
+        iq=recording.iq
+        * np.exp(
+            2j
+            * np.pi
+            * carrier_offset_hz
+            * sample_index
+            / recording.sample_rate_hz
+        ),
+        sample_rate_hz=recording.sample_rate_hz,
+        metadata=recording.metadata,
+    )
+    session = VSASession(recording=offset_recording, signal=signal)
+    session.update_settings(remove_dc=False)
+    session.configure_pattern_analysis(
+        PatternSearchSettings(
+            pattern=KnownPattern(tuple(map(int, expected[40:72]))),
+            mode=PatternSearchMode.ON,
+            correlation_threshold_auto=False,
+            iq_correlation_threshold=0.7,
+        ),
+        ResultRangeSettings(result_length=96),
+        DemodulationSettings(compensate_carrier_frequency_drift=False),
+    )
+
+    session.analyze()
+
+    assert session.pattern_result.carrier_frequency_offset_hz == pytest.approx(
+        carrier_offset_hz, abs=2_000.0
+    )
+    assert session.pattern_range_result is not None
+    assert session.carrier_corrected_pattern_range_result is not None
+    raw_frequency = session.pattern_range_result.instantaneous_frequency_hz[1:]
+    corrected_frequency = (
+        session.carrier_corrected_pattern_range_result.instantaneous_frequency_hz[1:]
+    )
+    np.testing.assert_allclose(
+        raw_frequency - corrected_frequency,
+        session.pattern_result.carrier_frequency_offset_hz,
+        atol=2.0,
+    )

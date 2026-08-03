@@ -19,6 +19,7 @@
 - [IQストリーム改善計画・実装状況](iq-streaming.md)
 - [リアルタイムSA・VSA準拠の計測アーキテクチャ](measurement-architecture.md)
 - [R&S FPL-K70を参照したVSAアプリケーション設計方針](vsa-architecture.md)
+- [VSA Carrier周波数推定・補正仕様](vsa-carrier-synchronization.md)
 - [RBW演算監査と改善方針](rbw-processing.md)
 - [PlutoSDR実機検証記録](hardware-validation.md)
 

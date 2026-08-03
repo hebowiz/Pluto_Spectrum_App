@@ -52,6 +52,8 @@ VSAの標準UIはR&S FPL-K70に慣れた利用者が説明なしでも辿れる�
 | Auto Level / Auto Scale | source capabilityに応じて同じ位置へ配置 |
 | Standard files | Measurement ProfileのLoad/Save |
 
+`Meas Config`はmain result workspace内の常設dockではなく、menuから開く独立したWindow Modal dialogとする。設定中は背後のplot、dock、menu操作を受け付けず、測定設定と結果window操作が同時進行して不整合になることを防ぐ。dialog内のRefresh/Apply後も、dialogを閉じるまではmain workspaceをmodal blockする。
+
 Session summary barにはmanual pp.19-20を参考に、少なくともRef Level、Capture Length、Profile/Modulation、Result Length、Center、Symbol Rate、TX Filter、Input、Burst、Pattern、Equalizer、Single状態を表示します。sourceがfileの場合など変更不能な項目は非表示にせず、値を表示したままdisabledとし、metadata由来であることを示します。
 
 右側の測定器風menuは現行SAの操作感を継承しつつ、R&Sに近い入口名へ整理します。

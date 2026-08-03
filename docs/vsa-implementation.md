@@ -6,6 +6,8 @@
 
 Bluetooth BR復調の詳細は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
 
+CFO、carrier phase、linear driftの計算式とsample単位補正は[vsa-carrier-synchronization.md](vsa-carrier-synchronization.md)を参照してください。
+
 ## 1. 現在の到達点
 
 独立したVSA application shellと、hardware/UIに依存しないoffline解析coreを追加しました。
@@ -84,8 +86,15 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
 - 通常FSK解析はResult Range内symbol frequencyの平均を`frequency_error_hz`として算出する基礎処理がある。
 - GFSK/FSK Pattern Searchはpatternからcarrier frequency offset、frequency deviation、linear frequency driftを同時推定し、offset/drift/polarityを除去してsymbol decisionする。
 - PSK Pattern Searchはpatternからcarrier phaseとcarrier frequency offsetを推定し、Result Rangeのsymbol decisionへ補正する。Differential PSKはphase increment上で補正する。
-- これらは現時点では復調器内部のcoarse synchronizationであり、推定値をResult Summaryへ十分表示していない。
-- Capture Power、Instantaneous Frequency、Result Range Spectrumは取得IQを表示しており、carrier-corrected IQへ置換していない。したがって表示traceを補正前/補正後で切り替える機能、carrier drift trace、R&S相当のFine Synchronizationは未実装。
+- これらはPattern Searchを基準にしたcoarse synchronizationである。
+- CFO、推定carrier frequency、linear driftをResult Summaryへ表示する。
+- `Display Config > Carrier Display`で`Raw IQ`と`Carrier Corrected`を切り替える。補正表示ではsample単位の位相補正後IQからInstantaneous FrequencyとResult Range Spectrumを再計算する。既定はCarrier Corrected。
+- Carrier Frequency Drift補正はDemodulation設定から切り替えられるが、実測cross-validation未完了のため既定OFF。CFO補正はCarrier Corrected表示で常に適用する。
+- R&S相当のFine Synchronization、残留CFO評価、estimator confidenceは未実装。
+
+### Meas Config window
+
+従来のmain window右側dockを廃止し、menu barの`Meas Config > Open Meas Config...`または`Ctrl+M`から独立dialogを開く。dialogはWindow Modalであり、開いている間はplot、dock、menuを含むmain windowを操作できない。設定dialog内の`Refresh Analysis`で現在captureを再解析し、`Close`でmain windowへ戻る。
 
 ### Capture内の複数pattern
 
