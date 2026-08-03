@@ -72,9 +72,16 @@ PSK検索はpattern symbol間の差分相関により一定phase回転とCFOに�
 
 R&SのResult Range表示に合わせ、Pattern Search成立時は次の表示規則とする。
 
-- IQ PowerとInstantaneous Frequencyはcapture全体を残し、Pattern Waveformを緑、Result Rangeを青の領域、Pattern Startを縦線で示す。
+- IQ PowerとInstantaneous Frequencyはcapture全体のdataを保持したまま、表示X軸を選択中Result Rangeの前後10%へfitする。Pattern Waveformを緑、Result Rangeを青の領域、Pattern Startを縦線で示す。zoom/panでcapture内の他部分も確認できる。
 - Spectrumはcapture全体ではなく、検出されたResult RangeのIQだけから再計算し、titleを`Spectrum (Result Range)`とする。
-- Symbol TableはResult Rangeの復調symbolを左から10 symbolsずつ並べ、各行の先頭にsymbol indexを表示する。
+- FSK Instantaneous Frequencyの初期Y軸は`FSK Ref Deviation`の±120%とする。
+- Symbol Tableは`QTableWidget`を使い、Result Rangeの復調symbolを中央揃えの10列へ配置する。列headerは0～9、行headerはその行の先頭symbol indexとする。
+
+### Capture内の複数pattern
+
+現実装はcapture全体のcorrelation最大値を1件だけ採用し、`PatternSearchResult`とResult Rangeも1件だけ保持する。同じpatternを含むpacketが複数ある場合、時刻順の最初ではなく相関が最も高いpacketが表示される。したがって現段階では他候補をNext/Previousで選べない。
+
+R&S manual pp.116-117、143-145では、Burst Search有効時は各burst内の最初のpatternを検索し、複数の離散Result Rangeをcapture buffer上に持ち、`Select Result Rng`で現在範囲を切り替える。今後は単純なcorrelation local peak列挙ではなく、Burst Searchでpacket候補を分離してから各burstの最初のpatternを対応づけ、available Result Rangesとselected Result Rangeを別管理する。この段階でNext/Previousまたはcapture上のrange選択UIを追加する。
 
 現在定義済みのmodulation kind:
 
@@ -179,8 +186,8 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 
 ## 7. 次の推奨実装順
 
-1. Burst Searchとpattern前を含むnegative Result Range offsetを実装。
-2. Pattern/Result Range overlayとsource-plane IQ Powerをユーザー実画面で再確認。
+1. Burst Search、複数の離散Result Range、Select Result Rangeを実装。
+2. pattern前を含むnegative Result Range offsetを実装。
 3. pulse shaping/matched/measurement filter contractとPSK symbol-rate recoveryを追加。
 4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。
 5. EVM用Fine Synchronization、compensation、Evaluation Rangeを接続。

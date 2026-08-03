@@ -128,9 +128,21 @@ class VSAWindow(QtWidgets.QMainWindow):
         symbol_layout = QtWidgets.QVBoxLayout(symbol_container)
         symbol_layout.setContentsMargins(6, 6, 6, 6)
         self.result_summary = QtWidgets.QLabel("No result")
-        self.symbol_table = QtWidgets.QPlainTextEdit()
-        self.symbol_table.setReadOnly(True)
-        self.symbol_table.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.NoWrap)
+        self.symbol_table = QtWidgets.QTableWidget(0, 10)
+        self.symbol_table.setHorizontalHeaderLabels([str(index) for index in range(10)])
+        self.symbol_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.symbol_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        self.symbol_table.setAlternatingRowColors(True)
+        self.symbol_table.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.symbol_table.verticalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
         symbol_layout.addWidget(self.result_summary)
         symbol_layout.addWidget(self.symbol_table, 1)
         self.symbol_dock = self._dock("Symbol Table", symbol_container)
@@ -580,6 +592,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             return
         capture_slice = _decimation_indices(result.time_s.size)
         self.zero_span_plot.clear()
+        self.zero_span_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
         self.zero_span_plot.plot(
             result.time_s[capture_slice] * 1e3,
             result.power_dbm[capture_slice],
@@ -610,6 +623,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             pen=pg.mkPen("c", width=1),
         )
         self.modulation_plot.clear()
+        self.modulation_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
         if signal.modulation.family is ModulationFamily.FSK:
             self.modulation_plot.setTitle("Instantaneous Frequency")
             self.modulation_plot.setLabel("left", "Frequency (kHz)")
@@ -620,6 +634,11 @@ class VSAWindow(QtWidgets.QMainWindow):
                 result.instantaneous_frequency_hz[capture_slice] / 1e3,
                 pen=pg.mkPen("m", width=1),
             )
+            if signal.frequency_deviation_hz is not None:
+                y_limit_khz = 1.2 * signal.frequency_deviation_hz / 1e3
+                self.modulation_plot.setYRange(
+                    -y_limit_khz, y_limit_khz, padding=0.0
+                )
             self._add_pattern_range_overlay(self.modulation_plot)
             summary = f"Frequency Error: {result.frequency_error_hz or 0.0:.1f} Hz"
         else:
@@ -650,6 +669,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 f"{signal.modulation.value} | Pattern Symbols Correct: "
                 f"{'Yes' if pattern_result.pattern_symbol_errors == 0 else 'No'} | "
                 f"I/Q Correlation: {pattern_result.correlation * 100.0:.2f}% | "
+                "Match: Strongest | "
                 f"Result Symbols: {symbols.size}"
             )
         elif self.session.pattern_error:
@@ -658,16 +678,18 @@ class VSAWindow(QtWidgets.QMainWindow):
                 f"{self.session.pattern_error}"
             )
         shown = symbols[:2048]
-        lines = []
-        for start in range(0, shown.size, 10):
-            row = shown[start : start + 10]
-            values = " ".join(f"{int(symbol):3d}" for symbol in row)
-            lines.append(f"{start:6d}: {values}")
-        if symbols.size > shown.size:
-            lines.append(f"... {symbols.size - shown.size} more symbols")
-        self.symbol_table.setPlainText(
-            "Symbol Index:     0   1   2   3   4   5   6   7   8   9\n"
-            + "\n".join(lines)
+        row_count = int(np.ceil(shown.size / 10.0))
+        self.symbol_table.clearContents()
+        self.symbol_table.setRowCount(row_count)
+        self.symbol_table.setVerticalHeaderLabels(
+            [str(row * 10) for row in range(row_count)]
+        )
+        for index, symbol in enumerate(shown):
+            item = QtWidgets.QTableWidgetItem(str(int(symbol)))
+            item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.symbol_table.setItem(index // 10, index % 10, item)
+        self.symbol_table.setToolTip(
+            f"Showing {shown.size} of {symbols.size} result-range symbols"
         )
 
     def _add_pattern_range_overlay(self, plot: pg.PlotWidget) -> None:
@@ -705,3 +727,12 @@ class VSAWindow(QtWidgets.QMainWindow):
             labelOpts={"position": 0.92, "color": (120, 255, 160)},
         )
         plot.addItem(marker)
+        duration_ms = (
+            pattern.result_stop_time_s - pattern.result_start_time_s
+        ) * 1e3
+        margin_ms = max(duration_ms * 0.1, 1e-9)
+        plot.setXRange(
+            pattern.result_start_time_s * 1e3 - margin_ms,
+            pattern.result_stop_time_s * 1e3 + margin_ms,
+            padding=0.0,
+        )

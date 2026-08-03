@@ -356,6 +356,7 @@ class PatternAnalyzer:
                 "result_offset_symbols": result_range.offset_symbols,
                 "gaussian_bt": gaussian_bt,
                 "source": recording.source,
+                "match_selection_policy": "strongest correlation in capture",
             },
         )
 
@@ -533,5 +534,6 @@ class PatternAnalyzer:
                 "result_offset_symbols": result_range.offset_symbols,
                 "differential": signal.modulation.differential,
                 "source": recording.source,
+                "match_selection_policy": "strongest correlation in capture",
             },
         )
