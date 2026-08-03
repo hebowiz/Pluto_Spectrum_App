@@ -635,7 +635,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 pen=pg.mkPen("m", width=1),
             )
             if signal.frequency_deviation_hz is not None:
-                y_limit_khz = 1.2 * signal.frequency_deviation_hz / 1e3
+                y_limit_khz = 1.5 * signal.frequency_deviation_hz / 1e3
                 self.modulation_plot.setYRange(
                     -y_limit_khz, y_limit_khz, padding=0.0
                 )

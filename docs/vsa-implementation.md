@@ -74,8 +74,18 @@ R&SのResult Range表示に合わせ、Pattern Search成立時は次の表示規
 
 - IQ PowerとInstantaneous Frequencyはcapture全体のdataを保持したまま、表示X軸を選択中Result Rangeの前後10%へfitする。Pattern Waveformを緑、Result Rangeを青の領域、Pattern Startを縦線で示す。zoom/panでcapture内の他部分も確認できる。
 - Spectrumはcapture全体ではなく、検出されたResult RangeのIQだけから再計算し、titleを`Spectrum (Result Range)`とする。
-- FSK Instantaneous Frequencyの初期Y軸は`FSK Ref Deviation`の±120%とする。
+- FSK Instantaneous Frequencyの初期Y軸は`FSK Ref Deviation`の±150%とする。
 - Symbol Tableは`QTableWidget`を使い、Result Rangeの復調symbolを中央揃えの10列へ配置する。列headerは0～9、行headerはその行の先頭symbol indexとする。
+
+Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK、PSK、QAMを想定し、Binary/Hexadecimal/Decimal表示切替を追加する。表示formatはdecision結果を変更せず、R&Sの`Symbol Format`と同様にview設定として扱う。
+
+### Carrier周波数測定・補正の実装境界
+
+- 通常FSK解析はResult Range内symbol frequencyの平均を`frequency_error_hz`として算出する基礎処理がある。
+- GFSK/FSK Pattern Searchはpatternからcarrier frequency offset、frequency deviation、linear frequency driftを同時推定し、offset/drift/polarityを除去してsymbol decisionする。
+- PSK Pattern Searchはpatternからcarrier phaseとcarrier frequency offsetを推定し、Result Rangeのsymbol decisionへ補正する。Differential PSKはphase increment上で補正する。
+- これらは現時点では復調器内部のcoarse synchronizationであり、推定値をResult Summaryへ十分表示していない。
+- Capture Power、Instantaneous Frequency、Result Range Spectrumは取得IQを表示しており、carrier-corrected IQへ置換していない。したがって表示traceを補正前/補正後で切り替える機能、carrier drift trace、R&S相当のFine Synchronizationは未実装。
 
 ### Capture内の複数pattern
 

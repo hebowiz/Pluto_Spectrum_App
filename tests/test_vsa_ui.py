@@ -30,7 +30,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         assert window.symbol_table.item(0, 0).textAlignment() == int(
             QtCore.Qt.AlignmentFlag.AlignCenter
         )
-        assert window.modulation_plot.viewRange()[1] == pytest.approx([-300.0, 300.0])
+        assert window.modulation_plot.viewRange()[1] == pytest.approx([-375.0, 375.0])
         assert window.zero_span_plot.viewRange()[0] == pytest.approx(
             window.modulation_plot.viewRange()[0]
         )
