@@ -47,7 +47,9 @@ power_dbm  = power_dbfs
            + input_correction_db
 ```
 
-生成IQは0 dBm基準の校正済みtest sourceとして扱います。校正metadataを持たないfile IQも数値配列としては`power_dbm`を生成しますが、correctionが0 dBの仮値であるためUIに`Amplitude: Uncal`と表示します。絶対電力として使う前に校正条件を設定する必要があります。
+生成IQは0 dBm基準の校正済みtest sourceとして扱います。新規NPZは`full_scale`を含む全振幅metadataを保存する。旧Pluto NPZのうち生ADC値と判定できるものは`full_scale=2048`、公称変換`-62 dB`をfallbackし、校正値とは区別してUIに`Amplitude: Nominal Pluto`と表示する。外部ATT、RX gain、外部gainはIQ値だけから推定できないため、既知の取得条件は同名の`.npz.json` sidecarで上書きできる。
+
+実測BR fixtureには、取得時のRX gain 0 dB、外部ATT 30 dBをsidecarへ記録した。これにより表示基準はPluto入力端ではなくATT手前のsource planeとなり、capture peakは従来の誤った約+35 dBmから公称約+3 dBmへ修正される。`amplitude_calibrated=false`なので、この値は絶対確度を保証する校正値ではない。
 
 ### Signal Description
 
@@ -67,6 +69,12 @@ power_dbm  = power_dbfs
 UIにも`Pattern Search`、`Result Range`、`Demodulation`を独立ページとして追加した。Pattern SymbolsはBinary、Decimal、Hexadecimalを入力できる。現在実際にDSPへ反映されるのはpattern、correlation threshold、Pattern Waveform/Leftを起点とした非負offset、Result Length、Bit Orderingである。その他はR&S互換の設定contractを先に固定した段階で、未実装項目を有効に見せないため今後段階的に接続する。
 
 PSK検索はpattern symbol間の差分相関により一定phase回転とCFOに耐え、patternでcarrier phase/CFOを推定してResult Rangeをdecisionする。Differential PSKはphase incrementを直接検索する。FSK/GFSKは既存のCFO、deviation、drift推定器を任意patternへ一般化した。pattern後の出力はprotocol fieldではなく、symbol番号、symbol値、bit列、symbol時刻、測定vector/frequencyからなる汎用結果である。
+
+R&SのResult Range表示に合わせ、Pattern Search成立時は次の表示規則とする。
+
+- IQ PowerとInstantaneous Frequencyはcapture全体を残し、Pattern Waveformを緑、Result Rangeを青の領域、Pattern Startを縦線で示す。
+- Spectrumはcapture全体ではなく、検出されたResult RangeのIQだけから再計算し、titleを`Spectrum (Result Range)`とする。
+- Symbol TableはResult Rangeの復調symbolを左から10 symbolsずつ並べ、各行の先頭にsymbol indexを表示する。
 
 現在定義済みのmodulation kind:
 
@@ -171,8 +179,8 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 
 ## 7. 次の推奨実装順
 
-1. 現在の固定BR信号で、Access Codeの一部など任意patternをUI入力し、Result Rangeのsymbol列を実機確認。
-2. Burst Searchとpattern前を含むnegative Result Range offsetを実装。
+1. Burst Searchとpattern前を含むnegative Result Range offsetを実装。
+2. Pattern/Result Range overlayとsource-plane IQ Powerをユーザー実画面で再確認。
 3. pulse shaping/matched/measurement filter contractとPSK symbol-rate recoveryを追加。
 4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。
 5. EVM用Fine Synchronization、compensation、Evaluation Rangeを接続。

@@ -1,6 +1,7 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
-from pathlib import Path
 
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
@@ -150,6 +151,8 @@ def test_session_publishes_generic_pattern_result():
     assert session.result is not None
     assert session.pattern_result is not None
     assert session.pattern_result.metadata["source"].endswith("Analysis channel")
+    assert session.pattern_range_result is not None
+    assert session.pattern_range_result.iq.size == 48 * 8
     np.testing.assert_array_equal(session.pattern_result.decoded_symbols, expected[24:72])
 
 
@@ -191,6 +194,8 @@ def test_generic_pattern_session_finds_real_pluto_br_capture():
     assert session.pattern_result is not None
     assert session.pattern_result.correlation > 0.99
     assert session.pattern_result.pattern_symbol_errors == 0
+    assert session.pattern_range_result is not None
+    assert session.pattern_range_result.iq.size > 0
     np.testing.assert_array_equal(
         session.pattern_result.decoded_symbols[: access.size], access
     )

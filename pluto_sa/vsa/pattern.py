@@ -126,6 +126,8 @@ class PatternSearchResult:
     pattern_start_sample: int
     pattern_start_time_s: float
     pattern_start_symbol: int
+    result_start_sample: int
+    result_stop_sample: int
     correlation: float
     pattern_symbol_errors: int
     decoded_symbols: np.ndarray
@@ -139,6 +141,7 @@ class PatternSearchResult:
     phase_rotation_rad: float | None
     timing_phase_samples: int
     analysis_sample_rate_hz: float
+    recording_sample_rate_hz: float
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -155,6 +158,21 @@ class PatternSearchResult:
     @property
     def pattern_stop_symbol(self) -> int:
         return self.pattern_start_symbol + int(self.metadata["pattern_symbol_count"])
+
+    @property
+    def result_start_time_s(self) -> float:
+        return self.result_start_sample / self.recording_sample_rate_hz
+
+    @property
+    def result_stop_time_s(self) -> float:
+        return self.result_stop_sample / self.recording_sample_rate_hz
+
+    @property
+    def pattern_stop_time_s(self) -> float:
+        return self.pattern_start_time_s + (
+            int(self.metadata["pattern_symbol_count"])
+            / float(self.metadata["symbol_rate_hz"])
+        )
 
 
 def _constellation(kind: ModulationKind) -> np.ndarray:
@@ -199,6 +217,8 @@ def _result_slice(
         raise NotImplementedError(
             "negative result-range positions require pre-pattern demodulation"
         )
+    if start >= int(available):
+        raise ValueError("result range starts after the available demodulated symbols")
     stop = min(int(available), start + int(settings.result_length))
     return slice(start, max(start, stop))
 
@@ -292,6 +312,15 @@ class PatternAnalyzer:
         decoded = demodulation.bits[selection].astype(np.int16)
         measured = demodulation.symbol_frequency_hz[selection].astype(np.complex64)
         times = demodulation.symbol_time_s[selection]
+        half_symbol_s = 0.5 / signal.symbol_rate_hz
+        result_start_sample = max(
+            0,
+            int(round((float(times[0]) - half_symbol_s) * recording.sample_rate_hz)),
+        )
+        result_stop_sample = min(
+            recording.sample_count,
+            int(round((float(times[-1]) + half_symbol_s) * recording.sample_rate_hz)),
+        )
         return PatternSearchResult(
             modulation=signal.modulation,
             pattern_start_sample=demodulation.access_start_sample,
@@ -299,6 +328,8 @@ class PatternAnalyzer:
                 demodulation.access_start_sample / recording.sample_rate_hz
             ),
             pattern_start_symbol=demodulation.access_start_bit,
+            result_start_sample=result_start_sample,
+            result_stop_sample=result_stop_sample,
             correlation=demodulation.access_correlation,
             pattern_symbol_errors=demodulation.access_bit_errors,
             decoded_symbols=decoded,
@@ -316,9 +347,11 @@ class PatternAnalyzer:
             phase_rotation_rad=None,
             timing_phase_samples=demodulation.timing_phase_samples,
             analysis_sample_rate_hz=demodulation.analysis_sample_rate_hz,
+            recording_sample_rate_hz=recording.sample_rate_hz,
             metadata={
                 "pattern_name": pattern.name,
                 "pattern_symbol_count": len(pattern.symbols),
+                "symbol_rate_hz": signal.symbol_rate_hz,
                 "result_length": result_range.result_length,
                 "result_offset_symbols": result_range.offset_symbols,
                 "gaussian_bt": gaussian_bt,
@@ -450,11 +483,32 @@ class PatternAnalyzer:
             )
         )
         start_sample = min(recording.sample_count - 1, max(0, start_sample))
+        half_symbol_s = 0.5 / signal.symbol_rate_hz
+        result_start_sample = max(
+            0,
+            int(
+                round(
+                    (float(result_centers[0]) / analysis_rate_hz - half_symbol_s)
+                    * recording.sample_rate_hz
+                )
+            ),
+        )
+        result_stop_sample = min(
+            recording.sample_count,
+            int(
+                round(
+                    (float(result_centers[-1]) / analysis_rate_hz + half_symbol_s)
+                    * recording.sample_rate_hz
+                )
+            ),
+        )
         return PatternSearchResult(
             modulation=signal.modulation,
             pattern_start_sample=start_sample,
             pattern_start_time_s=start_sample / recording.sample_rate_hz,
             pattern_start_symbol=(index + 1 if signal.modulation.differential else index),
+            result_start_sample=result_start_sample,
+            result_stop_sample=result_stop_sample,
             correlation=score,
             pattern_symbol_errors=pattern_errors,
             decoded_symbols=decoded,
@@ -470,9 +524,11 @@ class PatternAnalyzer:
             phase_rotation_rad=phase_rotation,
             timing_phase_samples=phase,
             analysis_sample_rate_hz=analysis_rate_hz,
+            recording_sample_rate_hz=recording.sample_rate_hz,
             metadata={
                 "pattern_name": pattern.name,
                 "pattern_symbol_count": len(pattern.symbols),
+                "symbol_rate_hz": signal.symbol_rate_hz,
                 "result_length": result_range.result_length,
                 "result_offset_symbols": result_range.offset_symbols,
                 "differential": signal.modulation.differential,

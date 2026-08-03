@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -111,7 +113,17 @@ def test_session_invalidates_result_when_signal_changes() -> None:
 
 
 def test_npz_file_source_round_trip_preserves_capture_metadata(tmp_path) -> None:
-    recording, _ = GeneratedIQSource.fsk(symbol_count=16)
+    generated, _ = GeneratedIQSource.fsk(symbol_count=16)
+    recording = IQRecording(
+        generated.iq,
+        sample_rate_hz=generated.sample_rate_hz,
+        usable_bandwidth_hz=generated.usable_bandwidth_hz,
+        full_scale=2048.0,
+        calibration_offset_db=-62.0,
+        frequency_dependent_offset_db=1.5,
+        input_correction_db=30.0,
+        amplitude_calibrated=True,
+    )
     path = tmp_path / "capture.npz"
 
     FileIQSource.save_npz(path, recording)
@@ -121,6 +133,30 @@ def test_npz_file_source_round_trip_preserves_capture_metadata(tmp_path) -> None
     assert loaded.sample_rate_hz == recording.sample_rate_hz
     assert loaded.center_frequency_hz == recording.center_frequency_hz
     assert loaded.usable_bandwidth_hz == recording.usable_bandwidth_hz
+    assert loaded.full_scale == recording.full_scale
+    assert loaded.calibration_offset_db == recording.calibration_offset_db
+    assert (
+        loaded.frequency_dependent_offset_db
+        == recording.frequency_dependent_offset_db
+    )
+    assert loaded.input_correction_db == recording.input_correction_db
+    assert loaded.amplitude_calibrated is True
+
+
+def test_pluto_fixture_sidecar_restores_source_plane_power() -> None:
+    path = Path(__file__).with_name("fixtures") / "bluetooth_br_prbs9_pluto_16msps.npz"
+    recording = FileIQSource.load(path)
+    peak_dbm = float(
+        np.max(
+            20.0 * np.log10(np.maximum(np.abs(recording.iq), np.finfo(float).tiny))
+            + recording.calibration_offset_db
+            + recording.input_correction_db
+        )
+    )
+
+    assert recording.full_scale == 2048.0
+    assert recording.input_correction_db == 30.0
+    assert peak_dbm == pytest.approx(2.96, abs=0.1)
 
 
 def test_spectrum_peak_uses_relative_frequency_axis() -> None:

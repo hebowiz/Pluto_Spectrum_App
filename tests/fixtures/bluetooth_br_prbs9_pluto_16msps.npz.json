@@ -1,0 +1,8 @@
+{
+  "full_scale": 2048.0,
+  "calibration_offset_db": -62.0,
+  "frequency_dependent_offset_db": 0.0,
+  "input_correction_db": 30.0,
+  "amplitude_calibrated": false,
+  "amplitude_reference": "Nominal Pluto conversion, corrected to the source plane for the known 30 dB external attenuator; RX gain was 0 dB"
+}

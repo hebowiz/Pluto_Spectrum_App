@@ -554,7 +554,20 @@ class VSAWindow(QtWidgets.QMainWindow):
                         if self.session.settings.analysis_bandwidth_hz is not None
                         else ()
                     ),
-                    "Amplitude: Cal" if recording.amplitude_calibrated else "Amplitude: Uncal",
+                    (
+                        "Amplitude: Cal"
+                        if recording.amplitude_calibrated
+                        else (
+                            "Amplitude: Nominal Pluto"
+                            if (
+                                recording.metadata.get(
+                                    "nominal_pluto_amplitude_inferred", False
+                                )
+                                or recording.metadata.get("amplitude_reference")
+                            )
+                            else "Amplitude: Uncal"
+                        )
+                    ),
                     "SGL",
                 )
             )
@@ -572,19 +585,28 @@ class VSAWindow(QtWidgets.QMainWindow):
             result.power_dbm[capture_slice],
             pen=pg.mkPen("y", width=1),
         )
+        self._add_pattern_range_overlay(self.zero_span_plot)
         self.spectrum_plot.clear()
+        spectrum_result = self.session.pattern_range_result or result
+        self.spectrum_plot.setTitle(
+            "Spectrum (Result Range)"
+            if self.session.pattern_range_result is not None
+            else "Spectrum"
+        )
         analysis_center_hz = float(
-            result.metadata.get("analysis_center_frequency_hz", 0.0) or 0.0
+            spectrum_result.metadata.get("analysis_center_frequency_hz", 0.0) or 0.0
         )
         if analysis_center_hz:
-            spectrum_x = (result.spectrum_frequency_hz + analysis_center_hz) / 1e6
+            spectrum_x = (
+                spectrum_result.spectrum_frequency_hz + analysis_center_hz
+            ) / 1e6
             self.spectrum_plot.setLabel("bottom", "Frequency (MHz)")
         else:
-            spectrum_x = result.spectrum_frequency_hz / 1e6
+            spectrum_x = spectrum_result.spectrum_frequency_hz / 1e6
             self.spectrum_plot.setLabel("bottom", "Relative Frequency (MHz)")
         self.spectrum_plot.plot(
             spectrum_x,
-            result.spectrum_dbfs,
+            spectrum_result.spectrum_dbfs,
             pen=pg.mkPen("c", width=1),
         )
         self.modulation_plot.clear()
@@ -598,6 +620,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 result.instantaneous_frequency_hz[capture_slice] / 1e3,
                 pen=pg.mkPen("m", width=1),
             )
+            self._add_pattern_range_overlay(self.modulation_plot)
             summary = f"Frequency Error: {result.frequency_error_hz or 0.0:.1f} Hz"
         else:
             self.modulation_plot.setTitle("Constellation")
@@ -635,7 +658,50 @@ class VSAWindow(QtWidgets.QMainWindow):
                 f"{self.session.pattern_error}"
             )
         shown = symbols[:2048]
-        lines = [f"{index:6d}  {int(symbol):3d}" for index, symbol in enumerate(shown)]
+        lines = []
+        for start in range(0, shown.size, 10):
+            row = shown[start : start + 10]
+            values = " ".join(f"{int(symbol):3d}" for symbol in row)
+            lines.append(f"{start:6d}: {values}")
         if symbols.size > shown.size:
             lines.append(f"... {symbols.size - shown.size} more symbols")
-        self.symbol_table.setPlainText("Index  Symbol\n" + "\n".join(lines))
+        self.symbol_table.setPlainText(
+            "Symbol Index:     0   1   2   3   4   5   6   7   8   9\n"
+            + "\n".join(lines)
+        )
+
+    def _add_pattern_range_overlay(self, plot: pg.PlotWidget) -> None:
+        pattern = self.session.pattern_result
+        if pattern is None:
+            return
+        result_region = pg.LinearRegionItem(
+            values=(
+                pattern.result_start_time_s * 1e3,
+                pattern.result_stop_time_s * 1e3,
+            ),
+            movable=False,
+            brush=pg.mkBrush(60, 130, 255, 35),
+            pen=pg.mkPen(80, 150, 255, 150),
+        )
+        result_region.setZValue(-5)
+        plot.addItem(result_region)
+        pattern_region = pg.LinearRegionItem(
+            values=(
+                pattern.pattern_start_time_s * 1e3,
+                pattern.pattern_stop_time_s * 1e3,
+            ),
+            movable=False,
+            brush=pg.mkBrush(40, 220, 100, 65),
+            pen=pg.mkPen(40, 240, 120, 190),
+        )
+        pattern_region.setZValue(-4)
+        plot.addItem(pattern_region)
+        marker = pg.InfiniteLine(
+            pos=pattern.pattern_start_time_s * 1e3,
+            angle=90,
+            movable=False,
+            pen=pg.mkPen(80, 255, 130, 220, width=2),
+            label="Pattern Start",
+            labelOpts={"position": 0.92, "color": (120, 255, 160)},
+        )
+        plot.addItem(marker)

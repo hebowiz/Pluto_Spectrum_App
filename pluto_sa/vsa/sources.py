@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -150,6 +151,8 @@ class FileIQSource:
         suffix = resolved.suffix.lower()
         metadata: dict[str, object] = {"path": str(resolved.resolve())}
         usable_bandwidth_hz: float | None = None
+        full_scale = 1.0
+        full_scale_present = False
         if suffix == ".npy":
             iq = np.load(resolved, allow_pickle=False)
         elif suffix == ".npz":
@@ -164,6 +167,9 @@ class FileIQSource:
                     usable_bandwidth_hz = float(
                         np.asarray(container["usable_bandwidth_hz"]).item()
                     )
+                if "full_scale" in container.files:
+                    full_scale = float(np.asarray(container["full_scale"]).item())
+                    full_scale_present = True
                 calibration_offset_db = (
                     float(np.asarray(container["calibration_offset_db"]).item())
                     if "calibration_offset_db" in container.files
@@ -199,6 +205,44 @@ class FileIQSource:
             frequency_dependent_offset_db = 0.0
             input_correction_db = 0.0
             amplitude_calibrated = False
+        sidecar = resolved.with_suffix(resolved.suffix + ".json")
+        if suffix == ".npz" and sidecar.is_file():
+            sidecar_values = json.loads(sidecar.read_text(encoding="utf-8"))
+            full_scale = float(sidecar_values.get("full_scale", full_scale))
+            full_scale_present = "full_scale" in sidecar_values or full_scale_present
+            calibration_offset_db = float(
+                sidecar_values.get("calibration_offset_db", calibration_offset_db)
+            )
+            frequency_dependent_offset_db = float(
+                sidecar_values.get(
+                    "frequency_dependent_offset_db", frequency_dependent_offset_db
+                )
+            )
+            input_correction_db = float(
+                sidecar_values.get("input_correction_db", input_correction_db)
+            )
+            amplitude_calibrated = bool(
+                sidecar_values.get("amplitude_calibrated", amplitude_calibrated)
+            )
+            metadata["amplitude_metadata_sidecar"] = str(sidecar.resolve())
+            if "amplitude_reference" in sidecar_values:
+                metadata["amplitude_reference"] = str(
+                    sidecar_values["amplitude_reference"]
+                )
+        if (
+            suffix == ".npz"
+            and not full_scale_present
+            and full_scale == 1.0
+            and float(np.max(np.abs(iq), initial=0.0)) > 2.0
+        ):
+            # Legacy Pluto captures were stored in raw AD936x sample units but
+            # old NPZ files omitted full_scale and the nominal -62 dB frontend
+            # conversion. Preserve their useful dBm display without claiming
+            # that the capture is calibrated.
+            full_scale = 2048.0
+            if calibration_offset_db == 0.0 and not amplitude_calibrated:
+                calibration_offset_db = -62.0
+                metadata["nominal_pluto_amplitude_inferred"] = True
         if sample_rate_hz is None:
             raise ValueError("sample_rate_hz is required when the file has no metadata")
         return IQRecording(
@@ -211,6 +255,7 @@ class FileIQSource:
                 else usable_bandwidth_hz
             ),
             source=f"File: {resolved.name}",
+            full_scale=full_scale,
             calibration_offset_db=calibration_offset_db,
             frequency_dependent_offset_db=frequency_dependent_offset_db,
             input_correction_db=input_correction_db,
@@ -230,6 +275,7 @@ class FileIQSource:
                 if recording.usable_bandwidth_hz is None
                 else recording.usable_bandwidth_hz
             ),
+            full_scale=np.float64(recording.full_scale),
             calibration_offset_db=np.float64(recording.calibration_offset_db),
             frequency_dependent_offset_db=np.float64(
                 recording.frequency_dependent_offset_db
