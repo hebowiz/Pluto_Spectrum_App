@@ -96,6 +96,20 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
 
 従来のmain window右側dockを廃止し、menu barの`Meas Config > Open Meas Config...`または`Ctrl+M`から独立dialogを開く。dialogはWindow Modalであり、開いている間はplot、dock、menuを含むmain windowを操作できない。設定dialog内の`Refresh Analysis`で現在captureを再解析し、`Close`でmain windowへ戻る。
 
+### Default result window layout
+
+main workspaceの結果blockはすべて同格の`QDockWidget`とし、central widgetを使用しない。起動時は同一幅・同一高さの3列×2行へ配置する。
+
+```text
+IQ Power    | Spectrum | Result Summary
+Modulation  | Reserved | Symbol Table
+```
+
+- IQ Powerも他resultと同様に移動、float、close、再表示できる。
+- Result SummaryはSymbol Tableから分離し、`Parameter`と`Current`の2列へ項目を縦方向に並べる。
+- Reservedは将来のTime vs Frequency、EVM等を配置するための空Dock Widget。
+- 初期geometryは各列幅と各行高を均等化する。ユーザーが移動・resizeした後はQt dock layoutに従う。
+
 ### Capture内の複数pattern
 
 現実装はcapture全体のcorrelation最大値を1件だけ採用し、`PatternSearchResult`とResult Rangeも1件だけ保持する。同じpatternを含むpacketが複数ある場合、時刻順の最初ではなく相関が最も高いpacketが表示される。したがって現段階では他候補をNext/Previousで選べない。

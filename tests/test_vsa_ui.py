@@ -53,16 +53,47 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
 
         window.show()
         QtWidgets.QApplication.processEvents()
+        window._equalize_result_docks()
+        QtWidgets.QApplication.processEvents()
+        docks = (
+            window.zero_span_dock,
+            window.spectrum_dock,
+            window.result_summary_dock,
+            window.modulation_dock,
+            window.reserved_dock,
+            window.symbol_dock,
+        )
+        assert all(isinstance(dock, QtWidgets.QDockWidget) for dock in docks)
+        assert window.centralWidget() is None
+        assert max(dock.width() for dock in docks) - min(
+            dock.width() for dock in docks
+        ) <= 2
+        assert max(dock.height() for dock in docks) - min(
+            dock.height() for dock in docks
+        ) <= 2
         QtCore.QTimer.singleShot(0, inspect_modality)
         window._open_meas_config()
         assert active_modal_widgets == [window._meas_config_dialog]
         assert window.corrected_carrier_action.isChecked()
         assert "Carrier Corrected" in window.spectrum_plot.getPlotItem().titleLabel.text
-        assert "CFO:" in window.result_summary.text()
+        summary = {
+            window.result_summary.item(row, 0).text(): window.result_summary.item(
+                row, 1
+            ).text()
+            for row in range(window.result_summary.rowCount())
+        }
+        assert "CFO" in summary
+        assert summary["Display"] == "Carrier Corrected"
 
         window.raw_carrier_action.trigger()
 
         assert "Raw IQ" in window.spectrum_plot.getPlotItem().titleLabel.text
-        assert "Display: Raw IQ" in window.result_summary.text()
+        summary = {
+            window.result_summary.item(row, 0).text(): window.result_summary.item(
+                row, 1
+            ).text()
+            for row in range(window.result_summary.rowCount())
+        }
+        assert summary["Display"] == "Raw IQ"
     finally:
         window.close()

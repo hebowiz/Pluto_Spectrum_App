@@ -134,20 +134,58 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _build_results(self) -> None:
         self.zero_span_plot = self._make_plot("Capture Power", "IQ Power (dBm)", "Time (ms)")
-        self.setCentralWidget(self.zero_span_plot)
+        self.zero_span_dock = self._dock("IQ Power", self.zero_span_plot)
+        self.addDockWidget(
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.zero_span_dock
+        )
 
         self.spectrum_plot = self._make_plot("Spectrum", "Magnitude (dBFS)", "Relative Frequency (MHz)")
         self.spectrum_dock = self._dock("Spectrum", self.spectrum_plot)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.spectrum_dock)
+        self.splitDockWidget(
+            self.zero_span_dock,
+            self.spectrum_dock,
+            QtCore.Qt.Orientation.Horizontal,
+        )
+
+        self.result_summary = QtWidgets.QTableWidget(0, 2)
+        self.result_summary.setHorizontalHeaderLabels(("Parameter", "Current"))
+        self.result_summary.verticalHeader().setVisible(False)
+        self.result_summary.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.result_summary.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.result_summary.setAlternatingRowColors(True)
+        self.result_summary.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.result_summary_dock = self._dock("Result Summary", self.result_summary)
+        self.splitDockWidget(
+            self.spectrum_dock,
+            self.result_summary_dock,
+            QtCore.Qt.Orientation.Horizontal,
+        )
 
         self.modulation_plot = self._make_plot("Modulation", "Q", "I")
         self.modulation_dock = self._dock("Modulation", self.modulation_plot)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.modulation_dock)
+        self.splitDockWidget(
+            self.zero_span_dock,
+            self.modulation_dock,
+            QtCore.Qt.Orientation.Vertical,
+        )
+
+        self.reserved_widget = QtWidgets.QWidget()
+        self.reserved_dock = self._dock("Reserved", self.reserved_widget)
+        self.splitDockWidget(
+            self.spectrum_dock,
+            self.reserved_dock,
+            QtCore.Qt.Orientation.Vertical,
+        )
 
         symbol_container = QtWidgets.QWidget()
         symbol_layout = QtWidgets.QVBoxLayout(symbol_container)
         symbol_layout.setContentsMargins(6, 6, 6, 6)
-        self.result_summary = QtWidgets.QLabel("No result")
         self.symbol_table = QtWidgets.QTableWidget(0, 10)
         self.symbol_table.setHorizontalHeaderLabels([str(index) for index in range(10)])
         self.symbol_table.setEditTriggers(
@@ -163,15 +201,34 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_table.verticalHeader().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
-        symbol_layout.addWidget(self.result_summary)
         symbol_layout.addWidget(self.symbol_table, 1)
         self.symbol_dock = self._dock("Symbol Table", symbol_container)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.symbol_dock)
         self.splitDockWidget(
-            self.modulation_dock,
+            self.result_summary_dock,
             self.symbol_dock,
             QtCore.Qt.Orientation.Vertical,
         )
+        QtCore.QTimer.singleShot(0, self._equalize_result_docks)
+
+    def _equalize_result_docks(self) -> None:
+        top_row = (
+            self.zero_span_dock,
+            self.spectrum_dock,
+            self.result_summary_dock,
+        )
+        bottom_row = (
+            self.modulation_dock,
+            self.reserved_dock,
+            self.symbol_dock,
+        )
+        self.resizeDocks(list(top_row), [500, 500, 500], QtCore.Qt.Orientation.Horizontal)
+        self.resizeDocks(
+            list(bottom_row), [500, 500, 500], QtCore.Qt.Orientation.Horizontal
+        )
+        for upper, lower in zip(top_row, bottom_row):
+            self.resizeDocks(
+                [upper, lower], [400, 400], QtCore.Qt.Orientation.Vertical
+            )
 
     def _build_configuration(self) -> None:
         toolbox = QtWidgets.QToolBox()
@@ -715,9 +772,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                 symbolBrush=pg.mkBrush("y"),
             )
             summary = f"EVM RMS: {result.evm_rms_percent or 0.0:.4f} %"
-        self.result_summary.setText(
-            f"{signal.modulation.value} | Symbols: {result.decoded_symbols.size} | {summary}"
-        )
         pattern_result = self.session.pattern_result
         symbols = (
             pattern_result.decoded_symbols
@@ -726,20 +780,55 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         if pattern_result is not None:
             display_name = "Carrier Corrected" if show_corrected else "Raw IQ"
-            self.result_summary.setText(
-                f"{signal.modulation.value} | Pattern Symbols Correct: "
-                f"{'Yes' if pattern_result.pattern_symbol_errors == 0 else 'No'} | "
-                f"I/Q Correlation: {pattern_result.correlation * 100.0:.2f}% | "
-                f"CFO: {pattern_result.carrier_frequency_offset_hz / 1e3:+.3f} kHz | "
-                f"Drift: {pattern_result.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms | "
-                f"Display: {display_name} | "
-                "Match: Strongest | "
-                f"Result Symbols: {symbols.size}"
+            recording = self.session.recording
+            analysis_center_hz = (
+                self.session.settings.analysis_center_frequency_hz
+                if self.session.settings.analysis_center_frequency_hz is not None
+                else (recording.center_frequency_hz if recording is not None else 0.0)
+            )
+            self._set_result_summary(
+                (
+                    ("Modulation", signal.modulation.value),
+                    (
+                        "Pattern Symbols Correct",
+                        "Yes" if pattern_result.pattern_symbol_errors == 0 else "No",
+                    ),
+                    ("I/Q Correlation", f"{pattern_result.correlation * 100.0:.2f} %"),
+                    ("CFO", f"{pattern_result.carrier_frequency_offset_hz / 1e3:+.3f} kHz"),
+                    (
+                        "Estimated Carrier",
+                        f"{(analysis_center_hz + pattern_result.carrier_frequency_offset_hz) / 1e6:.6f} MHz",
+                    ),
+                    (
+                        "Carrier Drift",
+                        f"{pattern_result.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms",
+                    ),
+                    ("Display", display_name),
+                    ("Match Selection", "Strongest"),
+                    ("Result Symbols", str(symbols.size)),
+                )
             )
         elif self.session.pattern_error:
-            self.result_summary.setText(
-                f"{signal.modulation.value} | Pattern Symbols Correct: No | "
-                f"{self.session.pattern_error}"
+            self._set_result_summary(
+                (
+                    ("Modulation", signal.modulation.value),
+                    ("Pattern Symbols Correct", "No"),
+                    ("Pattern Error", self.session.pattern_error),
+                    ("Result Symbols", str(symbols.size)),
+                )
+            )
+        else:
+            self._set_result_summary(
+                (
+                    ("Modulation", signal.modulation.value),
+                    ("Result Symbols", str(result.decoded_symbols.size)),
+                    (
+                        "Frequency Error"
+                        if signal.modulation.family is ModulationFamily.FSK
+                        else "EVM RMS",
+                        summary.split(":", 1)[-1].strip(),
+                    ),
+                )
             )
         shown = symbols[:2048]
         row_count = int(np.ceil(shown.size / 10.0))
@@ -755,6 +844,20 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_table.setToolTip(
             f"Showing {shown.size} of {symbols.size} result-range symbols"
         )
+
+    def _set_result_summary(self, rows: tuple[tuple[str, str], ...]) -> None:
+        self.result_summary.clearContents()
+        self.result_summary.setRowCount(len(rows))
+        for row, (name, value) in enumerate(rows):
+            name_item = QtWidgets.QTableWidgetItem(name)
+            value_item = QtWidgets.QTableWidgetItem(value)
+            name_item.setTextAlignment(
+                QtCore.Qt.AlignmentFlag.AlignLeft
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+            value_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self.result_summary.setItem(row, 0, name_item)
+            self.result_summary.setItem(row, 1, value_item)
 
     def _add_pattern_range_overlay(self, plot: pg.PlotWidget) -> None:
         pattern = self.session.pattern_result
