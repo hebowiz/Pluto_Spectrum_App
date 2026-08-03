@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -32,6 +34,56 @@ def test_giac_matches_bluetooth_sig_sample_vector() -> None:
     assert text[4:68] == f"{int(BLUETOOTH_GIAC_SYNC_WORD_HEX, 16):064b}"
     assert text[68:] == "1010"
     assert giac_access_code_bits(include_trailer=False).size == 68
+
+
+def test_shortened_inquiry_access_code_uses_known_symbols_for_tracking() -> None:
+    access = giac_access_code_bits(include_trailer=False)
+    iq = modulate_packet_bits(
+        access,
+        sample_rate_hz=4_000_000.0,
+        frequency_deviation_hz=165_000.0,
+        carrier_frequency_offset_hz=1_037_000.0,
+        prefix_samples=113,
+        suffix_samples=97,
+        snr_db=18.0,
+        seed=29,
+    )
+    recording = IQRecording(iq, sample_rate_hz=4_000_000.0)
+
+    result = BluetoothBRProfile(access_bits=access).analyze(recording)
+
+    assert result.demodulation.access_bit_errors == 0
+    np.testing.assert_array_equal(result.demodulation.bits[: access.size], access)
+    assert result.demodulation.carrier_frequency_offset_hz == pytest.approx(
+        1_037_000.0, abs=10_000.0
+    )
+    assert result.demodulation.frequency_deviation_hz == pytest.approx(
+        165_000.0, abs=15_000.0
+    )
+
+
+def test_pluto_smartphone_inquiry_capture_recovers_giac_without_errors() -> None:
+    fixture = Path(__file__).with_name("fixtures") / "bluetooth_giac_inquiry_pluto_4msps.npz"
+    with np.load(fixture, allow_pickle=False) as capture:
+        recording = IQRecording(
+            capture["iq"],
+            sample_rate_hz=float(capture["sample_rate_hz"]),
+            center_frequency_hz=float(capture["center_frequency_hz"]),
+            source="Pluto smartphone Inquiry fixture",
+        )
+    access = giac_access_code_bits(include_trailer=False)
+
+    result = BluetoothBRProfile(access_bits=access).analyze(recording)
+
+    assert result.demodulation.access_correlation > 0.99
+    assert result.demodulation.access_bit_errors == 0
+    np.testing.assert_array_equal(result.demodulation.bits[: access.size], access)
+    assert result.demodulation.carrier_frequency_offset_hz == pytest.approx(
+        1_037_494.0, abs=5_000.0
+    )
+    assert result.demodulation.frequency_deviation_hz == pytest.approx(
+        164_778.0, abs=5_000.0
+    )
 
 
 @pytest.mark.parametrize(

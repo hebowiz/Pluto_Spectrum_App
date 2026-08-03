@@ -233,6 +233,12 @@ def demodulate_gfsk(
     cfo_hz = float(cfo_hz)
     signed_deviation = float(signed_deviation)
     drift_hz_per_symbol = float(drift_hz_per_symbol)
+    initial_center_frequency = cfo_hz + drift_hz_per_symbol * access_relative_symbols
+    initial_polarity = -1.0 if signed_deviation < 0.0 else 1.0
+    initial_access_bits = (
+        initial_polarity * (access_frequency - initial_center_frequency) >= 0.0
+    ).astype(np.uint8)
+    access_errors = int(np.count_nonzero(initial_access_bits != pattern))
     access_start_resampled = phase + access_index * int(analysis_samples_per_symbol)
     access_start_source = int(
         round(access_start_resampled * float(sample_rate_hz) / analysis_rate_hz)
@@ -258,7 +264,13 @@ def demodulate_gfsk(
         np.arange(packet_observed_frequency.size, dtype=np.float64)
         - (pattern.size - 1.0) / 2.0
     )
-    for _ in range(3):
+    # A shortened inquiry/page ID packet contains only the 68-bit access code.
+    # Burst-detector padding can look like a few extra symbols, but those are
+    # not decision-directed training data.  Refine drift only when a meaningful
+    # post-access field is present (a normal packet supplies at least 54 header
+    # air bits).
+    refinement_iterations = 3 if packet_observed_frequency.size >= pattern.size + 32 else 0
+    for _ in range(refinement_iterations):
         polarity = -1.0 if signed_deviation < 0.0 else 1.0
         estimated_center_frequency = (
             cfo_hz + drift_hz_per_symbol * packet_relative_symbols
@@ -267,6 +279,12 @@ def demodulate_gfsk(
             packet_observed_frequency - estimated_center_frequency
         )
         bits = (packet_frequency >= 0.0).astype(np.uint8)
+        # The matched access code is known training data.  In particular, an
+        # inquiry ID packet can end immediately after its shortened access
+        # code, so decision-directed refinement must not relearn those symbols
+        # from its own tentative decisions and move away from the match.
+        training_size = min(pattern.size, bits.size)
+        bits[:training_size] = pattern[:training_size]
         modeled_levels = _expected_gfsk_symbol_levels(
             bits, int(analysis_samples_per_symbol)
         )
@@ -291,7 +309,11 @@ def demodulate_gfsk(
         packet_observed_frequency - estimated_center_frequency
     )
     bits = (packet_frequency >= 0.0).astype(np.uint8)
-    access_errors = int(np.count_nonzero(bits[: pattern.size] != pattern))
+    # Downstream fields begin after a known training word.  Preserve that word
+    # in the recovered stream; access_errors above retains the raw hard-decision
+    # quality observed before decision-directed packet tracking.
+    training_size = min(pattern.size, bits.size)
+    bits[:training_size] = pattern[:training_size]
     symbol_time_s = (
         access_start_resampled
         + (np.arange(bits.size, dtype=np.float64) + 0.5)

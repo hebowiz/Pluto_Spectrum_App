@@ -69,7 +69,33 @@ Bluetooth SIG Sample Dataとの一致:
 - IQ conjugation/inversion。
 - packet内frequency drift。
 
-実Bluetooth送信機から取得したIQによる検証はまだ行っていません。
+### Pluto + smartphone Inquiry実機検証（2026-08-03）
+
+スマートフォンのBluetooth機器検索を送信源として、Pluto Rev.C
+（`usb:1.60.5`）でGIAC Inquiry ID packetを捕捉しました。
+
+- 4 MSPS、RF BW 3 MHz、center 2460 MHz、6 ms snapshot。
+- 49回目のsnapshotで、約2461 MHzのGIACを検出。
+- shortened GIAC 68 bitを0 bit errorで復元。
+- normalized correlation: 0.9978998。
+- 推定carrier位置: centerから+1.037494 MHz（約2461.037494 MHz）。
+- 推定GFSK frequency deviation: 164.778 kHz。
+- capture内のAccess Code開始: 2611 sample（0.652750 ms）。
+- 回帰fixture: `tests/fixtures/bluetooth_giac_inquiry_pluto_4msps.npz`。
+
+これにより、少なくとも実電波のInquiry ID packetについて、burst捕捉、GIAC相関、
+symbol timing、CFO/deviation推定、68-bit同期word復元まで動作することを確認しました。
+Header/Payloadを持つ接続packetの復元は未検証です。
+
+最初に行った16 MSPS全帯域への直接相関では、相関0.888、2 bit error、偏移約
+1.82 MHzという不整合な候補を検出しました。複数の1 MHz channelを分離せずに
+wideband IQへ単一channel用GFSK復調器を適用すると誤検出し得ます。この結果からも、
+16 MSPS live sourceの前段には1 MHz Bluetooth channelizerが必要です。
+
+また、shortened Access Codeしかないpacketへdecision-directed drift refinementを
+適用すると、burst paddingを未知dataと誤認して既知bitを崩す問題を実測で確認しました。
+既知Access Codeをtraining symbolとして固定し、十分なpost-access fieldがある場合だけ
+drift refinementするよう修正済みです。
 
 ## 5. 保存IQの解析
 
@@ -101,7 +127,7 @@ python -m tools.capture_bluetooth_br_iq `
   --output bluetooth_capture.npz
 ```
 
-Bluetooth BRはfrequency hoppingするため、単一center frequencyでの捕捉は確率的です。16 MHz capture帯域内の複数channelを同時に受信できますが、現在のprofileはrecord全体を1 complex basebandとして検索し、channelizerはまだありません。捕捉成功時だけIQを保存します。
+Bluetooth BRはfrequency hoppingするため、単一center frequencyでの捕捉は確率的です。16 MHz capture帯域内の複数channelを同時に受信できますが、現在のprofileはrecord全体を1 complex basebandとして検索し、channelizerはまだありません。実機試験でwideband直接相関の誤検出も確認したため、現状の確実な検証は4 MSPS / RF BW 3 MHzの狭帯域scanを使用します。捕捉成功時だけIQを保存します。
 
 接続中packetを狙う場合はCentral BD_ADDRのLAP、Header復元にはclock、HEC検証にはUAPが必要です。まずは既知GIACを使えるInquiry trafficでRF捕捉とbit timingを検証するのが安全です。
 

@@ -1,6 +1,6 @@
 # VSA実装状況・引き継ぎノート
 
-最終更新: 2026-08-02
+最終更新: 2026-08-03
 
 設計上の判断は[vsa-architecture.md](vsa-architecture.md)を参照してください。この文書は実際に動作する範囲、既知の制約、次の実装順を第三者が把握するための記録です。
 
@@ -132,19 +132,18 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 - Pluto live source、Power Trigger接続、SCPI sourceは未実装。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
 
-Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。ただし実Bluetooth送信機IQでは未検証です。
+Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。16 MSPS wideband直接相関には誤検出があり、1 MHz channelizerが次の必須項目です。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
 
 現在の数値を規格適合判定やR&SとのEVM比較へ使用してはいけません。
 
 ## 7. 次の推奨実装順
 
-1. PlutoでGIAC Inquiry IQを捕捉し、実電波のAccess Code/bit timingを検証。
-2. 1 MHz Bluetooth channelizerと複数burst候補解析を追加。
-3. FHS decodeからLAP/UAP/clockを取得し、CAC packet trackingへ接続。
-4. packet TYPE別Payload length/FEC/CRCを追加。
-5. pulse shaping/matched filter contractとPSK carrier/timing recoveryを追加。
-6. VSA analysis workerを追加しUI threadからDSPを分離。
-7. EDR guard/sync検出、Composite segment UI、EDR profileへ拡張。
-8. SigMF、R&S IQ file、SCPI sourceを追加。
+1. 1 MHz Bluetooth channelizerと複数burst候補解析を追加。
+2. FHS decodeからLAP/UAP/clockを取得し、CAC packet trackingへ接続。
+3. packet TYPE別Payload length/FEC/CRCを追加。
+4. pulse shaping/matched filter contractとPSK carrier/timing recoveryを追加。
+5. VSA analysis workerを追加しUI threadからDSPを分離。
+6. EDR guard/sync検出、Composite segment UI、EDR profileへ拡張。
+7. SigMF、R&S IQ file、SCPI sourceを追加。
 
 実機接続前に、生成waveformへCFO、timing offset、AWGNを注入したpytestを追加し、推定器の許容誤差を固定してください。
