@@ -51,6 +51,23 @@ power_dbm  = power_dbfs
 
 ### Signal Description
 
+設定名と区分は投入済みのR&S FPL1-K70 VSA User Manual rev.12に準拠する。現在のUIでは`Modulation Type / Order`、`Symbol Rate`、`FSK Ref Deviation`、`Modulation Mapping`、`Transmit Filter Type`、`Alpha / BT`を同じページに配置した。内部の`SignalDescription`はsourceやBluetooth profileに依存しない。
+
+### Pattern Search / Result Range / Demodulation
+
+2026-08-03に一般VSA用の既知パターン解析を追加した。Bluetooth Access Code専用処理とは別の`pluto_sa/vsa/pattern.py`で、任意のFSK/GFSK/BPSK/QPSK/pi/4-DQPSK/8DPSK symbol列を検索し、patternを基準に指定範囲をsymbol単位で復調する。
+
+設定責務はmanual pp.164-170、208-224に従い、次のように分離した。
+
+- `KnownPattern`: Name、Description、Symbols。Result Lengthや検索しきい値は持たない。
+- `PatternSearchSettings`: Pattern Search Auto/On/Off、I/Q Correlation Threshold（AutoはR&Sと同じ90%）、`Meas only if Pattern Symbols Correct`。
+- `ResultRangeSettings`: Result Length、Reference、Alignment、Offset、`Symbol Number at Pattern Start`。
+- `DemodulationSettings`: Coarse/Fine Synchronization、Bit Ordering、FSKのCarrier Frequency Drift/Deviation Error補償選択。
+
+UIにも`Pattern Search`、`Result Range`、`Demodulation`を独立ページとして追加した。Pattern SymbolsはBinary、Decimal、Hexadecimalを入力できる。現在実際にDSPへ反映されるのはpattern、correlation threshold、Pattern Waveform/Leftを起点とした非負offset、Result Length、Bit Orderingである。その他はR&S互換の設定contractを先に固定した段階で、未実装項目を有効に見せないため今後段階的に接続する。
+
+PSK検索はpattern symbol間の差分相関により一定phase回転とCFOに耐え、patternでcarrier phase/CFOを推定してResult Rangeをdecisionする。Differential PSKはphase incrementを直接検索する。FSK/GFSKは既存のCFO、deviation、drift推定器を任意patternへ一般化した。pattern後の出力はprotocol fieldではなく、symbol番号、symbol値、bit列、symbol時刻、測定vector/frequencyからなる汎用結果である。
+
 現在定義済みのmodulation kind:
 
 - 2-FSK / GFSK
@@ -127,6 +144,10 @@ python -m pytest tests/test_vsa_core.py -q
 - 強い隣接GFSK packetを含む16 MSPS IQから手動選択したGIACの0-error復元。
 - Pluto実測Inquiry IQをAnalysis Center/Bandwidth指定後も0-error復元。
 - Pluto実測固定BR波形から通常Access Code、無誤りHeader FEC、DH1 27-byte bodyを復元。
+- 任意FSK/GFSK patternの検索とResult Range復調。
+- QPSKの任意phase/CFO下でのpattern検索、carrier補正、symbol復調。
+- pi/4-DQPSKの差動pattern検索とLSB/MSB Bit Ordering。
+- 16 MSPS Pluto実測BR captureを汎用Pattern Searchへ通し、手動Analysis Center/Bandwidth後に任意72-symbol patternを相関99%以上、0 symbol errorで検出。
 - 実測DH1 body 216 bitとPRBS-9を0 bit errorで照合。
 - Bluetooth SIG公式vectorに対するPayload CRCとcomplete DH1 payload decode。
 
@@ -134,12 +155,12 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 
 ## 6. 重要な未実装・制約
 
-- timing recovery、carrier recovery、frequency drift trackingは未実装。現在はmanual timingです。
+- 通常解析pipelineのtiming/carrier recoveryは未実装。Pattern Search側には8 samples/symbolへのresample、timing phase探索、patternを用いたcarrier phase/CFO推定があるが、symbol-rate error追従は未実装。
 - TX/RX/Measurement/Reference filter chainは未実装。
 - generated Gaussian waveformは開発用近似であり、規格reference/EVM用filterではありません。
 - PSK EVMはbasic decision-directed値。R&S相当のnormalization、同期、evaluation range、measurement filter条件をまだ満たしません。
 - FSK error metricsはfrequency error/deviationの基礎のみです。
-- 一般VSA用burst/pattern searchとDECT profileは未実装。Bluetooth BR profileには専用Access Code searchとHeader field decodeがあります。
+- 一般VSA用pattern searchは実装済み。Burst Search、DECT profile、negative Result Range offsetによるpattern前symbol復調は未実装。
 - VSA UIはoffline Single/Refreshのみ。処理はUI thread上で同期実行します。
 - Pluto live source、Power Trigger接続、SCPI sourceは未実装。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
@@ -150,12 +171,12 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 
 ## 7. 次の推奨実装順
 
-1. 送信器でstandard Whitening/HEC/CRCを有効化できれば、同じ固定BR packetでvalid HEC/CRCを実測検証。
-2. packet TYPE別Payload length/FEC/CRCを追加（DH1は実装済み）。
-3. FHS decodeからLAP/UAP/clockを取得し、必要になった段階でCAC packet trackingへ接続。
-4. pulse shaping/matched filter contractとPSK carrier/timing recoveryを追加。
-5. VSA analysis workerを追加しUI threadからDSPを分離。
-6. EDR guard/sync検出、Composite segment UI、EDR profileへ拡張。
+1. 現在の固定BR信号で、Access Codeの一部など任意patternをUI入力し、Result Rangeのsymbol列を実機確認。
+2. Burst Searchとpattern前を含むnegative Result Range offsetを実装。
+3. pulse shaping/matched/measurement filter contractとPSK symbol-rate recoveryを追加。
+4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。
+5. EVM用Fine Synchronization、compensation、Evaluation Rangeを接続。
+6. VSA analysis workerを追加しUI threadからDSPを分離。
 7. SigMF、R&S IQ file、SCPI sourceを追加。
 
 実機接続前に、生成waveformへCFO、timing offset、AWGNを注入したpytestを追加し、推定器の許容誤差を固定してください。

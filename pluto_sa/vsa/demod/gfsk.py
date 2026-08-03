@@ -139,17 +139,23 @@ def _normalized_sliding_correlation(
     return correlation / np.sqrt(window_energy * pattern_energy)
 
 
-def _expected_gfsk_symbol_levels(
-    bits: np.ndarray, samples_per_symbol: int, bt: float = 0.5
+def _expected_fsk_symbol_levels(
+    bits: np.ndarray, samples_per_symbol: int, gaussian_bt: float | None
 ) -> np.ndarray:
     levels = np.repeat(
         2.0 * np.asarray(bits, dtype=np.float64) - 1.0,
         int(samples_per_symbol),
     )
-    sigma_samples = int(samples_per_symbol) / (2.0 * np.pi * float(bt))
-    shaped = gaussian_filter1d(
-        levels, sigma=max(0.5, sigma_samples), mode="nearest"
-    )
+    shaped = levels
+    if gaussian_bt is not None:
+        if float(gaussian_bt) <= 0.0:
+            raise ValueError("gaussian_bt must be positive when provided")
+        sigma_samples = int(samples_per_symbol) / (
+            2.0 * np.pi * float(gaussian_bt)
+        )
+        shaped = gaussian_filter1d(
+            levels, sigma=max(0.5, sigma_samples), mode="nearest"
+        )
     shaped = uniform_filter1d(
         shaped,
         size=max(1, int(samples_per_symbol) // 2),
@@ -166,6 +172,7 @@ def demodulate_gfsk(
     symbol_rate_hz: float = 1_000_000.0,
     analysis_samples_per_symbol: int = 8,
     minimum_correlation: float = 0.65,
+    gaussian_bt: float | None = 0.5,
 ) -> GFSKDemodulationResult:
     """Recover binary symbols using a known access pattern for timing/CFO.
 
@@ -185,8 +192,10 @@ def demodulate_gfsk(
     if int(analysis_samples_per_symbol) < 4:
         raise ValueError("analysis_samples_per_symbol must be at least 4")
     pattern = _validate_bits(access_bits)
-    expected_levels = _expected_gfsk_symbol_levels(
-        pattern, int(analysis_samples_per_symbol)
+    expected_levels = _expected_fsk_symbol_levels(
+        pattern,
+        int(analysis_samples_per_symbol),
+        gaussian_bt,
     )
     resampled, analysis_rate_hz = _resample_for_symbols(
         samples,
@@ -285,8 +294,10 @@ def demodulate_gfsk(
         # from its own tentative decisions and move away from the match.
         training_size = min(pattern.size, bits.size)
         bits[:training_size] = pattern[:training_size]
-        modeled_levels = _expected_gfsk_symbol_levels(
-            bits, int(analysis_samples_per_symbol)
+        modeled_levels = _expected_fsk_symbol_levels(
+            bits,
+            int(analysis_samples_per_symbol),
+            gaussian_bt,
         )
         refinement_design = np.column_stack(
             (

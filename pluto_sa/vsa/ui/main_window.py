@@ -9,6 +9,17 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
+from pluto_sa.vsa.pattern import (
+    BitOrdering,
+    DemodulationSettings,
+    KnownPattern,
+    PatternSearchMode,
+    PatternSearchSettings,
+    ResultRangeAlignment,
+    ResultRangeReference,
+    ResultRangeSettings,
+    SynchronizationSource,
+)
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
@@ -183,11 +194,112 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.deviation_spin.setDecimals(0)
         self.deviation_spin.setValue(250_000.0)
         self.deviation_spin.setSuffix(" Hz")
-        signal_form.addRow("Modulation", self.modulation_combo)
+        self.mapping_combo = QtWidgets.QComboBox()
+        self.mapping_combo.addItem("Natural")
+        self.tx_filter_combo = QtWidgets.QComboBox()
+        self.tx_filter_combo.addItems(("None", "Gaussian", "Root Raised Cosine"))
+        self.filter_parameter_spin = QtWidgets.QDoubleSpinBox()
+        self.filter_parameter_spin.setRange(0.01, 2.0)
+        self.filter_parameter_spin.setDecimals(3)
+        self.filter_parameter_spin.setValue(0.5)
+        signal_form.addRow("Modulation Type / Order", self.modulation_combo)
         signal_form.addRow("Symbol Rate", self.symbol_rate_spin)
-        signal_form.addRow("FSK Deviation", self.deviation_spin)
+        signal_form.addRow("FSK Ref Deviation", self.deviation_spin)
+        signal_form.addRow("Modulation Mapping", self.mapping_combo)
+        signal_form.addRow("Transmit Filter Type", self.tx_filter_combo)
+        signal_form.addRow("Alpha / BT", self.filter_parameter_spin)
         self.modulation_combo.currentIndexChanged.connect(self._sync_signal_controls)
+        self.tx_filter_combo.currentTextChanged.connect(
+            lambda value: self.filter_parameter_spin.setEnabled(value != "None")
+        )
         toolbox.addItem(signal_page, "Signal Description")
+
+        pattern_page = QtWidgets.QWidget()
+        pattern_form = QtWidgets.QFormLayout(pattern_page)
+        self.pattern_search_check = QtWidgets.QCheckBox("Pattern Search On")
+        self.pattern_name_edit = QtWidgets.QLineEdit("Known Pattern")
+        self.pattern_format_combo = QtWidgets.QComboBox()
+        self.pattern_format_combo.addItems(("Binary", "Decimal", "Hexadecimal"))
+        self.pattern_symbols_edit = QtWidgets.QLineEdit("01010101")
+        self.pattern_threshold_auto = QtWidgets.QCheckBox("Auto (90%)")
+        self.pattern_threshold_auto.setChecked(True)
+        self.pattern_threshold_spin = QtWidgets.QDoubleSpinBox()
+        self.pattern_threshold_spin.setRange(0.1, 100.0)
+        self.pattern_threshold_spin.setValue(90.0)
+        self.pattern_threshold_spin.setSuffix(" %")
+        self.pattern_threshold_spin.setEnabled(False)
+        self.pattern_meas_only_check = QtWidgets.QCheckBox(
+            "Meas only if Pattern Symbols Correct"
+        )
+        self.pattern_meas_only_check.setChecked(True)
+        pattern_form.addRow(self.pattern_search_check)
+        pattern_form.addRow("Name", self.pattern_name_edit)
+        pattern_form.addRow("Symbol Format", self.pattern_format_combo)
+        pattern_form.addRow("Symbols", self.pattern_symbols_edit)
+        pattern_form.addRow("I/Q Correlation Threshold", self.pattern_threshold_spin)
+        pattern_form.addRow(self.pattern_threshold_auto)
+        pattern_form.addRow(self.pattern_meas_only_check)
+        self.pattern_threshold_auto.toggled.connect(
+            lambda checked: self.pattern_threshold_spin.setEnabled(not checked)
+        )
+        toolbox.addItem(pattern_page, "Pattern Search")
+
+        range_page = QtWidgets.QWidget()
+        range_form = QtWidgets.QFormLayout(range_page)
+        self.result_length_spin = QtWidgets.QSpinBox()
+        self.result_length_spin.setRange(1, 1_000_000)
+        self.result_length_spin.setValue(256)
+        self.result_reference_combo = QtWidgets.QComboBox()
+        self.result_reference_combo.addItem(
+            ResultRangeReference.PATTERN_WAVEFORM.value,
+            ResultRangeReference.PATTERN_WAVEFORM.value,
+        )
+        self.result_alignment_combo = QtWidgets.QComboBox()
+        for alignment in ResultRangeAlignment:
+            self.result_alignment_combo.addItem(alignment.value, alignment.value)
+        self.result_offset_spin = QtWidgets.QSpinBox()
+        self.result_offset_spin.setRange(-1_000_000, 1_000_000)
+        self.reference_symbol_number_spin = QtWidgets.QSpinBox()
+        self.reference_symbol_number_spin.setRange(-1_000_000, 1_000_000)
+        self.reference_symbol_number_spin.setEnabled(False)
+        self.reference_symbol_number_spin.setToolTip(
+            "Display-axis numbering is planned; it does not change DSP yet."
+        )
+        range_form.addRow("Result Length (Symbols)", self.result_length_spin)
+        range_form.addRow("Reference", self.result_reference_combo)
+        range_form.addRow("Alignment", self.result_alignment_combo)
+        range_form.addRow("Offset (Symbols)", self.result_offset_spin)
+        range_form.addRow(
+            "Symbol Number at Pattern Start", self.reference_symbol_number_spin
+        )
+        toolbox.addItem(range_page, "Result Range")
+
+        demod_page = QtWidgets.QWidget()
+        demod_form = QtWidgets.QFormLayout(demod_page)
+        self.coarse_sync_combo = QtWidgets.QComboBox()
+        self.coarse_sync_combo.addItems(("Auto", "Detected Data", "Pattern"))
+        self.fine_sync_combo = QtWidgets.QComboBox()
+        self.fine_sync_combo.addItems(("Auto", "Detected Data", "Pattern"))
+        self.bit_order_combo = QtWidgets.QComboBox()
+        self.bit_order_combo.addItems(("MSB", "LSB"))
+        self.compensate_drift_check = QtWidgets.QCheckBox("Carrier Frequency Drift")
+        self.compensate_drift_check.setChecked(True)
+        self.compensate_deviation_check = QtWidgets.QCheckBox("FSK Deviation Error")
+        self.compensate_deviation_check.setChecked(True)
+        for control in (
+            self.coarse_sync_combo,
+            self.fine_sync_combo,
+            self.compensate_drift_check,
+            self.compensate_deviation_check,
+        ):
+            control.setEnabled(False)
+            control.setToolTip("R&S-compatible setting contract; DSP connection is planned.")
+        demod_form.addRow("Coarse Synchronization", self.coarse_sync_combo)
+        demod_form.addRow("Fine Synchronization", self.fine_sync_combo)
+        demod_form.addRow("Bit Ordering", self.bit_order_combo)
+        demod_form.addRow("Compensate for", self.compensate_drift_check)
+        demod_form.addRow("", self.compensate_deviation_check)
+        toolbox.addItem(demod_page, "Demodulation")
 
         run_page = QtWidgets.QWidget()
         run_layout = QtWidgets.QVBoxLayout(run_page)
@@ -216,6 +328,8 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _sync_signal_controls(self) -> None:
         modulation = self._selected_modulation()
         self.deviation_spin.setEnabled(modulation.family is ModulationFamily.FSK)
+        if modulation is ModulationKind.GFSK:
+            self.tx_filter_combo.setCurrentText("Gaussian")
 
     def _sync_analysis_controls(self) -> None:
         enabled = self.channel_filter_check.isChecked()
@@ -254,9 +368,80 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if modulation.family is ModulationFamily.FSK
                 else None
             ),
-            tx_filter="Gaussian" if modulation is ModulationKind.GFSK else "None",
-            filter_parameter=0.5 if modulation is ModulationKind.GFSK else None,
+            tx_filter=self.tx_filter_combo.currentText(),
+            filter_parameter=(
+                self.filter_parameter_spin.value()
+                if self.tx_filter_combo.currentText() != "None"
+                else None
+            ),
+            symbol_mapping=self.mapping_combo.currentText(),
         )
+
+    def _parse_pattern_symbols(self, order: int) -> tuple[int, ...]:
+        text = self.pattern_symbols_edit.text().strip()
+        if not text:
+            raise ValueError("Pattern Symbols is empty")
+        symbol_format = self.pattern_format_combo.currentText()
+        if symbol_format == "Binary":
+            compact = "".join(text.replace(",", " ").split())
+            if any(character not in "01" for character in compact):
+                raise ValueError("Binary pattern may contain only 0 and 1")
+            width = int(round(np.log2(order)))
+            if len(compact) % width:
+                raise ValueError(f"Binary pattern length must be a multiple of {width}")
+            values = tuple(
+                int(compact[index : index + width], 2)
+                for index in range(0, len(compact), width)
+            )
+        else:
+            tokens = text.replace(",", " ").split()
+            base = 16 if symbol_format == "Hexadecimal" else 10
+            values = tuple(int(token, base) for token in tokens)
+        if any(value < 0 or value >= order for value in values):
+            raise ValueError(f"Pattern symbol must be between 0 and {order - 1}")
+        return values
+
+    def _configure_pattern_analysis(self, signal: SignalDescription) -> None:
+        if not self.pattern_search_check.isChecked():
+            self.session.configure_pattern_analysis(None)
+            return
+        search = PatternSearchSettings(
+            pattern=KnownPattern(
+                symbols=self._parse_pattern_symbols(signal.modulation.order),
+                name=self.pattern_name_edit.text(),
+            ),
+            mode=PatternSearchMode.ON,
+            iq_correlation_threshold=self.pattern_threshold_spin.value() / 100.0,
+            correlation_threshold_auto=self.pattern_threshold_auto.isChecked(),
+            meas_only_if_pattern_symbols_correct=(
+                self.pattern_meas_only_check.isChecked()
+            ),
+        )
+        result_range = ResultRangeSettings(
+            result_length=self.result_length_spin.value(),
+            reference=ResultRangeReference(self.result_reference_combo.currentData()),
+            alignment=ResultRangeAlignment(self.result_alignment_combo.currentData()),
+            offset_symbols=self.result_offset_spin.value(),
+            symbol_number_at_reference_start=(
+                self.reference_symbol_number_spin.value()
+            ),
+        )
+        demodulation = DemodulationSettings(
+            coarse_synchronization=SynchronizationSource(
+                self.coarse_sync_combo.currentText()
+            ),
+            fine_synchronization=SynchronizationSource(
+                self.fine_sync_combo.currentText()
+            ),
+            bit_ordering=BitOrdering(self.bit_order_combo.currentText()),
+            compensate_carrier_frequency_drift=(
+                self.compensate_drift_check.isChecked()
+            ),
+            compensate_fsk_deviation_error=(
+                self.compensate_deviation_check.isChecked()
+            ),
+        )
+        self.session.configure_pattern_analysis(search, result_range, demodulation)
 
     def _set_controls_from_signal(self, signal: SignalDescription) -> None:
         index = self.modulation_combo.findData(signal.modulation.value)
@@ -265,6 +450,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_rate_spin.setValue(signal.symbol_rate_hz)
         if signal.frequency_deviation_hz is not None:
             self.deviation_spin.setValue(signal.frequency_deviation_hz)
+        self.tx_filter_combo.setCurrentText(signal.tx_filter)
+        if signal.filter_parameter is not None:
+            self.filter_parameter_spin.setValue(signal.filter_parameter)
         self._sync_signal_controls()
 
     def _load_generated(self, modulation: ModulationKind) -> None:
@@ -323,8 +511,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         if self.session.recording is None:
             return
         try:
-            self.session.set_signal(self._signal_from_controls())
+            signal = self._signal_from_controls()
+            self.session.set_signal(signal)
             self._update_analysis_settings()
+            self._configure_pattern_analysis(signal)
             result = self.session.analyze()
         except Exception as error:
             self.statusBar().showMessage(f"Analysis failed: {error}")
@@ -426,8 +616,26 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.result_summary.setText(
             f"{signal.modulation.value} | Symbols: {result.decoded_symbols.size} | {summary}"
         )
-        shown = result.decoded_symbols[:2048]
+        pattern_result = self.session.pattern_result
+        symbols = (
+            pattern_result.decoded_symbols
+            if pattern_result is not None
+            else result.decoded_symbols
+        )
+        if pattern_result is not None:
+            self.result_summary.setText(
+                f"{signal.modulation.value} | Pattern Symbols Correct: "
+                f"{'Yes' if pattern_result.pattern_symbol_errors == 0 else 'No'} | "
+                f"I/Q Correlation: {pattern_result.correlation * 100.0:.2f}% | "
+                f"Result Symbols: {symbols.size}"
+            )
+        elif self.session.pattern_error:
+            self.result_summary.setText(
+                f"{signal.modulation.value} | Pattern Symbols Correct: No | "
+                f"{self.session.pattern_error}"
+            )
+        shown = symbols[:2048]
         lines = [f"{index:6d}  {int(symbol):3d}" for index, symbol in enumerate(shown)]
-        if result.decoded_symbols.size > shown.size:
-            lines.append(f"... {result.decoded_symbols.size - shown.size} more symbols")
+        if symbols.size > shown.size:
+            lines.append(f"... {symbols.size - shown.size} more symbols")
         self.symbol_table.setPlainText("Index  Symbol\n" + "\n".join(lines))

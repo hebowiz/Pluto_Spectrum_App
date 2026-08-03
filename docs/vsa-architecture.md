@@ -388,11 +388,13 @@ R&Sの設定（manual pp.217-224）を参照し、段階的に次を扱います
 
 ### Phase 2: Synchronizationとpattern
 
-- carrier/timing recovery。
-- I/Q waveform correlation。
-- pattern symbol checkとphase ambiguity解消。
-- burst search、result gating。
+- carrier/timing recovery（pattern-based timing/CFO/phase推定は実装、symbol-rate error追従は未実装）。
+- I/Q waveform correlation（FSK/GFSK/PSK/DPSKの任意symbol patternを実装）。
+- pattern symbol checkとphase ambiguity解消（実装）。
+- burst search、result gating（pattern result gatingのみ実装）。
 - DECT/Bluetooth向け`AnalysisProfile`の基礎。
+
+汎用Pattern Searchはprotocol decoderより下位の共通機能とする。Bluetooth Access Code、DECT sync word、将来のEDR sync blockはいずれも`KnownPattern` presetとして利用できるが、検索結果はprotocol fieldへ固定せず、R&Sと同様にResult Rangeのsymbol/vectorデータとして公開する。
 
 ### Phase 3: Live source
 

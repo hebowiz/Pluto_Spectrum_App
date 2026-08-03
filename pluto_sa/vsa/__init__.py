@@ -15,19 +15,43 @@ from pluto_sa.vsa.model import (
     VSASettings,
 )
 from pluto_sa.vsa.session import VSASession
+from pluto_sa.vsa.pattern import (
+    BitOrdering,
+    DemodulationSettings,
+    KnownPattern,
+    PatternAnalyzer,
+    PatternSearchMode,
+    PatternSearchResult,
+    PatternSearchSettings,
+    ResultRangeAlignment,
+    ResultRangeReference,
+    ResultRangeSettings,
+    SynchronizationSource,
+)
 
 __all__ = [
     "CompositeSignalDescription",
     "CompositeVSAAnalysisResult",
     "IQRecording",
+    "BitOrdering",
+    "DemodulationSettings",
+    "KnownPattern",
     "ModulationFamily",
     "ModulationKind",
     "ModulationSegment",
+    "PatternAnalyzer",
+    "PatternSearchMode",
+    "PatternSearchResult",
+    "PatternSearchSettings",
+    "ResultRangeAlignment",
+    "ResultRangeReference",
+    "ResultRangeSettings",
     "SignalDescription",
     "VSAAnalysisResult",
     "VSAAnalyzer",
     "VSASettings",
     "VSASegmentAnalysis",
     "VSASession",
+    "SynchronizationSource",
     "extract_analysis_channel",
 ]
