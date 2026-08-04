@@ -1089,7 +1089,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self,
             "Open IQ Recording",
             self._last_directory("iq"),
-            "IQ recordings (*.npz *.npy *.cf32 *.bin);;All files (*)",
+            "IQ recordings (*.iq.tar *.npz *.npy *.cf32 *.bin);;All files (*)",
         )
         if not path:
             return

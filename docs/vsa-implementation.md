@@ -170,10 +170,27 @@ PSK:
 ## 4. Source
 
 - `GeneratedIQSource`: FSK/GFSK/PSK test waveform。seed固定に対応。
-- `FileIQSource`: `.npy`、`.npz`、raw complex file。
+- `FileIQSource`: R&S `.iq.tar`、`.npy`、`.npz`、raw complex file。
 - `recording_from_acquisition`: 共通Pluto acquisition record adapter。
 
-`.npz`は`iq`、`sample_rate_hz`、`center_frequency_hz`、`usable_bandwidth_hz`、振幅補正条件を保存/復元できます。旧NPZにusable bandwidthがない場合は`0.8 * sample rate`をfallbackにします。`.npy`とraw IQはUIでsample rateを指定します。SigMF、R&S `.iq.tar`、SCPI instrumentは未実装です。
+`.npz`は`iq`、`sample_rate_hz`、`center_frequency_hz`、`usable_bandwidth_hz`、振幅補正条件を保存/復元できます。旧NPZにusable bandwidthがない場合は`0.8 * sample rate`をfallbackにします。`.npy`とraw IQはUIでsample rateを指定します。SigMFとSCPI instrumentは未実装です。
+
+### R&S iq-tar import
+
+Rohde & Schwarzの公式[iq-tar File Format Specification](https://scdn.rohde-schwarz.com/ur/pws/dl_downloads/dl_common_library/dl_manuals/dl_manual/RS_iq-tar_FileFormatSpecification_en_02.pdf) version 2に基づき、`.iq.tar`を展開せず直接読み込む。archive内の唯一のparameter XMLから次を復元する。
+
+- `Samples`、`Clock`（sample rate）、`Format`、`DataType`
+- `ScalingFactor`（省略時1 V）、`NumberOfChannels`（省略時1）
+- `DataFilename`、任意の`Name` / `Comment` / `DateTime`
+- R&S固有`UserData`内に`CenterFrequency`がある場合のcenter frequency
+
+対応形式は`complex`（I/Q）、`real`（Q=0として格納）、`polar`（magnitude/phase）で、data typeは`int8`、`int16`、`int32`、`float32`、`float64`。polarは仕様どおりfloatのみとする。complex/polarの成分、さらにmulti-channel sampleは仕様の順序どおりinterleaveを解除し、`channel_index`（既定0）で1 channelを選択して共通`IQRecording`へ変換する。`ScalingFactor`はcomplex/realの全成分、polarのmagnitudeだけに適用し、IQ値をVoltにする。
+
+現行VSA UIはsingle-channel解析のため、ファイルダイアログからの読込みではchannel 0を使う。core loaderはmulti-channel archiveから任意channelを選択可能なので、将来のchannel selector追加時もDSP contractは変えない。
+
+振幅値は仕様上Voltへ変換されるが、iq-tar core metadataだけでは測定系のimpedance、peak/RMS定義、外部補正を一意に決められない。そのため`amplitude_calibrated=False`を維持し、Volt値をdBm校正済みとは扱わない。必要な補正は取得条件またはinstrument固有`UserData`の仕様が判明した段階で追加する。
+
+安全性と誤読防止のため、tarをfilesystemへextractせず、parameter XMLの個数、`DataFilename`、regular file属性、path traversal、XML DTD/entity、binary byte数を検証する。現在のR&S/Windows出力に合わせてmulti-byte binaryはlittle-endianとして読む。公式仕様はbyte orderを明記していないため、異なるendianのproducerが必要になった場合は明示的な選択肢を追加する。
 
 ## 5. Test
 
@@ -231,6 +248,6 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。
 5. EVM用Fine Synchronization、compensation、Evaluation Rangeを接続。
 6. VSA analysis workerを追加しUI threadからDSPを分離。
-7. SigMF、R&S IQ file、SCPI sourceを追加。
+7. SigMF、SCPI sourceとiq-tarのUI channel selectorを追加。
 
 実機接続前に、生成waveformへCFO、timing offset、AWGNを注入したpytestを追加し、推定器の許容誤差を固定してください。

@@ -10,6 +10,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 
 from pluto_sa.sdr.trigger import IQAcquisitionRecord
+from pluto_sa.vsa.iqtar import load_iq_tar
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 
 
@@ -130,7 +131,7 @@ class GeneratedIQSource:
 
 
 class FileIQSource:
-    """Load NumPy containers or raw complex IQ without modifying the source."""
+    """Load R&S iq-tar, NumPy, or raw complex IQ without modifying the source."""
 
     capabilities = IQSourceCapabilities(
         finite_capture=True,
@@ -146,6 +147,7 @@ class FileIQSource:
         sample_rate_hz: float | None = None,
         center_frequency_hz: float = 0.0,
         raw_dtype: str = "complex64",
+        channel_index: int = 0,
     ) -> IQRecording:
         resolved = Path(path)
         suffix = resolved.suffix.lower()
@@ -153,7 +155,19 @@ class FileIQSource:
         usable_bandwidth_hz: float | None = None
         full_scale = 1.0
         full_scale_present = False
-        if suffix == ".npy":
+        if resolved.name.lower().endswith(".iq.tar"):
+            decoded = load_iq_tar(resolved, channel_index=channel_index)
+            iq = decoded.iq
+            sample_rate_hz = decoded.sample_rate_hz
+            if center_frequency_hz == 0.0:
+                center_frequency_hz = decoded.center_frequency_hz
+            usable_bandwidth_hz = decoded.sample_rate_hz
+            calibration_offset_db = 0.0
+            frequency_dependent_offset_db = 0.0
+            input_correction_db = 0.0
+            amplitude_calibrated = False
+            metadata.update(decoded.metadata)
+        elif suffix == ".npy":
             iq = np.load(resolved, allow_pickle=False)
         elif suffix == ".npz":
             with np.load(resolved, allow_pickle=False) as container:
@@ -254,7 +268,11 @@ class FileIQSource:
                 if usable_bandwidth_hz is None
                 else usable_bandwidth_hz
             ),
-            source=f"File: {resolved.name}",
+            source=(
+                f"R&S iq-tar: {resolved.name}"
+                if resolved.name.lower().endswith(".iq.tar")
+                else f"File: {resolved.name}"
+            ),
             full_scale=full_scale,
             calibration_offset_db=calibration_offset_db,
             frequency_dependent_offset_db=frequency_dependent_offset_db,
