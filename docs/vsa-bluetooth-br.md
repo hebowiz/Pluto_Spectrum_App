@@ -127,6 +127,32 @@ waveformはWhitening/CRC/HECの一部がdisabled、またはAccess Codeとは別
 使っている可能性があります。今回の結果はRF復調、Header FEC、DH1 length、PRBS-9
 Payload復元の実機検証として有効ですが、標準準拠packetのHEC/CRC成功例ではありません。
 
+### 合成DH1検証IQ（2026-08-04）
+
+実測fixtureとは別に、全fieldの期待値が既知でHEC/CRCも有効な最大長DH1を追加しました。
+
+- file: `tests/fixtures/bluetooth_dh1_prbs9_16msps.npz`
+- Fs / center / capture: 16 MS/s / 2441 MHz / 3 ms
+- packet start/stop: sample 32000 / 37856（2.000 ms / 2.366 ms）
+- modulation: GFSK、1 MSym/s、BT 0.5、deviation 160 kHz
+- CFO / SNR: +20 kHz / 35 dB
+- LAP / UAP / CLK6-1: `0xC6967E` / `0x6B` / `0x2B`
+- TYPE: DH1 (`0x4`)、Payload body: 27 bytes (`0x1B`) PRBS-9
+- Header whitening、rate 1/3 FEC、HEC、Payload whitening、CRCを適用
+
+NPZにはIQに加えて`packet_bits`、`access_bits`、`header_air_bits`、Payload Header、
+PRBS-9 body、CRC、air bits、packet sample範囲、各RF/DSP条件を格納しています。再生成:
+
+```powershell
+python -m tools.generate_bluetooth_br_iq
+```
+
+VSAの初期確認設定はGFSK、1 MSym/s、Deviation 160 kHz、Gaussian BT 0.5です。
+Pattern SearchにはAccess Code先頭32 symbol
+`10101011011111001100001011011001`をBinaryで指定し、Result Lengthを366 symbolsとします。
+回帰試験ではcorrelation 0.9837、pattern error 0、全366 symbol error 0、CFO約
++20.45 kHzを確認しています。
+
 ## 5. 保存IQの解析
 
 ```powershell

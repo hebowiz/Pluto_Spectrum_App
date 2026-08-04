@@ -19,12 +19,17 @@ from pluto_sa.vsa.profiles.bluetooth_edr import (
     BluetoothEDRWaveform,
     generate_edr_dh1,
 )
+from pluto_sa.vsa.profiles.bluetooth_br_waveform import (
+    BluetoothBRDH1Waveform,
+    generate_br_dh1,
+)
 
 __all__ = [
     "BluetoothACLPayload",
     "BluetoothBRPacketResult",
     "BluetoothBRProfile",
     "BluetoothDH1Candidate",
+    "BluetoothBRDH1Waveform",
     "BluetoothHeader",
     "BluetoothEDRWaveform",
     "PRBS9Match",
@@ -34,6 +39,7 @@ __all__ = [
     "find_header_candidates",
     "generate_edr_dh1",
     "match_prbs9",
+    "generate_br_dh1",
     "payload_crc_bytes",
     "prbs9_period",
 ]

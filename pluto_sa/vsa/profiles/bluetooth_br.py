@@ -430,6 +430,7 @@ def build_packet_bits(
     flow: int = 1,
     arqn: int = 0,
     seqn: int = 0,
+    lap: int | None = None,
 ) -> np.ndarray:
     """Build a BR-like bitstream for receiver tests (uncoded payload)."""
     payload = np.asarray(
@@ -451,7 +452,12 @@ def build_packet_bits(
     whitening = whitening_sequence(clock_6_1, header.size + payload.size)
     header_air = fec13_encode(header ^ whitening[: header.size])
     payload_air = payload ^ whitening[header.size :]
-    return np.concatenate((giac_access_code_bits(), header_air, payload_air))
+    access = (
+        giac_access_code_bits()
+        if lap is None
+        else access_code_bits(int(lap))
+    )
+    return np.concatenate((access, header_air, payload_air))
 
 
 def modulate_packet_bits(
