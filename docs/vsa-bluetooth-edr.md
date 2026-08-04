@@ -23,6 +23,39 @@
 - 外部ATT: 30 dB。
 - BD_ADDR: `00006BC6967E`、LAP: `0xC6967E`。
 
+## 合成IQ fixture（2026-08-04）
+
+実送信commandが利用できるまでの開発用として、Bluetooth Core仕様に基づく最大長2-DH1/3-DH1 IQを追加した。
+
+| file | modulation | payload body | PSK symbols |
+|---|---|---:|---:|
+| `tests/fixtures/bluetooth_2dh1_prbs9_16msps.npz` | pi/4-DQPSK | 54 bytes (`0x36`) | 245 |
+| `tests/fixtures/bluetooth_3dh1_prbs9_16msps.npz` | 8DPSK | 83 bytes (`0x53`) | 245 |
+
+共通条件:
+
+- 16 MS/s、center 2441 MHz、capture 3 ms、packet start 2.000 ms。
+- Access Code 72 symbolとHeader 54 air bitはBT=0.5 GFSK、1 Msym/s。
+- Header後に5 us Guard、11-symbol EDR Sync、Payload Header、PRBS-9 body、CRC、2-symbol Trailerを配置。
+- EDR symbol rateは1 MSym/s。TX filterはSRRC、roll-off 0.4。
+- CFOは+20 kHz、SNRは35 dB、振幅は校正済み合成基準として記録。
+- UAP `0x6B`、CLK_6-1 `0x2B`。Header/Payload whiteningとHEC/CRCを適用。
+
+NPZにはIQだけでなく、`access_bits`、`header_air_bits`、`sync_bits`、payload各field、`differential_phase_indices`、各segmentのsample indexを格納する。再生成は次で行う。
+
+```powershell
+python -m tools.generate_bluetooth_edr_iq
+```
+
+現行の汎用VSA Pattern Searchで、次のSync phase indexをDecimal指定すると両fixtureとも相関98%以上、0 symbol errorで検出できる。
+
+- 2-DH1: `1 2 1 2 1 2 2 1 1 1`
+- 3-DH1: `3 5 3 5 3 5 5 3 3 3`
+
+Signal DescriptionはSymbol Rate 1 MSym/s、Transmit Filter `Root Raised Cosine`、Alpha 0.4、Result Length 244とする。検出されるPattern Startはsample 34112（2.132 ms）で、EDR reference symbolに続く最初のdifferential symbolを指す。保存fixtureのCFO推定は2-DH1で約+19.5 kHz、3-DH1で約+18.4 kHz。
+
+変調mapping、SRRC、Guard、Sync、TrailerはBluetooth Core SpecificationのBaseband Specification 6.6およびRadio Physical Layer Specification 3.2に従う。合成波形はreceiver開発用であり、Bluetooth RF-PHY conformance test sourceを称するものではない。
+
 ## 解析順序
 
 1. BR/GFSKのAccess Codeを既存復調器で検出し、packet時刻、CFO、symbol timingを得る。
@@ -61,4 +94,3 @@ EDR payloadを現行GFSK decoderが正しく解釈できないこと自体はcap
 - 2-DH系でpi/4-DQPSK symbol列の一部が既知patternと一致する。
 - carrier-corrected constellationとsymbol tableが同じResult Rangeを表す。
 - 推定条件と未確定条件をfixture sidecarおよび本書へ残す。
-
