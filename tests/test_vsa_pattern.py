@@ -13,7 +13,7 @@ from pluto_sa.vsa.pattern import (
     PatternSearchSettings,
     ResultRangeSettings,
 )
-from pluto_sa.vsa.sources import GeneratedIQSource
+from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.profiles.bluetooth_br import access_code_bits
 
@@ -198,6 +198,43 @@ def test_generic_pattern_session_finds_real_pluto_br_capture():
     assert session.pattern_range_result.iq.size > 0
     np.testing.assert_array_equal(
         session.pattern_result.decoded_symbols[: access.size], access
+    )
+
+
+def test_real_pluto_cfo_stays_anchored_to_known_pattern():
+    fixture = Path(__file__).with_name("fixtures") / "bluetooth_br_prbs9_pluto_16msps.npz"
+    recording = FileIQSource.load(fixture)
+    access = access_code_bits(0xC6967E)
+    session = VSASession(
+        recording=recording,
+        signal=SignalDescription(
+            modulation=ModulationKind.GFSK,
+            symbol_rate_hz=1_000_000.0,
+            frequency_deviation_hz=160_000.0,
+            tx_filter="Gaussian",
+            filter_parameter=0.5,
+        ),
+    )
+    session.update_settings(
+        analysis_center_frequency_hz=2_441_000_000.0,
+        analysis_bandwidth_hz=2_000_000.0,
+    )
+    session.configure_pattern_analysis(
+        PatternSearchSettings(
+            pattern=KnownPattern(tuple(map(int, access))),
+            mode=PatternSearchMode.ON,
+        ),
+        ResultRangeSettings(result_length=360),
+    )
+
+    session.analyze()
+
+    # The known access code measures about +20 kHz.  Packet-wide tentative
+    # decisions used to overwrite this with -5.4 kHz and left the corrected
+    # instantaneous-frequency trace visibly above zero.
+    assert session.pattern_result is not None
+    assert session.pattern_result.carrier_frequency_offset_hz == pytest.approx(
+        20_000.0, abs=2_000.0
     )
 
 

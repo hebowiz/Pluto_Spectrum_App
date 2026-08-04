@@ -41,7 +41,7 @@ f_k = CFO + signed_deviation * m_k + drift_per_symbol * k
 - `signed_deviation`: 実測周波数偏移。負の場合はIQ polarity inversionとして扱う。
 - `drift_per_symbol`: 1 symbol当たりのlinear frequency変化。
 
-十分なpacket後続部がある場合は、known patternを固定training dataとし、後続のtentative decisionから最大3回再fitする。
+十分なpacket後続部がある場合は、known patternを固定training dataとし、後続のtentative decisionから最大3回再fitする。このpacket-wide fitはsymbol判定とcoarse drift推定にだけ用いる。Result Summaryへ表示しsample単位補正へ用いるCFOは、送信symbolが確定しているknown pattern単独のfit値に固定する。tentative decisionでCFO基準を上書きしない。
 
 ```text
 drift_hz_per_s = drift_per_symbol * symbol_rate_hz
@@ -109,7 +109,7 @@ Powerは位相回転で変化しないためRaw IQを使用する。CFO、推定
 
 `Demodulation > Compensate for > Carrier Frequency Drift`でsample単位補正へlinear driftを含める。CFO補正はCarrier Corrected表示で常に適用する。
 
-現行drift推定はdecision-directedな一次modelであり、測定確度のcross-validationが未完了である。2026-08-03の固定BR fixtureではCFO約-6.24 kHzに対しdrift約+279 kHz/msが推定され、長いResult Rangeへ外挿すると過補正の可能性がある。このためdrift補正の既定値はOFFとする。推定値はOFFでも表示し、検証可能にする。
+現行drift推定はdecision-directedな一次modelであり、測定確度のcross-validationが未完了である。2026-08-04の固定BR fixture（Analysis BW 2 MHz）では、known pattern単独のCFOは約+20.0 kHzだった一方、旧実装のpacket-wide fitはCFOを-5.37 kHzへ移動させ、Carrier Corrected瞬時周波数に約25 kHzの中心ずれを残していた。現在はCFOをknown patternへ固定し、packet-wide fitからはcoarse driftだけを採用する。長いResult Rangeへのdrift外挿はなお過補正の可能性があるため、drift補正の既定値はOFFとする。推定値はOFFでも表示し、検証可能にする。
 
 ## 6. 制約と次段階
 

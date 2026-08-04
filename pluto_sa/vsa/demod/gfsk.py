@@ -242,6 +242,12 @@ def demodulate_gfsk(
     cfo_hz = float(cfo_hz)
     signed_deviation = float(signed_deviation)
     drift_hz_per_symbol = float(drift_hz_per_symbol)
+    # CFO is a synchronization measurement anchored to the center of the known
+    # pattern.  Keep it separate from the packet-wide, decision-directed model
+    # below: tentative payload decisions can improve slicing and the coarse
+    # drift estimate, but must not move the reported carrier reference away
+    # from the only interval whose transmitted symbols are actually known.
+    pattern_cfo_hz = cfo_hz
     initial_center_frequency = cfo_hz + drift_hz_per_symbol * access_relative_symbols
     initial_polarity = -1.0 if signed_deviation < 0.0 else 1.0
     initial_access_bits = (
@@ -338,7 +344,7 @@ def demodulate_gfsk(
         access_start_sample=access_start_source,
         access_correlation=abs(score),
         access_bit_errors=access_errors,
-        carrier_frequency_offset_hz=cfo_hz,
+        carrier_frequency_offset_hz=pattern_cfo_hz,
         carrier_frequency_drift_hz_per_s=(
             drift_hz_per_symbol * float(symbol_rate_hz)
         ),
