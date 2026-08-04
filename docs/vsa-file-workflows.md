@@ -112,6 +112,33 @@ while the constellation contains differential products between adjacent
 symbols. Their amplitude distributions can therefore still differ slightly,
 but the earlier pre-filter/post-filter mismatch has been removed.
 
+### Normalization difference from R&S FPL1-K70
+
+The current Pluto VSA constellation normalization is an interim implementation,
+not an exact reproduction of R&S processing. After carrier/phase correction it
+divides the selected measured (differential, for DPSK) symbols by their measured
+RMS magnitude, while the ideal PSK alphabet has unit magnitude.
+
+The FPL1-K70 manual rev.12 describes a different full measurement model:
+
+- the physical differential-PSK constellation contains decision points after
+  ISI-free demodulation and is de-rotated for the configured standard (pp.86-88,
+  302);
+- analyzer scaling is optimized to minimize mean-square error-vector magnitude,
+  or to minimize EVM, according to the Demodulation `Optimization` setting
+  (pp.135-136, 222);
+- `Normalize EVM to` independently selects Max/Mean Reference Power or Max/Mean
+  Constellation Power for the EVM denominator (pp.128, 222). This setting is not
+  simply the constellation display scaling.
+
+For constant-envelope, high-SNR PSK the current measured-RMS scale can be
+numerically close to the R&S optimum global scale, but it is not equivalent in
+the presence of noise, gain error, amplitude distortion, filtering mismatch, or
+non-constant-envelope modulation. A future R&S-compatible implementation must
+fit one global complex gain against the reconstructed reference sequence and
+implement `Optimization` and `Normalize EVM to` as separate settings. It must
+not normalize every symbol independently.
+
 For FSK, each demodulated symbol-frequency value `f[k]` is converted to a unit
 phasor using `exp(j * 2*pi*f[k]/symbol_rate)`. The +I axis is zero phase; the
 point angle is the phase accumulated over one symbol. Ideal 2FSK therefore
