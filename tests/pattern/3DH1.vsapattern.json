@@ -1,0 +1,18 @@
+{
+  "schema": "pluto-vsa-pattern",
+  "version": 1,
+  "name": "3DH1",
+  "symbol_format": "Decimal",
+  "symbols": [
+    3,
+    5,
+    3,
+    5,
+    3,
+    5,
+    5,
+    3,
+    3,
+    3
+  ]
+}
