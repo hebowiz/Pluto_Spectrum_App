@@ -166,6 +166,11 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         assert np.median(magnitude) == pytest.approx(1.0, abs=0.03)
         assert np.min(magnitude) > 0.85
         assert np.max(magnitude) < 1.10
+        x_range, y_range = window.modulation_plot.viewRange()
+        assert x_range[0] <= -1.0 and x_range[1] >= 1.0
+        assert y_range[0] <= -1.0 and y_range[1] >= 1.0
+        assert x_range[1] - x_range[0] < 4.0
+        assert y_range[1] - y_range[0] < 4.0
     finally:
         window._meas_config_dialog.close()
         window.close()

@@ -807,6 +807,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.modulation_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
         if signal.modulation.family is ModulationFamily.FSK:
             self.modulation_plot.setTitle("Instantaneous Frequency")
+            self.modulation_plot.getAxis("left").enableAutoSIPrefix(True)
+            self.modulation_plot.getAxis("bottom").enableAutoSIPrefix(True)
             self.modulation_plot.setLabel("left", "Frequency (kHz)")
             self.modulation_plot.setLabel("bottom", "Time (ms)")
             self.modulation_plot.setAspectLocked(False)
@@ -824,6 +826,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             summary = f"Frequency Error: {result.frequency_error_hz or 0.0:.1f} Hz"
         else:
             self.modulation_plot.setTitle("Constellation")
+            self.modulation_plot.getAxis("left").enableAutoSIPrefix(False)
+            self.modulation_plot.getAxis("bottom").enableAutoSIPrefix(False)
             self.modulation_plot.setLabel("left", "Q")
             self.modulation_plot.setLabel("bottom", "I")
             self.modulation_plot.setAspectLocked(True, ratio=1.0)
@@ -840,6 +844,11 @@ class VSAWindow(QtWidgets.QMainWindow):
                 symbolSize=6,
                 symbolBrush=pg.mkBrush("y"),
             )
+            # clear() retains the previous ViewBox range.  Explicitly reset
+            # both axes because an FSK frequency range or an earlier malformed
+            # constellation can otherwise leave all unit-circle symbols offscreen.
+            self.modulation_plot.setXRange(-1.25, 1.25, padding=0.0)
+            self.modulation_plot.setYRange(-1.25, 1.25, padding=0.0)
             summary = f"EVM RMS: {result.evm_rms_percent or 0.0:.4f} %"
         pattern_result = self.session.pattern_result
         symbols = (

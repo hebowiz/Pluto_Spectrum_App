@@ -69,6 +69,8 @@ Signal DescriptionはSymbol Rate 1 MSym/s、Transmit Filter `Root Raised Cosine`
 
 Analysis Bandwidth 1.5 MHzを有効にした2-DH1でも244 symbol error 0、magnitude範囲は概ね0.91～1.06となる。これらのEVM値は同期・表示経路の回帰確認用であり、規格適合値ではない。
 
+さらに、`PlotWidget.clear()`が直前のFSKまたは旧constellationのViewBox rangeを保持するため、unit circle上の正常な点が表示範囲外になる問題を修正した。Constellation更新時はI/Q軸のSI prefixを無効化し、両軸を±1.25へ明示的にresetする。aspect ratio 1:1は維持する。
+
 ## 解析順序
 
 1. BR/GFSKのAccess Codeを既存復調器で検出し、packet時刻、CFO、symbol timingを得る。
