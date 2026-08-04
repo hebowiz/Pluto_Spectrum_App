@@ -332,6 +332,15 @@ def demodulate_gfsk(
     # post-access field is present (a normal packet supplies at least 54 header
     # air bits).
     refinement_iterations = 3 if packet_observed_frequency.size >= pattern.size + 32 else 0
+    if refinement_iterations:
+        # The short access pattern is sufficient for CFO and polarity, but its
+        # linear-drift coefficient is poorly conditioned when the bits mostly
+        # alternate.  Analysis-channel FIR edge transients can then turn a
+        # stationary carrier into a very large apparent drift.  Start the
+        # packet-wide decision-directed fit at zero drift; the longer symbol
+        # range estimates drift on the following iterations.
+        cfo_hz = pattern_cfo_hz
+        drift_hz_per_symbol = 0.0
     for _ in range(refinement_iterations):
         polarity = -1.0 if signed_deviation < 0.0 else 1.0
         estimated_center_frequency = (

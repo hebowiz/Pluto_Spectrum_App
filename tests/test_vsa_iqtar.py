@@ -211,6 +211,49 @@ def test_analysis_bandwidth_preserves_gfsk_symbol_timing() -> None:
     )
 
 
+def test_analysis_bandwidth_preserves_gfsk_phase_difference_plot() -> None:
+    path = Path(__file__).with_name("fixtures") / "rs_sample_gfsk_8msps.iq.tar"
+    recording = FileIQSource.load(path)
+    expected = np.concatenate(
+        (np.array([1, 0] * 8, dtype=np.uint8), _prbs9_bits(240))
+    )
+
+    def analyze(bandwidth_hz: float | None):
+        session = VSASession(
+            recording=recording,
+            signal=SignalDescription(
+                modulation=ModulationKind.GFSK,
+                symbol_rate_hz=1_000_000.0,
+                frequency_deviation_hz=250_000.0,
+                tx_filter="Gaussian",
+                filter_parameter=0.5,
+            ),
+        )
+        session.update_settings(
+            remove_dc=True,
+            analysis_center_frequency_hz=2_441_000_000.0,
+            analysis_bandwidth_hz=bandwidth_hz,
+        )
+        session.configure_pattern_analysis(
+            PatternSearchSettings(
+                pattern=KnownPattern(tuple(map(int, expected[:16]))),
+                mode=PatternSearchMode.ON,
+            ),
+            ResultRangeSettings(result_length=256),
+        )
+        session.analyze()
+        assert session.pattern_result is not None
+        return session.pattern_result
+
+    unfiltered = analyze(None)
+    filtered = analyze(2_000_000.0)
+    unfiltered_phase = np.exp(2j * np.pi * unfiltered.measured_symbols.real / 1_000_000.0)
+    filtered_phase = np.exp(2j * np.pi * filtered.measured_symbols.real / 1_000_000.0)
+
+    assert abs(filtered.carrier_frequency_drift_hz_per_s) < 20_000_000.0
+    assert np.mean(np.abs(filtered_phase - unfiltered_phase)) < 0.08
+
+
 def _prbs9_bits(count: int) -> np.ndarray:
     state = 0x1FF
     bits = np.empty(count, dtype=np.uint8)

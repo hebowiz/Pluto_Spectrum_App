@@ -196,6 +196,8 @@ Rohde & Schwarzの公式[iq-tar File Format Specification](https://scdn.rohde-sc
 
 Analysis BandwidthのFIR適用後は、FSKの交互patternに対して複数のsymbol timing phaseがほぼ同じ正規化相関になる場合がある。正規化相関は振幅を捨てるため、transition付近の小さなtone separationを誤って選び得る。timing recoveryでは最大相関との差が1 percentage point以内の候補を比較し、既知patternへfitしたfrequency separation（eye opening）が最大相関候補より20%以上広い場合に限り、その候補を選ぶ。小さなpulse-shape非対称では従来の最大相関時刻を維持し、channel filterでeyeが明確に閉じた場合だけsymbol centerへ補正する。
 
+また、短い交互patternだけから得たlinear driftはAnalysis Bandwidth FIRのcapture端過渡と強く結合する。誤ったdriftを初回payload decisionへ適用するとdecision-directed fitが自己強化し、瞬時周波数が同じでもFSK Symbol Phase Differenceだけが大きく変形する。patternはCFO、polarity、deviationの初期推定に使うが、十分長いResult Rangeがある場合のpacket-wide drift refinementは0 driftから開始し、全symbolのdecisionを使って再推定する。Symbol Plotとcarrier correctionへ同じ安定した推定値を渡す。
+
 ## 5. Test
 
 VSA unit test:
