@@ -91,6 +91,7 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
 - これらはPattern Searchを基準にしたcoarse synchronizationである。
 - CFO、推定carrier frequency、linear driftをResult Summaryへ表示する。
 - `Display Config > Carrier Display`で`Raw IQ`と`Carrier Corrected`を切り替える。補正表示ではsample単位の位相補正後IQからInstantaneous FrequencyとResult Range Spectrumを再計算する。既定はCarrier Corrected。
+- `Display Config > Show Symbol Points`をONにすると、IQ PowerとModulationのtrace上へ復調symbol中心位置を明るい緑の点で重ねる。FSKではtime/frequency座標、PSKではIQ軌跡座標を使用する。既定はOFF。
 - Carrier Frequency Drift補正はDemodulation設定から切り替えられるが、実測cross-validation未完了のため既定OFF。CFO補正はCarrier Corrected表示で常に適用する。
 - R&S相当のFine Synchronization、残留CFO評価、estimator confidenceは未実装。
 

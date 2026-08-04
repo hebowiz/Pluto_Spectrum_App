@@ -106,6 +106,12 @@ class VSAWindow(QtWidgets.QMainWindow):
 
         display_menu = self.menuBar().addMenu("Display Config")
         self._display_menu = display_menu
+        self.symbol_display_action = QtGui.QAction(
+            "Show Symbol Points", self, checkable=True
+        )
+        self.symbol_display_action.setChecked(False)
+        self.symbol_display_action.triggered.connect(self._refresh_display_only)
+        display_menu.addAction(self.symbol_display_action)
         display_menu.addSeparator()
         carrier_menu = display_menu.addMenu("Carrier Display")
         self.raw_carrier_action = QtGui.QAction("Raw IQ", self, checkable=True)
@@ -1153,6 +1159,20 @@ class VSAWindow(QtWidgets.QMainWindow):
             result.power_dbm[capture_slice],
             pen=pg.mkPen("y", width=1),
         )
+        symbol_times_s = (
+            self.session.pattern_result.symbol_time_s
+            if self.session.pattern_result is not None
+            else result.symbol_time_s
+        )
+        if self.symbol_display_action.isChecked() and symbol_times_s.size:
+            symbol_power_dbm = np.interp(
+                symbol_times_s, result.time_s, result.power_dbm
+            )
+            self._plot_symbol_points(
+                self.zero_span_plot,
+                symbol_times_s * 1e3,
+                symbol_power_dbm,
+            )
         self._add_pattern_range_overlay(self.zero_span_plot)
         self.spectrum_plot.clear()
         spectrum_result = (
@@ -1210,6 +1230,17 @@ class VSAWindow(QtWidgets.QMainWindow):
                 display_result.instantaneous_frequency_hz[capture_slice] / 1e3,
                 pen=pg.mkPen("m", width=1),
             )
+            if self.symbol_display_action.isChecked() and symbol_times_s.size:
+                symbol_frequency_khz = np.interp(
+                    symbol_times_s,
+                    display_result.time_s,
+                    display_result.instantaneous_frequency_hz,
+                ) / 1e3
+                self._plot_symbol_points(
+                    self.modulation_plot,
+                    symbol_times_s * 1e3,
+                    symbol_frequency_khz,
+                )
             if signal.frequency_deviation_hz is not None:
                 y_limit_khz = 1.5 * signal.frequency_deviation_hz / 1e3
                 self.modulation_plot.setYRange(
@@ -1283,6 +1314,23 @@ class VSAWindow(QtWidgets.QMainWindow):
                 trajectory_iq.imag,
                 pen=pg.mkPen((255, 210, 40, 170), width=1),
             )
+            if self.symbol_display_action.isChecked() and symbol_times_s.size:
+                symbol_iq = np.interp(
+                    symbol_times_s,
+                    display_result.time_s,
+                    np.real(display_result.iq),
+                ) + 1j * np.interp(
+                    symbol_times_s,
+                    display_result.time_s,
+                    np.imag(display_result.iq),
+                )
+                if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
+                    symbol_iq = symbol_iq / trajectory_rms
+                self._plot_symbol_points(
+                    self.modulation_plot,
+                    symbol_iq.real,
+                    symbol_iq.imag,
+                )
             trajectory_limit = (
                 max(
                     1.25,
@@ -1406,6 +1454,21 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.symbol_table.setItem(index // 10, index % 10, item)
         self.symbol_table.setToolTip(
             f"Showing {shown.size} of {symbols.size} result-range symbols"
+        )
+
+    @staticmethod
+    def _plot_symbol_points(
+        plot: pg.PlotWidget, x_values: np.ndarray, y_values: np.ndarray
+    ) -> None:
+        selection = _decimation_indices(len(x_values), maximum=20_000)
+        plot.plot(
+            np.asarray(x_values)[selection],
+            np.asarray(y_values)[selection],
+            pen=None,
+            symbol="o",
+            symbolSize=7,
+            symbolBrush=pg.mkBrush(70, 255, 145, 230),
+            symbolPen=pg.mkPen(10, 35, 20, 230, width=1),
         )
 
     def _set_result_summary(self, rows: tuple[tuple[str, str], ...]) -> None:

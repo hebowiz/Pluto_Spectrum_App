@@ -110,6 +110,21 @@ point angle is the phase accumulated over one symbol. Ideal 2FSK therefore
 forms two clusters at the positive and negative deviation angles. A unit-circle
 guide is drawn behind the measured points.
 
+## Symbol-position overlay
+
+`Display Config > Show Symbol Points` is an independent display-only toggle and
+defaults to off. When enabled, bright green circular markers distinguish symbol
+centres from the yellow Power/IQ traces and the magenta FSK trace.
+
+- IQ Power: interpolate dBm at each decoded symbol-centre time.
+- FSK Modulation: interpolate instantaneous frequency at each symbol centre.
+- PSK Modulation: interpolate complex IQ at each symbol centre and apply the
+  same RMS normalization as the displayed IQ trajectory.
+
+With a successful Pattern Search, the markers cover the current Result Range;
+otherwise they cover the symbol decisions from the normal analysis result.
+Rendering is capped at 20,000 markers and does not alter DSP data or results.
+
 ## Tests
 
 `tests/test_vsa_persistence.py` covers versioned JSON round trips and schema

@@ -52,6 +52,19 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
             result.result_stop_time_s * 1e3 + 0.1 * duration_ms,
         ]
         assert window.zero_span_plot.viewRange()[0] == pytest.approx(expected_x)
+        assert not window.symbol_display_action.isChecked()
+        assert len(window.zero_span_plot.listDataItems()) == 1
+        assert len(window.modulation_plot.listDataItems()) == 1
+        window.symbol_display_action.trigger()
+        assert window.symbol_display_action.isChecked()
+        assert len(window.zero_span_plot.listDataItems()) == 2
+        assert len(window.modulation_plot.listDataItems()) == 2
+        power_marker = window.zero_span_plot.listDataItems()[1]
+        marker_time_ms, marker_power_dbm = power_marker.getData()
+        assert marker_time_ms.size == marker_power_dbm.size == 64
+        marker_color = power_marker.opts["symbolBrush"].color()
+        assert marker_color.green() > marker_color.red()
+        assert marker_color.green() > marker_color.blue()
         assert window._meas_config_dialog.isModal()
         assert window._meas_config_dialog.windowModality() != (
             QtCore.Qt.WindowModality.NonModal
@@ -214,6 +227,12 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         assert y_range[0] <= -1.0 and y_range[1] >= 1.0
         assert x_range[1] - x_range[0] < 4.0
         assert y_range[1] - y_range[0] < 4.0
+
+        window.symbol_display_action.trigger()
+        trajectory_items = window.modulation_plot.listDataItems()
+        assert len(trajectory_items) == 2
+        marker_i, marker_q = trajectory_items[1].getData()
+        assert marker_i.size == marker_q.size == 244
     finally:
         window._meas_config_dialog.close()
         window.close()
