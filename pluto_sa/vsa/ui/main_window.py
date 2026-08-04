@@ -156,7 +156,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.result_summary.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.NoSelection
         )
-        self.result_summary.setAlternatingRowColors(True)
+        self.result_summary.setAlternatingRowColors(False)
         self.result_summary.horizontalHeader().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Stretch
         )
@@ -194,7 +194,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems
         )
-        self.symbol_table.setAlternatingRowColors(True)
+        self.symbol_table.setAlternatingRowColors(False)
         self.symbol_table.horizontalHeader().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Stretch
         )

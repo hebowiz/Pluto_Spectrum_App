@@ -24,6 +24,8 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         window._analyze()
 
         assert isinstance(window.symbol_table, QtWidgets.QTableWidget)
+        assert not window.symbol_table.alternatingRowColors()
+        assert not window.result_summary.alternatingRowColors()
         assert window.symbol_table.columnCount() == 10
         assert window.symbol_table.rowCount() == 7
         assert window.symbol_table.item(0, 0).text() == str(int(expected[20]))
