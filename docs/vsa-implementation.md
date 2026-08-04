@@ -194,6 +194,8 @@ Rohde & Schwarzの公式[iq-tar File Format Specification](https://scdn.rohde-sc
 
 手動確認用fixtureは`tests/fixtures/rs_sample_gfsk_8msps.iq.tar`。中心周波数2441 MHz、sample rate 8 MS/s、symbol rate 1 Msym/s、deviation 250 kHz、BT 0.5のdeterministic GFSKで、先頭16 symbolsは`1010...`、以降240 symbolsはPRBS9とする。`tools/generate_rs_iqtar_fixture.py`で同一内容を再生成できる。
 
+Analysis BandwidthのFIR適用後は、FSKの交互patternに対して複数のsymbol timing phaseがほぼ同じ正規化相関になる場合がある。正規化相関は振幅を捨てるため、transition付近の小さなtone separationを誤って選び得る。timing recoveryでは最大相関との差が1 percentage point以内の候補を比較し、既知patternへfitしたfrequency separation（eye opening）が最大相関候補より20%以上広い場合に限り、その候補を選ぶ。小さなpulse-shape非対称では従来の最大相関時刻を維持し、channel filterでeyeが明確に閉じた場合だけsymbol centerへ補正する。
+
 ## 5. Test
 
 VSA unit test:

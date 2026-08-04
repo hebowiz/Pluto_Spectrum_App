@@ -7,6 +7,14 @@ import tarfile
 import numpy as np
 import pytest
 
+from pluto_sa.vsa.model import ModulationKind, SignalDescription
+from pluto_sa.vsa.pattern import (
+    KnownPattern,
+    PatternSearchMode,
+    PatternSearchSettings,
+    ResultRangeSettings,
+)
+from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource
 
 
@@ -162,3 +170,52 @@ def test_committed_rs_iq_tar_sample_is_loadable() -> None:
     assert recording.metadata["iq_tar_format"] == "complex"
     assert recording.metadata["iq_tar_data_type"] == "float32"
     np.testing.assert_allclose(np.abs(recording.iq), 0.1, atol=1e-6)
+
+
+def test_analysis_bandwidth_preserves_gfsk_symbol_timing() -> None:
+    path = Path(__file__).with_name("fixtures") / "rs_sample_gfsk_8msps.iq.tar"
+    recording = FileIQSource.load(path)
+    expected = np.concatenate(
+        (np.array([1, 0] * 8, dtype=np.uint8), _prbs9_bits(240))
+    )
+    session = VSASession(
+        recording=recording,
+        signal=SignalDescription(
+            modulation=ModulationKind.GFSK,
+            symbol_rate_hz=1_000_000.0,
+            frequency_deviation_hz=250_000.0,
+            tx_filter="Gaussian",
+            filter_parameter=0.5,
+        ),
+    )
+    session.update_settings(
+        remove_dc=True,
+        analysis_center_frequency_hz=2_441_000_000.0,
+        analysis_bandwidth_hz=2_000_000.0,
+    )
+    session.configure_pattern_analysis(
+        PatternSearchSettings(
+            pattern=KnownPattern(tuple(map(int, expected[:16]))),
+            mode=PatternSearchMode.ON,
+        ),
+        ResultRangeSettings(result_length=200),
+    )
+
+    session.analyze()
+
+    assert session.pattern_result is not None
+    assert session.pattern_result.timing_phase_samples == 0
+    np.testing.assert_array_equal(
+        session.pattern_result.decoded_symbols,
+        expected[:200],
+    )
+
+
+def _prbs9_bits(count: int) -> np.ndarray:
+    state = 0x1FF
+    bits = np.empty(count, dtype=np.uint8)
+    for index in range(count):
+        bits[index] = state & 1
+        feedback = ((state >> 0) ^ (state >> 4)) & 1
+        state = (state >> 1) | (feedback << 8)
+    return bits

@@ -210,7 +210,9 @@ def demodulate_gfsk(
         mode="nearest",
     )
 
-    best: tuple[float, int, int, np.ndarray] | None = None
+    candidates: list[tuple[float, float, int, int, np.ndarray]] = []
+    centered_expected = expected_levels - np.mean(expected_levels)
+    expected_energy = float(np.sum(centered_expected**2))
     for phase in range(int(analysis_samples_per_symbol)):
         values = _symbol_values(frequency_hz, phase, int(analysis_samples_per_symbol))
         scores = _normalized_sliding_correlation(values, expected_levels)
@@ -218,15 +220,60 @@ def demodulate_gfsk(
             continue
         index = int(np.argmax(np.abs(scores)))
         score = float(scores[index])
-        if best is None or abs(score) > abs(best[0]):
-            best = (score, phase, index, values)
-    if best is None or abs(best[0]) < float(minimum_correlation):
-        observed = 0.0 if best is None else abs(best[0])
+        matched_values = values[index : index + pattern.size]
+        # Normalized correlation deliberately ignores amplitude.  With an
+        # alternating FSK pattern this makes samples near a transition look
+        # almost as good as samples at the eye centre, especially after a
+        # narrow analysis filter.  Measure the fitted tone separation as a
+        # second timing metric so equivalent correlations choose the open eye.
+        eye_opening_hz = abs(
+            float(
+                np.dot(
+                    matched_values - np.mean(matched_values),
+                    centered_expected,
+                )
+                / max(expected_energy, np.finfo(np.float64).tiny)
+            )
+        )
+        candidates.append((score, eye_opening_hz, phase, index, values))
+    if not candidates:
+        observed = 0.0
+        raise ValueError(
+            f"access pattern was not found (correlation={observed:.3f})"
+        )
+    strongest_correlation = max(abs(candidate[0]) for candidate in candidates)
+    if strongest_correlation < float(minimum_correlation):
+        observed = strongest_correlation
         raise ValueError(
             f"access pattern was not found (correlation={observed:.3f})"
         )
 
-    score, phase, access_index, all_symbol_frequency = best
+    # Correlations within one percentage point are indistinguishable for
+    # coarse timing.  Select the candidate with the largest fitted frequency
+    # separation, then prefer the stronger correlation and earlier phase.
+    strongest_candidate = max(
+        candidates,
+        key=lambda candidate: (abs(candidate[0]), candidate[1], -candidate[2]),
+    )
+    timing_candidates = [
+        candidate
+        for candidate in candidates
+        if abs(candidate[0]) >= strongest_correlation - 0.01
+    ]
+    widest_eye_candidate = max(
+        timing_candidates,
+        key=lambda candidate: (candidate[1], abs(candidate[0]), -candidate[2]),
+    )
+    # Preserve the maximum-correlation timing unless its eye is materially
+    # closed.  Small opening differences are normal pulse-shape asymmetry and
+    # must not move an otherwise well-defined packet timestamp.
+    best = (
+        widest_eye_candidate
+        if widest_eye_candidate[1] >= strongest_candidate[1] * 1.2
+        else strongest_candidate
+    )
+
+    score, _, phase, access_index, all_symbol_frequency = best
     access_frequency = all_symbol_frequency[
         access_index : access_index + pattern.size
     ]
