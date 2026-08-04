@@ -35,6 +35,12 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         assert window.symbol_table.item(0, 0).textAlignment() == int(
             QtCore.Qt.AlignmentFlag.AlignCenter
         )
+        green_cells = [
+            window.symbol_table.item(index // 10, index % 10)
+            for index in range(window.session.pattern_result.decoded_symbols.size)
+            if window.symbol_table.item(index // 10, index % 10).background().color().green() > 80
+        ]
+        assert len(green_cells) == 32
         assert window.modulation_plot.viewRange()[1] == pytest.approx([-375.0, 375.0])
         assert window.zero_span_plot.viewRange()[0] == pytest.approx(
             window.modulation_plot.viewRange()[0]
@@ -89,6 +95,12 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
             window.symbol_dock,
         )
         assert all(isinstance(dock, QtWidgets.QDockWidget) for dock in docks)
+        assert window.reserved_dock.windowTitle() == "IQ Trajectory"
+        trajectory_items = window.iq_trajectory_plot.listDataItems()
+        assert len(trajectory_items) == 1
+        trajectory_i, trajectory_q = trajectory_items[0].getData()
+        assert trajectory_i.size == trajectory_q.size
+        assert trajectory_i.size > 0
         assert window.centralWidget() is None
         assert not (
             window.dockOptions()
@@ -211,3 +223,40 @@ def test_constellation_display_rotation_is_qpsk_family_only() -> None:
         d8psk,
         atol=1e-12,
     )
+
+
+def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> None:
+    pg.mkQApp("VSA config UI test")
+    preferences = QtCore.QSettings(
+        str(tmp_path / "preferences.ini"), QtCore.QSettings.Format.IniFormat
+    )
+    window = VSAWindow(preferences=preferences)
+    try:
+        window.pattern_format_combo.setCurrentText("Decimal")
+        window._set_pattern_symbols([0, 1, 1, 0, 1, 0])
+        window.pattern_name_edit.setText("Saved Pattern")
+        window.result_length_spin.setValue(73)
+        window.bit_order_combo.setCurrentText("LSB")
+        saved = window._meas_config_values()
+
+        window._set_pattern_symbols([1, 1, 1, 1])
+        window.result_length_spin.setValue(12)
+        window.bit_order_combo.setCurrentText("MSB")
+        window._apply_meas_config_values(saved)
+
+        assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
+        assert window.pattern_name_edit.text() == "Saved Pattern"
+        assert window.result_length_spin.value() == 73
+        assert window.bit_order_combo.currentText() == "LSB"
+        assert window.pattern_symbol_table.item(0, 1).text() == "1"
+
+        iq_path = tmp_path / "captures" / "sample.npz"
+        iq_path.parent.mkdir()
+        window._remember_directory("iq", iq_path)
+        assert window._last_directory("iq") == str(iq_path.parent.resolve())
+        assert window._last_directory("pattern") == ""
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()

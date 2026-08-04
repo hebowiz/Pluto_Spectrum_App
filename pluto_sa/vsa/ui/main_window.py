@@ -20,6 +20,12 @@ from pluto_sa.vsa.pattern import (
     ResultRangeSettings,
     SynchronizationSource,
 )
+from pluto_sa.vsa.persistence import (
+    load_meas_config,
+    load_pattern,
+    save_meas_config,
+    save_pattern,
+)
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
@@ -58,9 +64,16 @@ def _constellation_display_symbols(
 class VSAWindow(QtWidgets.QMainWindow):
     """One VSA measurement session with detachable result windows."""
 
-    def __init__(self, session: VSASession | None = None) -> None:
+    def __init__(
+        self,
+        session: VSASession | None = None,
+        preferences: QtCore.QSettings | None = None,
+    ) -> None:
         super().__init__()
         self.session = session or VSASession()
+        self._preferences = preferences or QtCore.QSettings("PlutoSA", "PlutoVSA")
+        self._updating_pattern_table = False
+        self._pattern_values: list[int] = []
         self.setWindowTitle("Pluto VSA - Offline FSK / PSK")
         self.resize(1600, 960)
         self.setDockOptions(
@@ -113,6 +126,13 @@ class VSAWindow(QtWidgets.QMainWindow):
         open_config_action.setShortcut("Ctrl+M")
         open_config_action.triggered.connect(self._open_meas_config)
         meas_config_menu.addAction(open_config_action)
+        meas_config_menu.addSeparator()
+        load_config_action = QtGui.QAction("Load Meas Config...", self)
+        load_config_action.triggered.connect(self._load_meas_config_file)
+        meas_config_menu.addAction(load_config_action)
+        save_config_action = QtGui.QAction("Save Meas Config As...", self)
+        save_config_action.triggered.connect(self._save_meas_config_file)
+        meas_config_menu.addAction(save_config_action)
 
     def _build_summary_bar(self) -> None:
         toolbar = QtWidgets.QToolBar("Session Summary", self)
@@ -194,8 +214,13 @@ class VSAWindow(QtWidgets.QMainWindow):
             QtCore.Qt.Orientation.Vertical,
         )
 
-        self.reserved_widget = QtWidgets.QWidget()
-        self.reserved_dock = self._dock("Reserved", self.reserved_widget)
+        self.iq_trajectory_plot = self._make_plot("IQ Trajectory", "Q", "I")
+        # I is not monotonic, so the time-series clipping/downsampling policy
+        # used by the other plots does not apply to an IQ-plane path.
+        self.iq_trajectory_plot.setDownsampling(auto=False)
+        self.iq_trajectory_plot.setClipToView(False)
+        self.iq_trajectory_plot.setAspectLocked(True, ratio=1.0)
+        self.reserved_dock = self._dock("IQ Trajectory", self.iq_trajectory_plot)
         self.splitDockWidget(
             self.spectrum_dock,
             self.reserved_dock,
@@ -323,12 +348,43 @@ class VSAWindow(QtWidgets.QMainWindow):
         config_pages.append(("Signal Description", signal_page))
 
         pattern_page = QtWidgets.QWidget()
-        pattern_form = QtWidgets.QFormLayout(pattern_page)
+        pattern_layout = QtWidgets.QVBoxLayout(pattern_page)
+        pattern_form = QtWidgets.QFormLayout()
         self.pattern_search_check = QtWidgets.QCheckBox("Pattern Search On")
         self.pattern_name_edit = QtWidgets.QLineEdit("Known Pattern")
         self.pattern_format_combo = QtWidgets.QComboBox()
         self.pattern_format_combo.addItems(("Binary", "Decimal", "Hexadecimal"))
+        # Kept as a compatibility input for callers that previously populated
+        # the one-line editor. The visible editor is now pattern_symbol_table.
         self.pattern_symbols_edit = QtWidgets.QLineEdit("01010101")
+        self.pattern_symbols_edit.setVisible(False)
+        self.pattern_symbol_table = QtWidgets.QTableWidget(1, 10)
+        self.pattern_symbol_table.setHorizontalHeaderLabels(
+            [str(index) for index in range(10)]
+        )
+        self.pattern_symbol_table.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.pattern_symbol_table.verticalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.pattern_symbol_table.setMinimumHeight(190)
+        pattern_table_buttons = QtWidgets.QHBoxLayout()
+        add_pattern_row = QtWidgets.QPushButton("Add Row")
+        remove_pattern_row = QtWidgets.QPushButton("Remove Last Row")
+        load_pattern_button = QtWidgets.QPushButton("Load Pattern...")
+        save_pattern_button = QtWidgets.QPushButton("Save Pattern As...")
+        add_pattern_row.clicked.connect(self._add_pattern_row)
+        remove_pattern_row.clicked.connect(self._remove_pattern_row)
+        load_pattern_button.clicked.connect(self._load_pattern_file)
+        save_pattern_button.clicked.connect(self._save_pattern_file)
+        for button in (
+            add_pattern_row,
+            remove_pattern_row,
+            load_pattern_button,
+            save_pattern_button,
+        ):
+            pattern_table_buttons.addWidget(button)
         self.pattern_threshold_auto = QtWidgets.QCheckBox("Auto (90%)")
         self.pattern_threshold_auto.setChecked(True)
         self.pattern_threshold_spin = QtWidgets.QDoubleSpinBox()
@@ -343,13 +399,26 @@ class VSAWindow(QtWidgets.QMainWindow):
         pattern_form.addRow(self.pattern_search_check)
         pattern_form.addRow("Name", self.pattern_name_edit)
         pattern_form.addRow("Symbol Format", self.pattern_format_combo)
-        pattern_form.addRow("Symbols", self.pattern_symbols_edit)
         pattern_form.addRow("I/Q Correlation Threshold", self.pattern_threshold_spin)
         pattern_form.addRow(self.pattern_threshold_auto)
         pattern_form.addRow(self.pattern_meas_only_check)
+        pattern_layout.addLayout(pattern_form)
+        pattern_layout.addWidget(QtWidgets.QLabel("Pattern Symbols"))
+        pattern_layout.addWidget(self.pattern_symbol_table, 1)
+        pattern_layout.addLayout(pattern_table_buttons)
         self.pattern_threshold_auto.toggled.connect(
             lambda checked: self.pattern_threshold_spin.setEnabled(not checked)
         )
+        self.pattern_format_combo.currentTextChanged.connect(
+            self._refresh_pattern_table_format
+        )
+        self.pattern_symbols_edit.textChanged.connect(
+            self._load_pattern_compatibility_text
+        )
+        self.pattern_symbol_table.cellChanged.connect(
+            self._pattern_table_cell_changed
+        )
+        self._load_pattern_compatibility_text(self.pattern_symbols_edit.text())
         config_pages.append(("Pattern Search", pattern_page))
 
         range_page = QtWidgets.QWidget()
@@ -475,8 +544,22 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         dialog_layout.addWidget(self._config_stack, 1)
         close_buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Close
+            QtWidgets.QDialogButtonBox.StandardButton.Save
+            | QtWidgets.QDialogButtonBox.StandardButton.Open
+            | QtWidgets.QDialogButtonBox.StandardButton.Close
         )
+        close_buttons.button(
+            QtWidgets.QDialogButtonBox.StandardButton.Save
+        ).setText("Save Config As...")
+        close_buttons.button(
+            QtWidgets.QDialogButtonBox.StandardButton.Open
+        ).setText("Load Config...")
+        close_buttons.button(
+            QtWidgets.QDialogButtonBox.StandardButton.Save
+        ).clicked.connect(self._save_meas_config_file)
+        close_buttons.button(
+            QtWidgets.QDialogButtonBox.StandardButton.Open
+        ).clicked.connect(self._load_meas_config_file)
         close_buttons.rejected.connect(self._meas_config_dialog.reject)
         dialog_layout.addWidget(close_buttons)
         self._show_config_page(0)
@@ -502,6 +585,305 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._show_config_page(0)
         self._meas_config_dialog.exec()
 
+    def _last_directory(self, file_kind: str) -> str:
+        stored = self._preferences.value(f"directories/{file_kind}", "", type=str)
+        return stored if stored and Path(stored).is_dir() else ""
+
+    def _remember_directory(self, file_kind: str, path: str | Path) -> None:
+        directory = str(Path(path).resolve().parent)
+        self._preferences.setValue(f"directories/{file_kind}", directory)
+        self._preferences.sync()
+
+    @staticmethod
+    def _with_suffix(path: str, suffix: str) -> str:
+        candidate = Path(path)
+        return str(candidate if candidate.suffix else candidate.with_suffix(suffix))
+
+    def _format_pattern_symbol(self, symbol: int) -> str:
+        symbol_format = self.pattern_format_combo.currentText()
+        if symbol_format == "Binary":
+            width = int(round(np.log2(self._selected_modulation().order)))
+            return format(int(symbol), f"0{width}b")
+        if symbol_format == "Hexadecimal":
+            return format(int(symbol), "X")
+        return str(int(symbol))
+
+    def _set_pattern_symbols(self, symbols: list[int] | tuple[int, ...]) -> None:
+        self._pattern_values = [int(symbol) for symbol in symbols]
+        row_count = max(1, int(np.ceil(len(self._pattern_values) / 10.0)))
+        self._updating_pattern_table = True
+        try:
+            self.pattern_symbol_table.clearContents()
+            self.pattern_symbol_table.setRowCount(row_count)
+            self.pattern_symbol_table.setVerticalHeaderLabels(
+                [str(row * 10) for row in range(row_count)]
+            )
+            for index, symbol in enumerate(self._pattern_values):
+                item = QtWidgets.QTableWidgetItem(
+                    self._format_pattern_symbol(symbol)
+                )
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                self.pattern_symbol_table.setItem(index // 10, index % 10, item)
+        finally:
+            self._updating_pattern_table = False
+
+    def _pattern_symbols_from_table(self, order: int) -> tuple[int, ...]:
+        values: list[int] = []
+        found_empty = False
+        symbol_format = self.pattern_format_combo.currentText()
+        base = 2 if symbol_format == "Binary" else (16 if symbol_format == "Hexadecimal" else 10)
+        for index in range(self.pattern_symbol_table.rowCount() * 10):
+            item = self.pattern_symbol_table.item(index // 10, index % 10)
+            text = "" if item is None else item.text().strip()
+            if not text:
+                found_empty = True
+                continue
+            if found_empty:
+                raise ValueError("Pattern Symbol table may only have empty cells at the end")
+            try:
+                value = int(text, base)
+            except ValueError as error:
+                raise ValueError(
+                    f"Invalid {symbol_format} symbol at index {index}: {text!r}"
+                ) from error
+            if value < 0 or value >= order:
+                raise ValueError(f"Pattern symbol must be between 0 and {order - 1}")
+            values.append(value)
+        if len(values) < 4:
+            raise ValueError("known pattern must contain at least four symbols")
+        return tuple(values)
+
+    def _pattern_table_cell_changed(self, _row: int, _column: int) -> None:
+        if self._updating_pattern_table:
+            return
+        try:
+            self._pattern_values = list(
+                self._pattern_symbols_from_table(self._selected_modulation().order)
+            )
+        except ValueError:
+            # Keep the user's in-progress edit visible. Validation is reported
+            # on save or analysis rather than interrupting every keystroke.
+            pass
+
+    def _refresh_pattern_table_format(self, _value: str = "") -> None:
+        self._set_pattern_symbols(self._pattern_values)
+
+    def _load_pattern_compatibility_text(self, text: str) -> None:
+        if self._updating_pattern_table or not text.strip():
+            return
+        try:
+            symbol_format = self.pattern_format_combo.currentText()
+            if symbol_format == "Binary":
+                compact = "".join(text.replace(",", " ").split())
+                width = int(round(np.log2(self._selected_modulation().order)))
+                if any(character not in "01" for character in compact) or len(compact) % width:
+                    return
+                values = [
+                    int(compact[index : index + width], 2)
+                    for index in range(0, len(compact), width)
+                ]
+            else:
+                base = 16 if symbol_format == "Hexadecimal" else 10
+                values = [int(token, base) for token in text.replace(",", " ").split()]
+            if values:
+                self._set_pattern_symbols(values)
+        except ValueError:
+            pass
+
+    def _add_pattern_row(self) -> None:
+        row = self.pattern_symbol_table.rowCount()
+        self.pattern_symbol_table.insertRow(row)
+        self.pattern_symbol_table.setVerticalHeaderItem(
+            row, QtWidgets.QTableWidgetItem(str(row * 10))
+        )
+
+    def _remove_pattern_row(self) -> None:
+        if self.pattern_symbol_table.rowCount() > 1:
+            self.pattern_symbol_table.removeRow(
+                self.pattern_symbol_table.rowCount() - 1
+            )
+            self._pattern_table_cell_changed(0, 0)
+
+    def _save_pattern_file(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Known Pattern",
+            self._last_directory("pattern"),
+            "VSA pattern (*.vsapattern.json);;JSON files (*.json)",
+        )
+        if not path:
+            return
+        path = self._with_suffix(path, ".vsapattern.json")
+        try:
+            save_pattern(
+                path,
+                name=self.pattern_name_edit.text(),
+                symbols=self._pattern_symbols_from_table(
+                    self._selected_modulation().order
+                ),
+                symbol_format=self.pattern_format_combo.currentText(),
+            )
+            self._remember_directory("pattern", path)
+            self.statusBar().showMessage(f"Pattern saved - {Path(path).name}")
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Pattern Save Error", str(error))
+
+    def _load_pattern_file(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load Known Pattern",
+            self._last_directory("pattern"),
+            "VSA pattern (*.vsapattern.json *.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            document = load_pattern(path)
+            order = self._selected_modulation().order
+            if any(int(symbol) >= order for symbol in document["symbols"]):
+                raise ValueError(
+                    f"pattern contains symbols outside the current modulation order {order}"
+                )
+            self.pattern_name_edit.setText(document["name"])
+            self.pattern_format_combo.setCurrentText(document["symbol_format"])
+            self._set_pattern_symbols(document["symbols"])
+            self._remember_directory("pattern", path)
+            self.statusBar().showMessage(f"Pattern loaded - {Path(path).name}")
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Pattern Load Error", str(error))
+
+    def _meas_config_values(self) -> dict[str, object]:
+        return {
+            "input_frontend": {
+                "analysis_channel_enabled": self.channel_filter_check.isChecked(),
+                "analysis_center_mhz": self.analysis_center_spin.value(),
+                "analysis_bandwidth_mhz": self.analysis_bandwidth_spin.value(),
+            },
+            "signal_description": {
+                "modulation": self._selected_modulation().value,
+                "symbol_rate_hz": self.symbol_rate_spin.value(),
+                "frequency_deviation_hz": self.deviation_spin.value(),
+                "symbol_mapping": self.mapping_combo.currentText(),
+                "tx_filter": self.tx_filter_combo.currentText(),
+                "filter_parameter": self.filter_parameter_spin.value(),
+            },
+            "pattern_search": {
+                "enabled": self.pattern_search_check.isChecked(),
+                "name": self.pattern_name_edit.text(),
+                "symbol_format": self.pattern_format_combo.currentText(),
+                "symbols": list(
+                    self._pattern_symbols_from_table(
+                        self._selected_modulation().order
+                    )
+                ),
+                "threshold_auto": self.pattern_threshold_auto.isChecked(),
+                "threshold_percent": self.pattern_threshold_spin.value(),
+                "meas_only_if_correct": self.pattern_meas_only_check.isChecked(),
+            },
+            "result_range": {
+                "length_symbols": self.result_length_spin.value(),
+                "reference": self.result_reference_combo.currentText(),
+                "alignment": self.result_alignment_combo.currentText(),
+                "offset_symbols": self.result_offset_spin.value(),
+                "symbol_number_at_pattern_start": self.reference_symbol_number_spin.value(),
+            },
+            "demodulation": {
+                "coarse_synchronization": self.coarse_sync_combo.currentText(),
+                "fine_synchronization": self.fine_sync_combo.currentText(),
+                "bit_ordering": self.bit_order_combo.currentText(),
+                "compensate_carrier_frequency_drift": self.compensate_drift_check.isChecked(),
+                "compensate_fsk_deviation_error": self.compensate_deviation_check.isChecked(),
+            },
+        }
+
+    @staticmethod
+    def _set_combo_text(combo: QtWidgets.QComboBox, value: object, name: str) -> None:
+        index = combo.findText(str(value))
+        if index < 0:
+            raise ValueError(f"unsupported {name}: {value!r}")
+        combo.setCurrentIndex(index)
+
+    def _apply_meas_config_values(self, settings: dict[str, object]) -> None:
+        try:
+            source = settings["input_frontend"]
+            signal = settings["signal_description"]
+            pattern = settings["pattern_search"]
+            result_range = settings["result_range"]
+            demodulation = settings["demodulation"]
+            if not all(isinstance(section, dict) for section in (
+                source, signal, pattern, result_range, demodulation
+            )):
+                raise TypeError("configuration sections must be objects")
+            self._set_combo_text(self.modulation_combo, signal["modulation"], "modulation")
+            self.symbol_rate_spin.setValue(float(signal["symbol_rate_hz"]))
+            self.deviation_spin.setValue(float(signal["frequency_deviation_hz"]))
+            self._set_combo_text(self.mapping_combo, signal["symbol_mapping"], "symbol mapping")
+            self._set_combo_text(self.tx_filter_combo, signal["tx_filter"], "TX filter")
+            self.filter_parameter_spin.setValue(float(signal["filter_parameter"]))
+            self.channel_filter_check.setChecked(bool(source["analysis_channel_enabled"]))
+            self.analysis_center_spin.setValue(float(source["analysis_center_mhz"]))
+            self.analysis_bandwidth_spin.setValue(float(source["analysis_bandwidth_mhz"]))
+            self.pattern_search_check.setChecked(bool(pattern["enabled"]))
+            self.pattern_name_edit.setText(str(pattern["name"]))
+            self._set_combo_text(self.pattern_format_combo, pattern["symbol_format"], "symbol format")
+            pattern_symbols = pattern["symbols"]
+            if not isinstance(pattern_symbols, list):
+                raise TypeError("pattern symbols must be an array")
+            self._set_pattern_symbols([int(value) for value in pattern_symbols])
+            self.pattern_threshold_auto.setChecked(bool(pattern["threshold_auto"]))
+            self.pattern_threshold_spin.setValue(float(pattern["threshold_percent"]))
+            self.pattern_meas_only_check.setChecked(bool(pattern["meas_only_if_correct"]))
+            self.result_length_spin.setValue(int(result_range["length_symbols"]))
+            self._set_combo_text(self.result_reference_combo, result_range["reference"], "result reference")
+            self._set_combo_text(self.result_alignment_combo, result_range["alignment"], "result alignment")
+            self.result_offset_spin.setValue(int(result_range["offset_symbols"]))
+            self.reference_symbol_number_spin.setValue(int(result_range["symbol_number_at_pattern_start"]))
+            self._set_combo_text(self.coarse_sync_combo, demodulation["coarse_synchronization"], "coarse synchronization")
+            self._set_combo_text(self.fine_sync_combo, demodulation["fine_synchronization"], "fine synchronization")
+            self._set_combo_text(self.bit_order_combo, demodulation["bit_ordering"], "bit ordering")
+            self.compensate_drift_check.setChecked(bool(demodulation["compensate_carrier_frequency_drift"]))
+            self.compensate_deviation_check.setChecked(bool(demodulation["compensate_fsk_deviation_error"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(f"invalid measurement configuration: {error}") from error
+        self._sync_signal_controls()
+        self._sync_analysis_controls()
+
+    def _save_meas_config_file(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Measurement Configuration",
+            self._last_directory("config"),
+            "VSA configuration (*.vsaconfig.json);;JSON files (*.json)",
+        )
+        if not path:
+            return
+        path = self._with_suffix(path, ".vsaconfig.json")
+        try:
+            save_meas_config(path, self._meas_config_values())
+            self._remember_directory("config", path)
+            self.statusBar().showMessage(f"Configuration saved - {Path(path).name}")
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Config Save Error", str(error))
+
+    def _load_meas_config_file(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load Measurement Configuration",
+            self._last_directory("config"),
+            "VSA configuration (*.vsaconfig.json *.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self._apply_meas_config_values(load_meas_config(path))
+            self._remember_directory("config", path)
+            if self._analyze():
+                self.statusBar().showMessage(
+                    f"Configuration loaded - {Path(path).name}"
+                )
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Config Load Error", str(error))
+
     def _refresh_display_only(self) -> None:
         if self.session.result is None:
             return
@@ -516,6 +898,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.deviation_spin.setEnabled(modulation.family is ModulationFamily.FSK)
         if modulation is ModulationKind.GFSK:
             self.tx_filter_combo.setCurrentText("Gaussian")
+        if hasattr(self, "pattern_symbol_table"):
+            self._refresh_pattern_table_format()
 
     def _sync_analysis_controls(self) -> None:
         enabled = self.channel_filter_check.isChecked()
@@ -564,28 +948,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
 
     def _parse_pattern_symbols(self, order: int) -> tuple[int, ...]:
-        text = self.pattern_symbols_edit.text().strip()
-        if not text:
-            raise ValueError("Pattern Symbols is empty")
-        symbol_format = self.pattern_format_combo.currentText()
-        if symbol_format == "Binary":
-            compact = "".join(text.replace(",", " ").split())
-            if any(character not in "01" for character in compact):
-                raise ValueError("Binary pattern may contain only 0 and 1")
-            width = int(round(np.log2(order)))
-            if len(compact) % width:
-                raise ValueError(f"Binary pattern length must be a multiple of {width}")
-            values = tuple(
-                int(compact[index : index + width], 2)
-                for index in range(0, len(compact), width)
-            )
-        else:
-            tokens = text.replace(",", " ").split()
-            base = 16 if symbol_format == "Hexadecimal" else 10
-            values = tuple(int(token, base) for token in tokens)
-        if any(value < 0 or value >= order for value in values):
-            raise ValueError(f"Pattern symbol must be between 0 and {order - 1}")
-        return values
+        return self._pattern_symbols_from_table(order)
 
     def _configure_pattern_analysis(self, signal: SignalDescription) -> None:
         if not self.pattern_search_check.isChecked():
@@ -666,7 +1029,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open IQ Recording",
-            "",
+            self._last_directory("iq"),
             "IQ recordings (*.npz *.npy *.cf32 *.bin);;All files (*)",
         )
         if not path:
@@ -690,12 +1053,13 @@ class VSAWindow(QtWidgets.QMainWindow):
                     return
                 recording = FileIQSource.load(path, sample_rate_hz=sample_rate_hz)
             self.load_recording(recording, self._signal_from_controls())
+            self._remember_directory("iq", path)
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "IQ Import Error", str(error))
 
-    def _analyze(self) -> None:
+    def _analyze(self) -> bool:
         if self.session.recording is None:
-            return
+            return False
         try:
             signal = self._signal_from_controls()
             self.session.set_signal(signal)
@@ -704,12 +1068,13 @@ class VSAWindow(QtWidgets.QMainWindow):
             result = self.session.analyze()
         except Exception as error:
             self.statusBar().showMessage(f"Analysis failed: {error}")
-            return
+            return False
         self._update_summary()
         self._update_plots()
         self.statusBar().showMessage(
             f"Analysis complete - {self.session.recording.sample_count:,} samples"
         )
+        return True
 
     def _update_summary(self) -> None:
         recording = self.session.recording
@@ -822,6 +1187,41 @@ class VSAWindow(QtWidgets.QMainWindow):
             spectrum_result.spectrum_dbfs,
             pen=pg.mkPen("c", width=1),
         )
+        self.iq_trajectory_plot.clear()
+        trajectory_result = (
+            (
+                self.session.carrier_corrected_pattern_range_result
+                if show_corrected
+                else self.session.pattern_range_result
+            )
+            or display_result
+        )
+        trajectory_iq = np.asarray(trajectory_result.iq, dtype=np.complex128)
+        trajectory_slice = _decimation_indices(trajectory_iq.size, maximum=20_000)
+        trajectory_iq = trajectory_iq[trajectory_slice]
+        trajectory_rms = (
+            float(np.sqrt(np.mean(np.abs(trajectory_iq) ** 2)))
+            if trajectory_iq.size
+            else 1.0
+        )
+        if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
+            trajectory_iq = trajectory_iq / trajectory_rms
+        self.iq_trajectory_plot.plot(
+            trajectory_iq.real,
+            trajectory_iq.imag,
+            pen=pg.mkPen((255, 210, 40, 170), width=1),
+        )
+        if trajectory_iq.size:
+            trajectory_limit = max(
+                1.25,
+                1.15 * float(np.percentile(np.abs(trajectory_iq), 99.5)),
+            )
+            self.iq_trajectory_plot.setXRange(
+                -trajectory_limit, trajectory_limit, padding=0.0
+            )
+            self.iq_trajectory_plot.setYRange(
+                -trajectory_limit, trajectory_limit, padding=0.0
+            )
         self.modulation_plot.clear()
         self.modulation_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
         if signal.modulation.family is ModulationFamily.FSK:
@@ -940,6 +1340,15 @@ class VSAWindow(QtWidgets.QMainWindow):
         for index, symbol in enumerate(shown):
             item = QtWidgets.QTableWidgetItem(str(int(symbol)))
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            if pattern_result is not None and index < pattern_result.symbol_time_s.size:
+                symbol_time_s = float(pattern_result.symbol_time_s[index])
+                if (
+                    pattern_result.pattern_start_time_s
+                    <= symbol_time_s
+                    < pattern_result.pattern_stop_time_s
+                ):
+                    item.setBackground(QtGui.QColor(24, 112, 55))
+                    item.setForeground(QtGui.QColor(255, 255, 255))
             self.symbol_table.setItem(index // 10, index % 10, item)
         self.symbol_table.setToolTip(
             f"Showing {shown.size} of {symbols.size} result-range symbols"
