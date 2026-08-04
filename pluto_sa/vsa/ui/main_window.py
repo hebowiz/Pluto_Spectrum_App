@@ -827,9 +827,14 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.setLabel("left", "Q")
             self.modulation_plot.setLabel("bottom", "I")
             self.modulation_plot.setAspectLocked(True, ratio=1.0)
+            constellation_symbols = (
+                self.session.pattern_result.measured_symbols
+                if self.session.pattern_result is not None
+                else display_result.measured_symbols
+            )
             self.modulation_plot.plot(
-                result.measured_symbols.real,
-                result.measured_symbols.imag,
+                constellation_symbols.real,
+                constellation_symbols.imag,
                 pen=None,
                 symbol="o",
                 symbolSize=6,

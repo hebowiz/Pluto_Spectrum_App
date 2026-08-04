@@ -84,7 +84,11 @@ def test_generic_vsa_recovers_edr_sync_pattern(packet_name):
         waveform.edr_start_sample + 16, abs=4
     )
     assert result.carrier_frequency_offset_hz == pytest.approx(20_000.0, abs=5_000.0)
-    np.testing.assert_array_equal(result.decoded_symbols[:10], sync_phase_indices)
+    np.testing.assert_array_equal(
+        result.decoded_symbols, waveform.differential_phase_indices
+    )
+    assert np.median(np.abs(result.measured_symbols)) == pytest.approx(1.0, abs=0.02)
+    assert np.max(np.abs(result.measured_symbols)) < 1.05
 
 
 @pytest.mark.parametrize(

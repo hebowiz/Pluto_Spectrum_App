@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -8,6 +9,8 @@ import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_sa.vsa.ui.main_window import VSAWindow
+from pluto_sa.vsa.model import ModulationKind, SignalDescription
+from pluto_sa.vsa.sources import FileIQSource
 
 
 def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
@@ -117,6 +120,52 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
             for row in range(window.result_summary.rowCount())
         }
         assert summary["Display"] == "Raw IQ"
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
+    pg.mkQApp("VSA PSK UI test")
+    window = VSAWindow()
+    try:
+        fixture = (
+            Path(__file__).with_name("fixtures")
+            / "bluetooth_2dh1_prbs9_16msps.npz"
+        )
+        with np.load(fixture, allow_pickle=False) as values:
+            pattern = " ".join(
+                str(int(value))
+                for value in values["differential_phase_indices"][:10]
+            )
+        window.load_recording(
+            FileIQSource.load(fixture),
+            SignalDescription(
+                modulation=ModulationKind.PI4_DQPSK,
+                symbol_rate_hz=1_000_000.0,
+                tx_filter="Root Raised Cosine",
+                filter_parameter=0.4,
+            ),
+        )
+        window.pattern_search_check.setChecked(True)
+        window.pattern_format_combo.setCurrentText("Decimal")
+        window.pattern_symbols_edit.setText(pattern)
+        window.result_length_spin.setValue(244)
+        window.channel_filter_check.setChecked(True)
+        window.analysis_center_spin.setValue(2441.0)
+        window.analysis_bandwidth_spin.setValue(1.5)
+        window._analyze()
+
+        plot_items = window.modulation_plot.listDataItems()
+        assert len(plot_items) == 1
+        i_values, q_values = plot_items[0].getData()
+        magnitude = np.hypot(i_values, q_values)
+        assert magnitude.size == 244
+        assert np.median(magnitude) == pytest.approx(1.0, abs=0.03)
+        assert np.min(magnitude) > 0.85
+        assert np.max(magnitude) < 1.10
     finally:
         window._meas_config_dialog.close()
         window.close()

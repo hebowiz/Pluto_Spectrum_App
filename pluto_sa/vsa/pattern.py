@@ -116,7 +116,7 @@ class DemodulationSettings:
     coarse_synchronization: SynchronizationSource = SynchronizationSource.AUTO
     fine_synchronization: SynchronizationSource = SynchronizationSource.AUTO
     bit_ordering: BitOrdering = BitOrdering.MSB
-    compensate_carrier_frequency_drift: bool = True
+    compensate_carrier_frequency_drift: bool = False
     compensate_fsk_deviation_error: bool = True
 
 
@@ -280,6 +280,33 @@ def _resample_for_symbols(
     return np.asarray(result, dtype=np.complex128), actual_rate_hz
 
 
+def _root_raised_cosine_taps(
+    samples_per_symbol: int, beta: float, span_symbols: int = 10
+) -> np.ndarray:
+    """Return unit-energy SRRC taps for offline matched filtering."""
+    sps = int(samples_per_symbol)
+    if sps < 2 or not 0.0 < float(beta) <= 1.0:
+        raise ValueError("SRRC requires samples_per_symbol >= 2 and 0 < beta <= 1")
+    time = np.arange(-span_symbols * sps / 2, span_symbols * sps / 2 + 1) / sps
+    taps = np.empty(time.size, dtype=np.float64)
+    for index, value in enumerate(time):
+        if np.isclose(value, 0.0):
+            taps[index] = 1.0 + beta * (4.0 / np.pi - 1.0)
+        elif np.isclose(abs(value), 1.0 / (4.0 * beta)):
+            taps[index] = beta / np.sqrt(2.0) * (
+                (1.0 + 2.0 / np.pi) * np.sin(np.pi / (4.0 * beta))
+                + (1.0 - 2.0 / np.pi) * np.cos(np.pi / (4.0 * beta))
+            )
+        else:
+            numerator = (
+                np.sin(np.pi * value * (1.0 - beta))
+                + 4.0 * beta * value * np.cos(np.pi * value * (1.0 + beta))
+            )
+            denominator = np.pi * value * (1.0 - (4.0 * beta * value) ** 2)
+            taps[index] = numerator / denominator
+    return taps / np.sqrt(np.sum(taps**2))
+
+
 def _normalized_complex_correlation(
     values: np.ndarray, pattern: np.ndarray
 ) -> np.ndarray:
@@ -421,6 +448,19 @@ class PatternAnalyzer:
             signal.symbol_rate_hz,
         )
         samples_per_symbol = 8
+        matched_filter_applied = signal.tx_filter.lower() in {
+            "root raised cosine",
+            "root-raised-cosine",
+            "rrc",
+            "srrc",
+        }
+        if matched_filter_applied:
+            beta = 0.4 if signal.filter_parameter is None else signal.filter_parameter
+            resampled = np.convolve(
+                resampled,
+                _root_raised_cosine_taps(samples_per_symbol, float(beta)),
+                mode="same",
+            )
         alphabet = _constellation(signal.modulation)
         expected = alphabet[np.asarray(pattern.symbols, dtype=np.int16)]
         best: tuple[float, int, int, np.ndarray, np.ndarray] | None = None
@@ -473,8 +513,13 @@ class PatternAnalyzer:
             relative = np.arange(phase_error.size, dtype=np.float64)
             slope, intercept = np.polyfit(relative, phase_error, 1)
             all_relative = np.arange(available.size, dtype=np.float64)
+            applied_slope = (
+                slope
+                if demodulation.compensate_carrier_frequency_drift
+                else 0.0
+            )
             corrected_available = available * np.exp(
-                -1j * (intercept + slope * all_relative)
+                -1j * (intercept + applied_slope * all_relative)
             )
             measured = available[selection]
             corrected = corrected_available[selection]
@@ -584,6 +629,10 @@ class PatternAnalyzer:
                 "result_length": result_range.result_length,
                 "result_offset_symbols": result_range.offset_symbols,
                 "differential": signal.modulation.differential,
+                "matched_filter_applied": matched_filter_applied,
+                "carrier_drift_compensated": (
+                    demodulation.compensate_carrier_frequency_drift
+                ),
                 "source": recording.source,
                 "match_selection_policy": "strongest correlation in capture",
             },

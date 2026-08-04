@@ -56,6 +56,19 @@ Signal DescriptionはSymbol Rate 1 MSym/s、Transmit Filter `Root Raised Cosine`
 
 変調mapping、SRRC、Guard、Sync、TrailerはBluetooth Core SpecificationのBaseband Specification 6.6およびRadio Physical Layer Specification 3.2に従う。合成波形はreceiver開発用であり、Bluetooth RF-PHY conformance test sourceを称するものではない。
 
+### Constellation表示修正（2026-08-04）
+
+初回実装ではPSK Pattern Searchが成立していても、UIはcapture全体を固定timingでsampleした`VSAAnalysisResult.measured_symbols`を描画していた。このため2 msの無信号、GFSK Access/Header、Guardがconstellationへ混入し、無信号を含むRMS normalizationによって有効信号が約5～10倍へ拡大されていた。原点・I軸付近の点と大きな45度方向の広がりは生成IQのphase noiseではなく、この表示経路の誤りだった。
+
+修正後はPattern Search成立時に`PatternSearchResult.measured_symbols`だけを描画する。TX filterがRoot Raised Cosineの場合は、8 samples/symbolへresampleした後に同じroll-offのSRRC matched filterを適用し、Result RangeだけでRMS振幅を1へnormalizeする。また`Compensate for Carrier Frequency Drift`がOFFでもPSK symbol補正へdriftを適用していた漏れを修正した。
+
+修正後の合成fixture結果:
+
+- 2-DH1: Sync correlation 0.99998、244 symbol error 0、median magnitude 1.000、簡易EVM約0.80%。
+- 3-DH1: Sync correlation 0.99997、244 symbol error 0、median magnitude 1.000、簡易EVM約0.82%。
+
+Analysis Bandwidth 1.5 MHzを有効にした2-DH1でも244 symbol error 0、magnitude範囲は概ね0.91～1.06となる。これらのEVM値は同期・表示経路の回帰確認用であり、規格適合値ではない。
+
 ## 解析順序
 
 1. BR/GFSKのAccess Codeを既存復調器で検出し、packet時刻、CFO、symbol timingを得る。
