@@ -432,13 +432,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         top_title_font.setPointSizeF(max(16.0, top_title_font.pointSizeF() + 6.0))
         self._config_top_title.setFont(top_title_font)
         config_top_layout.addWidget(self._config_top_title)
-        self._config_top_hint = QtWidgets.QLabel(
-            "Select a measurement configuration category."
-        )
-        hint_font = self._config_top_hint.font()
-        hint_font.setPointSizeF(max(11.0, hint_font.pointSizeF() + 2.0))
-        self._config_top_hint.setFont(hint_font)
-        config_top_layout.addWidget(self._config_top_hint)
         config_button_grid = QtWidgets.QGridLayout()
         config_button_grid.setHorizontalSpacing(14)
         config_button_grid.setVerticalSpacing(14)
