@@ -43,10 +43,10 @@ pattern start/stop times, so Result Range offsets and alignment are respected.
 ## Measurement configuration file
 
 `Meas Config` files use UTF-8 JSON with the preferred extension
-`.vsaconfig.json`. They can be loaded or saved from the main `Meas Config` menu
-and from the dedicated buttons on `Config Top Menu`. Config file buttons are
-not shown on individual pages, avoiding confusion with the Pattern file buttons
-on the Pattern Search page.
+`.vsaconfig.json`. They are loaded or saved from the main-window `Meas Config`
+menu. Config file buttons are not duplicated in `Config Top Menu` or individual
+pages, avoiding confusion with the Pattern-specific file buttons on the Pattern
+Search page.
 
 Version 1 stores all currently exposed measurement controls:
 

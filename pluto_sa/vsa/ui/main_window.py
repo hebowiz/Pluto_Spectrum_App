@@ -537,14 +537,6 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._config_top_buttons[name] = button
             self._config_stack.addWidget(page)
         config_top_layout.addLayout(config_button_grid)
-        config_file_layout = QtWidgets.QHBoxLayout()
-        self._config_load_button = QtWidgets.QPushButton("Load Config...")
-        self._config_save_button = QtWidgets.QPushButton("Save Config As...")
-        self._config_load_button.clicked.connect(self._load_meas_config_file)
-        self._config_save_button.clicked.connect(self._save_meas_config_file)
-        config_file_layout.addWidget(self._config_load_button)
-        config_file_layout.addWidget(self._config_save_button)
-        config_top_layout.addLayout(config_file_layout)
         config_top_layout.addStretch(1)
         self._config_stack.insertWidget(0, config_top)
         self._config_page_names = ("Config Top Menu",) + tuple(
