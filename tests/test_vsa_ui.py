@@ -208,7 +208,7 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         assert len(trajectory_items) == 1
         trajectory_i, trajectory_q = trajectory_items[0].getData()
         assert trajectory_i.size == trajectory_q.size
-        assert trajectory_i.size > 0
+        assert 1_000 < trajectory_i.size < 3_000
 
         plot_items = window.symbol_plot.listDataItems()
         assert len(plot_items) == 1
@@ -233,6 +233,9 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         assert len(trajectory_items) == 2
         marker_i, marker_q = trajectory_items[1].getData()
         assert marker_i.size == marker_q.size == 244
+        marker_magnitude = np.hypot(marker_i, marker_q)
+        assert np.median(marker_magnitude) == pytest.approx(1.0, abs=0.02)
+        assert np.std(marker_magnitude) < 0.08
     finally:
         window._meas_config_dialog.close()
         window.close()

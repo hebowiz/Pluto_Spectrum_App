@@ -19,6 +19,7 @@ from pluto_sa.vsa.pattern import (
     ResultRangeReference,
     ResultRangeSettings,
     SynchronizationSource,
+    prepare_psk_iq,
 )
 from pluto_sa.vsa.persistence import (
     load_meas_config,
@@ -1205,14 +1206,6 @@ class VSAWindow(QtWidgets.QMainWindow):
             spectrum_result.spectrum_dbfs,
             pen=pg.mkPen("c", width=1),
         )
-        trajectory_result = (
-            (
-                self.session.carrier_corrected_pattern_range_result
-                if show_corrected
-                else self.session.pattern_range_result
-            )
-            or display_result
-        )
         self.modulation_plot.clear()
         self.symbol_plot.clear()
         if signal.modulation.family is ModulationFamily.FSK:
@@ -1295,37 +1288,58 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.setLabel("left", "Q")
             self.modulation_plot.setLabel("bottom", "I")
             self.modulation_plot.setAspectLocked(True, ratio=1.0)
-            trajectory_iq = np.asarray(
-                trajectory_result.iq, dtype=np.complex128
+            processed_iq, processed_rate_hz = prepare_psk_iq(
+                display_result.iq,
+                sample_rate_hz=float(
+                    display_result.metadata.get(
+                        "analysis_sample_rate_hz",
+                        self.session.recording.sample_rate_hz,
+                    )
+                ),
+                symbol_rate_hz=signal.symbol_rate_hz,
+                tx_filter=signal.tx_filter,
+                filter_parameter=signal.filter_parameter,
             )
+            processed_time_s = (
+                np.arange(processed_iq.size, dtype=np.float64)
+                / processed_rate_hz
+            )
+            symbol_iq = np.interp(
+                symbol_times_s,
+                processed_time_s,
+                np.real(processed_iq),
+            ) + 1j * np.interp(
+                symbol_times_s,
+                processed_time_s,
+                np.imag(processed_iq),
+            )
+            trajectory_rms = (
+                float(np.sqrt(np.mean(np.abs(symbol_iq) ** 2)))
+                if symbol_iq.size
+                else 1.0
+            )
+            if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
+                processed_iq = processed_iq / trajectory_rms
+                symbol_iq = symbol_iq / trajectory_rms
+            pattern_result = self.session.pattern_result
+            if pattern_result is not None:
+                in_result_range = (
+                    (processed_time_s >= pattern_result.result_start_time_s)
+                    & (processed_time_s < pattern_result.result_stop_time_s)
+                )
+                trajectory_iq = processed_iq[in_result_range]
+            else:
+                trajectory_iq = processed_iq
             trajectory_slice = _decimation_indices(
                 trajectory_iq.size, maximum=20_000
             )
             trajectory_iq = trajectory_iq[trajectory_slice]
-            trajectory_rms = (
-                float(np.sqrt(np.mean(np.abs(trajectory_iq) ** 2)))
-                if trajectory_iq.size
-                else 1.0
-            )
-            if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
-                trajectory_iq = trajectory_iq / trajectory_rms
             self.modulation_plot.plot(
                 trajectory_iq.real,
                 trajectory_iq.imag,
                 pen=pg.mkPen((255, 210, 40, 170), width=1),
             )
             if self.symbol_display_action.isChecked() and symbol_times_s.size:
-                symbol_iq = np.interp(
-                    symbol_times_s,
-                    display_result.time_s,
-                    np.real(display_result.iq),
-                ) + 1j * np.interp(
-                    symbol_times_s,
-                    display_result.time_s,
-                    np.imag(display_result.iq),
-                )
-                if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
-                    symbol_iq = symbol_iq / trajectory_rms
                 self._plot_symbol_points(
                     self.modulation_plot,
                     symbol_iq.real,

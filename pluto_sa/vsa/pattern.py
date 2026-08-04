@@ -307,6 +307,37 @@ def _root_raised_cosine_taps(
     return taps / np.sqrt(np.sum(taps**2))
 
 
+def prepare_psk_iq(
+    iq: np.ndarray,
+    *,
+    sample_rate_hz: float,
+    symbol_rate_hz: float,
+    tx_filter: str,
+    filter_parameter: float | None,
+    samples_per_symbol: int = 8,
+) -> tuple[np.ndarray, float]:
+    """Resample PSK IQ and apply the configured matched receive filter."""
+    waveform, analysis_rate_hz = _resample_for_symbols(
+        iq,
+        sample_rate_hz,
+        symbol_rate_hz,
+        samples_per_symbol=samples_per_symbol,
+    )
+    if tx_filter.lower() in {
+        "root raised cosine",
+        "root-raised-cosine",
+        "rrc",
+        "srrc",
+    }:
+        beta = 0.4 if filter_parameter is None else float(filter_parameter)
+        waveform = np.convolve(
+            waveform,
+            _root_raised_cosine_taps(samples_per_symbol, beta),
+            mode="same",
+        )
+    return np.asarray(waveform, dtype=np.complex128), analysis_rate_hz
+
+
 def _normalized_complex_correlation(
     values: np.ndarray, pattern: np.ndarray
 ) -> np.ndarray:
@@ -442,25 +473,21 @@ class PatternAnalyzer:
         demodulation: DemodulationSettings,
     ) -> PatternSearchResult:
         pattern = search.pattern
-        resampled, analysis_rate_hz = _resample_for_symbols(
-            recording.iq,
-            recording.sample_rate_hz,
-            signal.symbol_rate_hz,
-        )
         samples_per_symbol = 8
+        resampled, analysis_rate_hz = prepare_psk_iq(
+            recording.iq,
+            sample_rate_hz=recording.sample_rate_hz,
+            symbol_rate_hz=signal.symbol_rate_hz,
+            tx_filter=signal.tx_filter,
+            filter_parameter=signal.filter_parameter,
+            samples_per_symbol=samples_per_symbol,
+        )
         matched_filter_applied = signal.tx_filter.lower() in {
             "root raised cosine",
             "root-raised-cosine",
             "rrc",
             "srrc",
         }
-        if matched_filter_applied:
-            beta = 0.4 if signal.filter_parameter is None else signal.filter_parameter
-            resampled = np.convolve(
-                resampled,
-                _root_raised_cosine_taps(samples_per_symbol, float(beta)),
-                mode="same",
-            )
         alphabet = _constellation(signal.modulation)
         expected = alphabet[np.asarray(pattern.symbols, dtype=np.int16)]
         best: tuple[float, int, int, np.ndarray, np.ndarray] | None = None

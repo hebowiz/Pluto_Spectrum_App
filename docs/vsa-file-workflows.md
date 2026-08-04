@@ -98,11 +98,19 @@ dock is named `Symbol Plot`. Their contents depend on the modulation family:
 
 For PSK, the IQ trajectory uses the selected Result Range when Pattern Search
 succeeds. It follows `Display Config > Carrier Display`, choosing raw or
-carrier-corrected Result Range IQ. Without a pattern result it uses the full
-analysis result. Display samples are RMS-normalized and capped at 20,000 plot
-vertices; this affects only rendering and never modifies stored IQ or DSP
-results. The I/Q axes use equal scale and a symmetric range based on the 99.5th
-amplitude percentile.
+carrier-corrected IQ. The IQ is resampled to 8 samples/symbol and, when the TX
+filter is Root Raised Cosine, passed through the same-beta SRRC matched receive
+filter before plotting. The continuous waveform is then cropped to Result
+Range; without a pattern result the full filtered waveform is used. Its scale
+is normalized by the RMS amplitude of the filtered IQ at recovered symbol
+times. Display samples are capped at 20,000 plot vertices; this affects only
+rendering and never modifies stored IQ or DSP results. The I/Q axes use equal
+scale and a symmetric range based on the 99.5th amplitude percentile.
+
+For differential PSK, the trajectory markers are absolute filtered IQ samples,
+while the constellation contains differential products between adjacent
+symbols. Their amplitude distributions can therefore still differ slightly,
+but the earlier pre-filter/post-filter mismatch has been removed.
 
 For FSK, each demodulated symbol-frequency value `f[k]` is converted to a unit
 phasor using `exp(j * 2*pi*f[k]/symbol_rate)`. The +I axis is zero phase; the
@@ -118,8 +126,8 @@ centres from the yellow Power/IQ traces and the magenta FSK trace.
 
 - IQ Power: interpolate dBm at each decoded symbol-centre time.
 - FSK Modulation: interpolate instantaneous frequency at each symbol centre.
-- PSK Modulation: interpolate complex IQ at each symbol centre and apply the
-  same RMS normalization as the displayed IQ trajectory.
+- PSK Modulation: interpolate matched-filter output at each symbol centre and
+  apply the same RMS normalization as the displayed IQ trajectory.
 
 With a successful Pattern Search, the markers cover the current Result Range;
 otherwise they cover the symbol decisions from the normal analysis result.
