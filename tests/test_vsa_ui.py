@@ -71,6 +71,8 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
             for button in window._config_top_buttons.values()
         )
         assert window._config_top_title.font().pointSizeF() >= 16.0
+        assert window._config_load_button.text() == "Load Config..."
+        assert window._config_save_button.text() == "Save Config As..."
         window._config_top_buttons["Signal Description"].click()
         assert window._config_stack.currentIndex() == 2
         assert window._config_back_button.isVisibleTo(window._meas_config_dialog)

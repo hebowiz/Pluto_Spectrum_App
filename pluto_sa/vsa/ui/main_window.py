@@ -537,6 +537,14 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._config_top_buttons[name] = button
             self._config_stack.addWidget(page)
         config_top_layout.addLayout(config_button_grid)
+        config_file_layout = QtWidgets.QHBoxLayout()
+        self._config_load_button = QtWidgets.QPushButton("Load Config...")
+        self._config_save_button = QtWidgets.QPushButton("Save Config As...")
+        self._config_load_button.clicked.connect(self._load_meas_config_file)
+        self._config_save_button.clicked.connect(self._save_meas_config_file)
+        config_file_layout.addWidget(self._config_load_button)
+        config_file_layout.addWidget(self._config_save_button)
+        config_top_layout.addLayout(config_file_layout)
         config_top_layout.addStretch(1)
         self._config_stack.insertWidget(0, config_top)
         self._config_page_names = ("Config Top Menu",) + tuple(
@@ -544,22 +552,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         dialog_layout.addWidget(self._config_stack, 1)
         close_buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Save
-            | QtWidgets.QDialogButtonBox.StandardButton.Open
-            | QtWidgets.QDialogButtonBox.StandardButton.Close
+            QtWidgets.QDialogButtonBox.StandardButton.Close
         )
-        close_buttons.button(
-            QtWidgets.QDialogButtonBox.StandardButton.Save
-        ).setText("Save Config As...")
-        close_buttons.button(
-            QtWidgets.QDialogButtonBox.StandardButton.Open
-        ).setText("Load Config...")
-        close_buttons.button(
-            QtWidgets.QDialogButtonBox.StandardButton.Save
-        ).clicked.connect(self._save_meas_config_file)
-        close_buttons.button(
-            QtWidgets.QDialogButtonBox.StandardButton.Open
-        ).clicked.connect(self._load_meas_config_file)
         close_buttons.rejected.connect(self._meas_config_dialog.reject)
         dialog_layout.addWidget(close_buttons)
         self._show_config_page(0)
