@@ -47,6 +47,20 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         assert window._meas_config_dialog.windowModality() != (
             QtCore.Qt.WindowModality.NonModal
         )
+        assert window._config_stack.currentIndex() == 0
+        assert set(window._config_top_buttons) == {
+            "Input / Frontend",
+            "Signal Description",
+            "Pattern Search",
+            "Result Range",
+            "Demodulation",
+            "Sweep / Run",
+        }
+        window._config_top_buttons["Signal Description"].click()
+        assert window._config_stack.currentIndex() == 2
+        assert window._config_back_button.isVisibleTo(window._meas_config_dialog)
+        window._config_back_button.click()
+        assert window._config_stack.currentIndex() == 0
         active_modal_widgets = []
 
         def inspect_modality() -> None:

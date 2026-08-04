@@ -231,7 +231,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
 
     def _build_configuration(self) -> None:
-        toolbox = QtWidgets.QToolBox()
+        config_pages: list[tuple[str, QtWidgets.QWidget]] = []
 
         source_page = QtWidgets.QWidget()
         source_layout = QtWidgets.QVBoxLayout(source_page)
@@ -266,7 +266,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.channel_filter_check.toggled.connect(self._sync_analysis_controls)
         self._sync_analysis_controls()
         source_layout.addStretch(1)
-        toolbox.addItem(source_page, "Input / Frontend")
+        config_pages.append(("Input / Frontend", source_page))
 
         signal_page = QtWidgets.QWidget()
         signal_form = QtWidgets.QFormLayout(signal_page)
@@ -301,7 +301,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.tx_filter_combo.currentTextChanged.connect(
             lambda value: self.filter_parameter_spin.setEnabled(value != "None")
         )
-        toolbox.addItem(signal_page, "Signal Description")
+        config_pages.append(("Signal Description", signal_page))
 
         pattern_page = QtWidgets.QWidget()
         pattern_form = QtWidgets.QFormLayout(pattern_page)
@@ -331,7 +331,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.pattern_threshold_auto.toggled.connect(
             lambda checked: self.pattern_threshold_spin.setEnabled(not checked)
         )
-        toolbox.addItem(pattern_page, "Pattern Search")
+        config_pages.append(("Pattern Search", pattern_page))
 
         range_page = QtWidgets.QWidget()
         range_form = QtWidgets.QFormLayout(range_page)
@@ -361,7 +361,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         range_form.addRow(
             "Symbol Number at Pattern Start", self.reference_symbol_number_spin
         )
-        toolbox.addItem(range_page, "Result Range")
+        config_pages.append(("Result Range", range_page))
 
         demod_page = QtWidgets.QWidget()
         demod_form = QtWidgets.QFormLayout(demod_page)
@@ -390,7 +390,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         demod_form.addRow("Bit Ordering", self.bit_order_combo)
         demod_form.addRow("Compensate for", self.compensate_drift_check)
         demod_form.addRow("", self.compensate_deviation_check)
-        toolbox.addItem(demod_page, "Demodulation")
+        config_pages.append(("Demodulation", demod_page))
 
         run_page = QtWidgets.QWidget()
         run_layout = QtWidgets.QVBoxLayout(run_page)
@@ -399,7 +399,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         run_layout.addWidget(refresh_button)
         run_layout.addWidget(QtWidgets.QLabel("Offline milestone: Refresh reuses the current capture."))
         run_layout.addStretch(1)
-        toolbox.addItem(run_page, "Sweep / Run")
+        config_pages.append(("Sweep / Run", run_page))
 
         self._meas_config_dialog = QtWidgets.QDialog(self)
         self._meas_config_dialog.setWindowTitle("Meas Config")
@@ -407,16 +407,68 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._meas_config_dialog.setWindowModality(
             QtCore.Qt.WindowModality.WindowModal
         )
-        self._meas_config_dialog.resize(520, 720)
+        self._meas_config_dialog.resize(620, 520)
         dialog_layout = QtWidgets.QVBoxLayout(self._meas_config_dialog)
-        dialog_layout.addWidget(toolbox, 1)
+
+        navigation_layout = QtWidgets.QHBoxLayout()
+        self._config_back_button = QtWidgets.QPushButton("< Config Top")
+        self._config_back_button.clicked.connect(lambda: self._show_config_page(0))
+        self._config_page_title = QtWidgets.QLabel()
+        title_font = self._config_page_title.font()
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 2)
+        self._config_page_title.setFont(title_font)
+        navigation_layout.addWidget(self._config_back_button)
+        navigation_layout.addWidget(self._config_page_title)
+        navigation_layout.addStretch(1)
+        dialog_layout.addLayout(navigation_layout)
+
+        self._config_stack = QtWidgets.QStackedWidget()
+        config_top = QtWidgets.QWidget()
+        config_top_layout = QtWidgets.QVBoxLayout(config_top)
+        config_top_title = QtWidgets.QLabel("Config Top Menu")
+        config_top_title.setFont(title_font)
+        config_top_layout.addWidget(config_top_title)
+        config_top_layout.addWidget(
+            QtWidgets.QLabel("Select a measurement configuration category.")
+        )
+        config_button_grid = QtWidgets.QGridLayout()
+        self._config_top_buttons: dict[str, QtWidgets.QPushButton] = {}
+        for index, (name, page) in enumerate(config_pages, start=1):
+            button = QtWidgets.QPushButton(name)
+            button.setMinimumHeight(64)
+            button.clicked.connect(
+                lambda _checked=False, page_index=index: self._show_config_page(
+                    page_index
+                )
+            )
+            config_button_grid.addWidget(button, (index - 1) // 2, (index - 1) % 2)
+            self._config_top_buttons[name] = button
+            self._config_stack.addWidget(page)
+        config_top_layout.addLayout(config_button_grid)
+        config_top_layout.addStretch(1)
+        self._config_stack.insertWidget(0, config_top)
+        self._config_page_names = ("Config Top Menu",) + tuple(
+            name for name, _page in config_pages
+        )
+        dialog_layout.addWidget(self._config_stack, 1)
         close_buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Close
         )
         close_buttons.rejected.connect(self._meas_config_dialog.reject)
         dialog_layout.addWidget(close_buttons)
+        self._show_config_page(0)
+
+    def _show_config_page(self, index: int) -> None:
+        self._config_stack.setCurrentIndex(index)
+        is_top = index == 0
+        self._config_back_button.setVisible(not is_top)
+        self._config_page_title.setText(
+            "" if is_top else self._config_page_names[index]
+        )
 
     def _open_meas_config(self) -> None:
+        self._show_config_page(0)
         self._meas_config_dialog.exec()
 
     def _refresh_display_only(self) -> None:

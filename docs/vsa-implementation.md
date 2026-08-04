@@ -57,6 +57,8 @@ power_dbm  = power_dbfs
 
 設定名と区分は投入済みのR&S FPL1-K70 VSA User Manual rev.12に準拠する。現在のUIでは`Modulation Type / Order`、`Symbol Rate`、`FSK Ref Deviation`、`Modulation Mapping`、`Transmit Filter Type`、`Alpha / BT`を同じページに配置した。内部の`SignalDescription`はsourceやBluetooth profileに依存しない。
 
+Meas Configは縦並びのaccordionではなく、`Config Top Menu`にカテゴリボタンを2列で配置する。ボタンから個別設定ページへ移動し、`< Config Top`でトップへ戻る2階層構造とする。ダイアログを開くたびにトップを表示し、Window Modalによるメイン画面の操作抑止は維持する。
+
 ### Pattern Search / Result Range / Demodulation
 
 2026-08-03に一般VSA用の既知パターン解析を追加した。Bluetooth Access Code専用処理とは別の`pluto_sa/vsa/pattern.py`で、任意のFSK/GFSK/BPSK/QPSK/pi/4-DQPSK/8DPSK symbol列を検索し、patternを基準に指定範囲をsymbol単位で復調する。
