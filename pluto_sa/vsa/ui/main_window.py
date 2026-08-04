@@ -41,6 +41,20 @@ def _decimation_indices(count: int, maximum: int = _MAX_DISPLAY_POINTS) -> slice
     return slice(None, None, step)
 
 
+def _constellation_display_symbols(
+    modulation: ModulationKind, symbols: np.ndarray
+) -> np.ndarray:
+    """Apply the R&S-style display reference without changing decisions."""
+    values = np.asarray(symbols, dtype=np.complex128)
+    if modulation in {
+        ModulationKind.QPSK,
+        ModulationKind.OQPSK,
+        ModulationKind.PI4_DQPSK,
+    }:
+        values = values * np.exp(-1j * np.pi / 4.0)
+    return values
+
+
 class VSAWindow(QtWidgets.QMainWindow):
     """One VSA measurement session with detachable result windows."""
 
@@ -835,6 +849,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.session.pattern_result.measured_symbols
                 if self.session.pattern_result is not None
                 else display_result.measured_symbols
+            )
+            constellation_symbols = _constellation_display_symbols(
+                signal.modulation, constellation_symbols
             )
             self.modulation_plot.plot(
                 constellation_symbols.real,

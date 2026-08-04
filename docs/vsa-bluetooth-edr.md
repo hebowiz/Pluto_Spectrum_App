@@ -71,6 +71,8 @@ Analysis Bandwidth 1.5 MHzを有効にした2-DH1でも244 symbol error 0、magn
 
 さらに、`PlotWidget.clear()`が直前のFSKまたは旧constellationのViewBox rangeを保持するため、unit circle上の正常な点が表示範囲外になる問題を修正した。Constellation更新時はI/Q軸のSI prefixを無効化し、両軸を±1.25へ明示的にresetする。aspect ratio 1:1は維持する。
 
+R&S FPL1-K70 VSA User Manual rev.12 pp.86-88では、differential PSKの物理constellationをISI-free demodulation後のdecision pointとして表示し、pi/4-DQPSKはpi/4 rotation compensatedで表示する。これに合わせ、QPSK、OQPSK、pi/4-DQPSKのConstellation表示vectorだけを-45 degree回転し、4点を+I、+Q、-I、-Q軸上へ置く。内部のcarrier correction、symbol decision、mapping、Symbol Tableは回転前の論理vectorを使い続ける。8DPSKは回転せず、I/Q軸を含む45 degree間隔の8点表示とする。
+
 ## 解析順序
 
 1. BR/GFSKのAccess Codeを既存復調器で検出し、packet時刻、CFO、symbol timingを得る。

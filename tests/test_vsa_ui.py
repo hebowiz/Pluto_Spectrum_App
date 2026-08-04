@@ -8,7 +8,7 @@ import pyqtgraph as pg
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from pluto_sa.vsa.ui.main_window import VSAWindow
+from pluto_sa.vsa.ui.main_window import VSAWindow, _constellation_display_symbols
 from pluto_sa.vsa.model import ModulationKind, SignalDescription
 from pluto_sa.vsa.sources import FileIQSource
 
@@ -166,6 +166,10 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         assert np.median(magnitude) == pytest.approx(1.0, abs=0.03)
         assert np.min(magnitude) > 0.85
         assert np.max(magnitude) < 1.10
+        # R&S-style QPSK-family display compensates the pi/4 rotation, placing
+        # decision points on the I/Q axes while leaving decoded symbols intact.
+        distance_from_nearest_axis = np.minimum(np.abs(i_values), np.abs(q_values))
+        assert np.percentile(distance_from_nearest_axis, 95) < 0.08
         x_range, y_range = window.modulation_plot.viewRange()
         assert x_range[0] <= -1.0 and x_range[1] >= 1.0
         assert y_range[0] <= -1.0 and y_range[1] >= 1.0
@@ -176,3 +180,20 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         window.close()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_constellation_display_rotation_is_qpsk_family_only() -> None:
+    diagonal = np.exp(1j * (np.pi / 4.0 + np.arange(4) * np.pi / 2.0))
+    qpsk_display = _constellation_display_symbols(ModulationKind.QPSK, diagonal)
+    pi4_display = _constellation_display_symbols(
+        ModulationKind.PI4_DQPSK, diagonal
+    )
+    d8psk = np.exp(1j * np.arange(8) * np.pi / 4.0)
+
+    np.testing.assert_allclose(qpsk_display, [1.0, 1j, -1.0, -1j], atol=1e-12)
+    np.testing.assert_allclose(pi4_display, qpsk_display, atol=1e-12)
+    np.testing.assert_allclose(
+        _constellation_display_symbols(ModulationKind.DPSK8, d8psk),
+        d8psk,
+        atol=1e-12,
+    )
