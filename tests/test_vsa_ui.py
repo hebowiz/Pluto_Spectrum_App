@@ -65,6 +65,27 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         marker_color = power_marker.opts["symbolBrush"].color()
         assert marker_color.green() > marker_color.red()
         assert marker_color.green() > marker_color.blue()
+        assert window.rect_zoom_action.isChecked()
+        assert all(
+            plot.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
+            for _name, plot in window._plot_widgets()
+        )
+        window.pan_action.trigger()
+        assert all(
+            plot.getViewBox().state["mouseMode"] == pg.ViewBox.PanMode
+            for _name, plot in window._plot_widgets()
+        )
+        window.rect_zoom_action.trigger()
+        initial_ranges = {
+            name: (list(ranges[0]), list(ranges[1]))
+            for name, ranges in window._analysis_plot_ranges.items()
+        }
+        for _name, plot in window._plot_widgets():
+            plot.setRange(xRange=(-99.0, -98.0), yRange=(-77.0, -76.0))
+        window.reset_graph_scales_action.trigger()
+        for name, plot in window._plot_widgets():
+            assert plot.viewRange()[0] == pytest.approx(initial_ranges[name][0])
+            assert plot.viewRange()[1] == pytest.approx(initial_ranges[name][1])
         assert window._meas_config_dialog.isModal()
         assert window._meas_config_dialog.windowModality() != (
             QtCore.Qt.WindowModality.NonModal

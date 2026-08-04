@@ -75,6 +75,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._preferences = preferences or QtCore.QSettings("PlutoSA", "PlutoVSA")
         self._updating_pattern_table = False
         self._pattern_values: list[int] = []
+        self._analysis_plot_ranges: dict[str, tuple[list[float], list[float]]] = {}
         self.setWindowTitle("Pluto VSA - Offline FSK / PSK")
         self.resize(1600, 960)
         self.setDockOptions(
@@ -113,6 +114,23 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_display_action.setChecked(False)
         self.symbol_display_action.triggered.connect(self._refresh_display_only)
         display_menu.addAction(self.symbol_display_action)
+        self.reset_graph_scales_action = QtGui.QAction(
+            "Reset Graph Scales", self
+        )
+        self.reset_graph_scales_action.setShortcut("Home")
+        self.reset_graph_scales_action.triggered.connect(self._reset_graph_scales)
+        display_menu.addAction(self.reset_graph_scales_action)
+        mouse_menu = display_menu.addMenu("Mouse Interaction")
+        self.rect_zoom_action = QtGui.QAction("Rect Zoom", self, checkable=True)
+        self.pan_action = QtGui.QAction("Pan", self, checkable=True)
+        mouse_group = QtGui.QActionGroup(self)
+        mouse_group.setExclusive(True)
+        mouse_group.addAction(self.rect_zoom_action)
+        mouse_group.addAction(self.pan_action)
+        self.rect_zoom_action.setChecked(True)
+        self.rect_zoom_action.triggered.connect(self._apply_mouse_interaction_mode)
+        self.pan_action.triggered.connect(self._apply_mouse_interaction_mode)
+        mouse_menu.addActions(mouse_group.actions())
         display_menu.addSeparator()
         carrier_menu = display_menu.addMenu("Carrier Display")
         self.raw_carrier_action = QtGui.QAction("Raw IQ", self, checkable=True)
@@ -261,6 +279,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.symbol_dock,
             QtCore.Qt.Orientation.Vertical,
         )
+        self._apply_mouse_interaction_mode()
         QtCore.QTimer.singleShot(0, self._equalize_result_docks)
 
     def _equalize_result_docks(self) -> None:
@@ -893,7 +912,42 @@ class VSAWindow(QtWidgets.QMainWindow):
         if self.session.result is None:
             return
         self._update_summary()
-        self._update_plots()
+        self._update_plots(reset_ranges=False)
+
+    def _plot_widgets(self) -> tuple[tuple[str, pg.PlotWidget], ...]:
+        if not hasattr(self, "zero_span_plot"):
+            return ()
+        return (
+            ("iq_power", self.zero_span_plot),
+            ("spectrum", self.spectrum_plot),
+            ("modulation", self.modulation_plot),
+            ("symbol_plot", self.symbol_plot),
+        )
+
+    def _apply_mouse_interaction_mode(self) -> None:
+        mode = (
+            pg.ViewBox.RectMode
+            if self.rect_zoom_action.isChecked()
+            else pg.ViewBox.PanMode
+        )
+        for _name, plot in self._plot_widgets():
+            plot.getViewBox().setMouseMode(mode)
+
+    def _capture_analysis_plot_ranges(self) -> None:
+        captured: dict[str, tuple[list[float], list[float]]] = {}
+        for name, plot in self._plot_widgets():
+            plot.getViewBox().updateAutoRange()
+            x_range, y_range = plot.viewRange()
+            captured[name] = (list(x_range), list(y_range))
+        self._analysis_plot_ranges = captured
+
+    def _reset_graph_scales(self) -> None:
+        for name, plot in self._plot_widgets():
+            ranges = self._analysis_plot_ranges.get(name)
+            if ranges is None:
+                continue
+            x_range, y_range = ranges
+            plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
 
     def _selected_modulation(self) -> ModulationKind:
         return ModulationKind(str(self.modulation_combo.currentData()))
@@ -1075,7 +1129,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Analysis failed: {error}")
             return False
         self._update_summary()
-        self._update_plots()
+        self._update_plots(reset_ranges=True)
         self.statusBar().showMessage(
             f"Analysis complete - {self.session.recording.sample_count:,} samples"
         )
@@ -1140,11 +1194,14 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
         )
 
-    def _update_plots(self) -> None:
+    def _update_plots(self, *, reset_ranges: bool = False) -> None:
         result = self.session.result
         signal = self.session.signal
         if result is None or signal is None:
             return
+        if reset_ranges:
+            for _name, plot in self._plot_widgets():
+                plot.enableAutoRange(enable=True)
         show_corrected = (
             self.corrected_carrier_action.isChecked()
             and self.session.carrier_corrected_result is not None
@@ -1154,7 +1211,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         capture_slice = _decimation_indices(result.time_s.size)
         self.zero_span_plot.clear()
-        self.zero_span_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
         self.zero_span_plot.plot(
             result.time_s[capture_slice] * 1e3,
             result.power_dbm[capture_slice],
@@ -1174,7 +1230,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                 symbol_times_s * 1e3,
                 symbol_power_dbm,
             )
-        self._add_pattern_range_overlay(self.zero_span_plot)
+        self._add_pattern_range_overlay(
+            self.zero_span_plot, fit_range=reset_ranges
+        )
         self.spectrum_plot.clear()
         spectrum_result = (
             self.session.carrier_corrected_pattern_range_result
@@ -1211,7 +1269,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         if signal.modulation.family is ModulationFamily.FSK:
             self.modulation_plot.setDownsampling(auto=True, mode="peak")
             self.modulation_plot.setClipToView(True)
-            self.modulation_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
             self.modulation_plot.setTitle("Instantaneous Frequency")
             self.modulation_plot.getAxis("left").enableAutoSIPrefix(True)
             self.modulation_plot.getAxis("bottom").enableAutoSIPrefix(True)
@@ -1234,12 +1291,14 @@ class VSAWindow(QtWidgets.QMainWindow):
                     symbol_times_s * 1e3,
                     symbol_frequency_khz,
                 )
-            if signal.frequency_deviation_hz is not None:
+            if reset_ranges and signal.frequency_deviation_hz is not None:
                 y_limit_khz = 1.5 * signal.frequency_deviation_hz / 1e3
                 self.modulation_plot.setYRange(
                     -y_limit_khz, y_limit_khz, padding=0.0
                 )
-            self._add_pattern_range_overlay(self.modulation_plot)
+            self._add_pattern_range_overlay(
+                self.modulation_plot, fit_range=reset_ranges
+            )
 
             self.symbol_plot.setTitle("FSK Symbol Phase Difference")
             self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
@@ -1276,8 +1335,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                 np.sin(unit_angle),
                 pen=pg.mkPen((120, 120, 120, 110), width=1),
             )
-            self.symbol_plot.setXRange(-1.25, 1.25, padding=0.0)
-            self.symbol_plot.setYRange(-1.25, 1.25, padding=0.0)
+            if reset_ranges:
+                self.symbol_plot.setXRange(-1.25, 1.25, padding=0.0)
+                self.symbol_plot.setYRange(-1.25, 1.25, padding=0.0)
             summary = f"Frequency Error: {result.frequency_error_hz or 0.0:.1f} Hz"
         else:
             self.modulation_plot.setDownsampling(auto=False)
@@ -1353,12 +1413,13 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if trajectory_iq.size
                 else 1.25
             )
-            self.modulation_plot.setXRange(
-                -trajectory_limit, trajectory_limit, padding=0.0
-            )
-            self.modulation_plot.setYRange(
-                -trajectory_limit, trajectory_limit, padding=0.0
-            )
+            if reset_ranges:
+                self.modulation_plot.setXRange(
+                    -trajectory_limit, trajectory_limit, padding=0.0
+                )
+                self.modulation_plot.setYRange(
+                    -trajectory_limit, trajectory_limit, padding=0.0
+                )
 
             self.symbol_plot.setTitle("Constellation")
             self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
@@ -1385,8 +1446,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             # clear() retains the previous ViewBox range.  Explicitly reset
             # both axes because an FSK frequency range or an earlier malformed
             # constellation can otherwise leave all unit-circle symbols offscreen.
-            self.symbol_plot.setXRange(-1.25, 1.25, padding=0.0)
-            self.symbol_plot.setYRange(-1.25, 1.25, padding=0.0)
+            if reset_ranges:
+                self.symbol_plot.setXRange(-1.25, 1.25, padding=0.0)
+                self.symbol_plot.setYRange(-1.25, 1.25, padding=0.0)
             summary = f"EVM RMS: {result.evm_rms_percent or 0.0:.4f} %"
         pattern_result = self.session.pattern_result
         symbols = (
@@ -1469,6 +1531,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_table.setToolTip(
             f"Showing {shown.size} of {symbols.size} result-range symbols"
         )
+        if reset_ranges:
+            self._capture_analysis_plot_ranges()
 
     @staticmethod
     def _plot_symbol_points(
@@ -1499,7 +1563,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.result_summary.setItem(row, 0, name_item)
             self.result_summary.setItem(row, 1, value_item)
 
-    def _add_pattern_range_overlay(self, plot: pg.PlotWidget) -> None:
+    def _add_pattern_range_overlay(
+        self, plot: pg.PlotWidget, *, fit_range: bool = True
+    ) -> None:
         pattern = self.session.pattern_result
         if pattern is None:
             return
@@ -1538,8 +1604,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             pattern.result_stop_time_s - pattern.result_start_time_s
         ) * 1e3
         margin_ms = max(duration_ms * 0.1, 1e-9)
-        plot.setXRange(
-            pattern.result_start_time_s * 1e3 - margin_ms,
-            pattern.result_stop_time_s * 1e3 + margin_ms,
-            padding=0.0,
-        )
+        if fit_range:
+            plot.setXRange(
+                pattern.result_start_time_s * 1e3 - margin_ms,
+                pattern.result_stop_time_s * 1e3 + margin_ms,
+                padding=0.0,
+            )

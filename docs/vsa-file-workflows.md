@@ -160,6 +160,23 @@ With a successful Pattern Search, the markers cover the current Result Range;
 otherwise they cover the symbol decisions from the normal analysis result.
 Rendering is capped at 20,000 markers and does not alter DSP data or results.
 
+## Graph scale and mouse interaction
+
+Every completed analysis establishes a new initial X/Y range for IQ Power,
+Spectrum, Modulation, and Symbol Plot. Manual zoom/pan does not modify this
+snapshot. `Display Config > Reset Graph Scales` restores all four plots to the
+snapshot; the `Home` key is its shortcut. Re-running analysis discards the old
+snapshot and calculates a new one from the new result.
+
+`Display Config > Mouse Interaction` selects one common interaction mode for
+all four plots:
+
+- `Rect Zoom` (default): left-drag a rectangular area to zoom to it.
+- `Pan`: left-drag to move the visible range.
+
+Display-only refreshes, such as toggling symbol points or raw/carrier-corrected
+display, preserve the current manual view instead of silently resetting it.
+
 ## Tests
 
 `tests/test_vsa_persistence.py` covers versioned JSON round trips and schema
