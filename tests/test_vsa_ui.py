@@ -251,10 +251,24 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.pattern_symbol_table.item(0, 1).text() == "1"
 
         iq_path = tmp_path / "captures" / "sample.npz"
+        pattern_path = tmp_path / "patterns" / "access.vsapattern.json"
+        config_path = tmp_path / "configs" / "measurement.vsaconfig.json"
         iq_path.parent.mkdir()
+        pattern_path.parent.mkdir()
+        config_path.parent.mkdir()
         window._remember_directory("iq", iq_path)
+        window._remember_directory("pattern", pattern_path)
+        window._remember_directory("config", config_path)
         assert window._last_directory("iq") == str(iq_path.parent.resolve())
-        assert window._last_directory("pattern") == ""
+        assert window._last_directory("pattern") == str(pattern_path.parent.resolve())
+        assert window._last_directory("config") == str(config_path.parent.resolve())
+        assert len(
+            {
+                window._last_directory("iq"),
+                window._last_directory("pattern"),
+                window._last_directory("config"),
+            }
+        ) == 3
     finally:
         window._meas_config_dialog.close()
         window.close()

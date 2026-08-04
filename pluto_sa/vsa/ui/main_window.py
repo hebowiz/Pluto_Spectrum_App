@@ -587,7 +587,10 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _last_directory(self, file_kind: str) -> str:
         stored = self._preferences.value(f"directories/{file_kind}", "", type=str)
-        return stored if stored and Path(stored).is_dir() else ""
+        # Never pass an empty path to the native Windows dialog. An empty path
+        # makes Qt reuse the process-wide native-dialog history, which makes
+        # the Pattern and Config histories appear to be shared.
+        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
 
     def _remember_directory(self, file_kind: str, path: str | Path) -> None:
         directory = str(Path(path).resolve().parent)
@@ -714,6 +717,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         if not path:
             return
         path = self._with_suffix(path, ".vsapattern.json")
+        self._remember_directory("pattern", path)
         try:
             save_pattern(
                 path,
@@ -723,7 +727,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                 ),
                 symbol_format=self.pattern_format_combo.currentText(),
             )
-            self._remember_directory("pattern", path)
             self.statusBar().showMessage(f"Pattern saved - {Path(path).name}")
         except ValueError as error:
             QtWidgets.QMessageBox.critical(self, "Pattern Save Error", str(error))
@@ -737,6 +740,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
+        self._remember_directory("pattern", path)
         try:
             document = load_pattern(path)
             order = self._selected_modulation().order
@@ -747,7 +751,6 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.pattern_name_edit.setText(document["name"])
             self.pattern_format_combo.setCurrentText(document["symbol_format"])
             self._set_pattern_symbols(document["symbols"])
-            self._remember_directory("pattern", path)
             self.statusBar().showMessage(f"Pattern loaded - {Path(path).name}")
         except ValueError as error:
             QtWidgets.QMessageBox.critical(self, "Pattern Load Error", str(error))
@@ -858,9 +861,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         if not path:
             return
         path = self._with_suffix(path, ".vsaconfig.json")
+        self._remember_directory("config", path)
         try:
             save_meas_config(path, self._meas_config_values())
-            self._remember_directory("config", path)
             self.statusBar().showMessage(f"Configuration saved - {Path(path).name}")
         except ValueError as error:
             QtWidgets.QMessageBox.critical(self, "Config Save Error", str(error))
@@ -874,9 +877,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
+        self._remember_directory("config", path)
         try:
             self._apply_meas_config_values(load_meas_config(path))
-            self._remember_directory("config", path)
             if self._analyze():
                 self.statusBar().showMessage(
                     f"Configuration loaded - {Path(path).name}"
@@ -1034,6 +1037,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
+        self._remember_directory("iq", path)
         try:
             try:
                 recording = FileIQSource.load(path)
@@ -1053,7 +1057,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                     return
                 recording = FileIQSource.load(path, sample_rate_hz=sample_rate_hz)
             self.load_recording(recording, self._signal_from_controls())
-            self._remember_directory("iq", path)
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "IQ Import Error", str(error))
 

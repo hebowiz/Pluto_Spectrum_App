@@ -71,9 +71,16 @@ independent directory keys:
 - `directories/pattern`
 - `directories/config`
 
-Each corresponding Open/Save dialog starts in its own last successfully used
-folder. These preferences persist between application runs and do not form
+Each corresponding Open/Save dialog starts in its own last selected folder.
+These preferences persist between application runs and do not form
 part of a measurement configuration file.
+
+The selected directory is recorded as soon as a non-empty filename is returned
+by the dialog, even if parsing or writing the selected file later fails. Before
+a file type has its own history, the application passes the current working
+directory explicitly. It never passes an empty start path because the Windows
+native dialog would then fall back to a process-wide folder history and make
+the Pattern and Config locations appear to be shared.
 
 ## IQ trajectory
 
