@@ -20,7 +20,9 @@ defined symbol.
 
 Changing the format changes only the representation, not the stored symbol
 values. A loaded pattern is rejected when a symbol is outside the order of the
-currently selected modulation.
+currently selected modulation. Existing and newly entered table cells are
+always center-aligned; alignment is applied by the edit handler as well as the
+file/table population path.
 
 Pattern files use UTF-8 JSON with the preferred extension
 `.vsapattern.json`. The version-1 fields are:
@@ -84,23 +86,33 @@ directory explicitly. It never passes an empty start path because the Windows
 native dialog would then fall back to a process-wide folder history and make
 the Pattern and Config locations appear to be shared.
 
-## IQ trajectory
+## Modulation and Symbol Plot layout
 
-The former `Reserved` dock is now `IQ Trajectory`. It draws a connected path
-of complex samples on the I/Q plane, comparable to the R&S VSA IQ trajectory
-view.
+The lower-left dock keeps the window name `Modulation`; the former `Reserved`
+dock is named `Symbol Plot`. Their contents depend on the modulation family:
 
-When Pattern Search succeeds, the trajectory uses only the selected Result
-Range. It follows `Display Config > Carrier Display`, choosing raw or
+| Modulation | Modulation dock | Symbol Plot dock |
+| --- | --- | --- |
+| PSK | connected IQ trajectory | constellation decision points |
+| FSK | instantaneous frequency vs time | per-symbol phase difference |
+
+For PSK, the IQ trajectory uses the selected Result Range when Pattern Search
+succeeds. It follows `Display Config > Carrier Display`, choosing raw or
 carrier-corrected Result Range IQ. Without a pattern result it uses the full
 analysis result. Display samples are RMS-normalized and capped at 20,000 plot
 vertices; this affects only rendering and never modifies stored IQ or DSP
 results. The I/Q axes use equal scale and a symmetric range based on the 99.5th
 amplitude percentile.
 
+For FSK, each demodulated symbol-frequency value `f[k]` is converted to a unit
+phasor using `exp(j * 2*pi*f[k]/symbol_rate)`. The +I axis is zero phase; the
+point angle is the phase accumulated over one symbol. Ideal 2FSK therefore
+forms two clusters at the positive and negative deviation angles. A unit-circle
+guide is drawn behind the measured points.
+
 ## Tests
 
 `tests/test_vsa_persistence.py` covers versioned JSON round trips and schema
 rejection. `tests/test_vsa_ui.py` covers the editable pattern table, Config
 control round trip, separate folder preferences, matched-symbol highlighting,
-and IQ trajectory population.
+PSK IQ trajectory/constellation placement, and FSK phase-difference plotting.

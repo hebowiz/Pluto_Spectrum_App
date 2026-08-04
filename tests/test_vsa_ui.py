@@ -97,12 +97,16 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
             window.symbol_dock,
         )
         assert all(isinstance(dock, QtWidgets.QDockWidget) for dock in docks)
-        assert window.reserved_dock.windowTitle() == "IQ Trajectory"
-        trajectory_items = window.iq_trajectory_plot.listDataItems()
-        assert len(trajectory_items) == 1
-        trajectory_i, trajectory_q = trajectory_items[0].getData()
-        assert trajectory_i.size == trajectory_q.size
-        assert trajectory_i.size > 0
+        assert window.symbol_plot_dock.windowTitle() == "Symbol Plot"
+        phase_items = window.symbol_plot.listDataItems()
+        assert len(phase_items) == 2
+        phase_i, phase_q = phase_items[0].getData()
+        assert phase_i.size == phase_q.size
+        assert phase_i.size == window.session.pattern_result.measured_symbols.size
+        np.testing.assert_allclose(np.hypot(phase_i, phase_q), 1.0, atol=1e-12)
+        decoded = window.session.pattern_result.decoded_symbols
+        assert np.mean(phase_q[decoded == 1]) > 0.25
+        assert np.mean(phase_q[decoded == 0]) < -0.25
         assert window.centralWidget() is None
         assert not (
             window.dockOptions()
@@ -186,7 +190,14 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         window.analysis_bandwidth_spin.setValue(1.5)
         window._analyze()
 
-        plot_items = window.modulation_plot.listDataItems()
+        assert "IQ Trajectory" in window.modulation_plot.getPlotItem().titleLabel.text
+        trajectory_items = window.modulation_plot.listDataItems()
+        assert len(trajectory_items) == 1
+        trajectory_i, trajectory_q = trajectory_items[0].getData()
+        assert trajectory_i.size == trajectory_q.size
+        assert trajectory_i.size > 0
+
+        plot_items = window.symbol_plot.listDataItems()
         assert len(plot_items) == 1
         i_values, q_values = plot_items[0].getData()
         magnitude = np.hypot(i_values, q_values)
@@ -198,7 +209,7 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         # decision points on the I/Q axes while leaving decoded symbols intact.
         distance_from_nearest_axis = np.minimum(np.abs(i_values), np.abs(q_values))
         assert np.percentile(distance_from_nearest_axis, 95) < 0.08
-        x_range, y_range = window.modulation_plot.viewRange()
+        x_range, y_range = window.symbol_plot.viewRange()
         assert x_range[0] <= -1.0 and x_range[1] >= 1.0
         assert y_range[0] <= -1.0 and y_range[1] >= 1.0
         assert x_range[1] - x_range[0] < 4.0
@@ -251,6 +262,11 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.result_length_spin.value() == 73
         assert window.bit_order_combo.currentText() == "LSB"
         assert window.pattern_symbol_table.item(0, 1).text() == "1"
+        new_item = QtWidgets.QTableWidgetItem("1")
+        window.pattern_symbol_table.setItem(0, 6, new_item)
+        assert new_item.textAlignment() == int(
+            QtCore.Qt.AlignmentFlag.AlignCenter
+        )
 
         iq_path = tmp_path / "captures" / "sample.npz"
         pattern_path = tmp_path / "patterns" / "access.vsapattern.json"

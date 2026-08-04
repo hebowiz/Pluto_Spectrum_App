@@ -330,7 +330,7 @@ R&SのEvaluation Data Source分類（manual pp.21-24）を採用します。
 
 R&SはSignal Sourceを配置した後、windowごとにResult TypeとNormal/Spectrum/Statistics transformationを選び、最大16 result windowsを同時表示します（manual pp.247-251）。本アプリではQt dock widgetを基本とします。
 
-IQ Powerを含む全result blockを同格のDock Widgetとして扱う。初期workspaceは3列×2行の均等gridとし、上段をIQ Power / Spectrum / Result Summary、下段をModulation / Reserved / Symbol Tableとする。Result Summaryは単一行labelではなく測定項目を縦に列挙する独立result windowとする。
+IQ Powerを含む全result blockを同格のDock Widgetとして扱う。初期workspaceは3列×2行の均等gridとし、上段をIQ Power / Spectrum / Result Summary、下段をModulation / Symbol Plot / Symbol Tableとする。PSKではModulationにIQ軌跡、Symbol PlotにConstellationを表示する。FSKではModulationにInstantaneous Frequency、Symbol Plotに1 symbol期間の位相差分を表示する。Result Summaryは単一行labelではなく測定項目を縦に列挙する独立result windowとする。
 
 - gridへ追加
 - tab化

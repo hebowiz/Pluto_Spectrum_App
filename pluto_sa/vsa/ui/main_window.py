@@ -214,16 +214,18 @@ class VSAWindow(QtWidgets.QMainWindow):
             QtCore.Qt.Orientation.Vertical,
         )
 
-        self.iq_trajectory_plot = self._make_plot("IQ Trajectory", "Q", "I")
-        # I is not monotonic, so the time-series clipping/downsampling policy
-        # used by the other plots does not apply to an IQ-plane path.
-        self.iq_trajectory_plot.setDownsampling(auto=False)
-        self.iq_trajectory_plot.setClipToView(False)
-        self.iq_trajectory_plot.setAspectLocked(True, ratio=1.0)
-        self.reserved_dock = self._dock("IQ Trajectory", self.iq_trajectory_plot)
+        self.symbol_plot = self._make_plot("Symbol Plot", "Q", "I")
+        # I is not monotonic in either constellation or phase-difference
+        # views, so time-series clipping/downsampling does not apply here.
+        self.symbol_plot.setDownsampling(auto=False)
+        self.symbol_plot.setClipToView(False)
+        self.symbol_plot.setAspectLocked(True, ratio=1.0)
+        self.symbol_plot_dock = self._dock("Symbol Plot", self.symbol_plot)
+        # Compatibility alias for the original empty Reserved dock name.
+        self.reserved_dock = self.symbol_plot_dock
         self.splitDockWidget(
             self.spectrum_dock,
-            self.reserved_dock,
+            self.symbol_plot_dock,
             QtCore.Qt.Orientation.Vertical,
         )
 
@@ -645,6 +647,13 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _pattern_table_cell_changed(self, _row: int, _column: int) -> None:
         if self._updating_pattern_table:
             return
+        item = self.pattern_symbol_table.item(_row, _column)
+        if item is not None:
+            self._updating_pattern_table = True
+            try:
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            finally:
+                self._updating_pattern_table = False
         try:
             self._pattern_values = list(
                 self._pattern_symbols_from_table(self._selected_modulation().order)
@@ -1176,7 +1185,6 @@ class VSAWindow(QtWidgets.QMainWindow):
             spectrum_result.spectrum_dbfs,
             pen=pg.mkPen("c", width=1),
         )
-        self.iq_trajectory_plot.clear()
         trajectory_result = (
             (
                 self.session.carrier_corrected_pattern_range_result
@@ -1185,35 +1193,12 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             or display_result
         )
-        trajectory_iq = np.asarray(trajectory_result.iq, dtype=np.complex128)
-        trajectory_slice = _decimation_indices(trajectory_iq.size, maximum=20_000)
-        trajectory_iq = trajectory_iq[trajectory_slice]
-        trajectory_rms = (
-            float(np.sqrt(np.mean(np.abs(trajectory_iq) ** 2)))
-            if trajectory_iq.size
-            else 1.0
-        )
-        if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
-            trajectory_iq = trajectory_iq / trajectory_rms
-        self.iq_trajectory_plot.plot(
-            trajectory_iq.real,
-            trajectory_iq.imag,
-            pen=pg.mkPen((255, 210, 40, 170), width=1),
-        )
-        if trajectory_iq.size:
-            trajectory_limit = max(
-                1.25,
-                1.15 * float(np.percentile(np.abs(trajectory_iq), 99.5)),
-            )
-            self.iq_trajectory_plot.setXRange(
-                -trajectory_limit, trajectory_limit, padding=0.0
-            )
-            self.iq_trajectory_plot.setYRange(
-                -trajectory_limit, trajectory_limit, padding=0.0
-            )
         self.modulation_plot.clear()
-        self.modulation_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
+        self.symbol_plot.clear()
         if signal.modulation.family is ModulationFamily.FSK:
+            self.modulation_plot.setDownsampling(auto=True, mode="peak")
+            self.modulation_plot.setClipToView(True)
+            self.modulation_plot.enableAutoRange(axis=pg.ViewBox.XAxis, enable=True)
             self.modulation_plot.setTitle("Instantaneous Frequency")
             self.modulation_plot.getAxis("left").enableAutoSIPrefix(True)
             self.modulation_plot.getAxis("bottom").enableAutoSIPrefix(True)
@@ -1231,14 +1216,94 @@ class VSAWindow(QtWidgets.QMainWindow):
                     -y_limit_khz, y_limit_khz, padding=0.0
                 )
             self._add_pattern_range_overlay(self.modulation_plot)
+
+            self.symbol_plot.setTitle("FSK Symbol Phase Difference")
+            self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
+            self.symbol_plot.getAxis("bottom").enableAutoSIPrefix(False)
+            self.symbol_plot.setLabel("left", "Q")
+            self.symbol_plot.setLabel("bottom", "I")
+            self.symbol_plot.setAspectLocked(True, ratio=1.0)
+            measured_frequency_hz = np.real(
+                self.session.pattern_result.measured_symbols
+                if self.session.pattern_result is not None
+                else display_result.measured_symbols
+            )
+            phase_difference = np.exp(
+                1j
+                * 2.0
+                * np.pi
+                * measured_frequency_hz
+                / signal.symbol_rate_hz
+            )
+            phase_slice = _decimation_indices(
+                phase_difference.size, maximum=20_000
+            )
+            self.symbol_plot.plot(
+                phase_difference.real[phase_slice],
+                phase_difference.imag[phase_slice],
+                pen=None,
+                symbol="o",
+                symbolSize=6,
+                symbolBrush=pg.mkBrush("y"),
+            )
+            unit_angle = np.linspace(0.0, 2.0 * np.pi, 361)
+            self.symbol_plot.plot(
+                np.cos(unit_angle),
+                np.sin(unit_angle),
+                pen=pg.mkPen((120, 120, 120, 110), width=1),
+            )
+            self.symbol_plot.setXRange(-1.25, 1.25, padding=0.0)
+            self.symbol_plot.setYRange(-1.25, 1.25, padding=0.0)
             summary = f"Frequency Error: {result.frequency_error_hz or 0.0:.1f} Hz"
         else:
-            self.modulation_plot.setTitle("Constellation")
+            self.modulation_plot.setDownsampling(auto=False)
+            self.modulation_plot.setClipToView(False)
+            self.modulation_plot.setTitle("IQ Trajectory")
             self.modulation_plot.getAxis("left").enableAutoSIPrefix(False)
             self.modulation_plot.getAxis("bottom").enableAutoSIPrefix(False)
             self.modulation_plot.setLabel("left", "Q")
             self.modulation_plot.setLabel("bottom", "I")
             self.modulation_plot.setAspectLocked(True, ratio=1.0)
+            trajectory_iq = np.asarray(
+                trajectory_result.iq, dtype=np.complex128
+            )
+            trajectory_slice = _decimation_indices(
+                trajectory_iq.size, maximum=20_000
+            )
+            trajectory_iq = trajectory_iq[trajectory_slice]
+            trajectory_rms = (
+                float(np.sqrt(np.mean(np.abs(trajectory_iq) ** 2)))
+                if trajectory_iq.size
+                else 1.0
+            )
+            if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
+                trajectory_iq = trajectory_iq / trajectory_rms
+            self.modulation_plot.plot(
+                trajectory_iq.real,
+                trajectory_iq.imag,
+                pen=pg.mkPen((255, 210, 40, 170), width=1),
+            )
+            trajectory_limit = (
+                max(
+                    1.25,
+                    1.15 * float(np.percentile(np.abs(trajectory_iq), 99.5)),
+                )
+                if trajectory_iq.size
+                else 1.25
+            )
+            self.modulation_plot.setXRange(
+                -trajectory_limit, trajectory_limit, padding=0.0
+            )
+            self.modulation_plot.setYRange(
+                -trajectory_limit, trajectory_limit, padding=0.0
+            )
+
+            self.symbol_plot.setTitle("Constellation")
+            self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
+            self.symbol_plot.getAxis("bottom").enableAutoSIPrefix(False)
+            self.symbol_plot.setLabel("left", "Q")
+            self.symbol_plot.setLabel("bottom", "I")
+            self.symbol_plot.setAspectLocked(True, ratio=1.0)
             constellation_symbols = (
                 self.session.pattern_result.measured_symbols
                 if self.session.pattern_result is not None
@@ -1247,7 +1312,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             constellation_symbols = _constellation_display_symbols(
                 signal.modulation, constellation_symbols
             )
-            self.modulation_plot.plot(
+            self.symbol_plot.plot(
                 constellation_symbols.real,
                 constellation_symbols.imag,
                 pen=None,
@@ -1258,8 +1323,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             # clear() retains the previous ViewBox range.  Explicitly reset
             # both axes because an FSK frequency range or an earlier malformed
             # constellation can otherwise leave all unit-circle symbols offscreen.
-            self.modulation_plot.setXRange(-1.25, 1.25, padding=0.0)
-            self.modulation_plot.setYRange(-1.25, 1.25, padding=0.0)
+            self.symbol_plot.setXRange(-1.25, 1.25, padding=0.0)
+            self.symbol_plot.setYRange(-1.25, 1.25, padding=0.0)
             summary = f"EVM RMS: {result.evm_rms_percent or 0.0:.4f} %"
         pattern_result = self.session.pattern_result
         symbols = (

@@ -104,13 +104,13 @@ main workspaceの結果blockはすべて同格の`QDockWidget`とし、central w
 
 ```text
 IQ Power    | Spectrum | Result Summary
-Modulation  | Reserved | Symbol Table
+Modulation  | Symbol Plot | Symbol Table
 ```
 
 - IQ Powerも他resultと同様に移動、float、close、再表示できる。
 - Result SummaryはSymbol Tableから分離し、`Parameter`と`Current`の2列へ項目を縦方向に並べる。
 - Result SummaryとSymbol Tableのdata cell背景は交互色を使わず、単一色で統一する。
-- Reservedは将来のTime vs Frequency、EVM等を配置するための空Dock Widget。
+- Symbol PlotはPSK時にConstellation、FSK時に1 symbol期間の位相差分をI/Q平面へ表示するDock Widget。
 - 初期geometryは各列幅と各行高を均等化する。ユーザーが移動・resizeした後はQt dock layoutに従う。
 
 ### Capture内の複数pattern
