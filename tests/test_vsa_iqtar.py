@@ -149,3 +149,16 @@ def test_load_iq_tar_rejects_out_of_range_channel(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="channel_index"):
         FileIQSource.load(path, channel_index=1)
+
+
+def test_committed_rs_iq_tar_sample_is_loadable() -> None:
+    path = Path(__file__).with_name("fixtures") / "rs_sample_gfsk_8msps.iq.tar"
+
+    recording = FileIQSource.load(path)
+
+    assert recording.sample_count == 2048
+    assert recording.sample_rate_hz == 8_000_000.0
+    assert recording.center_frequency_hz == 2_441_000_000.0
+    assert recording.metadata["iq_tar_format"] == "complex"
+    assert recording.metadata["iq_tar_data_type"] == "float32"
+    np.testing.assert_allclose(np.abs(recording.iq), 0.1, atol=1e-6)
