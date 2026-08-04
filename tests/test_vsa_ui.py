@@ -90,6 +90,20 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         )
         assert all(isinstance(dock, QtWidgets.QDockWidget) for dock in docks)
         assert window.centralWidget() is None
+        assert not (
+            window.dockOptions()
+            & QtWidgets.QMainWindow.DockOption.AnimatedDocks
+        )
+        for plot in (
+            window.zero_span_plot,
+            window.spectrum_plot,
+            window.modulation_plot,
+        ):
+            options = plot.getPlotItem().ctrl
+            assert options.downsampleCheck.isChecked()
+            assert options.autoDownsampleCheck.isChecked()
+            assert options.peakRadio.isChecked()
+            assert options.clipToViewCheck.isChecked()
         assert max(dock.width() for dock in docks) - min(
             dock.width() for dock in docks
         ) <= 2

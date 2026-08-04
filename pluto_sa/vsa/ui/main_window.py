@@ -66,7 +66,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.setDockOptions(
             QtWidgets.QMainWindow.DockOption.AllowNestedDocks
             | QtWidgets.QMainWindow.DockOption.AllowTabbedDocks
-            | QtWidgets.QMainWindow.DockOption.AnimatedDocks
         )
         self._build_menu()
         self._build_summary_bar()
@@ -131,6 +130,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         plot.showGrid(x=True, y=True, alpha=0.25)
         plot.setLabel("left", left)
         plot.setLabel("bottom", bottom)
+        # Long IQ traces are expensive to repaint while Windows is moving or
+        # exposing the top-level window. Let pyqtgraph retain extrema while
+        # reducing the curve to the available horizontal pixels, and avoid
+        # painting samples outside the current result-range view.
+        plot.setDownsampling(auto=True, mode="peak")
+        plot.setClipToView(True)
         return plot
 
     def _dock(self, title: str, widget: QtWidgets.QWidget) -> QtWidgets.QDockWidget:
