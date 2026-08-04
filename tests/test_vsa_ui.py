@@ -56,6 +56,13 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
             "Demodulation",
             "Sweep / Run",
         }
+        assert all(
+            button.font().pointSizeF() >= 18.0
+            and button.minimumHeight() >= 84
+            for button in window._config_top_buttons.values()
+        )
+        assert window._config_top_title.font().pointSizeF() >= 16.0
+        assert window._config_top_hint.font().pointSizeF() >= 11.0
         window._config_top_buttons["Signal Description"].click()
         assert window._config_stack.currentIndex() == 2
         assert window._config_back_button.isVisibleTo(window._meas_config_dialog)
@@ -112,4 +119,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         }
         assert summary["Display"] == "Raw IQ"
     finally:
+        window._meas_config_dialog.close()
         window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()

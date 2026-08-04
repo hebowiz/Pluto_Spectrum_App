@@ -412,7 +412,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
         navigation_layout = QtWidgets.QHBoxLayout()
         self._config_back_button = QtWidgets.QPushButton("< Config Top")
-        self._config_back_button.clicked.connect(lambda: self._show_config_page(0))
+        self._config_back_button.clicked.connect(self._show_config_top)
         self._config_page_title = QtWidgets.QLabel()
         title_font = self._config_page_title.font()
         title_font.setBold(True)
@@ -426,22 +426,32 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._config_stack = QtWidgets.QStackedWidget()
         config_top = QtWidgets.QWidget()
         config_top_layout = QtWidgets.QVBoxLayout(config_top)
-        config_top_title = QtWidgets.QLabel("Config Top Menu")
-        config_top_title.setFont(title_font)
-        config_top_layout.addWidget(config_top_title)
-        config_top_layout.addWidget(
-            QtWidgets.QLabel("Select a measurement configuration category.")
+        self._config_top_title = QtWidgets.QLabel("Config Top Menu")
+        top_title_font = self._config_top_title.font()
+        top_title_font.setBold(True)
+        top_title_font.setPointSizeF(max(16.0, top_title_font.pointSizeF() + 6.0))
+        self._config_top_title.setFont(top_title_font)
+        config_top_layout.addWidget(self._config_top_title)
+        self._config_top_hint = QtWidgets.QLabel(
+            "Select a measurement configuration category."
         )
+        hint_font = self._config_top_hint.font()
+        hint_font.setPointSizeF(max(11.0, hint_font.pointSizeF() + 2.0))
+        self._config_top_hint.setFont(hint_font)
+        config_top_layout.addWidget(self._config_top_hint)
         config_button_grid = QtWidgets.QGridLayout()
+        config_button_grid.setHorizontalSpacing(14)
+        config_button_grid.setVerticalSpacing(14)
         self._config_top_buttons: dict[str, QtWidgets.QPushButton] = {}
         for index, (name, page) in enumerate(config_pages, start=1):
             button = QtWidgets.QPushButton(name)
-            button.setMinimumHeight(64)
-            button.clicked.connect(
-                lambda _checked=False, page_index=index: self._show_config_page(
-                    page_index
-                )
-            )
+            button_font = button.font()
+            button_font.setPointSizeF(max(18.0, button_font.pointSizeF() * 2.0))
+            button_font.setBold(True)
+            button.setFont(button_font)
+            button.setMinimumHeight(84)
+            button.setProperty("configPageIndex", index)
+            button.clicked.connect(self._show_selected_config_page)
             config_button_grid.addWidget(button, (index - 1) // 2, (index - 1) % 2)
             self._config_top_buttons[name] = button
             self._config_stack.addWidget(page)
@@ -458,6 +468,15 @@ class VSAWindow(QtWidgets.QMainWindow):
         close_buttons.rejected.connect(self._meas_config_dialog.reject)
         dialog_layout.addWidget(close_buttons)
         self._show_config_page(0)
+
+    def _show_config_top(self) -> None:
+        self._show_config_page(0)
+
+    def _show_selected_config_page(self) -> None:
+        button = self.sender()
+        if not isinstance(button, QtWidgets.QPushButton):
+            return
+        self._show_config_page(int(button.property("configPageIndex")))
 
     def _show_config_page(self, index: int) -> None:
         self._config_stack.setCurrentIndex(index)

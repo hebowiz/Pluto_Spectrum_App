@@ -57,7 +57,7 @@ power_dbm  = power_dbfs
 
 設定名と区分は投入済みのR&S FPL1-K70 VSA User Manual rev.12に準拠する。現在のUIでは`Modulation Type / Order`、`Symbol Rate`、`FSK Ref Deviation`、`Modulation Mapping`、`Transmit Filter Type`、`Alpha / BT`を同じページに配置した。内部の`SignalDescription`はsourceやBluetooth profileに依存しない。
 
-Meas Configは縦並びのaccordionではなく、`Config Top Menu`にカテゴリボタンを2列で配置する。ボタンから個別設定ページへ移動し、`< Config Top`でトップへ戻る2階層構造とする。ダイアログを開くたびにトップを表示し、Window Modalによるメイン画面の操作抑止は維持する。
+Meas Configは縦並びのaccordionではなく、`Config Top Menu`にカテゴリボタンを2列で配置する。ボタンから個別設定ページへ移動し、`< Config Top`でトップへ戻る2階層構造とする。トップのカテゴリボタンは18 pt以上の太字・高さ84 px以上とし、タイトルと案内文も個別設定画面より大きく表示する。ダイアログを開くたびにトップを表示し、Window Modalによるメイン画面の操作抑止は維持する。
 
 ### Pattern Search / Result Range / Demodulation
 
