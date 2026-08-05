@@ -202,7 +202,66 @@ python -m tools.capture_bluetooth_br_iq `
 
 接続中packetを狙う場合はCentral BD_ADDRのLAP、Header復元にはclock、HEC検証にはUAPが必要です。まずは既知GIACを使えるInquiry trafficでRF捕捉とbit timingを検証するのが安全です。
 
-## 7. 未実装
+## 7. R&S方式のFSK carrier drift推定
+
+R&S FPL1-K70 VSA User Manual rev.12の4.5.2.1～4.5.2.3
+（PDF pp.139～141）は、FSKの周波数歪みを次のモデルで定義しています。
+
+```text
+f_dist(t) = B * f_ref(t - tau) + f0 + fd * t
+```
+
+- `B`: reference deviation errorを表すscale
+- `tau`: timing offset
+- `f0`: carrier frequency offset [Hz]
+- `fd`: linear carrier frequency drift [Hz/s]
+
+測定瞬時周波数`f_meas(n)`と、復調symbolおよび設定したfrequency pulseから再構成した
+基準瞬時周波数`f_ref(n*TE - tau)`に対し、R&Sは次のleast-squares criterionを
+`B, f0, fd, tau`について同時に最小化すると説明しています。
+
+```text
+sum_n (
+    f_meas(n)
+    - B * f_ref(n*TE - tau)
+    - f0
+    - fd * n*TE
+) ** 2
+```
+
+FSKのAuto設定では`TE`はcapture sampling period、すなわちCapture Oversamplingの
+全sampleを推定に使用します。burst signalではdetected burstとResult Rangeの重複範囲を
+estimation rangeとし、Run-In/Run-Outを除外します。Measurement Filterが有効なら、
+測定瞬時周波数はそのfilterを経由します。Result SummaryのCarrier Frequency Driftは
+Hz/symbolで表示され、補正ONの場合は推定したlinear driftが復調結果から除去されます。
+
+2026-08-05にこの方式を実装しました。decoded symbol列からGaussian frequency reference
+waveformをcapture oversamplingで再構成し、timing候補ごとにdeviation scaleとdriftをlinear
+least squaresで解きます。fractional timingは1 symbol幅のcoarse search後にbounded scalar
+minimizationを行い、frequency residualが最小のoffsetを選びます。decisionとreference再構成は
+最大3回反復します。
+
+CFOはpacket-wide暫定decisionとの相関で移動しないよう、既知patternから得た値へanchorして
+います。これは公開R&S式のunconstrained joint fitより保守的ですが、実機fixtureで既知の
++20 kHz CFOが0 kHz付近へ移動する問題を防ぎます。通常packetはpatternに32 symbols以上続く
+場合のみdrift refinementを実施し、短縮Inquiry/Page ID packetはdrift 0としてCFO/deviationを
+既知patternから推定します。
+
+Estimation RangeはR&S仕様どおり、検出burst全体ではなく設定されたResult Rangeの終端までに
+制限します。3 ms captureには複数packetが入るため、burst detectorが次packetまでを一範囲に
+まとめる場合があります。以前はその全範囲をfitしてDriftが+120～200 kHz/ms、Deviationが
+126～155 kHzへ崩れることがありました。Result Length 366 symbolsへ制限後、同一実機の8 captureは
+Drift +12.05～+13.31 kHz/ms、CFO +18.92～+19.19 kHz、Deviation 167.90～168.72 kHzとなりました。
+
+`compensate_carrier_frequency_drift=False`ではCFOのみ補正したsymbol frequencyをResultへ渡し、
+`True`の場合だけCFO+drift補正値を渡します。以前はこの設定に関係なくSymbol Plotへdrift補正値が
+渡っていました。30 dB SNRの合成packetでは、真値+150 kHz/msを通常IQで約+141 kHz/ms、
+IQ反転で約-141 kHz/msと推定しました。
+
+公開manualにはtiming searchの数値解法、weighting、外れ値処理、反復decision条件までは記載
+されていないため、その部分は検証可能な独自実装です。
+
+## 8. 未実装
 
 - 複数channel自動探索とfrequency hopping追従（手動single-channel選択は実装済み）。
 - unknown LAP discovery。

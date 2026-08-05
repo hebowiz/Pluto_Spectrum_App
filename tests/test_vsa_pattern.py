@@ -12,10 +12,17 @@ from pluto_sa.vsa.pattern import (
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeSettings,
+    _constellation,
+    _fit_differential_psk_phase_model,
 )
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.profiles.bluetooth_br import access_code_bits
+from pluto_sa.vsa.profiles.bluetooth_br import (
+    build_packet_bits,
+    giac_access_code_bits,
+    modulate_packet_bits,
+)
 
 
 def _pattern_from_generated(recording, start: int, length: int) -> KnownPattern:
@@ -116,6 +123,108 @@ def test_pi4_dqpsk_pattern_search_and_lsb_symbol_bits():
     np.testing.assert_array_equal(
         result.decoded_bits[:2], [first_symbol & 1, (first_symbol >> 1) & 1]
     )
+
+
+@pytest.mark.parametrize(
+    "modulation", [ModulationKind.PI4_DQPSK, ModulationKind.DPSK8]
+)
+def test_differential_psk_short_pattern_uses_joint_result_range_synchronization(
+    modulation: ModulationKind,
+) -> None:
+    recording, signal = GeneratedIQSource.psk(
+        modulation=modulation,
+        symbol_count=420,
+        seed=77,
+    )
+    expected = np.asarray(recording.metadata["generated_symbols"])
+    sample_time_s = np.arange(recording.sample_count) / recording.sample_rate_hz
+    initial_cfo_hz = 25_000.0
+    drift_hz_per_s = 150.0e6
+    phase = 2.0 * np.pi * (
+        initial_cfo_hz * sample_time_s
+        + 0.5 * drift_hz_per_s * sample_time_s**2
+    )
+    distorted = IQRecording(
+        iq=(recording.iq * np.exp(1j * phase)).astype(np.complex64),
+        sample_rate_hz=recording.sample_rate_hz,
+        metadata=recording.metadata,
+    )
+    pattern_start = 50
+    pattern = KnownPattern(
+        tuple(map(int, expected[pattern_start : pattern_start + 10]))
+    )
+
+    result = PatternAnalyzer().search(
+        distorted,
+        signal,
+        PatternSearchSettings(pattern=pattern, mode=PatternSearchMode.ON),
+        ResultRangeSettings(result_length=244),
+        DemodulationSettings(compensate_carrier_frequency_drift=True),
+    )
+
+    assert result.pattern_start_symbol == pattern_start
+    assert result.carrier_frequency_offset_hz == pytest.approx(
+        initial_cfo_hz + drift_hz_per_s * pattern_start / signal.symbol_rate_hz,
+        abs=200.0,
+    )
+    assert result.carrier_frequency_drift_hz_per_s == pytest.approx(
+        drift_hz_per_s, abs=1_000.0
+    )
+    assert result.phase_rotation_rad is not None
+    assert result.metadata["absolute_reference_waveform_sync"] is True
+    assert result.metadata["synchronization_evm_rms"] < 1e-6
+    np.testing.assert_array_equal(
+        result.decoded_symbols, expected[pattern_start : pattern_start + 244]
+    )
+    assert (
+        result.metadata["phase_estimation_method"]
+        == "joint ideal-reference waveform complex-EVM synchronization"
+    )
+
+
+@pytest.mark.parametrize(
+    ("modulation", "outlier_seed"),
+    [(ModulationKind.PI4_DQPSK, 3), (ModulationKind.DPSK8, 1)],
+)
+def test_differential_psk_drift_fit_rejects_faded_phase_cycle_slips(
+    modulation: ModulationKind,
+    outlier_seed: int,
+) -> None:
+    alphabet = _constellation(modulation)
+    symbol_count = 244
+    symbol_indices = np.arange(symbol_count, dtype=np.float64)
+    intercept_rad = 0.13
+    expected_drift_hz_per_s = 6.0e6
+    slope_rad_per_symbol = (
+        2.0 * np.pi * expected_drift_hz_per_s / 1_000_000.0**2
+    )
+    rng = np.random.default_rng(11)
+    data = rng.integers(alphabet.size, size=symbol_count)
+    measured = alphabet[data] * np.exp(
+        1j * (intercept_rad + slope_rad_per_symbol * symbol_indices)
+    )
+
+    # A short faded/disturbed interval makes ordinary Mth-power phase unwrap
+    # acquire a whole-cycle slip, even though the remaining symbols are clean.
+    outlier_indices = np.arange(90, 105)
+    outlier_rng = np.random.default_rng(outlier_seed)
+    measured[outlier_indices] = 0.05 * np.exp(
+        1j * outlier_rng.uniform(-np.pi, np.pi, outlier_indices.size)
+    )
+
+    _, fitted_slope, _, drift_accepted, _ = _fit_differential_psk_phase_model(
+        measured,
+        symbol_indices,
+        alphabet,
+        pattern_phase_anchor_rad=intercept_rad + slope_rad_per_symbol * 4.5,
+        pattern_center_symbol=4.5,
+    )
+    fitted_drift_hz_per_s = fitted_slope * 1_000_000.0**2 / (2.0 * np.pi)
+
+    assert fitted_drift_hz_per_s == pytest.approx(
+        expected_drift_hz_per_s, abs=1_000.0
+    )
+    assert drift_accepted
 
 
 def test_rs_style_pattern_and_result_range_settings_are_independent():
@@ -284,3 +393,64 @@ def test_session_builds_sample_level_carrier_corrected_results():
         session.pattern_result.carrier_frequency_offset_hz,
         atol=2.0,
     )
+
+
+def test_fsk_pattern_result_honors_carrier_drift_compensation_setting() -> None:
+    payload = np.tile(np.asarray([0, 1, 1, 0], dtype=np.uint8), 40)
+    packet_bits = build_packet_bits(
+        clock_6_1=0x15,
+        uap=0x2A,
+        payload_bits=payload,
+        packet_type=3,
+    )
+    recording = IQRecording(
+        modulate_packet_bits(
+            packet_bits,
+            sample_rate_hz=8_000_000.0,
+            carrier_frequency_offset_hz=45_000.0,
+            carrier_frequency_drift_hz_per_s=150.0e6,
+            prefix_samples=19,
+            suffix_samples=17,
+            snr_db=30.0,
+            seed=91,
+        ),
+        sample_rate_hz=8_000_000.0,
+    )
+    signal = SignalDescription(
+        modulation=ModulationKind.GFSK,
+        symbol_rate_hz=1_000_000.0,
+        frequency_deviation_hz=160_000.0,
+        tx_filter="Gaussian",
+        filter_parameter=0.5,
+    )
+    search = PatternSearchSettings(
+        pattern=KnownPattern(tuple(map(int, giac_access_code_bits()))),
+        mode=PatternSearchMode.ON,
+    )
+    analyzer = PatternAnalyzer()
+    uncompensated = analyzer.search(
+        recording,
+        signal,
+        search,
+        ResultRangeSettings(result_length=220),
+        DemodulationSettings(compensate_carrier_frequency_drift=False),
+    )
+    compensated = analyzer.search(
+        recording,
+        signal,
+        search,
+        ResultRangeSettings(result_length=220),
+        DemodulationSettings(compensate_carrier_frequency_drift=True),
+    )
+
+    assert compensated.carrier_frequency_drift_hz_per_s == pytest.approx(
+        150.0e6, abs=20.0e6
+    )
+    np.testing.assert_array_equal(
+        uncompensated.decoded_symbols, compensated.decoded_symbols
+    )
+    difference = (
+        uncompensated.measured_symbols.real
+        - compensated.measured_symbols.real
+    )
+    assert np.ptp(difference) > 20_000.0

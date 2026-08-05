@@ -64,6 +64,34 @@ def _constellation_display_symbols(
     return values
 
 
+def _fsk_phase_difference_symbols(
+    iq: np.ndarray,
+    time_s: np.ndarray,
+    symbol_time_s: np.ndarray,
+    symbol_frequency_hz: np.ndarray,
+    symbol_rate_hz: float,
+) -> np.ndarray:
+    """Build RMS-normalized FSK phase vectors without discarding amplitude."""
+    symbol_times = np.asarray(symbol_time_s, dtype=np.float64)
+    frequencies = np.asarray(symbol_frequency_hz, dtype=np.float64)
+    count = min(symbol_times.size, frequencies.size)
+    if count == 0:
+        return np.empty(0, dtype=np.complex128)
+    symbol_times = symbol_times[:count]
+    frequencies = frequencies[:count]
+    samples = np.asarray(iq, dtype=np.complex128)
+    sample_times = np.asarray(time_s, dtype=np.float64)
+    sampled_iq = np.interp(symbol_times, sample_times, samples.real) + 1j * np.interp(
+        symbol_times, sample_times, samples.imag
+    )
+    rms = float(np.sqrt(np.mean(np.abs(sampled_iq) ** 2)))
+    normalized_magnitude = np.abs(sampled_iq) / max(
+        rms, np.finfo(np.float64).tiny
+    )
+    phase_rad = 2.0 * np.pi * frequencies / float(symbol_rate_hz)
+    return normalized_magnitude * np.exp(1j * phase_rad)
+
+
 class _PlutoSingleCaptureThread(QtCore.QThread):
     capture_ready = QtCore.Signal(object)
     capture_failed = QtCore.Signal(str)
@@ -1606,12 +1634,12 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if self.session.pattern_result is not None
                 else display_result.measured_symbols
             )
-            phase_difference = np.exp(
-                1j
-                * 2.0
-                * np.pi
-                * measured_frequency_hz
-                / signal.symbol_rate_hz
+            phase_difference = _fsk_phase_difference_symbols(
+                display_result.iq,
+                display_result.time_s,
+                symbol_times_s,
+                measured_frequency_hz,
+                signal.symbol_rate_hz,
             )
             phase_slice = _decimation_indices(
                 phase_difference.size, maximum=20_000
@@ -1631,8 +1659,17 @@ class VSAWindow(QtWidgets.QMainWindow):
                 pen=pg.mkPen((120, 120, 120, 110), width=1),
             )
             if reset_ranges:
-                self.symbol_plot.setXRange(-1.25, 1.25, padding=0.0)
-                self.symbol_plot.setYRange(-1.25, 1.25, padding=0.0)
+                symbol_limit = (
+                    max(
+                        1.25,
+                        1.15
+                        * float(np.percentile(np.abs(phase_difference), 99.5)),
+                    )
+                    if phase_difference.size
+                    else 1.25
+                )
+                self.symbol_plot.setXRange(-symbol_limit, symbol_limit, padding=0.0)
+                self.symbol_plot.setYRange(-symbol_limit, symbol_limit, padding=0.0)
             summary = f"Frequency Error: {result.frequency_error_hz or 0.0:.1f} Hz"
         else:
             self.modulation_plot.setDownsampling(auto=False)
@@ -1759,8 +1796,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if self.session.settings.analysis_center_frequency_hz is not None
                 else (recording.center_frequency_hz if recording is not None else 0.0)
             )
-            self._set_result_summary(
-                (
+            summary_rows = [
                     ("Modulation", signal.modulation.value),
                     (
                         "Pattern Symbols Correct",
@@ -1776,11 +1812,26 @@ class VSAWindow(QtWidgets.QMainWindow):
                         "Carrier Drift",
                         f"{pattern_result.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms",
                     ),
+            ]
+            if signal.modulation.family is ModulationFamily.PSK:
+                rate_error_ppm = pattern_result.metadata.get("symbol_rate_error_ppm")
+                sync_evm = pattern_result.metadata.get("synchronization_evm_rms")
+                if rate_error_ppm is not None:
+                    summary_rows.append(
+                        ("Symbol Rate Error", f"{float(rate_error_ppm):+.2f} ppm")
+                    )
+                if sync_evm is not None:
+                    summary_rows.append(
+                        ("Sync EVM RMS", f"{float(sync_evm) * 100.0:.2f} %")
+                    )
+            summary_rows.extend(
+                (
                     ("Display", display_name),
                     ("Match Selection", "Strongest"),
                     ("Result Symbols", str(symbols.size)),
                 )
             )
+            self._set_result_summary(tuple(summary_rows))
         elif self.session.pattern_error:
             self._set_result_summary(
                 (

@@ -310,3 +310,187 @@ R&S風`Input / Frontend`および`Signal Capture`設定から、共通`PlutoRece
 - USBとRNDISは同じ物理デバイスなので、並列に試験してはいけません。
 
 次は既知のPRBS/QPSKまたは連続カウンタ相当信号を入力し、10分以上の相関検証でsample slipを数えます。その後、block sizeとkernel buffer数を比較し、安全な最大sample rateを決定します。
+
+# 2026-08-05: Bluetooth BR FSK symbol-plot asymmetry
+
+An 8 MS/s, 1 ms Pluto VSA Single capture at 2441 MHz was compared with the
+`FSK Symbol Phase Difference` display path.  Its angle is calculated from each
+demodulated symbol-frequency value using `exp(j*2*pi*f_symbol/R_symbol)`.
+The radius now retains the symbol-instant IQ magnitude with one global RMS
+normalization, so angular asymmetry and radial amplitude spread are separate.
+
+One directly captured packet matched the configured 32-symbol access pattern
+at 99.63 %.  Its zero/one cluster medians were -148.17 kHz and +149.11 kHz,
+with a midpoint of +0.47 kHz.  This confirms that neither Pluto nor the basic
+phase-difference display equation inherently produces the asymmetry.
+
+Repeated captures exposed an intermittent carrier-drift estimation problem.
+Nominal cases estimated about +40 kHz/ms and left the cluster midpoint near
+-3 kHz.  Other captures of the same transmitted waveform estimated
++218...+305 kHz/ms and left the midpoint about -11...-17 kHz.  In one
++280 kHz/ms case, reconstructing the pre-compensation symbol frequencies
+showed the local upper/lower midpoint changing only from about +65 kHz to
++43 kHz over the packet.  Applying the estimated positive drift instead moved
+the corrected midpoint from about +36 kHz to -57 kHz.  The large fitted drift
+therefore did not represent the observed common movement of the two FSK tones
+and made the symbol plot less symmetric.
+
+The implementation at the time also applied the decision-directed drift estimate
+to `PatternSearchResult.measured_symbols` unconditionally.  This means the FSK
+Symbol Plot receives drift-compensated values even when Demodulation >
+Compensate for > Carrier Frequency Drift is disabled (the default).  The
+sample-level carrier-corrected IQ path does honor that checkbox, so the two
+result paths are inconsistent.
+
+The subsequently implemented correction:
+
+- retain the pattern-anchored CFO measurement;
+- keep CFO-only and CFO-plus-drift symbol-frequency results separate;
+- select between them using `compensate_carrier_frequency_drift` for every
+  plot/result path;
+- replace the symbol-rate decision-directed drift fit with the sample-rate
+  reconstructed-reference model described below;
+- add regression coverage for payload sequences whose symbol values correlate
+  with time, because those sequences currently allow deviation-model mismatch
+  to leak into the linear drift coefficient.
+
+The IQ DC magnitude in the symmetric direct capture was about 3.35 % of RMS.
+The normal VSA session removes the complex mean before pattern analysis when
+`remove_dc` is enabled, and the direct unremoved capture was nevertheless
+symmetric, so DC offset was not the primary cause in this observation.  Tuning
+the wanted carrier exactly to the Pluto LO still deserves separate DC-notch
+and image-rejection characterization.
+
+## 2026-08-05: sample-rate joint-fit drift validation
+
+The FSK estimator was changed from symbol-rate decision-directed regression to
+a capture-oversampling reference-frequency fit modeled after R&S VSA.  Initial
+3 ms tests exposed a second issue: multiple transmitted packets can occur in
+one capture, and the burst detector can combine adjacent activity.  Fitting the
+entire detected range produced occasional +120...+200 kHz/ms drift and
+126...155 kHz deviation estimates even when the requested result was only one
+366-symbol DH1 packet.
+
+The estimation range is now capped at the configured Result Range, matching the
+R&S burst/result-range rule.  Eight subsequent 3 ms captures, each analyzed as
+one complete 366-symbol result, produced:
+
+- I/Q correlation: 99.53...99.67 %
+- CFO: +18.92...+19.19 kHz
+- carrier drift: +12.05...+13.31 kHz/ms
+- measured deviation: 167.90...168.72 kHz
+
+The earlier bimodal estimates did not recur.  Capture Length must still be long
+enough to contain a complete packet; for this asynchronous Free Run BR test,
+3 ms is preferred over 1 ms.  Result Length then limits parameter estimation to
+the intended packet rather than every packet present in the capture.
+
+## 2026-08-05: live 2DH1 phase stability
+
+Ten 3 ms Pluto captures of the fixed 2DH1 signal were evaluated independently
+of the current ten-symbol PSK drift fit.  The application estimator varied by
+roughly -814...+1774 kHz/ms.  A data-removing pi/4-DQPSK fourth-power estimate
+over the complete 244-symbol Result Range measured only -0.72...+1.03 kHz/ms.
+After removing that small linear component, residual phase RMS was
+2.26...6.45 degrees.
+
+This separates a modest real receive/transmit phase spread from the dominant
+analysis artifact: the large visible capture-to-capture constellation changes
+were caused mainly by fitting drift to only ten known symbols.
+
+After implementing full-Result-Range Mth-power/detected-data synchronization,
+ten further live captures measured CFO +21.10...+21.37 kHz, drift
+-1.72...+0.80 kHz/ms, and phase RMS 2.32...4.86 degrees.  Drift compensation
+ON and OFF produced effectively the same phase RMS because the physical drift
+was small.  The previous hundreds-to-thousands of kHz/ms variation no longer
+occurred.
+
+### Rare 8DPSK false-drift reproduction and final guard
+
+With the fixed 2441 MHz 3DH1 signal, Pluto gain 0 dB, external attenuation
+30 dB, 8 MS/s and a 3 ms capture, the issue was reproduced independently of
+the GUI. Two normal captures reported -1.1 and +3.6 kHz/ms. A third capture
+still decoded its ten-symbol pattern with 99.24% correlation and zero errors,
+but the old fit reported -736.5 kHz/ms and moved CFO from its normal +21 kHz to
++44.3 kHz. This demonstrates an estimator alias rather than receiver overload
+or ambient 2.4 GHz ingress.
+
+After circular robust drift estimation, CFO-only model fallback, and fractional
+symbol timing were added, twenty consecutive live 8DPSK captures produced:
+
+- pattern correlation: 98.49...99.91%;
+- pattern errors: zero in all captures;
+- CFO: +20.61...+21.02 kHz;
+- accepted/reported drift: 0 kHz/ms because none of the candidate slopes
+  improved the CFO-only weighted phase residual;
+- fractional timing correction: -0.50...+0.40 analysis samples;
+- weighted phase residual RMS: 2.52...7.67 degrees.
+
+No false high-drift solution occurred. Reporting zero here means drift was not
+supported by the Result Range error comparison; it does not assert that the
+physical oscillator has mathematically exact zero drift.
+
+### Joint-EVM 2DH1 synchronization validation
+
+The preceding CFO-only fallback was superseded because it also rejected valid
+small drift and left Carrier Drift fixed at zero. A joint complex-EVM fit of
+fractional timing, timing rate, CFO, and drift was then tested with twenty
+fixed-channel 2DH1 captures under the same 2441 MHz, 8 MS/s, 3 ms, Pluto gain
+0 dB and external attenuation 30 dB conditions.
+
+The initial +/-0.75-sample timing bound was reached by several captures, proving
+that short-pattern coarse correlation could be more than one sample from the
+eye center. Expanding fine timing to the non-ambiguous part of one 8-sample
+symbol removed the boundary hits. A final twenty-capture run produced:
+
+- pattern errors: zero in all captures;
+- CFO: +20.64...+21.47 kHz;
+- Carrier Drift: -3.25...+3.02 kHz/ms, no zero locking;
+- phase residual RMS: 2.42...3.17 degrees;
+- complex synchronization EVM RMS: 5.58...7.41%;
+- fractional timing offset: -0.40...+1.47 analysis samples;
+- symbol-rate error: -17.8...+56.0 ppm.
+
+The earlier outlier captures near 6 degrees phase residual and 14% EVM did not
+recur in this run. These values characterize synchronization repeatability,
+not yet standards-compliant Bluetooth EVM accuracy.
+
+### 3DH1 absolute-vector versus differential-phase validation
+
+The IQ Trajectory symbol-point spread was independently calculated through two
+paths: directly from matched-filtered samples at the optimized demodulator symbol
+times, and through the carrier-corrected IQ path used by the GUI. Across twelve
+live captures the two absolute phase-spread results agreed within 0.14 degree,
+excluding stale timing or a separate UI interpolation bug.
+
+Across ten subsequent captures, differential 8DPSK phase error remained about
+2.8...3.4 degrees RMS while absolute phase spread varied 3.35...10.82 degrees.
+The cumulative sum of differential phase error reproduced absolute trajectory
+phase error with 0.000-degree RMS mismatch for every capture. The varying spread
+is therefore the accumulated differential phase-error random walk. It can contain
+real transmitter/receiver phase noise plus residual synchronization error; it is
+not evidence by itself that symbol timing selected a wrong sample.
+
+### 3DH1 absolute-reference waveform synchronization
+
+After replacing differential-decision-point synchronization with the reconstructed
+absolute-reference waveform fit, an initial twenty-capture run reduced IQ
+Trajectory phase spread from the earlier 3.35...10.82 degrees to
+1.95...2.56 degrees and Sync EVM to 4.46...5.86%. One run still retained a
+-21.19 kHz/ms local drift solution even though its trajectory looked good.
+
+The optimizer was then changed to solve from both zero drift and the Mth-power
+coarse drift, selecting the lower absolute-reference EVM result. A final twenty
+fixed-channel 3DH1 captures at 2441 MHz, 8 MS/s and 3 ms produced:
+
+- pattern errors: zero in every capture;
+- I/Q correlation: 99.61...99.94%;
+- CFO: +21.594...+21.654 kHz;
+- Carrier Drift: -0.26...+0.23 kHz/ms;
+- Symbol Rate Error: -22.7...+37.6 ppm;
+- absolute IQ Trajectory phase spread: 1.97...2.61 degrees;
+- absolute-reference Sync EVM RMS: 4.64...6.06%.
+
+The prior tight/dispersed two-state trajectory behavior and high-drift outlier did
+not recur. These are implementation repeatability figures for the connected test
+source, not a standards-conformance EVM specification.

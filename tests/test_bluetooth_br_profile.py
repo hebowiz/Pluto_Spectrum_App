@@ -347,8 +347,8 @@ def test_bluetooth_packet_tracks_frequency_drift_and_iq_inversion() -> None:
     )
 
     assert result.demodulation.iq_inverted is True
-    # The decision-directed drift value is a coarse correction estimate rather
-    # than a conformance measurement, but it must identify the inverted slope.
-    assert -300.0e6 < result.demodulation.carrier_frequency_drift_hz_per_s < -50.0e6
+    assert result.demodulation.carrier_frequency_drift_hz_per_s == pytest.approx(
+        -drift_hz_per_s, abs=25.0e6
+    )
     assert result.header is not None and result.header.hec_valid is True
     np.testing.assert_array_equal(result.payload_bits[: payload.size], payload)

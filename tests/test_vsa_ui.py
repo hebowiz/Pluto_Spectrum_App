@@ -8,7 +8,11 @@ import pyqtgraph as pg
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from pluto_sa.vsa.ui.main_window import VSAWindow, _constellation_display_symbols
+from pluto_sa.vsa.ui.main_window import (
+    VSAWindow,
+    _constellation_display_symbols,
+    _fsk_phase_difference_symbols,
+)
 from pluto_sa.vsa.model import ModulationKind, SignalDescription
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
@@ -138,7 +142,10 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         phase_i, phase_q = phase_items[0].getData()
         assert phase_i.size == phase_q.size
         assert phase_i.size == window.session.pattern_result.measured_symbols.size
-        np.testing.assert_allclose(np.hypot(phase_i, phase_q), 1.0, atol=1e-12)
+        phase_magnitude = np.hypot(phase_i, phase_q)
+        assert np.sqrt(np.mean(phase_magnitude**2)) == pytest.approx(
+            1.0, abs=1e-6
+        )
         decoded = window.session.pattern_result.decoded_symbols
         assert np.mean(phase_q[decoded == 1]) > 0.25
         assert np.mean(phase_q[decoded == 0]) < -0.25
@@ -192,6 +199,30 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         window.close()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_fsk_phase_difference_preserves_rms_normalized_symbol_amplitude() -> None:
+    time_s = np.arange(32, dtype=np.float64) / 8_000_000.0
+    symbol_time_s = np.asarray([0.5, 1.5, 2.5, 3.5]) / 1_000_000.0
+    amplitude = np.asarray([0.5, 1.0, 1.5, 2.0])
+    iq = np.interp(time_s, symbol_time_s, amplitude).astype(np.complex128)
+    frequency_hz = np.asarray([-160_000.0, 160_000.0, -160_000.0, 160_000.0])
+
+    symbols = _fsk_phase_difference_symbols(
+        iq,
+        time_s,
+        symbol_time_s,
+        frequency_hz,
+        1_000_000.0,
+    )
+
+    expected_magnitude = amplitude / np.sqrt(np.mean(amplitude**2))
+    np.testing.assert_allclose(np.abs(symbols), expected_magnitude, atol=1e-12)
+    np.testing.assert_allclose(
+        np.angle(symbols),
+        2.0 * np.pi * frequency_hz / 1_000_000.0,
+        atol=1e-12,
+    )
 
 
 def test_psk_constellation_uses_normalized_pattern_result_only() -> None:

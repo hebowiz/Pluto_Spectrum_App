@@ -3,9 +3,22 @@
   "version": 1,
   "settings": {
     "input_frontend": {
+      "input_source": "Pluto",
+      "pluto_uri": "",
+      "center_frequency_mhz": 2441.0,
+      "rf_bandwidth_mhz": 8.0,
+      "internal_gain_db": 30,
+      "external_attenuation_db": 30.0,
+      "external_gain_db": 0.0,
       "analysis_channel_enabled": false,
       "analysis_center_mhz": 2441.0,
       "analysis_bandwidth_mhz": 1.5
+    },
+    "signal_capture": {
+      "capture_length": 3000.0,
+      "capture_length_unit": "Symbols",
+      "samples_per_symbol": 8,
+      "swap_iq": false
     },
     "signal_description": {
       "modulation": "pi/4-DQPSK",
@@ -33,7 +46,7 @@
       ],
       "threshold_auto": true,
       "threshold_percent": 90.0,
-      "meas_only_if_correct": true
+      "meas_only_if_correct": false
     },
     "result_range": {
       "length_symbols": 244,

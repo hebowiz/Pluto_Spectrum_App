@@ -139,11 +139,17 @@ fit one global complex gain against the reconstructed reference sequence and
 implement `Optimization` and `Normalize EVM to` as separate settings. It must
 not normalize every symbol independently.
 
-For FSK, each demodulated symbol-frequency value `f[k]` is converted to a unit
-phasor using `exp(j * 2*pi*f[k]/symbol_rate)`. The +I axis is zero phase; the
-point angle is the phase accumulated over one symbol. Ideal 2FSK therefore
-forms two clusters at the positive and negative deviation angles. A unit-circle
-guide is drawn behind the measured points.
+For FSK, each demodulated symbol-frequency value `f[k]` sets the phase of the
+display vector using `exp(j * 2*pi*f[k]/symbol_rate)`. The +I axis is zero
+phase; the point angle is the phase accumulated over one symbol. Its magnitude
+is sampled from the analysis IQ waveform at the recovered symbol instant. One
+global RMS magnitude over the selected symbols is used for normalization, as
+for the PSK symbol display; individual points are not projected onto the unit
+circle. Ideal constant-envelope 2FSK therefore forms two clusters near the
+positive and negative deviation angles, while real amplitude variation remains
+visible as radial spread. A unit-circle guide is drawn behind the measured
+points, and the plot range expands when the measured radial spread exceeds the
+default +/-1.25 range.
 
 ## Symbol-position overlay
 

@@ -7,6 +7,7 @@ from fractions import Fraction
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+from scipy.optimize import minimize_scalar
 from scipy.signal import resample_poly
 
 
@@ -14,6 +15,7 @@ from scipy.signal import resample_poly
 class GFSKDemodulationResult:
     bits: np.ndarray
     symbol_frequency_hz: np.ndarray
+    drift_compensated_symbol_frequency_hz: np.ndarray
     symbol_time_s: np.ndarray
     access_start_bit: int
     access_start_sample: int
@@ -26,12 +28,18 @@ class GFSKDemodulationResult:
     analysis_sample_rate_hz: float
     samples_per_symbol: int
     iq_inverted: bool
+    frequency_model_timing_offset_samples: float
+    frequency_model_residual_rms_hz: float
     burst_ranges: tuple[tuple[int, int], ...]
 
     def __post_init__(self) -> None:
         arrays = {
             "bits": (self.bits, np.uint8),
             "symbol_frequency_hz": (self.symbol_frequency_hz, np.float64),
+            "drift_compensated_symbol_frequency_hz": (
+                self.drift_compensated_symbol_frequency_hz,
+                np.float64,
+            ),
             "symbol_time_s": (self.symbol_time_s, np.float64),
         }
         for name, (values, dtype) in arrays.items():
@@ -164,6 +172,119 @@ def _expected_fsk_symbol_levels(
     return _symbol_values(shaped, 0, int(samples_per_symbol))
 
 
+def _expected_fsk_sample_levels(
+    bits: np.ndarray, samples_per_symbol: int, gaussian_bt: float | None
+) -> np.ndarray:
+    """Reconstruct the reference instantaneous-frequency waveform."""
+    levels = np.repeat(
+        2.0 * np.asarray(bits, dtype=np.float64) - 1.0,
+        int(samples_per_symbol),
+    )
+    if gaussian_bt is not None:
+        sigma_samples = int(samples_per_symbol) / (
+            2.0 * np.pi * float(gaussian_bt)
+        )
+        levels = gaussian_filter1d(
+            levels, sigma=max(0.5, sigma_samples), mode="nearest"
+        )
+    return uniform_filter1d(
+        levels,
+        size=max(1, int(samples_per_symbol) // 2),
+        mode="nearest",
+    )
+
+
+def _fit_frequency_distortion_model(
+    measured_frequency_hz: np.ndarray,
+    bits: np.ndarray,
+    *,
+    samples_per_symbol: int,
+    pattern_symbols: int,
+    gaussian_bt: float | None,
+    anchored_cfo_hz: float | None = None,
+) -> tuple[float, float, float, float, float]:
+    """Jointly fit deviation, CFO, linear drift, and fractional timing.
+
+    This is the variable-projection form of the R&S FSK frequency model.  For
+    each timing offset, deviation scale, CFO, and drift are linear least-squares
+    parameters.  A bounded scalar search then selects the timing offset with
+    minimum residual energy.
+    """
+    measured = np.asarray(measured_frequency_hz, dtype=np.float64)
+    reference = _expected_fsk_sample_levels(
+        bits, int(samples_per_symbol), gaussian_bt
+    )
+    count = min(measured.size, reference.size)
+    if count < max(16, 4 * int(samples_per_symbol)):
+        raise ValueError("not enough FSK samples for frequency-model estimation")
+    measured = measured[:count]
+    reference = reference[:count]
+    indices = np.arange(count, dtype=np.float64)
+    relative_symbols = (
+        (indices + 0.5) / float(samples_per_symbol)
+        - (float(pattern_symbols) - 1.0) / 2.0
+    )
+    # Exclude filter/run-in edge samples when enough packet data is available.
+    guard = min(2 * int(samples_per_symbol), max(0, (count - 32) // 4))
+    fit_slice = slice(guard, count - guard if guard else count)
+    fit_measured = measured[fit_slice]
+    fit_relative = relative_symbols[fit_slice]
+
+    def solve(timing_offset_samples: float) -> tuple[float, np.ndarray]:
+        shifted_reference = np.interp(
+            indices - float(timing_offset_samples),
+            indices,
+            reference,
+            left=reference[0],
+            right=reference[-1],
+        )[fit_slice]
+        if anchored_cfo_hz is None:
+            design = np.column_stack(
+                (shifted_reference, np.ones(fit_measured.size), fit_relative)
+            )
+            parameters = np.linalg.lstsq(design, fit_measured, rcond=None)[0]
+            modeled = design @ parameters
+        else:
+            design = np.column_stack((shifted_reference, fit_relative))
+            fitted = np.linalg.lstsq(
+                design,
+                fit_measured - float(anchored_cfo_hz),
+                rcond=None,
+            )[0]
+            parameters = np.asarray(
+                [fitted[0], float(anchored_cfo_hz), fitted[1]],
+                dtype=np.float64,
+            )
+            modeled = design @ fitted + float(anchored_cfo_hz)
+        residual = fit_measured - modeled
+        return float(np.mean(residual**2)), parameters
+
+    half_symbol = 0.5 * float(samples_per_symbol)
+    coarse_offsets = np.linspace(
+        -half_symbol, half_symbol, 2 * int(samples_per_symbol) + 1
+    )
+    coarse = [(solve(offset)[0], float(offset)) for offset in coarse_offsets]
+    _, best_offset = min(coarse, key=lambda item: item[0])
+    lower = max(-half_symbol, best_offset - 1.0)
+    upper = min(half_symbol, best_offset + 1.0)
+    optimized = minimize_scalar(
+        lambda offset: solve(float(offset))[0],
+        bounds=(lower, upper),
+        method="bounded",
+        options={"xatol": 0.01},
+    )
+    timing_offset = float(optimized.x) if optimized.success else best_offset
+    residual_power, parameters = solve(timing_offset)
+    signed_deviation_hz, cfo_hz, drift_hz_per_symbol = map(float, parameters)
+    return (
+        signed_deviation_hz,
+        cfo_hz,
+        drift_hz_per_symbol,
+        timing_offset,
+        float(np.sqrt(residual_power)),
+    )
+
+
 def demodulate_gfsk(
     iq: np.ndarray,
     *,
@@ -173,6 +294,7 @@ def demodulate_gfsk(
     analysis_samples_per_symbol: int = 8,
     minimum_correlation: float = 0.65,
     gaussian_bt: float | None = 0.5,
+    maximum_symbols: int | None = None,
 ) -> GFSKDemodulationResult:
     """Recover binary symbols using a known access pattern for timing/CFO.
 
@@ -191,6 +313,8 @@ def demodulate_gfsk(
         raise ValueError("symbol_rate_hz must be positive")
     if int(analysis_samples_per_symbol) < 4:
         raise ValueError("analysis_samples_per_symbol must be at least 4")
+    if maximum_symbols is not None and int(maximum_symbols) <= 0:
+        raise ValueError("maximum_symbols must be positive when provided")
     pattern = _validate_bits(access_bits)
     expected_levels = _expected_fsk_symbol_levels(
         pattern,
@@ -322,26 +446,49 @@ def demodulate_gfsk(
             )
             packet_observed_frequency = packet_observed_frequency[:burst_symbols]
             break
+    if maximum_symbols is not None:
+        packet_observed_frequency = packet_observed_frequency[
+            : int(maximum_symbols)
+        ]
     packet_relative_symbols = (
         np.arange(packet_observed_frequency.size, dtype=np.float64)
         - (pattern.size - 1.0) / 2.0
     )
-    # A shortened inquiry/page ID packet contains only the 68-bit access code.
-    # Burst-detector padding can look like a few extra symbols, but those are
-    # not decision-directed training data.  Refine drift only when a meaningful
-    # post-access field is present (a normal packet supplies at least 54 header
-    # air bits).
-    refinement_iterations = 3 if packet_observed_frequency.size >= pattern.size + 32 else 0
-    if refinement_iterations:
-        # The short access pattern is sufficient for CFO and polarity, but its
-        # linear-drift coefficient is poorly conditioned when the bits mostly
-        # alternate.  Analysis-channel FIR edge transients can then turn a
-        # stationary carrier into a very large apparent drift.  Start the
-        # packet-wide decision-directed fit at zero drift; the longer symbol
-        # range estimates drift on the following iterations.
-        cfo_hz = pattern_cfo_hz
-        drift_hz_per_symbol = 0.0
+    # Start decisions from the known-pattern estimate, then reconstruct the
+    # complete reference frequency waveform.  Unlike the former symbol-rate
+    # regression, the joint fit uses every capture-oversampling point and
+    # estimates deviation, CFO, drift, and fractional timing together.
+    initial_polarity = -1.0 if signed_deviation < 0.0 else 1.0
+    initial_packet_frequency = initial_polarity * (
+        packet_observed_frequency - pattern_cfo_hz
+    )
+    bits = (initial_packet_frequency >= 0.0).astype(np.uint8)
+    training_size = min(pattern.size, bits.size)
+    bits[:training_size] = pattern[:training_size]
+    packet_start = int(access_start_resampled)
+    packet_sample_count = bits.size * int(analysis_samples_per_symbol)
+    packet_sample_stop = min(frequency_hz.size, packet_start + packet_sample_count)
+    packet_measured_frequency = frequency_hz[packet_start:packet_sample_stop]
+    joint_timing_offset = 0.0
+    joint_residual_rms_hz = 0.0
+    refinement_iterations = 3 if bits.size >= pattern.size + 32 else 0
+    cfo_hz = pattern_cfo_hz
+    drift_hz_per_symbol = 0.0
     for _ in range(refinement_iterations):
+        (
+            signed_deviation,
+            cfo_hz,
+            drift_hz_per_symbol,
+            joint_timing_offset,
+            joint_residual_rms_hz,
+        ) = _fit_frequency_distortion_model(
+            packet_measured_frequency,
+            bits,
+            samples_per_symbol=int(analysis_samples_per_symbol),
+            pattern_symbols=pattern.size,
+            gaussian_bt=gaussian_bt,
+            anchored_cfo_hz=pattern_cfo_hz,
+        )
         polarity = -1.0 if signed_deviation < 0.0 else 1.0
         estimated_center_frequency = (
             cfo_hz + drift_hz_per_symbol * packet_relative_symbols
@@ -350,38 +497,16 @@ def demodulate_gfsk(
             packet_observed_frequency - estimated_center_frequency
         )
         bits = (packet_frequency >= 0.0).astype(np.uint8)
-        # The matched access code is known training data.  In particular, an
-        # inquiry ID packet can end immediately after its shortened access
-        # code, so decision-directed refinement must not relearn those symbols
-        # from its own tentative decisions and move away from the match.
-        training_size = min(pattern.size, bits.size)
         bits[:training_size] = pattern[:training_size]
-        modeled_levels = _expected_fsk_symbol_levels(
-            bits,
-            int(analysis_samples_per_symbol),
-            gaussian_bt,
-        )
-        refinement_design = np.column_stack(
-            (
-                np.ones(bits.size),
-                modeled_levels,
-                packet_relative_symbols,
-            )
-        )
-        cfo_hz, signed_deviation, drift_hz_per_symbol = np.linalg.lstsq(
-            refinement_design, packet_observed_frequency, rcond=None
-        )[0]
-        cfo_hz = float(cfo_hz)
-        signed_deviation = float(signed_deviation)
-        drift_hz_per_symbol = float(drift_hz_per_symbol)
     iq_inverted = signed_deviation < 0.0
     polarity = -1.0 if iq_inverted else 1.0
     deviation_hz = abs(signed_deviation)
     estimated_center_frequency = cfo_hz + drift_hz_per_symbol * packet_relative_symbols
-    packet_frequency = polarity * (
+    drift_compensated_packet_frequency = polarity * (
         packet_observed_frequency - estimated_center_frequency
     )
-    bits = (packet_frequency >= 0.0).astype(np.uint8)
+    packet_frequency = polarity * (packet_observed_frequency - cfo_hz)
+    bits = (drift_compensated_packet_frequency >= 0.0).astype(np.uint8)
     # Downstream fields begin after a known training word.  Preserve that word
     # in the recovered stream; access_errors above retains the raw hard-decision
     # quality observed before decision-directed packet tracking.
@@ -395,12 +520,15 @@ def demodulate_gfsk(
     return GFSKDemodulationResult(
         bits=bits,
         symbol_frequency_hz=packet_frequency,
+        drift_compensated_symbol_frequency_hz=(
+            drift_compensated_packet_frequency
+        ),
         symbol_time_s=symbol_time_s,
         access_start_bit=access_index,
         access_start_sample=access_start_source,
         access_correlation=abs(score),
         access_bit_errors=access_errors,
-        carrier_frequency_offset_hz=pattern_cfo_hz,
+        carrier_frequency_offset_hz=cfo_hz,
         carrier_frequency_drift_hz_per_s=(
             drift_hz_per_symbol * float(symbol_rate_hz)
         ),
@@ -409,5 +537,7 @@ def demodulate_gfsk(
         analysis_sample_rate_hz=analysis_rate_hz,
         samples_per_symbol=int(analysis_samples_per_symbol),
         iq_inverted=iq_inverted,
+        frequency_model_timing_offset_samples=joint_timing_offset,
+        frequency_model_residual_rms_hz=joint_residual_rms_hz,
         burst_ranges=bursts,
     )

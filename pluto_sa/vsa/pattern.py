@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
+from scipy.optimize import least_squares
 from scipy.signal import resample_poly
 
 from pluto_sa.vsa.demod.gfsk import demodulate_gfsk
@@ -354,6 +355,229 @@ def _normalized_complex_correlation(
     return np.abs(numerator) / denominator
 
 
+def _interpolate_complex(
+    waveform: np.ndarray,
+    positions: np.ndarray,
+) -> np.ndarray:
+    """Linearly sample a complex waveform at fractional sample positions."""
+    sample_index = np.arange(waveform.size, dtype=np.float64)
+    return np.interp(positions, sample_index, waveform.real) + 1j * np.interp(
+        positions, sample_index, waveform.imag
+    )
+
+
+def _weighted_phase_line(
+    symbol_indices: np.ndarray,
+    phase_rad: np.ndarray,
+    weights: np.ndarray,
+) -> tuple[float, float]:
+    x = np.asarray(symbol_indices, dtype=np.float64)
+    y = np.asarray(phase_rad, dtype=np.float64)
+    weight = np.maximum(np.asarray(weights, dtype=np.float64), _EPSILON)
+    root_weight = np.sqrt(weight / np.mean(weight))
+    design = np.column_stack((np.ones(x.size), x))
+    parameters = np.linalg.lstsq(
+        design * root_weight[:, None],
+        y * root_weight,
+        rcond=None,
+    )[0]
+    return float(parameters[0]), float(parameters[1])
+
+
+def _robust_circular_location(
+    phase_rad: np.ndarray,
+    weights: np.ndarray,
+) -> float:
+    """Return a robust mean angle without converting phase to a line.
+
+    Keeping the samples on the unit circle avoids the permanent cycle slips
+    that an ordinary ``unwrap`` can create after a faded or disturbed symbol.
+    The Tukey reweighting also stops a small group of bad differential symbols
+    from steering the carrier-drift estimate.
+    """
+    phase = np.asarray(phase_rad, dtype=np.float64)
+    base_weight = np.maximum(np.asarray(weights, dtype=np.float64), 0.0)
+    if phase.size == 0 or phase.size != base_weight.size:
+        raise ValueError("circular location requires equally sized non-empty arrays")
+    if not np.any(base_weight > 0.0):
+        base_weight = np.ones(phase.size, dtype=np.float64)
+    center = float(np.angle(np.sum(base_weight * np.exp(1j * phase))))
+    for _ in range(6):
+        residual = np.angle(np.exp(1j * (phase - center)))
+        scale = 1.4826 * float(np.median(np.abs(residual)))
+        cutoff = max(np.deg2rad(2.0), 4.685 * scale)
+        ratio = residual / cutoff
+        robust_weight = np.where(
+            np.abs(ratio) < 1.0,
+            (1.0 - ratio**2) ** 2,
+            0.0,
+        )
+        effective_weight = base_weight * robust_weight
+        if float(np.sum(effective_weight)) <= _EPSILON:
+            break
+        correction = float(
+            np.sum(effective_weight * residual) / np.sum(effective_weight)
+        )
+        center += correction
+        if abs(correction) < 1e-10:
+            break
+    return _wrap_phase(center)
+
+
+def _robust_phase_line_update(
+    symbol_indices: np.ndarray,
+    wrapped_residual_rad: np.ndarray,
+    weights: np.ndarray,
+) -> tuple[float, float]:
+    """Fit a small intercept/slope correction while rejecting phase outliers."""
+    residual = np.asarray(wrapped_residual_rad, dtype=np.float64)
+    base_weight = np.maximum(np.asarray(weights, dtype=np.float64), 0.0)
+    scale = 1.4826 * float(np.median(np.abs(residual - np.median(residual))))
+    cutoff = max(np.deg2rad(2.0), 4.685 * scale)
+    ratio = residual / cutoff
+    robust_weight = np.where(
+        np.abs(ratio) < 1.0,
+        (1.0 - ratio**2) ** 2,
+        0.0,
+    )
+    effective_weight = base_weight * robust_weight
+    if np.count_nonzero(effective_weight > 0.0) < 4:
+        effective_weight = base_weight
+    return _weighted_phase_line(symbol_indices, residual, effective_weight)
+
+
+def _fit_differential_psk_phase_model(
+    measured_symbols: np.ndarray,
+    symbol_indices: np.ndarray,
+    alphabet: np.ndarray,
+    *,
+    pattern_phase_anchor_rad: float,
+    pattern_center_symbol: float,
+) -> tuple[float, float, float, bool, float]:
+    """Estimate differential-PSK carrier offset/drift over Result Range.
+
+    Raising an M-PSK differential symbol to the Mth power removes its data
+    phase.  The known pattern resolves the remaining 2*pi/M ambiguity.  Two
+    reference-directed iterations then minimize phase error over all detected
+    Result Range symbols, matching R&S Auto synchronization's preference for
+    detected data when the known pattern is short.
+    """
+    measured = np.asarray(measured_symbols, dtype=np.complex128)
+    x = np.asarray(symbol_indices, dtype=np.float64)
+    reference_alphabet = np.asarray(alphabet, dtype=np.complex128)
+    if measured.size != x.size or measured.size < 4:
+        raise ValueError("differential PSK phase fit requires at least four symbols")
+    order = int(reference_alphabet.size)
+    invariant = reference_alphabet[0] ** order
+    modulation_removed = measured**order / invariant
+    weights = np.abs(measured) ** 2
+
+    # The phase change between adjacent modulation-removed symbols is M times
+    # the carrier-drift slope.  Estimate it directly on the unit circle.  An
+    # unwrap-based line fit can acquire a whole-cycle slip at one weak symbol,
+    # which appears as a very large but entirely artificial carrier drift.
+    unit = modulation_removed / np.maximum(np.abs(modulation_removed), _EPSILON)
+    adjacent_phase = np.angle(unit[1:] * np.conj(unit[:-1]))
+    adjacent_weight = np.sqrt(weights[1:] * weights[:-1])
+    slope = _robust_circular_location(adjacent_phase, adjacent_weight) / float(order)
+    intercept_phase = np.angle(
+        unit * np.exp(-1j * float(order) * slope * x)
+    )
+    intercept = _robust_circular_location(intercept_phase, weights) / float(order)
+
+    ambiguity = 2.0 * np.pi / float(order)
+    fitted_at_pattern = intercept + slope * float(pattern_center_symbol)
+    intercept += ambiguity * round(
+        (float(pattern_phase_anchor_rad) - fitted_at_pattern) / ambiguity
+    )
+
+    for _ in range(2):
+        predicted = intercept + slope * x
+        corrected = measured * np.exp(-1j * predicted)
+        rms = float(np.sqrt(np.mean(np.abs(corrected) ** 2)))
+        normalized = corrected / max(rms, _EPSILON)
+        decoded = np.argmin(
+            np.abs(normalized[:, None] - reference_alphabet[None, :]), axis=1
+        )
+        reference = reference_alphabet[decoded]
+        observed_error = np.angle(measured * np.conj(reference))
+        residual_error = np.angle(
+            np.exp(1j * (observed_error - predicted))
+        )
+        intercept_update, _ = _robust_phase_line_update(
+            x, residual_error, weights
+        )
+        intercept += intercept_update
+
+    def residual_rms(model_intercept: float, model_slope: float) -> float:
+        corrected_model = measured * np.exp(
+            -1j * (model_intercept + model_slope * x)
+        )
+        decoded_model = np.argmin(
+            np.abs(corrected_model[:, None] - reference_alphabet[None, :]),
+            axis=1,
+        )
+        residual = np.angle(
+            corrected_model * np.conj(reference_alphabet[decoded_model])
+        )
+        return float(
+            np.sqrt(
+                np.sum(weights * residual**2)
+                / max(float(np.sum(weights)), _EPSILON)
+            )
+        )
+
+    candidate_residual_rms = residual_rms(intercept, slope)
+
+    # Compare the drift model with a CFO-only model.  Blind detected-data
+    # synchronization has periodic false solutions; a reported drift must at
+    # least reduce the Result Range phase error.  Otherwise retain the robust
+    # CFO estimate and report zero drift rather than applying an unstable fit.
+    no_drift_intercept = (
+        _robust_circular_location(np.angle(unit), weights) / float(order)
+    )
+    no_drift_intercept += ambiguity * round(
+        (
+            float(pattern_phase_anchor_rad)
+            - no_drift_intercept
+        )
+        / ambiguity
+    )
+    for _ in range(2):
+        corrected_no_drift = measured * np.exp(-1j * no_drift_intercept)
+        decoded_no_drift = np.argmin(
+            np.abs(
+                corrected_no_drift[:, None] - reference_alphabet[None, :]
+            ),
+            axis=1,
+        )
+        no_drift_error = np.angle(
+            corrected_no_drift
+            * np.conj(reference_alphabet[decoded_no_drift])
+        )
+        no_drift_intercept += _robust_circular_location(
+            no_drift_error, weights
+        )
+    no_drift_residual_rms = residual_rms(no_drift_intercept, 0.0)
+    # A fitted slope consumes one extra degree of freedom, so tiny numerical
+    # differences around the same physical solution are expected.  Permit a
+    # 0.1 degree RMS tolerance; reject only a materially worse periodic alias.
+    drift_accepted = candidate_residual_rms <= (
+        no_drift_residual_rms + np.deg2rad(0.1)
+    )
+    if not drift_accepted:
+        intercept = no_drift_intercept
+        slope = 0.0
+        candidate_residual_rms = no_drift_residual_rms
+    return (
+        intercept,
+        slope,
+        candidate_residual_rms,
+        drift_accepted,
+        no_drift_residual_rms,
+    )
+
+
 def _wrap_phase(value: float) -> float:
     return float((float(value) + np.pi) % (2.0 * np.pi) - np.pi)
 
@@ -400,6 +624,18 @@ class PatternAnalyzer:
             and signal.tx_filter.lower() == "gaussian"
             else None
         )
+        if result_range.alignment is ResultRangeAlignment.LEFT:
+            result_start = int(result_range.offset_symbols)
+        elif result_range.alignment is ResultRangeAlignment.CENTER:
+            result_start = len(pattern.symbols) // 2 - int(result_range.result_length) // 2
+            result_start += int(result_range.offset_symbols)
+        else:
+            result_start = len(pattern.symbols) - int(result_range.result_length)
+            result_start += int(result_range.offset_symbols)
+        maximum_symbols = max(
+            len(pattern.symbols),
+            result_start + int(result_range.result_length),
+        )
         demodulation = demodulate_gfsk(
             recording.iq,
             sample_rate_hz=recording.sample_rate_hz,
@@ -407,10 +643,16 @@ class PatternAnalyzer:
             symbol_rate_hz=signal.symbol_rate_hz,
             minimum_correlation=search.effective_correlation_threshold,
             gaussian_bt=gaussian_bt,
+            maximum_symbols=maximum_symbols,
         )
         selection = _result_slice(len(pattern.symbols), demodulation.bits.size, result_range)
         decoded = demodulation.bits[selection].astype(np.int16)
-        measured = demodulation.symbol_frequency_hz[selection].astype(np.complex64)
+        measured_frequency = (
+            demodulation.drift_compensated_symbol_frequency_hz
+            if demodulation_settings.compensate_carrier_frequency_drift
+            else demodulation.symbol_frequency_hz
+        )
+        measured = measured_frequency[selection].astype(np.complex64)
         times = demodulation.symbol_time_s[selection]
         half_symbol_s = 0.5 / signal.symbol_rate_hz
         result_start_sample = max(
@@ -531,15 +773,293 @@ class PatternAnalyzer:
             )
 
         score, phase, index, waveform_symbols, centers = best
+        phase_model_residual_rms_rad: float | None = None
+        phase_drift_estimate_accepted: bool | None = None
+        phase_no_drift_residual_rms_rad: float | None = None
+        fractional_timing_offset_samples = 0.0
+        symbol_timing_rate_samples_per_symbol = 0.0
+        synchronization_evm_rms: float | None = None
         if signal.modulation.differential:
-            observed = waveform_symbols[1:] * np.conj(waveform_symbols[:-1])
-            available = observed[index:]
-            selection = _result_slice(len(pattern.symbols), available.size, result_range)
-            fit_window = available[: len(pattern.symbols)]
-            phase_error = np.unwrap(np.angle(fit_window * np.conj(expected)))
-            relative = np.arange(phase_error.size, dtype=np.float64)
-            slope, intercept = np.polyfit(relative, phase_error, 1)
-            all_relative = np.arange(available.size, dtype=np.float64)
+            base_centers = np.asarray(centers, dtype=np.float64)
+            base_observed = waveform_symbols[1:] * np.conj(waveform_symbols[:-1])
+            base_available = base_observed[index:]
+            selection = _result_slice(
+                len(pattern.symbols), base_available.size, result_range
+            )
+            all_relative = np.arange(base_available.size, dtype=np.float64)
+            selected_relative = all_relative[selection]
+            fit_window = base_available[: len(pattern.symbols)]
+            pattern_error = fit_window * np.conj(expected)
+            pattern_phase_anchor = float(
+                np.angle(np.sum(pattern_error * np.abs(fit_window)))
+            )
+            phase_model = _fit_differential_psk_phase_model(
+                base_available[selection],
+                selected_relative,
+                alphabet,
+                pattern_phase_anchor_rad=pattern_phase_anchor,
+                pattern_center_symbol=(len(pattern.symbols) - 1.0) / 2.0,
+            )
+            (
+                intercept,
+                slope,
+                phase_model_residual_rms_rad,
+                phase_drift_estimate_accepted,
+                phase_no_drift_residual_rms_rad,
+            ) = phase_model
+
+            result_symbol_count = selected_relative.size
+            timing_anchor = float(index + 1) + float(
+                np.mean(selected_relative)
+            )
+            timing_axis = np.arange(base_centers.size, dtype=np.float64) - timing_anchor
+            maximum_timing_rate = 1.0 / max(result_symbol_count - 1, 1)
+            maximum_phase_slope = np.pi / (
+                float(alphabet.size) * max(result_symbol_count - 1, 1)
+            )
+            slope = float(
+                np.clip(slope, -maximum_phase_slope, maximum_phase_slope)
+            )
+            initial_differential = base_available[selection] * np.exp(
+                -1j * (intercept + slope * selected_relative)
+            )
+            initial_differential_rms = float(
+                np.sqrt(np.mean(np.abs(initial_differential) ** 2))
+            )
+            normalized_differential = initial_differential / max(
+                initial_differential_rms, _EPSILON
+            )
+            reference_decisions = alphabet[
+                np.argmin(
+                    np.abs(normalized_differential[:, None] - alphabet[None, :]),
+                    axis=1,
+                )
+            ]
+            pattern_indices = selected_relative.astype(np.int64)
+            known_mask = (pattern_indices >= 0) & (
+                pattern_indices < len(pattern.symbols)
+            )
+            reference_decisions[known_mask] = expected[pattern_indices[known_mask]]
+            reference_absolute = np.cumprod(reference_decisions)
+            base_absolute = waveform_symbols[1 + index :][selection]
+            # Once the absolute reference sequence is available, start the
+            # fine fit at zero drift.  The absolute waveform objective is
+            # smooth in carrier phase/frequency/drift; seeding it with a blind
+            # Mth-power slope can otherwise preserve a rare periodic alias.
+            fine_slope = 0.0
+            initial_dynamic_phase = (
+                intercept * selected_relative
+                + 0.5
+                * fine_slope
+                * selected_relative
+                * (selected_relative + 1.0)
+            )
+            carrier_phase = float(
+                np.angle(
+                    np.sum(
+                        base_absolute
+                        * np.exp(-1j * initial_dynamic_phase)
+                        * np.conj(reference_absolute)
+                    )
+                )
+            )
+            initial_parameters = np.asarray(
+                [0.0, 0.0, carrier_phase, intercept, fine_slope],
+                dtype=np.float64,
+            )
+            ambiguity = 2.0 * np.pi / float(alphabet.size)
+            lower_bounds = np.asarray(
+                [
+                    -3.5,
+                    -maximum_timing_rate,
+                    carrier_phase - np.pi,
+                    intercept - ambiguity / 2.0,
+                    -maximum_phase_slope,
+                ]
+            )
+            upper_bounds = np.asarray(
+                [
+                    3.5,
+                    maximum_timing_rate,
+                    carrier_phase + np.pi,
+                    intercept + ambiguity / 2.0,
+                    maximum_phase_slope,
+                ]
+            )
+
+            def measured_for_parameters(parameters: np.ndarray) -> tuple[
+                np.ndarray, np.ndarray, np.ndarray
+            ]:
+                (
+                    timing_offset,
+                    timing_rate,
+                    model_phase,
+                    model_intercept,
+                    model_slope,
+                ) = parameters
+                candidate_centers = (
+                    base_centers
+                    + timing_offset
+                    + timing_rate * timing_axis
+                )
+                candidate_symbols = _interpolate_complex(
+                    resampled, candidate_centers
+                )
+                candidate_observed = candidate_symbols[1:] * np.conj(
+                    candidate_symbols[:-1]
+                )
+                candidate_available = candidate_observed[index:]
+                candidate_absolute = candidate_symbols[1 + index :][selection]
+                absolute_phase = (
+                    model_phase
+                    + model_intercept * selected_relative
+                    + 0.5
+                    * model_slope
+                    * selected_relative
+                    * (selected_relative + 1.0)
+                )
+                corrected_absolute = candidate_absolute * np.exp(
+                    -1j
+                    * absolute_phase
+                )
+                return candidate_centers, candidate_available, corrected_absolute
+
+            def optimize_reference_waveform(
+                starting_parameters: np.ndarray,
+            ) -> tuple[np.ndarray, np.ndarray, float]:
+                parameters = np.asarray(starting_parameters, dtype=np.float64).copy()
+                decisions = np.asarray(reference_decisions).copy()
+                for _ in range(3):
+                    fixed_reference = np.cumprod(decisions)
+
+                    def synchronization_residual(candidate: np.ndarray) -> np.ndarray:
+                        _, _, corrected_candidate = measured_for_parameters(candidate)
+                        candidate_rms = float(
+                            np.sqrt(np.mean(np.abs(corrected_candidate) ** 2))
+                        )
+                        normalized_candidate = corrected_candidate / max(
+                            candidate_rms, _EPSILON
+                        )
+                        error = normalized_candidate - fixed_reference
+                        return np.concatenate((error.real, error.imag))
+
+                    optimized = least_squares(
+                        synchronization_residual,
+                        parameters,
+                        bounds=(lower_bounds, upper_bounds),
+                        loss="soft_l1",
+                        f_scale=0.05,
+                        x_scale=np.asarray(
+                            [
+                                0.5,
+                                maximum_timing_rate,
+                                0.1,
+                                0.1,
+                                maximum_phase_slope,
+                            ]
+                        ),
+                        max_nfev=120,
+                    )
+                    parameters = optimized.x
+                    _, differential_iteration, _ = measured_for_parameters(parameters)
+                    iteration_intercept = float(parameters[3])
+                    iteration_slope = float(parameters[4])
+                    corrected_differential = differential_iteration[
+                        selection
+                    ] * np.exp(
+                        -1j
+                        * (
+                            iteration_intercept
+                            + iteration_slope * selected_relative
+                        )
+                    )
+                    iteration_rms = float(
+                        np.sqrt(np.mean(np.abs(corrected_differential) ** 2))
+                    )
+                    normalized_iteration = corrected_differential / max(
+                        iteration_rms, _EPSILON
+                    )
+                    decisions = alphabet[
+                        np.argmin(
+                            np.abs(
+                                normalized_iteration[:, None] - alphabet[None, :]
+                            ),
+                            axis=1,
+                        )
+                    ]
+                    decisions[known_mask] = expected[pattern_indices[known_mask]]
+
+                _, _, corrected_result = measured_for_parameters(parameters)
+                result_rms = float(np.sqrt(np.mean(np.abs(corrected_result) ** 2)))
+                normalized_result = corrected_result / max(result_rms, _EPSILON)
+                result_reference = np.cumprod(decisions)
+                result_evm = float(
+                    np.sqrt(np.mean(np.abs(normalized_result - result_reference) ** 2))
+                )
+                return parameters, decisions, result_evm
+
+            coarse_dynamic_phase = (
+                intercept * selected_relative
+                + 0.5 * slope * selected_relative * (selected_relative + 1.0)
+            )
+            coarse_carrier_phase = float(
+                np.angle(
+                    np.sum(
+                        base_absolute
+                        * np.exp(-1j * coarse_dynamic_phase)
+                        * np.conj(reference_absolute)
+                    )
+                )
+            )
+            coarse_carrier_phase += 2.0 * np.pi * round(
+                (carrier_phase - coarse_carrier_phase) / (2.0 * np.pi)
+            )
+            coarse_parameters = np.asarray(
+                [0.0, 0.0, coarse_carrier_phase, intercept, slope],
+                dtype=np.float64,
+            )
+            candidates = (
+                optimize_reference_waveform(initial_parameters),
+                optimize_reference_waveform(coarse_parameters),
+            )
+            parameters, reference_decisions, _ = min(
+                candidates,
+                key=lambda candidate: (
+                    candidate[2],
+                    abs(float(candidate[0][4])),
+                ),
+            )
+
+            (
+                fractional_timing_offset_samples,
+                symbol_timing_rate_samples_per_symbol,
+                carrier_phase,
+                intercept,
+                slope,
+            ) = map(float, parameters)
+            centers, available, fitted_corrected = measured_for_parameters(parameters)
+            fitted_rms = float(np.sqrt(np.mean(np.abs(fitted_corrected) ** 2)))
+            fitted_normalized = fitted_corrected / max(fitted_rms, _EPSILON)
+            fitted_reference = np.cumprod(reference_decisions)
+            fitted_error = fitted_normalized - fitted_reference
+            synchronization_evm_rms = float(
+                np.sqrt(np.mean(np.abs(fitted_error) ** 2))
+            )
+            phase_model_residual_rms_rad = float(
+                np.sqrt(
+                    np.mean(
+                        np.angle(
+                            fitted_normalized * np.conj(fitted_reference)
+                        )
+                        ** 2
+                    )
+                )
+            )
+            phase_drift_estimate_accepted = True
+            final_symbols = _interpolate_complex(resampled, centers)
+            final_observed = final_symbols[1:] * np.conj(final_symbols[:-1])
+            final_scores = _normalized_complex_correlation(final_observed, expected)
+            score = float(final_scores[index])
             applied_slope = (
                 slope
                 if demodulation.compensate_carrier_frequency_drift
@@ -548,13 +1068,16 @@ class PatternAnalyzer:
             corrected_available = available * np.exp(
                 -1j * (intercept + applied_slope * all_relative)
             )
-            measured = available[selection]
             corrected = corrected_available[selection]
-            carrier_offset_hz = intercept * signal.symbol_rate_hz / (2.0 * np.pi)
+            carrier_offset_hz = (
+                (intercept + 0.5 * slope)
+                * signal.symbol_rate_hz
+                / (2.0 * np.pi)
+            )
             drift_hz_per_s = slope * signal.symbol_rate_hz**2 / (2.0 * np.pi)
             result_centers = centers[1 + index :][selection]
             start_center = centers[1 + index]
-            phase_rotation: float | None = None
+            phase_rotation = _wrap_phase(carrier_phase)
         else:
             available = waveform_symbols[index:]
             selection = _result_slice(len(pattern.symbols), available.size, result_range)
@@ -645,9 +1168,12 @@ class PatternAnalyzer:
             analysis_sample_rate_hz=analysis_rate_hz,
             recording_sample_rate_hz=recording.sample_rate_hz,
             carrier_reference_time_s=(
-                start_sample / recording.sample_rate_hz
-                + (1.0 if signal.modulation.differential else 0.5)
-                / signal.symbol_rate_hz
+                float(result_centers[0]) / analysis_rate_hz
+                if signal.modulation.differential
+                else (
+                    start_sample / recording.sample_rate_hz
+                    + 0.5 / signal.symbol_rate_hz
+                )
             ),
             metadata={
                 "pattern_name": pattern.name,
@@ -659,6 +1185,31 @@ class PatternAnalyzer:
                 "matched_filter_applied": matched_filter_applied,
                 "carrier_drift_compensated": (
                     demodulation.compensate_carrier_frequency_drift
+                ),
+                "phase_estimation_method": (
+                    "joint ideal-reference waveform complex-EVM synchronization"
+                    if signal.modulation.differential
+                    else "known-pattern phase fit"
+                ),
+                "phase_model_residual_rms_rad": phase_model_residual_rms_rad,
+                "phase_drift_estimate_accepted": phase_drift_estimate_accepted,
+                "phase_no_drift_residual_rms_rad": (
+                    phase_no_drift_residual_rms_rad
+                ),
+                "fractional_timing_offset_samples": (
+                    fractional_timing_offset_samples
+                ),
+                "symbol_timing_rate_samples_per_symbol": (
+                    symbol_timing_rate_samples_per_symbol
+                ),
+                "symbol_rate_error_ppm": (
+                    -symbol_timing_rate_samples_per_symbol
+                    / float(samples_per_symbol)
+                    * 1.0e6
+                ),
+                "synchronization_evm_rms": synchronization_evm_rms,
+                "absolute_reference_waveform_sync": (
+                    signal.modulation.differential
                 ),
                 "source": recording.source,
                 "match_selection_policy": "strongest correlation in capture",
