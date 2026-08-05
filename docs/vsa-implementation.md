@@ -22,6 +22,7 @@ python -m pluto_sa.vsa.main
 
 - GFSK、QPSK、pi/4-DQPSKのtest waveform生成。
 - NumPy `.npy` / `.npz`およびraw complex IQの読込み。
+- Plutoからの非同期finite Run Single capture。
 - Analysis Center/Bandwidthによる手動single-channel選択。
 - IQ Power（Zero Span、dBm）、Spectrum表示。
 - FSKのinstantaneous frequency表示。
@@ -172,8 +173,32 @@ PSK:
 - `GeneratedIQSource`: FSK/GFSK/PSK test waveform。seed固定に対応。
 - `FileIQSource`: R&S `.iq.tar`、`.npy`、`.npz`、raw complex file。
 - `recording_from_acquisition`: 共通Pluto acquisition record adapter。
+- `PlutoLiveSource`: 共通`PlutoReceiver`とtrigger/acquisition contractを使うfinite live source。
 
 `.npz`は`iq`、`sample_rate_hz`、`center_frequency_hz`、`usable_bandwidth_hz`、振幅補正条件を保存/復元できます。旧NPZにusable bandwidthがない場合は`0.8 * sample rate`をfallbackにします。`.npy`とraw IQはUIでsample rateを指定します。SigMFとSCPI instrumentは未実装です。
+
+### Pluto live Run Single
+
+R&S VSAの`Input / Frontend`、`Signal Capture > Data Acquisition`、`Sweep / Run`の区分に合わせ、Pluto finite captureを追加した。`Run Single`（F6）はGUI threadとは別のcapture threadでPluto接続、設定、IQ取得を行い、完了したimmutable `IQRecording`だけをmain threadへ返す。`Refresh Analysis`（F5）は従来どおり現在のcaptureを再解析し、再取得しない。
+
+初期設定はsymbol rate 1 Msym/s、capture oversampling 8 samples/symbol、source sample rate 8 MS/s、RF bandwidth 8 MHz、capture length 3 ms、record length 24,000 samples、nominal usable I/Q bandwidth 6.4 MHz。Capture Lengthはmsまたはsymbolsで指定し、実sample countへ変換する。Plutoからread backした実sample rateとRF bandwidthをrecord metadataの正本とする。
+
+振幅補正はSA/VSAで別実装にしない。`pluto_sa.config.input_frontend.InputPowerCorrection`を共通contractとし、次式を`SpectrumConfig.input_correction_db`とVSA live captureの両方で使う。
+
+```text
+input_correction_db = external_attenuation_db
+                    - internal_gain_db
+                    - external_gain_db
+
+power_dbm = 20 log10(|IQ|)
+          + Pluto calibration offset (-62 dB nominal)
+          + frequency-dependent offset
+          + input_correction_db
+```
+
+Internal GainはPluto hardwareへ設定し、External ATT/GainはDUT側reference planeへの表示補正としてのみ適用する。初期値はPluto SAと共通でInternal Gain 30 dB、External ATT 30 dB、External Gain 0 dB。現段階の`-62 dB`は公称換算でありtraceable calibrationではないため、表示単位はdBmだがmetadataの`amplitude_calibrated`はfalseを維持する。
+
+`Swap I/Q`はR&Sと同じ`Q + jI`変換をcapture後に適用する。現在はFree Run / Singleのみ。I/Q Power Trigger、negative Trigger Offset（pretrigger）、Continuous、Stopは次段階で同じ共通streamへ接続する。
 
 ### R&S iq-tar import
 
@@ -238,8 +263,8 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 - PSK EVMはbasic decision-directed値。R&S相当のnormalization、同期、evaluation range、measurement filter条件をまだ満たしません。
 - FSK error metricsはfrequency error/deviationの基礎のみです。
 - 一般VSA用pattern searchは実装済み。Burst Search、DECT profile、negative Result Range offsetによるpattern前symbol復調は未実装。
-- VSA UIはoffline Single/Refreshのみ。処理はUI thread上で同期実行します。
-- Pluto live source、Power Trigger接続、SCPI sourceは未実装。
+- VSA UIはPluto Free Run / Run Singleとoffline Refreshに対応。Pluto取得は非同期だが、取得後のDSP解析はUI thread上で同期実行します。
+- Pluto Power Trigger、Continuous、SCPI sourceは未実装。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
 
 Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出、DH1 Payload/CRC、PRBS-9照合までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。さらに固定2441 MHzのBR test waveformを16 MSPSで取得し、通常Access Code、Header FEC、DH1 27-byte body、PRBS-9 216 bitを0 bit errorで復元しました。このtest waveformはUAP `0x6B`のHECとPayload CRCが一致せず、Whitening OFFかつcheck初期値が別設定の可能性があります。16 MSPS全帯域への直接相関は行わず、ユーザー指定Analysis Center/Bandwidthで1 channelを抽出してから復調します。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
@@ -248,7 +273,7 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 
 ## 7. 次の推奨実装順
 
-1. Burst Search、複数の離散Result Range、Select Result Rangeを実装。
+1. Pluto I/Q Power Trigger、Trigger Offset、Continuous/Stopを接続。
 2. pattern前を含むnegative Result Range offsetを実装。
 3. pulse shaping/matched/measurement filter contractとPSK symbol-rate recoveryを追加。
 4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。

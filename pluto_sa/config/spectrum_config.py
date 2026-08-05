@@ -5,6 +5,7 @@ import os
 from typing import Optional
 
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
+from pluto_sa.config.input_frontend import InputPowerCorrection
 
 MAX_DISPLAY_SPAN_HZ = 55_000_000
 MIN_INTERNAL_GAIN_DB = 0
@@ -128,7 +129,18 @@ class SpectrumConfig:
 
     @property
     def input_correction_db(self) -> float:
-        return self.ext_att_db - self.rx_gain_db - self.ext_gain_db
+        return self.input_power_correction.input_correction_db
+
+    @property
+    def input_power_correction(self) -> InputPowerCorrection:
+        """Return the correction contract shared with Pluto VSA capture."""
+
+        return InputPowerCorrection(
+            calibration_offset_db=self.calibration_offset_db,
+            internal_gain_db=self.rx_gain_db,
+            external_attenuation_db=self.ext_att_db,
+            external_gain_db=self.ext_gain_db,
+        )
 
     @property
     def sweep_start_freq_hz(self) -> int:

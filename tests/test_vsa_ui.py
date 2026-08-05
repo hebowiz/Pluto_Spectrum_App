@@ -10,7 +10,7 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_sa.vsa.ui.main_window import VSAWindow, _constellation_display_symbols
 from pluto_sa.vsa.model import ModulationKind, SignalDescription
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
 
 def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
@@ -94,6 +94,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
         assert set(window._config_top_buttons) == {
             "Input / Frontend",
             "Signal Description",
+            "Signal Capture",
             "Pattern Search",
             "Result Range",
             "Demodulation",
@@ -293,17 +294,37 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.pattern_name_edit.setText("Saved Pattern")
         window.result_length_spin.setValue(73)
         window.bit_order_combo.setCurrentText("LSB")
+        window.capture_length_spin.setValue(3.0)
+        window.capture_length_unit_combo.setCurrentText("ms")
+        window.capture_oversampling_combo.setCurrentIndex(
+            window.capture_oversampling_combo.findData(8)
+        )
+        window.capture_center_spin.setValue(2441.0)
+        window.capture_rf_bandwidth_spin.setValue(8.0)
+        window.internal_gain_spin.setValue(12)
+        window.external_attenuation_spin.setValue(30.0)
+        window.external_gain_spin.setValue(3.0)
         saved = window._meas_config_values()
 
         window._set_pattern_symbols([1, 1, 1, 1])
         window.result_length_spin.setValue(12)
         window.bit_order_combo.setCurrentText("MSB")
+        window.capture_oversampling_combo.setCurrentIndex(
+            window.capture_oversampling_combo.findData(16)
+        )
+        window.internal_gain_spin.setValue(0)
         window._apply_meas_config_values(saved)
 
         assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
         assert window.pattern_name_edit.text() == "Saved Pattern"
         assert window.result_length_spin.value() == 73
         assert window.bit_order_combo.currentText() == "LSB"
+        assert window.capture_oversampling_combo.currentData() == 8
+        assert window.capture_sample_rate_label.text() == "8.000 MS/s"
+        assert window.capture_samples_label.text() == "24,000 samples"
+        assert window.capture_usable_bandwidth_label.text() == "6.400 MHz"
+        assert window.internal_gain_spin.value() == 12
+        assert window.capture_correction_label.text().startswith("+15.0 dB")
         assert window.pattern_symbol_table.item(0, 1).text() == "1"
         new_item = QtWidgets.QTableWidgetItem("1")
         window.pattern_symbol_table.setItem(0, 6, new_item)
@@ -335,3 +356,50 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.close()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_pluto_run_single_uses_async_capture_and_updates_session() -> None:
+    pg.mkQApp("VSA Pluto UI test")
+
+    class FakePlutoSource:
+        def __init__(self) -> None:
+            self.settings = None
+            self.closed = False
+
+        def capture_single(self, settings):
+            self.settings = settings
+            recording, _signal = GeneratedIQSource.fsk(
+                symbol_count=64,
+                symbol_rate_hz=settings.symbol_rate_hz,
+                samples_per_symbol=settings.samples_per_symbol,
+            )
+            return recording
+
+        def close(self) -> None:
+            self.closed = True
+
+    source = FakePlutoSource()
+    window = VSAWindow(pluto_source=source)
+    try:
+        window._run_pluto_single()
+        for _index in range(200):
+            QtWidgets.QApplication.processEvents()
+            thread = window._pluto_capture_thread
+            if thread is None:
+                break
+            thread.wait(10)
+
+        assert window._pluto_capture_thread is None
+        assert source.settings is not None
+        assert source.settings.samples_per_symbol == 8
+        assert source.settings.requested_sample_rate_hz == 8_000_000
+        assert source.settings.capture_samples == 24_000
+        assert window.input_source_combo.currentText() == "Pluto"
+        assert window.run_single_action.isEnabled()
+        assert window.session.recording.sample_rate_hz == 8_000_000.0
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+    assert source.closed

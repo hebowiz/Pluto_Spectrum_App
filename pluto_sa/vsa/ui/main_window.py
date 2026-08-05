@@ -8,6 +8,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     BitOrdering,
@@ -28,6 +29,7 @@ from pluto_sa.vsa.persistence import (
     save_pattern,
 )
 from pluto_sa.vsa.session import VSASession
+from pluto_sa.vsa.pluto_source import PlutoCaptureSettings, PlutoLiveSource
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
 
@@ -62,6 +64,27 @@ def _constellation_display_symbols(
     return values
 
 
+class _PlutoSingleCaptureThread(QtCore.QThread):
+    capture_ready = QtCore.Signal(object)
+    capture_failed = QtCore.Signal(str)
+
+    def __init__(
+        self,
+        source: PlutoLiveSource,
+        settings: PlutoCaptureSettings,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._source = source
+        self._settings = settings
+
+    def run(self) -> None:
+        try:
+            self.capture_ready.emit(self._source.capture_single(self._settings))
+        except Exception as error:
+            self.capture_failed.emit(str(error))
+
+
 class VSAWindow(QtWidgets.QMainWindow):
     """One VSA measurement session with detachable result windows."""
 
@@ -69,14 +92,17 @@ class VSAWindow(QtWidgets.QMainWindow):
         self,
         session: VSASession | None = None,
         preferences: QtCore.QSettings | None = None,
+        pluto_source: PlutoLiveSource | None = None,
     ) -> None:
         super().__init__()
         self.session = session or VSASession()
         self._preferences = preferences or QtCore.QSettings("PlutoSA", "PlutoVSA")
+        self._pluto_source = pluto_source or PlutoLiveSource()
+        self._pluto_capture_thread: _PlutoSingleCaptureThread | None = None
         self._updating_pattern_table = False
         self._pattern_values: list[int] = []
         self._analysis_plot_ranges: dict[str, tuple[list[float], list[float]]] = {}
-        self.setWindowTitle("Pluto VSA - Offline FSK / PSK")
+        self.setWindowTitle("Pluto VSA - FSK / PSK")
         self.resize(1600, 960)
         self.setDockOptions(
             QtWidgets.QMainWindow.DockOption.AllowNestedDocks
@@ -101,6 +127,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         file_menu.addAction(close_action)
 
         run_menu = self.menuBar().addMenu("Sweep / Run")
+        self.run_single_action = QtGui.QAction("Run Single", self)
+        self.run_single_action.setShortcut("F6")
+        self.run_single_action.triggered.connect(self._run_pluto_single)
+        run_menu.addAction(self.run_single_action)
         analyze_action = QtGui.QAction("Refresh Analysis", self)
         analyze_action.setShortcut("F5")
         analyze_action.triggered.connect(self._analyze)
@@ -307,6 +337,10 @@ class VSAWindow(QtWidgets.QMainWindow):
 
         source_page = QtWidgets.QWidget()
         source_layout = QtWidgets.QVBoxLayout(source_page)
+        self.input_source_combo = QtWidgets.QComboBox()
+        self.input_source_combo.addItems(("Generated", "IQ File", "Pluto"))
+        source_layout.addWidget(QtWidgets.QLabel("Input Source"))
+        source_layout.addWidget(self.input_source_combo)
         gfsk_button = QtWidgets.QPushButton("Generate GFSK")
         qpsk_button = QtWidgets.QPushButton("Generate QPSK")
         edr_button = QtWidgets.QPushButton("Generate pi/4-DQPSK")
@@ -320,6 +354,48 @@ class VSAWindow(QtWidgets.QMainWindow):
         source_layout.addWidget(edr_button)
         source_layout.addWidget(open_button)
         source_layout.addSpacing(12)
+        pluto_form = QtWidgets.QFormLayout()
+        self.pluto_uri_edit = QtWidgets.QLineEdit()
+        self.pluto_uri_edit.setPlaceholderText("Auto (direct USB preferred)")
+        self.capture_center_spin = QtWidgets.QDoubleSpinBox()
+        self.capture_center_spin.setRange(70.0, 6000.0)
+        self.capture_center_spin.setDecimals(6)
+        self.capture_center_spin.setValue(2441.0)
+        self.capture_center_spin.setSuffix(" MHz")
+        self.capture_rf_bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.capture_rf_bandwidth_spin.setRange(0.2, 56.0)
+        self.capture_rf_bandwidth_spin.setDecimals(3)
+        self.capture_rf_bandwidth_spin.setValue(8.0)
+        self.capture_rf_bandwidth_spin.setSuffix(" MHz")
+        self.internal_gain_spin = QtWidgets.QSpinBox()
+        self.internal_gain_spin.setRange(0, 40)
+        self.internal_gain_spin.setValue(30)
+        self.internal_gain_spin.setSuffix(" dB")
+        self.external_attenuation_spin = QtWidgets.QDoubleSpinBox()
+        self.external_attenuation_spin.setRange(-200.0, 200.0)
+        self.external_attenuation_spin.setDecimals(1)
+        self.external_attenuation_spin.setValue(30.0)
+        self.external_attenuation_spin.setSuffix(" dB")
+        self.external_gain_spin = QtWidgets.QDoubleSpinBox()
+        self.external_gain_spin.setRange(-200.0, 200.0)
+        self.external_gain_spin.setDecimals(1)
+        self.external_gain_spin.setValue(0.0)
+        self.external_gain_spin.setSuffix(" dB")
+        self.capture_correction_label = QtWidgets.QLabel()
+        pluto_form.addRow("Pluto URI", self.pluto_uri_edit)
+        pluto_form.addRow("Center Frequency", self.capture_center_spin)
+        pluto_form.addRow("RF Bandwidth", self.capture_rf_bandwidth_spin)
+        pluto_form.addRow("Internal Gain", self.internal_gain_spin)
+        pluto_form.addRow("External ATT", self.external_attenuation_spin)
+        pluto_form.addRow("External Gain", self.external_gain_spin)
+        pluto_form.addRow("Input Correction", self.capture_correction_label)
+        source_layout.addLayout(pluto_form)
+        for control in (
+            self.internal_gain_spin,
+            self.external_attenuation_spin,
+            self.external_gain_spin,
+        ):
+            control.valueChanged.connect(self._sync_capture_settings)
         self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
         self.analysis_center_spin = QtWidgets.QDoubleSpinBox()
         self.analysis_center_spin.setRange(-100_000.0, 100_000.0)
@@ -373,7 +449,50 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.tx_filter_combo.currentTextChanged.connect(
             lambda value: self.filter_parameter_spin.setEnabled(value != "None")
         )
+        self.symbol_rate_spin.valueChanged.connect(self._sync_capture_settings)
         config_pages.append(("Signal Description", signal_page))
+
+        capture_page = QtWidgets.QWidget()
+        capture_form = QtWidgets.QFormLayout(capture_page)
+        self.capture_length_spin = QtWidgets.QDoubleSpinBox()
+        self.capture_length_spin.setRange(0.001, 1_000_000.0)
+        self.capture_length_spin.setDecimals(3)
+        self.capture_length_spin.setValue(3.0)
+        self.capture_length_unit_combo = QtWidgets.QComboBox()
+        self.capture_length_unit_combo.addItems(("ms", "Symbols"))
+        capture_length_row = QtWidgets.QHBoxLayout()
+        capture_length_row.addWidget(self.capture_length_spin)
+        capture_length_row.addWidget(self.capture_length_unit_combo)
+        self.capture_oversampling_combo = QtWidgets.QComboBox()
+        for value in (2, 4, 8, 16, 32, 64, 128):
+            self.capture_oversampling_combo.addItem(
+                f"{value} samples/symbol", value
+            )
+        self.capture_oversampling_combo.setCurrentIndex(
+            self.capture_oversampling_combo.findData(8)
+        )
+        self.capture_sample_rate_label = QtWidgets.QLabel()
+        self.capture_samples_label = QtWidgets.QLabel()
+        self.capture_usable_bandwidth_label = QtWidgets.QLabel()
+        self.swap_iq_check = QtWidgets.QCheckBox("Swap I/Q")
+        capture_form.addRow("Capture Length", capture_length_row)
+        capture_form.addRow("Sample Rate", self.capture_oversampling_combo)
+        capture_form.addRow("Resulting Sample Rate", self.capture_sample_rate_label)
+        capture_form.addRow("Record Length", self.capture_samples_label)
+        capture_form.addRow("Usable I/Q Bandwidth", self.capture_usable_bandwidth_label)
+        capture_form.addRow(self.swap_iq_check)
+        for control in (
+            self.capture_length_spin,
+            self.capture_length_unit_combo,
+            self.capture_oversampling_combo,
+            self.capture_rf_bandwidth_spin,
+        ):
+            if isinstance(control, QtWidgets.QComboBox):
+                control.currentIndexChanged.connect(self._sync_capture_settings)
+            else:
+                control.valueChanged.connect(self._sync_capture_settings)
+        self._sync_capture_settings()
+        config_pages.append(("Signal Capture", capture_page))
 
         pattern_page = QtWidgets.QWidget()
         pattern_layout = QtWidgets.QVBoxLayout(pattern_page)
@@ -510,10 +629,17 @@ class VSAWindow(QtWidgets.QMainWindow):
 
         run_page = QtWidgets.QWidget()
         run_layout = QtWidgets.QVBoxLayout(run_page)
+        self.run_single_button = QtWidgets.QPushButton("Run Single (Pluto)")
+        self.run_single_button.clicked.connect(self._run_pluto_single)
+        run_layout.addWidget(self.run_single_button)
         refresh_button = QtWidgets.QPushButton("Refresh Analysis")
         refresh_button.clicked.connect(self._analyze)
         run_layout.addWidget(refresh_button)
-        run_layout.addWidget(QtWidgets.QLabel("Offline milestone: Refresh reuses the current capture."))
+        run_layout.addWidget(
+            QtWidgets.QLabel(
+                "Run Single captures new Pluto IQ. Refresh reuses the current capture."
+            )
+        )
         run_layout.addStretch(1)
         config_pages.append(("Sweep / Run", run_page))
 
@@ -779,9 +905,24 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _meas_config_values(self) -> dict[str, object]:
         return {
             "input_frontend": {
+                "input_source": self.input_source_combo.currentText(),
+                "pluto_uri": self.pluto_uri_edit.text().strip(),
+                "center_frequency_mhz": self.capture_center_spin.value(),
+                "rf_bandwidth_mhz": self.capture_rf_bandwidth_spin.value(),
+                "internal_gain_db": self.internal_gain_spin.value(),
+                "external_attenuation_db": self.external_attenuation_spin.value(),
+                "external_gain_db": self.external_gain_spin.value(),
                 "analysis_channel_enabled": self.channel_filter_check.isChecked(),
                 "analysis_center_mhz": self.analysis_center_spin.value(),
                 "analysis_bandwidth_mhz": self.analysis_bandwidth_spin.value(),
+            },
+            "signal_capture": {
+                "capture_length": self.capture_length_spin.value(),
+                "capture_length_unit": self.capture_length_unit_combo.currentText(),
+                "samples_per_symbol": int(
+                    self.capture_oversampling_combo.currentData()
+                ),
+                "swap_iq": self.swap_iq_check.isChecked(),
             },
             "signal_description": {
                 "modulation": self._selected_modulation().value,
@@ -834,8 +975,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             pattern = settings["pattern_search"]
             result_range = settings["result_range"]
             demodulation = settings["demodulation"]
+            signal_capture = settings.get("signal_capture", {})
             if not all(isinstance(section, dict) for section in (
-                source, signal, pattern, result_range, demodulation
+                source, signal, pattern, result_range, demodulation, signal_capture
             )):
                 raise TypeError("configuration sections must be objects")
             self._set_combo_text(self.modulation_combo, signal["modulation"], "modulation")
@@ -844,6 +986,26 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._set_combo_text(self.mapping_combo, signal["symbol_mapping"], "symbol mapping")
             self._set_combo_text(self.tx_filter_combo, signal["tx_filter"], "TX filter")
             self.filter_parameter_spin.setValue(float(signal["filter_parameter"]))
+            if "input_source" in source:
+                self._set_combo_text(
+                    self.input_source_combo, source["input_source"], "input source"
+                )
+            self.pluto_uri_edit.setText(str(source.get("pluto_uri", "")))
+            self.capture_center_spin.setValue(
+                float(source.get("center_frequency_mhz", 2441.0))
+            )
+            self.capture_rf_bandwidth_spin.setValue(
+                float(source.get("rf_bandwidth_mhz", 8.0))
+            )
+            self.internal_gain_spin.setValue(
+                int(round(float(source.get("internal_gain_db", 30.0))))
+            )
+            self.external_attenuation_spin.setValue(
+                float(source.get("external_attenuation_db", 30.0))
+            )
+            self.external_gain_spin.setValue(
+                float(source.get("external_gain_db", 0.0))
+            )
             self.channel_filter_check.setChecked(bool(source["analysis_channel_enabled"]))
             self.analysis_center_spin.setValue(float(source["analysis_center_mhz"]))
             self.analysis_bandwidth_spin.setValue(float(source["analysis_bandwidth_mhz"]))
@@ -867,10 +1029,34 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._set_combo_text(self.bit_order_combo, demodulation["bit_ordering"], "bit ordering")
             self.compensate_drift_check.setChecked(bool(demodulation["compensate_carrier_frequency_drift"]))
             self.compensate_deviation_check.setChecked(bool(demodulation["compensate_fsk_deviation_error"]))
+            if signal_capture:
+                self.capture_length_spin.setValue(
+                    float(signal_capture.get("capture_length", 3.0))
+                )
+                self._set_combo_text(
+                    self.capture_length_unit_combo,
+                    signal_capture.get("capture_length_unit", "ms"),
+                    "capture length unit",
+                )
+                oversampling = int(signal_capture.get("samples_per_symbol", 8))
+                oversampling_index = self.capture_oversampling_combo.findData(
+                    oversampling
+                )
+                if oversampling_index < 0:
+                    raise ValueError(
+                        f"unsupported capture oversampling: {oversampling}"
+                    )
+                self.capture_oversampling_combo.setCurrentIndex(
+                    oversampling_index
+                )
+                self.swap_iq_check.setChecked(
+                    bool(signal_capture.get("swap_iq", False))
+                )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"invalid measurement configuration: {error}") from error
         self._sync_signal_controls()
         self._sync_analysis_controls()
+        self._sync_capture_settings()
 
     def _save_meas_config_file(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -964,6 +1150,100 @@ class VSAWindow(QtWidgets.QMainWindow):
         enabled = self.channel_filter_check.isChecked()
         self.analysis_center_spin.setEnabled(enabled)
         self.analysis_bandwidth_spin.setEnabled(enabled)
+
+    def _capture_length_s(self) -> float:
+        value = float(self.capture_length_spin.value())
+        if self.capture_length_unit_combo.currentText() == "Symbols":
+            return value / float(self.symbol_rate_spin.value())
+        return value / 1e3
+
+    def _input_power_correction(self) -> InputPowerCorrection:
+        return InputPowerCorrection(
+            calibration_offset_db=-62.0,
+            internal_gain_db=self.internal_gain_spin.value(),
+            external_attenuation_db=self.external_attenuation_spin.value(),
+            external_gain_db=self.external_gain_spin.value(),
+        )
+
+    def _pluto_capture_settings(self) -> PlutoCaptureSettings:
+        return PlutoCaptureSettings(
+            center_frequency_hz=self.capture_center_spin.value() * 1e6,
+            symbol_rate_hz=self.symbol_rate_spin.value(),
+            samples_per_symbol=int(self.capture_oversampling_combo.currentData()),
+            capture_length_s=self._capture_length_s(),
+            rf_bandwidth_hz=self.capture_rf_bandwidth_spin.value() * 1e6,
+            sdr_uri=self.pluto_uri_edit.text().strip() or None,
+            swap_iq=self.swap_iq_check.isChecked(),
+            power_correction=self._input_power_correction(),
+        )
+
+    def _sync_capture_settings(self, _value: object = None) -> None:
+        if not hasattr(self, "capture_oversampling_combo"):
+            return
+        settings = self._pluto_capture_settings()
+        self.capture_sample_rate_label.setText(
+            f"{settings.requested_sample_rate_hz / 1e6:.3f} MS/s"
+        )
+        self.capture_samples_label.setText(f"{settings.capture_samples:,} samples")
+        self.capture_usable_bandwidth_label.setText(
+            f"{settings.nominal_usable_bandwidth_hz / 1e6:.3f} MHz"
+        )
+        correction = settings.power_correction
+        self.capture_correction_label.setText(
+            f"{correction.input_correction_db:+.1f} dB "
+            "(Ext ATT - Internal Gain - Ext Gain)"
+        )
+
+    def _run_pluto_single(self) -> None:
+        if (
+            self._pluto_capture_thread is not None
+            and self._pluto_capture_thread.isRunning()
+        ):
+            return
+        try:
+            settings = self._pluto_capture_settings()
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", str(error))
+            return
+        self.input_source_combo.setCurrentText("Pluto")
+        self.run_single_action.setEnabled(False)
+        self.run_single_button.setEnabled(False)
+        self.statusBar().showMessage(
+            "Capturing Pluto IQ - "
+            f"{settings.requested_sample_rate_hz / 1e6:.3f} MS/s, "
+            f"{settings.capture_samples:,} samples"
+        )
+        thread = _PlutoSingleCaptureThread(
+            self._pluto_source,
+            settings,
+            self,
+        )
+        thread.capture_ready.connect(self._pluto_capture_ready)
+        thread.capture_failed.connect(self._pluto_capture_failed)
+        thread.finished.connect(self._pluto_capture_stopped)
+        thread.finished.connect(thread.deleteLater)
+        self._pluto_capture_thread = thread
+        thread.start()
+
+    def _pluto_capture_ready(self, recording: object) -> None:
+        if not isinstance(recording, IQRecording):
+            self._pluto_capture_failed("capture returned an invalid IQ record")
+            return
+        self.load_recording(recording, self._signal_from_controls())
+        self.statusBar().showMessage(
+            "Pluto Single complete - "
+            f"{recording.sample_count:,} samples, "
+            f"{recording.sample_rate_hz / 1e6:.3f} MS/s"
+        )
+
+    def _pluto_capture_failed(self, message: str) -> None:
+        self.statusBar().showMessage(f"Pluto capture failed: {message}")
+        QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", message)
+
+    def _pluto_capture_stopped(self) -> None:
+        self._pluto_capture_thread = None
+        self.run_single_action.setEnabled(True)
+        self.run_single_button.setEnabled(True)
 
     def _set_analysis_controls_from_recording(self, recording: IQRecording) -> None:
         self.analysis_center_spin.setValue(recording.center_frequency_hz / 1e6)
@@ -1064,6 +1344,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._sync_signal_controls()
 
     def _load_generated(self, modulation: ModulationKind) -> None:
+        self.input_source_combo.setCurrentText("Generated")
         if modulation.family is ModulationFamily.FSK:
             recording, signal = GeneratedIQSource.fsk(
                 gaussian_bt=0.5 if modulation is ModulationKind.GFSK else None
@@ -1112,9 +1393,23 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if not accepted:
                     return
                 recording = FileIQSource.load(path, sample_rate_hz=sample_rate_hz)
+            self.input_source_combo.setCurrentText("IQ File")
             self.load_recording(recording, self._signal_from_controls())
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "IQ Import Error", str(error))
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if (
+            self._pluto_capture_thread is not None
+            and self._pluto_capture_thread.isRunning()
+        ):
+            self.statusBar().showMessage(
+                "Pluto capture is still running; close again after it completes."
+            )
+            event.ignore()
+            return
+        self._pluto_source.close()
+        super().closeEvent(event)
 
     def _analyze(self) -> bool:
         if self.session.recording is None:

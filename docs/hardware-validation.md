@@ -284,6 +284,24 @@ direct USB `usb:1.54.5`、Center 2.440 GHz、測定Span 80 MHz、Chunk Width 40 
 
 これは最大Chunk Widthにおける設定受付・リチューン・2 chunk合成の確認です。入力信号を管理していないため、広幅時のノイズフロア、mirror、roll-off、chunk境界振幅差の定量評価ではありません。
 
+### VSA Pluto Run Single（2026-08-05）
+
+R&S風`Input / Frontend`および`Signal Capture`設定から、共通`PlutoReceiver`と`TriggerAcquisitionController`を通してVSA finite captureを取得した。direct USB接続のPlutoへCenter 2441 MHz、Capture Oversampling 8 samples/symbol、Symbol Rate 1 Msym/s、要求SR 8 MS/s、RF BW 8 MHz、Capture Length 3 ms、Internal Gain 30 dBを設定した。
+
+| 項目 | 実機結果 |
+|---|---:|
+| Record length | 24,000 samples |
+| Duration | 3.000000 ms |
+| Pluto sample-rate readback | 7.999999 MS/s |
+| Nominal usable I/Q bandwidth | 6.399999 MHz |
+| Center | 2441.000000 MHz |
+| Discontinuity reason | None |
+| External ATT / Gain | 30 dB / 0 dB |
+| Input correction | 0 dB（30 dB ATT - 30 dB internal gain） |
+| Median / peak power | -62.000 / -50.861 dBm |
+
+電力はPluto SAと共通の`InputPowerCorrection`を用い、`20log10(|IQ|) - 62 dB + Ext ATT - Internal Gain - Ext Gain`でDUT側reference planeのdBmへ変換した。今回の値は既知CWによる確度検証ではなく、接続・readback・record length・換算経路の統合確認である。frequency-dependent calibrationは未適用。既知レベル信号による絶対振幅検証を別途行う。
+
 ## 解釈上の注意と次の検証
 
 - アプリのsequence/sample indexは、libiioから正常に返ったブロックへ付ける連番です。Pluto、USB、libiio内部でデータが抜けても、常に検出できるわけではありません。
