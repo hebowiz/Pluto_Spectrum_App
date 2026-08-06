@@ -14,6 +14,7 @@ from pluto_sa.vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
     KnownPattern,
+    MatchSelectionPolicy,
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeAlignment,
@@ -163,6 +164,23 @@ class VSAWindow(QtWidgets.QMainWindow):
         analyze_action.setShortcut("F5")
         analyze_action.triggered.connect(self._analyze)
         run_menu.addAction(analyze_action)
+        run_menu.addSeparator()
+        self.previous_result_action = QtGui.QAction(
+            "Previous Result Range", self
+        )
+        self.previous_result_action.setShortcut("Left")
+        self.previous_result_action.setEnabled(False)
+        self.previous_result_action.triggered.connect(
+            lambda: self._select_adjacent_match(-1)
+        )
+        run_menu.addAction(self.previous_result_action)
+        self.next_result_action = QtGui.QAction("Next Result Range", self)
+        self.next_result_action.setShortcut("Right")
+        self.next_result_action.setEnabled(False)
+        self.next_result_action.triggered.connect(
+            lambda: self._select_adjacent_match(1)
+        )
+        run_menu.addAction(self.next_result_action)
 
         display_menu = self.menuBar().addMenu("Display Config")
         self._display_menu = display_menu
@@ -571,18 +589,37 @@ class VSAWindow(QtWidgets.QMainWindow):
             "Meas only if Pattern Symbols Correct"
         )
         self.pattern_meas_only_check.setChecked(True)
+        self.pattern_match_selection_combo = QtWidgets.QComboBox()
+        for policy in MatchSelectionPolicy:
+            self.pattern_match_selection_combo.addItem(policy.value, policy.value)
+        self.pattern_match_selection_combo.setCurrentText(
+            MatchSelectionPolicy.FIRST.value
+        )
+        self.pattern_match_index_spin = QtWidgets.QSpinBox()
+        self.pattern_match_index_spin.setRange(1, 1_000_000)
+        self.pattern_match_index_spin.setValue(1)
+        self.pattern_match_index_spin.setEnabled(False)
         pattern_form.addRow(self.pattern_search_check)
         pattern_form.addRow("Name", self.pattern_name_edit)
         pattern_form.addRow("Symbol Format", self.pattern_format_combo)
         pattern_form.addRow("I/Q Correlation Threshold", self.pattern_threshold_spin)
         pattern_form.addRow(self.pattern_threshold_auto)
         pattern_form.addRow(self.pattern_meas_only_check)
+        pattern_form.addRow(
+            "Match Selection", self.pattern_match_selection_combo
+        )
+        pattern_form.addRow("Match Index", self.pattern_match_index_spin)
         pattern_layout.addLayout(pattern_form)
         pattern_layout.addWidget(QtWidgets.QLabel("Pattern Symbols"))
         pattern_layout.addWidget(self.pattern_symbol_table, 1)
         pattern_layout.addLayout(pattern_table_buttons)
         self.pattern_threshold_auto.toggled.connect(
             lambda checked: self.pattern_threshold_spin.setEnabled(not checked)
+        )
+        self.pattern_match_selection_combo.currentTextChanged.connect(
+            lambda value: self.pattern_match_index_spin.setEnabled(
+                value == MatchSelectionPolicy.INDEX.value
+            )
         )
         self.pattern_format_combo.currentTextChanged.connect(
             self._refresh_pattern_table_format
@@ -617,6 +654,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.reference_symbol_number_spin.setToolTip(
             "Display-axis numbering is planned; it does not change DSP yet."
         )
+        self.exclude_incomplete_result_check = QtWidgets.QCheckBox(
+            "Exclude incomplete Result Range"
+        )
+        self.exclude_incomplete_result_check.setChecked(False)
         range_form.addRow("Result Length (Symbols)", self.result_length_spin)
         range_form.addRow("Reference", self.result_reference_combo)
         range_form.addRow("Alignment", self.result_alignment_combo)
@@ -624,6 +665,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         range_form.addRow(
             "Symbol Number at Pattern Start", self.reference_symbol_number_spin
         )
+        range_form.addRow(self.exclude_incomplete_result_check)
         config_pages.append(("Result Range", range_page))
 
         demod_page = QtWidgets.QWidget()
@@ -972,6 +1014,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "threshold_auto": self.pattern_threshold_auto.isChecked(),
                 "threshold_percent": self.pattern_threshold_spin.value(),
                 "meas_only_if_correct": self.pattern_meas_only_check.isChecked(),
+                "match_selection": self.pattern_match_selection_combo.currentText(),
+                "match_index": self.pattern_match_index_spin.value(),
             },
             "result_range": {
                 "length_symbols": self.result_length_spin.value(),
@@ -979,6 +1023,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "alignment": self.result_alignment_combo.currentText(),
                 "offset_symbols": self.result_offset_spin.value(),
                 "symbol_number_at_pattern_start": self.reference_symbol_number_spin.value(),
+                "exclude_incomplete_result": (
+                    self.exclude_incomplete_result_check.isChecked()
+                ),
             },
             "demodulation": {
                 "coarse_synchronization": self.coarse_sync_combo.currentText(),
@@ -1047,11 +1094,22 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.pattern_threshold_auto.setChecked(bool(pattern["threshold_auto"]))
             self.pattern_threshold_spin.setValue(float(pattern["threshold_percent"]))
             self.pattern_meas_only_check.setChecked(bool(pattern["meas_only_if_correct"]))
+            self._set_combo_text(
+                self.pattern_match_selection_combo,
+                pattern.get("match_selection", MatchSelectionPolicy.FIRST.value),
+                "match selection",
+            )
+            self.pattern_match_index_spin.setValue(
+                int(pattern.get("match_index", 1))
+            )
             self.result_length_spin.setValue(int(result_range["length_symbols"]))
             self._set_combo_text(self.result_reference_combo, result_range["reference"], "result reference")
             self._set_combo_text(self.result_alignment_combo, result_range["alignment"], "result alignment")
             self.result_offset_spin.setValue(int(result_range["offset_symbols"]))
             self.reference_symbol_number_spin.setValue(int(result_range["symbol_number_at_pattern_start"]))
+            self.exclude_incomplete_result_check.setChecked(
+                bool(result_range.get("exclude_incomplete_result", False))
+            )
             self._set_combo_text(self.coarse_sync_combo, demodulation["coarse_synchronization"], "coarse synchronization")
             self._set_combo_text(self.fine_sync_combo, demodulation["fine_synchronization"], "fine synchronization")
             self._set_combo_text(self.bit_order_combo, demodulation["bit_ordering"], "bit ordering")
@@ -1332,6 +1390,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             meas_only_if_pattern_symbols_correct=(
                 self.pattern_meas_only_check.isChecked()
             ),
+            match_selection=MatchSelectionPolicy(
+                self.pattern_match_selection_combo.currentData()
+            ),
+            match_index=self.pattern_match_index_spin.value(),
         )
         result_range = ResultRangeSettings(
             result_length=self.result_length_spin.value(),
@@ -1340,6 +1402,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             offset_symbols=self.result_offset_spin.value(),
             symbol_number_at_reference_start=(
                 self.reference_symbol_number_spin.value()
+            ),
+            exclude_incomplete_result=(
+                self.exclude_incomplete_result_check.isChecked()
             ),
         )
         demodulation = DemodulationSettings(
@@ -1453,9 +1518,50 @@ class VSAWindow(QtWidgets.QMainWindow):
             return False
         self._update_summary()
         self._update_plots(reset_ranges=True)
+        self._update_match_navigation_actions()
         self.statusBar().showMessage(
             f"Analysis complete - {self.session.recording.sample_count:,} samples"
         )
+        return True
+
+    def _update_match_navigation_actions(self) -> None:
+        pattern_result = self.session.pattern_result
+        if pattern_result is None:
+            self.previous_result_action.setEnabled(False)
+            self.next_result_action.setEnabled(False)
+            return
+        current = int(pattern_result.metadata.get("selected_match_index", 1))
+        count = int(pattern_result.metadata.get("eligible_match_count", 1))
+        self.previous_result_action.setEnabled(current > 1)
+        self.next_result_action.setEnabled(current < count)
+
+    def _select_adjacent_match(self, direction: int) -> bool:
+        pattern_result = self.session.pattern_result
+        if pattern_result is None or int(direction) == 0:
+            return False
+        current = int(pattern_result.metadata.get("selected_match_index", 1))
+        count = int(pattern_result.metadata.get("eligible_match_count", 1))
+        target = current + (1 if int(direction) > 0 else -1)
+        if target < 1 or target > count:
+            self._update_match_navigation_actions()
+            return False
+        self.pattern_match_selection_combo.setCurrentText(
+            MatchSelectionPolicy.INDEX.value
+        )
+        self.pattern_match_index_spin.setValue(target)
+        if not self._analyze():
+            return False
+        selected = self.session.pattern_result
+        if selected is not None:
+            selected_index = int(
+                selected.metadata.get("selected_match_index", target)
+            )
+            selected_count = int(
+                selected.metadata.get("eligible_match_count", count)
+            )
+            self.statusBar().showMessage(
+                f"Selected Result Range {selected_index}/{selected_count}"
+            )
         return True
 
     def _update_summary(self) -> None:
@@ -1827,7 +1933,12 @@ class VSAWindow(QtWidgets.QMainWindow):
             summary_rows.extend(
                 (
                     ("Display", display_name),
-                    ("Match Selection", "Strongest"),
+                    (
+                        "Match Selection",
+                        f"{pattern_result.metadata.get('match_selection_policy', 'First')} "
+                        f"({pattern_result.metadata.get('selected_match_index', 1)}/"
+                        f"{pattern_result.metadata.get('eligible_match_count', 1)})",
+                    ),
                     ("Result Symbols", str(symbols.size)),
                 )
             )

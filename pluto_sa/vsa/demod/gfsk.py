@@ -31,6 +31,9 @@ class GFSKDemodulationResult:
     frequency_model_timing_offset_samples: float
     frequency_model_residual_rms_hz: float
     burst_ranges: tuple[tuple[int, int], ...]
+    selected_match_index: int
+    eligible_match_count: int
+    detected_match_count: int
 
     def __post_init__(self) -> None:
         arrays = {
@@ -145,6 +148,17 @@ def _normalized_sliding_correlation(
         np.finfo(np.float64).tiny,
     )
     return correlation / np.sqrt(window_energy * pattern_energy)
+
+
+def _local_peak_indices(scores: np.ndarray, threshold: float) -> np.ndarray:
+    magnitude = np.abs(np.asarray(scores, dtype=np.float64))
+    selected: list[int] = []
+    for index in np.flatnonzero(magnitude >= float(threshold)):
+        left = magnitude[index - 1] if index > 0 else -np.inf
+        right = magnitude[index + 1] if index + 1 < magnitude.size else -np.inf
+        if magnitude[index] >= left and magnitude[index] > right:
+            selected.append(int(index))
+    return np.asarray(selected, dtype=np.int64)
 
 
 def _expected_fsk_symbol_levels(
@@ -295,6 +309,10 @@ def demodulate_gfsk(
     minimum_correlation: float = 0.65,
     gaussian_bt: float | None = 0.5,
     maximum_symbols: int | None = None,
+    match_selection: str = "First",
+    match_index: int = 1,
+    required_result_symbols: int | None = None,
+    exclude_incomplete_result: bool = False,
 ) -> GFSKDemodulationResult:
     """Recover binary symbols using a known access pattern for timing/CFO.
 
@@ -315,6 +333,12 @@ def demodulate_gfsk(
         raise ValueError("analysis_samples_per_symbol must be at least 4")
     if maximum_symbols is not None and int(maximum_symbols) <= 0:
         raise ValueError("maximum_symbols must be positive when provided")
+    if match_selection not in {"Strongest", "First", "Last", "Match Index"}:
+        raise ValueError(f"unsupported match selection: {match_selection}")
+    if int(match_index) < 1:
+        raise ValueError("match_index must be one-based and positive")
+    if required_result_symbols is not None and int(required_result_symbols) <= 0:
+        raise ValueError("required_result_symbols must be positive when provided")
     pattern = _validate_bits(access_bits)
     expected_levels = _expected_fsk_symbol_levels(
         pattern,
@@ -334,7 +358,8 @@ def demodulate_gfsk(
         mode="nearest",
     )
 
-    candidates: list[tuple[float, float, int, int, np.ndarray]] = []
+    candidates: list[tuple[float, float, int, int, np.ndarray, float]] = []
+    observed_correlation = 0.0
     centered_expected = expected_levels - np.mean(expected_levels)
     expected_energy = float(np.sum(centered_expected**2))
     for phase in range(int(analysis_samples_per_symbol)):
@@ -342,62 +367,133 @@ def demodulate_gfsk(
         scores = _normalized_sliding_correlation(values, expected_levels)
         if scores.size == 0:
             continue
-        index = int(np.argmax(np.abs(scores)))
-        score = float(scores[index])
-        matched_values = values[index : index + pattern.size]
-        # Normalized correlation deliberately ignores amplitude.  With an
-        # alternating FSK pattern this makes samples near a transition look
-        # almost as good as samples at the eye centre, especially after a
-        # narrow analysis filter.  Measure the fitted tone separation as a
-        # second timing metric so equivalent correlations choose the open eye.
-        eye_opening_hz = abs(
-            float(
-                np.dot(
-                    matched_values - np.mean(matched_values),
-                    centered_expected,
+        observed_correlation = max(
+            observed_correlation, float(np.max(np.abs(scores)))
+        )
+        for index in _local_peak_indices(scores, minimum_correlation):
+            matched_values = values[index : index + pattern.size]
+            # Normalized correlation deliberately ignores amplitude. With an
+            # alternating pattern, use fitted tone separation as the secondary
+            # timing metric among detections of the same physical packet.
+            eye_opening_hz = abs(
+                float(
+                    np.dot(
+                        matched_values - np.mean(matched_values),
+                        centered_expected,
+                    )
+                    / max(expected_energy, np.finfo(np.float64).tiny)
                 )
-                / max(expected_energy, np.finfo(np.float64).tiny)
             )
-        )
-        candidates.append((score, eye_opening_hz, phase, index, values))
+            candidates.append(
+                (
+                    float(scores[index]),
+                    eye_opening_hz,
+                    phase,
+                    int(index),
+                    values,
+                    float(phase + int(index) * int(analysis_samples_per_symbol)),
+                )
+            )
     if not candidates:
-        observed = 0.0
         raise ValueError(
-            f"access pattern was not found (correlation={observed:.3f})"
+            "access pattern was not found "
+            f"(correlation={observed_correlation:.3f})"
         )
-    strongest_correlation = max(abs(candidate[0]) for candidate in candidates)
-    if strongest_correlation < float(minimum_correlation):
-        observed = strongest_correlation
-        raise ValueError(
-            f"access pattern was not found (correlation={observed:.3f})"
+    groups: list[list[tuple[float, float, int, int, np.ndarray, float]]] = []
+    for candidate in sorted(candidates, key=lambda item: item[5]):
+        group = next(
+            (
+                item
+                for item in groups
+                if abs(item[0][5] - candidate[5])
+                < 0.99 * int(analysis_samples_per_symbol)
+            ),
+            None,
+        )
+        if group is None:
+            groups.append([candidate])
+        else:
+            group.append(candidate)
+
+    physical_candidates = []
+    for group in groups:
+        strongest_correlation = max(abs(candidate[0]) for candidate in group)
+        strongest_candidate = max(
+            group,
+            key=lambda candidate: (
+                abs(candidate[0]), candidate[1], -candidate[2]
+            ),
+        )
+        timing_candidates = [
+            candidate
+            for candidate in group
+            if abs(candidate[0]) >= strongest_correlation - 0.01
+        ]
+        widest_eye_candidate = max(
+            timing_candidates,
+            key=lambda candidate: (
+                candidate[1], abs(candidate[0]), -candidate[2]
+            ),
+        )
+        physical_candidates.append(
+            widest_eye_candidate
+            if widest_eye_candidate[1] >= strongest_candidate[1] * 1.2
+            else strongest_candidate
         )
 
-    # Correlations within one percentage point are indistinguishable for
-    # coarse timing.  Select the candidate with the largest fitted frequency
-    # separation, then prefer the stronger correlation and earlier phase.
-    strongest_candidate = max(
-        candidates,
-        key=lambda candidate: (abs(candidate[0]), candidate[1], -candidate[2]),
+    bursts = _detect_bursts(
+        samples,
+        sample_rate_hz=float(sample_rate_hz),
+        symbol_rate_hz=float(symbol_rate_hz),
     )
-    timing_candidates = [
+
+    def available_symbols(candidate: tuple) -> int:
+        _, _, phase, index, values, _ = candidate
+        available = int(values.size - index)
+        start_resampled = phase + index * int(analysis_samples_per_symbol)
+        start_source = int(
+            round(start_resampled * float(sample_rate_hz) / analysis_rate_hz)
+        )
+        for _, burst_stop in bursts:
+            if burst_stop > start_source:
+                burst_symbols = int(
+                    np.ceil(
+                        (burst_stop - start_source)
+                        * float(symbol_rate_hz)
+                        / float(sample_rate_hz)
+                    )
+                )
+                return min(available, burst_symbols)
+        return available
+
+    detected_match_count = len(physical_candidates)
+    eligible_candidates = [
         candidate
-        for candidate in candidates
-        if abs(candidate[0]) >= strongest_correlation - 0.01
+        for candidate in physical_candidates
+        if not exclude_incomplete_result
+        or required_result_symbols is None
+        or available_symbols(candidate) >= int(required_result_symbols)
     ]
-    widest_eye_candidate = max(
-        timing_candidates,
-        key=lambda candidate: (candidate[1], abs(candidate[0]), -candidate[2]),
-    )
-    # Preserve the maximum-correlation timing unless its eye is materially
-    # closed.  Small opening differences are normal pulse-shape asymmetry and
-    # must not move an otherwise well-defined packet timestamp.
-    best = (
-        widest_eye_candidate
-        if widest_eye_candidate[1] >= strongest_candidate[1] * 1.2
-        else strongest_candidate
-    )
+    if not eligible_candidates:
+        raise ValueError("no pattern match satisfies the result-range requirements")
+    ordered = sorted(eligible_candidates, key=lambda item: item[5])
+    if match_selection == "First":
+        best = ordered[0]
+    elif match_selection == "Last":
+        best = ordered[-1]
+    elif match_selection == "Match Index":
+        if int(match_index) > len(ordered):
+            raise ValueError(
+                f"Match Index {int(match_index)} is unavailable; "
+                f"{len(ordered)} eligible match(es) were found"
+            )
+        best = ordered[int(match_index) - 1]
+    else:
+        best = max(ordered, key=lambda item: (abs(item[0]), -item[5]))
+    selected_match_index = ordered.index(best) + 1
+    eligible_match_count = len(ordered)
 
-    score, _, phase, access_index, all_symbol_frequency = best
+    score, _, phase, access_index, all_symbol_frequency, _ = best
     access_frequency = all_symbol_frequency[
         access_index : access_index + pattern.size
     ]
@@ -430,11 +526,6 @@ def demodulate_gfsk(
         round(access_start_resampled * float(sample_rate_hz) / analysis_rate_hz)
     )
     packet_observed_frequency = all_symbol_frequency[access_index:]
-    bursts = _detect_bursts(
-        samples,
-        sample_rate_hz=float(sample_rate_hz),
-        symbol_rate_hz=float(symbol_rate_hz),
-    )
     for _, burst_stop in bursts:
         if burst_stop > access_start_source:
             burst_symbols = int(
@@ -540,4 +631,7 @@ def demodulate_gfsk(
         frequency_model_timing_offset_samples=joint_timing_offset,
         frequency_model_residual_rms_hz=joint_residual_rms_hz,
         burst_ranges=bursts,
+        selected_match_index=selected_match_index,
+        eligible_match_count=eligible_match_count,
+        detected_match_count=detected_match_count,
     )

@@ -8,6 +8,7 @@ from pluto_sa.vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
     KnownPattern,
+    MatchSelectionPolicy,
     PatternAnalyzer,
     PatternSearchMode,
     PatternSearchSettings,
@@ -28,6 +29,115 @@ from pluto_sa.vsa.profiles.bluetooth_br import (
 def _pattern_from_generated(recording, start: int, length: int) -> KnownPattern:
     symbols = np.asarray(recording.metadata["generated_symbols"])
     return KnownPattern(tuple(int(value) for value in symbols[start : start + length]))
+
+
+def test_psk_multiple_matches_support_time_selection_and_incomplete_exclusion():
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.PI4_DQPSK,
+        symbol_count=160,
+        seed=123,
+    )
+    pattern = _pattern_from_generated(recording, 20, 16)
+    gap = np.zeros(64, dtype=np.complex64)
+    combined_iq = np.concatenate((recording.iq, gap, recording.iq))
+    combined = IQRecording(
+        iq=combined_iq,
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+
+    first = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            pattern=pattern,
+            mode=PatternSearchMode.ON,
+            match_selection=MatchSelectionPolicy.FIRST,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+    second = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            pattern=pattern,
+            mode=PatternSearchMode.ON,
+            match_selection=MatchSelectionPolicy.INDEX,
+            match_index=2,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+
+    assert first.pattern_start_sample == 20 * 8
+    assert second.pattern_start_sample == recording.sample_count + 64 + 20 * 8
+    assert second.metadata["selected_match_index"] == 2
+    assert second.metadata["eligible_match_count"] == 2
+
+    truncated_stop = recording.sample_count + 64 + (20 + 16 + 20) * 8
+    truncated = IQRecording(
+        iq=combined_iq[:truncated_stop],
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+    allowed = PatternAnalyzer().search(
+        truncated,
+        signal,
+        PatternSearchSettings(
+            pattern=pattern,
+            mode=PatternSearchMode.ON,
+            match_selection=MatchSelectionPolicy.LAST,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+    excluded = PatternAnalyzer().search(
+        truncated,
+        signal,
+        PatternSearchSettings(
+            pattern=pattern,
+            mode=PatternSearchMode.ON,
+            match_selection=MatchSelectionPolicy.LAST,
+        ),
+        ResultRangeSettings(
+            result_length=100,
+            exclude_incomplete_result=True,
+        ),
+    )
+
+    assert allowed.pattern_start_sample == second.pattern_start_sample
+    assert allowed.decoded_symbols.size < 100
+    assert excluded.pattern_start_sample == first.pattern_start_sample
+    assert excluded.decoded_symbols.size == 100
+    assert excluded.metadata["detected_match_count"] == 2
+    assert excluded.metadata["eligible_match_count"] == 1
+
+
+def test_fsk_multiple_matches_use_one_physical_candidate_per_packet():
+    recording, signal = GeneratedIQSource.fsk(
+        symbol_count=180,
+        gaussian_bt=0.5,
+        seed=321,
+    )
+    pattern = _pattern_from_generated(recording, 30, 32)
+    gap = np.zeros(64, dtype=np.complex64)
+    combined = IQRecording(
+        iq=np.concatenate((recording.iq, gap, recording.iq)),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+    result = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            pattern=pattern,
+            mode=PatternSearchMode.ON,
+            correlation_threshold_auto=False,
+            iq_correlation_threshold=0.7,
+            match_selection=MatchSelectionPolicy.LAST,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+
+    assert result.pattern_start_sample == recording.sample_count + 64 + 30 * 8
+    assert result.metadata["selected_match_index"] == 2
+    assert result.metadata["eligible_match_count"] == 2
+    assert result.metadata["detected_match_count"] == 2
 
 
 @pytest.mark.parametrize("gaussian_bt", [None, 0.5])

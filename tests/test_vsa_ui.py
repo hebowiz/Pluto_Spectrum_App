@@ -13,8 +13,55 @@ from pluto_sa.vsa.ui.main_window import (
     _constellation_display_symbols,
     _fsk_phase_difference_symbols,
 )
-from pluto_sa.vsa.model import ModulationKind, SignalDescription
+from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
+
+
+def test_result_range_arrow_actions_select_adjacent_packet() -> None:
+    pg.mkQApp("VSA result navigation test")
+    window = VSAWindow()
+    try:
+        recording, signal = GeneratedIQSource.psk(
+            modulation=ModulationKind.PI4_DQPSK,
+            symbol_count=160,
+            seed=123,
+        )
+        generated = np.asarray(recording.metadata["generated_symbols"])
+        gap = np.zeros(64, dtype=np.complex64)
+        combined = IQRecording(
+            iq=np.concatenate((recording.iq, gap, recording.iq)),
+            sample_rate_hz=recording.sample_rate_hz,
+        )
+        window.load_recording(combined, signal)
+        window.pattern_search_check.setChecked(True)
+        window._set_pattern_symbols(generated[20:36])
+        window.result_length_spin.setValue(100)
+
+        assert window.pattern_match_selection_combo.currentText() == "First"
+        assert window._analyze()
+        first_start = window.session.pattern_result.pattern_start_sample
+        assert first_start == 20 * 8
+        assert not window.previous_result_action.isEnabled()
+        assert window.next_result_action.isEnabled()
+        assert window.previous_result_action.shortcut().toString() == "Left"
+        assert window.next_result_action.shortcut().toString() == "Right"
+
+        window.next_result_action.trigger()
+        second = window.session.pattern_result
+        assert second.pattern_start_sample == recording.sample_count + 64 + 20 * 8
+        assert window.pattern_match_selection_combo.currentText() == "Match Index"
+        assert window.pattern_match_index_spin.value() == 2
+        assert window.previous_result_action.isEnabled()
+        assert not window.next_result_action.isEnabled()
+
+        window.previous_result_action.trigger()
+        assert window.session.pattern_result.pattern_start_sample == first_start
+        assert window.pattern_match_index_spin.value() == 1
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
@@ -251,6 +298,10 @@ def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
         window.pattern_format_combo.setCurrentText("Decimal")
         window.pattern_symbols_edit.setText(pattern)
         window.result_length_spin.setValue(244)
+        # This test validates the known high-correlation packet fixture rather
+        # than the application's time-first default. A short ten-symbol word
+        # also has an earlier 90%-correlation occurrence in this capture.
+        window.pattern_match_selection_combo.setCurrentText("Strongest")
         window.channel_filter_check.setChecked(True)
         window.analysis_center_spin.setValue(2441.0)
         window.analysis_bandwidth_spin.setValue(1.5)
@@ -324,6 +375,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window._set_pattern_symbols([0, 1, 1, 0, 1, 0])
         window.pattern_name_edit.setText("Saved Pattern")
         window.result_length_spin.setValue(73)
+        window.pattern_match_selection_combo.setCurrentText("Match Index")
+        window.pattern_match_index_spin.setValue(3)
+        window.exclude_incomplete_result_check.setChecked(True)
         window.bit_order_combo.setCurrentText("LSB")
         window.capture_length_spin.setValue(3.0)
         window.capture_length_unit_combo.setCurrentText("ms")
@@ -339,6 +393,8 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
 
         window._set_pattern_symbols([1, 1, 1, 1])
         window.result_length_spin.setValue(12)
+        window.pattern_match_selection_combo.setCurrentText("First")
+        window.exclude_incomplete_result_check.setChecked(False)
         window.bit_order_combo.setCurrentText("MSB")
         window.capture_oversampling_combo.setCurrentIndex(
             window.capture_oversampling_combo.findData(16)
@@ -349,6 +405,10 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
         assert window.pattern_name_edit.text() == "Saved Pattern"
         assert window.result_length_spin.value() == 73
+        assert window.pattern_match_selection_combo.currentText() == "Match Index"
+        assert window.pattern_match_index_spin.value() == 3
+        assert window.pattern_match_index_spin.isEnabled()
+        assert window.exclude_incomplete_result_check.isChecked()
         assert window.bit_order_combo.currentText() == "LSB"
         assert window.capture_oversampling_combo.currentData() == 8
         assert window.capture_sample_rate_label.text() == "8.000 MS/s"

@@ -49,6 +49,13 @@ class PatternSearchMode(str, Enum):
     OFF = "Off"
 
 
+class MatchSelectionPolicy(str, Enum):
+    STRONGEST = "Strongest"
+    FIRST = "First"
+    LAST = "Last"
+    INDEX = "Match Index"
+
+
 @dataclass(frozen=True)
 class PatternSearchSettings:
     """Settings corresponding to R&S VSA ``Pattern Search``."""
@@ -58,11 +65,19 @@ class PatternSearchSettings:
     iq_correlation_threshold: float = 0.9
     correlation_threshold_auto: bool = True
     meas_only_if_pattern_symbols_correct: bool = True
+    match_selection: MatchSelectionPolicy = MatchSelectionPolicy.FIRST
+    match_index: int = 1
 
     def __post_init__(self) -> None:
         threshold = float(self.iq_correlation_threshold)
         if not 0.0 < threshold <= 1.0:
             raise ValueError("iq_correlation_threshold must be in the range (0, 1]")
+        if int(self.match_index) < 1:
+            raise ValueError("match_index must be one-based and positive")
+        object.__setattr__(
+            self, "match_selection", MatchSelectionPolicy(self.match_selection)
+        )
+        object.__setattr__(self, "match_index", int(self.match_index))
 
     @property
     def effective_correlation_threshold(self) -> float:
@@ -92,6 +107,7 @@ class ResultRangeSettings:
     alignment: ResultRangeAlignment = ResultRangeAlignment.LEFT
     offset_symbols: int = 0
     symbol_number_at_reference_start: int = 0
+    exclude_incomplete_result: bool = False
 
     def __post_init__(self) -> None:
         if int(self.result_length) <= 0:
@@ -242,9 +258,9 @@ def _symbols_to_bits(
     return ((symbols[:, None] >> shifts) & 1).astype(np.uint8).reshape(-1)
 
 
-def _result_slice(
-    pattern_size: int, available: int, settings: ResultRangeSettings
-) -> slice:
+def _result_start_symbol(
+    pattern_size: int, settings: ResultRangeSettings
+) -> int:
     if settings.reference is not ResultRangeReference.PATTERN_WAVEFORM:
         raise NotImplementedError(
             "pattern analysis currently supports Pattern Waveform result reference"
@@ -260,10 +276,72 @@ def _result_slice(
         raise NotImplementedError(
             "negative result-range positions require pre-pattern demodulation"
         )
+    return start
+
+
+def _result_is_complete(
+    pattern_size: int, available: int, settings: ResultRangeSettings
+) -> bool:
+    start = _result_start_symbol(pattern_size, settings)
+    return int(available) >= start + int(settings.result_length)
+
+
+def _result_slice(
+    pattern_size: int, available: int, settings: ResultRangeSettings
+) -> slice:
+    start = _result_start_symbol(pattern_size, settings)
     if start >= int(available):
         raise ValueError("result range starts after the available demodulated symbols")
+    if settings.exclude_incomplete_result and not _result_is_complete(
+        pattern_size, available, settings
+    ):
+        raise ValueError("complete result range is not available after the pattern")
     stop = min(int(available), start + int(settings.result_length))
     return slice(start, max(start, stop))
+
+
+def _select_match_candidate(
+    candidates: list[object],
+    policy: MatchSelectionPolicy,
+    match_index: int,
+    *,
+    time_key,
+    score_key,
+) -> tuple[object, int, int]:
+    """Select one candidate and return it with one-based time index/count."""
+    if not candidates:
+        raise ValueError("no pattern match satisfies the result-range requirements")
+    ordered = sorted(candidates, key=time_key)
+    if policy is MatchSelectionPolicy.FIRST:
+        selected = ordered[0]
+    elif policy is MatchSelectionPolicy.LAST:
+        selected = ordered[-1]
+    elif policy is MatchSelectionPolicy.INDEX:
+        requested = int(match_index)
+        if requested > len(ordered):
+            raise ValueError(
+                f"Match Index {requested} is unavailable; "
+                f"{len(ordered)} eligible match(es) were found"
+            )
+        selected = ordered[requested - 1]
+    else:
+        selected = max(ordered, key=lambda item: (score_key(item), -time_key(item)))
+    return selected, ordered.index(selected) + 1, len(ordered)
+
+
+def _local_peak_indices(scores: np.ndarray, threshold: float) -> np.ndarray:
+    """Return one index for each above-threshold correlation peak."""
+    values = np.asarray(scores, dtype=np.float64)
+    if values.size == 0:
+        return np.empty(0, dtype=np.int64)
+    magnitude = np.abs(values)
+    selected: list[int] = []
+    for index in np.flatnonzero(magnitude >= float(threshold)):
+        left = magnitude[index - 1] if index > 0 else -np.inf
+        right = magnitude[index + 1] if index + 1 < magnitude.size else -np.inf
+        if magnitude[index] >= left and magnitude[index] > right:
+            selected.append(int(index))
+    return np.asarray(selected, dtype=np.int64)
 
 
 def _resample_for_symbols(
@@ -644,6 +722,10 @@ class PatternAnalyzer:
             minimum_correlation=search.effective_correlation_threshold,
             gaussian_bt=gaussian_bt,
             maximum_symbols=maximum_symbols,
+            match_selection=search.match_selection.value,
+            match_index=search.match_index,
+            required_result_symbols=maximum_symbols,
+            exclude_incomplete_result=result_range.exclude_incomplete_result,
         )
         selection = _result_slice(len(pattern.symbols), demodulation.bits.size, result_range)
         decoded = demodulation.bits[selection].astype(np.int16)
@@ -702,7 +784,13 @@ class PatternAnalyzer:
                 "result_offset_symbols": result_range.offset_symbols,
                 "gaussian_bt": gaussian_bt,
                 "source": recording.source,
-                "match_selection_policy": "strongest correlation in capture",
+                "match_selection_policy": search.match_selection.value,
+                "selected_match_index": demodulation.selected_match_index,
+                "eligible_match_count": demodulation.eligible_match_count,
+                "detected_match_count": demodulation.detected_match_count,
+                "exclude_incomplete_result": (
+                    result_range.exclude_incomplete_result
+                ),
             },
         )
 
@@ -732,7 +820,10 @@ class PatternAnalyzer:
         }
         alphabet = _constellation(signal.modulation)
         expected = alphabet[np.asarray(pattern.symbols, dtype=np.int16)]
-        best: tuple[float, int, int, np.ndarray, np.ndarray] | None = None
+        candidates: list[
+            tuple[float, int, int, np.ndarray, np.ndarray, float]
+        ] = []
+        observed_score = 0.0
         for phase in range(samples_per_symbol):
             centers = np.arange(
                 phase + samples_per_symbol / 2.0 - 0.5,
@@ -758,21 +849,79 @@ class PatternAnalyzer:
                 )
             if scores.size == 0:
                 continue
-            index = int(np.argmax(scores))
-            score = float(scores[index])
-            # Rectangular synthetic waveforms can produce numerically equal
-            # correlations at a symbol centre and at a transition. Prefer the
-            # earlier timing phase for ties; this keeps the reported symbol
-            # index aligned with the capture rather than one symbol early.
-            if best is None or score > best[0] + 1e-10:
-                best = (score, phase, index, waveform_symbols, centers)
-        if best is None or best[0] < search.effective_correlation_threshold:
-            observed_score = 0.0 if best is None else best[0]
+            observed_score = max(observed_score, float(np.max(scores)))
+            for index in _local_peak_indices(
+                scores, search.effective_correlation_threshold
+            ):
+                symbol_offset = 1 if signal.modulation.differential else 0
+                start_coordinate = float(
+                    centers[int(index) + symbol_offset]
+                )
+                candidates.append(
+                    (
+                        float(scores[index]),
+                        phase,
+                        int(index),
+                        waveform_symbols,
+                        centers,
+                        start_coordinate,
+                    )
+                )
+        if not candidates:
             raise ValueError(
                 f"known pattern was not found (correlation={observed_score:.3f})"
             )
 
-        score, phase, index, waveform_symbols, centers = best
+        # Collapse the same physical packet detected at adjacent timing phases.
+        # Retain the best correlation and prefer the earlier phase for a tie.
+        physical_candidates: list[
+            tuple[float, int, int, np.ndarray, np.ndarray, float]
+        ] = []
+        for candidate in sorted(candidates, key=lambda item: item[5]):
+            duplicate_index = next(
+                (
+                    position
+                    for position, existing in enumerate(physical_candidates)
+                    if abs(existing[5] - candidate[5])
+                    < 0.99 * samples_per_symbol
+                ),
+                None,
+            )
+            if duplicate_index is None:
+                physical_candidates.append(candidate)
+                continue
+            existing = physical_candidates[duplicate_index]
+            if (
+                candidate[0] > existing[0] + 1e-10
+                or (
+                    abs(candidate[0] - existing[0]) <= 1e-10
+                    and candidate[1] < existing[1]
+                )
+            ):
+                physical_candidates[duplicate_index] = candidate
+
+        detected_match_count = len(physical_candidates)
+        eligible_candidates = []
+        for candidate in physical_candidates:
+            _, _, candidate_index, candidate_symbols, _, _ = candidate
+            available = candidate_symbols.size - candidate_index
+            if signal.modulation.differential:
+                available -= 1
+            if (
+                not result_range.exclude_incomplete_result
+                or _result_is_complete(
+                    len(pattern.symbols), available, result_range
+                )
+            ):
+                eligible_candidates.append(candidate)
+        best, selected_match_index, eligible_match_count = _select_match_candidate(
+            eligible_candidates,
+            search.match_selection,
+            search.match_index,
+            time_key=lambda item: item[5],
+            score_key=lambda item: item[0],
+        )
+        score, phase, index, waveform_symbols, centers, _ = best
         phase_model_residual_rms_rad: float | None = None
         phase_drift_estimate_accepted: bool | None = None
         phase_no_drift_residual_rms_rad: float | None = None
@@ -1212,6 +1361,12 @@ class PatternAnalyzer:
                     signal.modulation.differential
                 ),
                 "source": recording.source,
-                "match_selection_policy": "strongest correlation in capture",
+                "match_selection_policy": search.match_selection.value,
+                "selected_match_index": selected_match_index,
+                "eligible_match_count": eligible_match_count,
+                "detected_match_count": detected_match_count,
+                "exclude_incomplete_result": (
+                    result_range.exclude_incomplete_result
+                ),
             },
         )

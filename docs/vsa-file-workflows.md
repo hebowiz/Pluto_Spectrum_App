@@ -55,8 +55,10 @@ Version 1 stores all currently exposed measurement controls:
 - Input / Frontend analysis-channel enable, center, and bandwidth
 - Signal Description modulation, symbol rate, FSK deviation, mapping, TX
   filter, and filter parameter
-- Pattern Search enable, name, format, symbols, threshold, and correctness rule
-- Result Range length, reference, alignment, offset, and reference numbering
+- Pattern Search enable, name, format, symbols, threshold, correctness rule,
+  match-selection policy, and one-based match index
+- Result Range length, reference, alignment, offset, reference numbering, and
+  incomplete-range exclusion
 - Demodulation synchronization contracts, bit ordering, CFO-drift
   compensation, and FSK deviation compensation
 
@@ -65,6 +67,49 @@ against the currently loaded IQ capture. Display-only window layout and
 Carrier Display selection are intentionally not measurement configuration.
 
 Serialization and schema validation live in `pluto_sa/vsa/persistence.py`.
+
+Existing version-1 configuration files that predate multiple-match selection
+remain valid. Missing fields load as `First`, match index `1`, and
+`Exclude incomplete Result Range = Off`.
+
+## Multiple pattern matches in one capture
+
+Pattern Search now keeps all above-threshold local correlation peaks and
+collapses detections from adjacent symbol-timing phases into one physical
+packet candidate. This behavior is shared by FSK and PSK. `Match Selection`
+then chooses one eligible candidate:
+
+- `Strongest`: greatest normalized pattern correlation; an exact tie selects
+  the earlier candidate. This is correlation strength, not received power.
+- `First`: earliest candidate in capture time.
+- `Last`: latest candidate in capture time.
+- `Match Index`: one-based index in capture-time order.
+
+`First` is the application default. It means the earliest above-threshold
+pattern occurrence, so a very short pattern can still produce an earlier false
+candidate in unrelated symbols. Use a longer pattern, raise the correlation
+threshold, or temporarily choose `Strongest` when that ambiguity matters.
+
+The Result Summary displays both the policy and selected/eligible index, for
+example `Last (2/2)`. Result metadata also records
+`detected_match_count`, `eligible_match_count`, and `selected_match_index`.
+
+`Result Range > Exclude incomplete Result Range` controls captures that end
+before the requested result length is available. When Off (the backward-
+compatible default), the selected result is returned with the available
+symbols only. When On, incomplete candidates are removed before First/Last/
+Strongest/Match Index selection. Consequently, `Match Index` numbers the
+remaining eligible candidates, not the raw detections. If none remain, pattern
+analysis reports that no match satisfies the result-range requirements.
+
+The completeness requirement includes Result Range alignment and offset. FSK
+also respects the detected burst end; PSK uses the available demodulated
+symbols up to the capture end. The current analyzer still returns one selected
+result at a time. `Sweep / Run > Previous Result Range` (`Left`) and
+`Next Result Range` (`Right`) change to the adjacent eligible match without a
+new IQ acquisition. Navigation changes the active setting to `Match Index` and
+reruns analysis against the same immutable capture. The actions stop at the
+first/last result rather than wrapping.
 
 ## Last-used folders
 

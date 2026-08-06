@@ -1,6 +1,6 @@
 # VSA実装状況・引き継ぎノート
 
-最終更新: 2026-08-03
+最終更新: 2026-08-06
 
 設計上の判断は[vsa-architecture.md](vsa-architecture.md)を参照してください。この文書は実際に動作する範囲、既知の制約、次の実装順を第三者が把握するための記録です。
 
@@ -119,7 +119,9 @@ Modulation  | Symbol Plot | Symbol Table
 
 ### Capture内の複数pattern
 
-現実装はcapture全体のcorrelation最大値を1件だけ採用し、`PatternSearchResult`とResult Rangeも1件だけ保持する。同じpatternを含むpacketが複数ある場合、時刻順の最初ではなく相関が最も高いpacketが表示される。したがって現段階では他候補をNext/Previousで選べない。
+2026-08-06にFSK/PSK共通の複数候補列挙を実装した。threshold以上のcorrelation local peakを列挙し、隣接timing phaseで同一packetを重複検出したものは物理候補1件へ統合する。`Match Selection`は`Strongest`（正規化相関最大、電力最大ではない）、`First`（既定値）、`Last`、`Match Index`（時刻順・1始まり）を選択できる。Result Summaryは選択方式と`selected/eligible`件数を表示し、metadataには検出件数も残す。`Sweep / Run > Previous/Next Result Range`または左右矢印で、IQを再取得せず同じcapture内の前後候補へ切り替える。端では停止し、切替後の設定は`Match Index`となる。解析結果そのものは引き続き選択した1件だけを保持する。
+
+`Result Range > Exclude incomplete Result Range`をONにすると、capture端またはFSK burst端までに指定Result Lengthを確保できない候補を選択前に除外する。OFFは従来互換で、選択候補の取得可能なsymbolだけを返す。除外後に候補がない場合はpattern analysis error、`Match Index`は除外後のeligible候補に対する番号とする。旧Configに項目がない場合は`First`、index 1、除外OFFを補完する。
 
 R&S manual pp.116-117、143-145では、Burst Search有効時は各burst内の最初のpatternを検索し、複数の離散Result Rangeをcapture buffer上に持ち、`Select Result Rng`で現在範囲を切り替える。今後は単純なcorrelation local peak列挙ではなく、Burst Searchでpacket候補を分離してから各burstの最初のpatternを対応づけ、available Result Rangesとselected Result Rangeを別管理する。この段階でNext/Previousまたはcapture上のrange選択UIを追加する。
 
@@ -199,6 +201,12 @@ power_dbm = 20 log10(|IQ|)
 Internal GainはPluto hardwareへ設定し、External ATT/GainはDUT側reference planeへの表示補正としてのみ適用する。初期値はPluto SAと共通でInternal Gain 30 dB、External ATT 30 dB、External Gain 0 dB。現段階の`-62 dB`は公称換算でありtraceable calibrationではないため、表示単位はdBmだがmetadataの`amplitude_calibrated`はfalseを維持する。
 
 `Swap I/Q`はR&Sと同じ`Q + jI`変換をcapture後に適用する。現在はFree Run / Singleのみ。I/Q Power Trigger、negative Trigger Offset（pretrigger）、Continuous、Stopは次段階で同じ共通streamへ接続する。
+
+### VSA Power Trigger検討
+
+現行の`PlutoLiveSource.capture_single()`は共通`TriggerAcquisitionController`を経由するが、設定はFree Run固定であり、VSA UIにはPower Trigger設定をまだ公開していない。共通stream/trigger基盤を利用してVSAへPower Triggerを接続することは可能である。
+
+Power TriggerをRising edge、適切なlevel、固定pre-trigger positionで使用すれば、各captureの時間原点をpacket立ち上がりのlevel crossingへ合わせられるため、Free Runよりpacket開始時刻を大幅に揃えられる。ただし同期するのはprotocol上のpacket先頭ではなく、RBW/IQ filter後のpower envelopeがthresholdを横切ったsampleである。送信ramp、packetごとのpower差、noise、interference、filter group delayにより数sample程度以上のjitterは残り得る。正確なsymbol境界とpattern startは引き続きPattern Search/Symbol Synchronizationで決定し、Power Triggerはcapture内のおおまかな位置合わせと必要pre-trigger量の削減に使う設計とする。
 
 ### R&S iq-tar import
 
