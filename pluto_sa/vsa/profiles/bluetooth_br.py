@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
 
 from pluto_sa.vsa.demod.gfsk import GFSKDemodulationResult, demodulate_gfsk
+from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
 from pluto_sa.vsa.model import IQRecording
 
 
@@ -481,9 +481,11 @@ def modulate_packet_bits(
         samples_per_symbol * BLUETOOTH_BR_SYMBOL_RATE_HZ, sample_rate_hz
     ):
         raise ValueError("sample_rate_hz must be an integer multiple of 1 MHz")
-    levels = np.repeat(2.0 * values.astype(np.float64) - 1.0, samples_per_symbol)
-    sigma_samples = samples_per_symbol / (2.0 * np.pi * BLUETOOTH_BR_BT)
-    shaped = gaussian_filter1d(levels, sigma=max(0.5, sigma_samples), mode="nearest")
+    shaped = fsk_reference_frequency_levels(
+        values,
+        samples_per_symbol=samples_per_symbol,
+        transmit_gaussian_bt=BLUETOOTH_BR_BT,
+    )
     packet_time_s = np.arange(shaped.size, dtype=np.float64) / float(sample_rate_hz)
     frequency = (
         shaped * float(frequency_deviation_hz)

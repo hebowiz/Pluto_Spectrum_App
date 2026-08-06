@@ -6,9 +6,14 @@ from dataclasses import dataclass
 from fractions import Fraction
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d, uniform_filter1d
+from scipy.ndimage import uniform_filter1d
 from scipy.optimize import minimize_scalar
 from scipy.signal import resample_poly
+
+from pluto_sa.vsa.demod.fsk_reference import (
+    apply_gaussian_frequency_filter,
+    fsk_reference_frequency_levels,
+)
 
 
 @dataclass(frozen=True)
@@ -32,6 +37,15 @@ class GFSKDemodulationResult:
     applied_timing_offset_samples: float
     timing_correction_accepted: bool
     frequency_model_residual_rms_hz: float
+    frequency_model_no_drift_residual_rms_hz: float
+    drift_model_accepted: bool
+    candidate_drift_hz_per_s: float
+    drift_model_residual_rms_hz: float
+    drift_excursion_hz: float
+    drift_bic_improvement: float
+    drift_rejection_reason: str
+    timing_confidence: float
+    estimation_sample_count: int
     burst_ranges: tuple[tuple[int, int], ...]
     selected_match_index: int
     eligible_match_count: int
@@ -210,20 +224,12 @@ def _local_peak_indices(scores: np.ndarray, threshold: float) -> np.ndarray:
 def _expected_fsk_symbol_levels(
     bits: np.ndarray, samples_per_symbol: int, gaussian_bt: float | None
 ) -> np.ndarray:
-    levels = np.repeat(
-        2.0 * np.asarray(bits, dtype=np.float64) - 1.0,
-        int(samples_per_symbol),
+    shaped = fsk_reference_frequency_levels(
+        bits,
+        samples_per_symbol=int(samples_per_symbol),
+        transmit_gaussian_bt=gaussian_bt,
+        measurement_gaussian_bt=None,
     )
-    shaped = levels
-    if gaussian_bt is not None:
-        if float(gaussian_bt) <= 0.0:
-            raise ValueError("gaussian_bt must be positive when provided")
-        sigma_samples = int(samples_per_symbol) / (
-            2.0 * np.pi * float(gaussian_bt)
-        )
-        shaped = gaussian_filter1d(
-            levels, sigma=max(0.5, sigma_samples), mode="nearest"
-        )
     shaped = uniform_filter1d(
         shaped,
         size=max(1, int(samples_per_symbol) // 2),
@@ -236,21 +242,40 @@ def _expected_fsk_sample_levels(
     bits: np.ndarray, samples_per_symbol: int, gaussian_bt: float | None
 ) -> np.ndarray:
     """Reconstruct the reference instantaneous-frequency waveform."""
-    levels = np.repeat(
-        2.0 * np.asarray(bits, dtype=np.float64) - 1.0,
-        int(samples_per_symbol),
+    return fsk_reference_frequency_levels(
+        bits,
+        samples_per_symbol=int(samples_per_symbol),
+        transmit_gaussian_bt=gaussian_bt,
+        measurement_gaussian_bt=gaussian_bt,
     )
-    if gaussian_bt is not None:
-        sigma_samples = int(samples_per_symbol) / (
-            2.0 * np.pi * float(gaussian_bt)
-        )
-        levels = gaussian_filter1d(
-            levels, sigma=max(0.5, sigma_samples), mode="nearest"
-        )
-    return uniform_filter1d(
-        levels,
-        size=max(1, int(samples_per_symbol) // 2),
-        mode="nearest",
+
+
+@dataclass(frozen=True)
+class _FrequencyModelFit:
+    signed_deviation_hz: float
+    cfo_hz: float
+    drift_hz_per_symbol: float
+    timing_offset_samples: float
+    residual_rms_hz: float
+    no_drift_residual_rms_hz: float
+    drift_accepted: bool
+    candidate_drift_hz_per_symbol: float
+    drift_residual_rms_hz: float
+    drift_excursion_hz: float
+    drift_bic_improvement: float
+    drift_rejection_reason: str
+    timing_confidence: float
+    estimation_sample_count: int
+
+
+def _timing_fit_is_credible(
+    fit: _FrequencyModelFit, samples_per_symbol: int
+) -> bool:
+    deviation = max(abs(fit.signed_deviation_hz), np.finfo(float).tiny)
+    return bool(
+        abs(fit.timing_offset_samples) <= 0.5 * int(samples_per_symbol)
+        and fit.timing_confidence >= 0.01
+        and fit.residual_rms_hz <= 0.75 * deviation
     )
 
 
@@ -262,7 +287,7 @@ def _fit_frequency_distortion_model(
     pattern_symbols: int,
     gaussian_bt: float | None,
     anchored_cfo_hz: float | None = None,
-) -> tuple[float, float, float, float, float]:
+) -> _FrequencyModelFit:
     """Jointly fit deviation, CFO, linear drift, and fractional timing.
 
     This is the variable-projection form of the R&S FSK frequency model.  For
@@ -290,7 +315,9 @@ def _fit_frequency_distortion_model(
     fit_measured = measured[fit_slice]
     fit_relative = relative_symbols[fit_slice]
 
-    def solve(timing_offset_samples: float) -> tuple[float, np.ndarray]:
+    def solve(
+        timing_offset_samples: float, *, include_drift: bool
+    ) -> tuple[float, np.ndarray]:
         shifted_reference = np.interp(
             indices - float(timing_offset_samples),
             indices,
@@ -299,20 +326,32 @@ def _fit_frequency_distortion_model(
             right=reference[-1],
         )[fit_slice]
         if anchored_cfo_hz is None:
-            design = np.column_stack(
-                (shifted_reference, np.ones(fit_measured.size), fit_relative)
-            )
+            columns = [shifted_reference, np.ones(fit_measured.size)]
+            if include_drift:
+                columns.append(fit_relative)
+            design = np.column_stack(columns)
             parameters = np.linalg.lstsq(design, fit_measured, rcond=None)[0]
             modeled = design @ parameters
+            if not include_drift:
+                parameters = np.asarray(
+                    [parameters[0], parameters[1], 0.0], dtype=np.float64
+                )
         else:
-            design = np.column_stack((shifted_reference, fit_relative))
+            columns = [shifted_reference]
+            if include_drift:
+                columns.append(fit_relative)
+            design = np.column_stack(columns)
             fitted = np.linalg.lstsq(
                 design,
                 fit_measured - float(anchored_cfo_hz),
                 rcond=None,
             )[0]
             parameters = np.asarray(
-                [fitted[0], float(anchored_cfo_hz), fitted[1]],
+                [
+                    fitted[0],
+                    float(anchored_cfo_hz),
+                    fitted[1] if include_drift else 0.0,
+                ],
                 dtype=np.float64,
             )
             modeled = design @ fitted + float(anchored_cfo_hz)
@@ -320,28 +359,93 @@ def _fit_frequency_distortion_model(
         return float(np.mean(residual**2)), parameters
 
     half_symbol = 0.5 * float(samples_per_symbol)
-    coarse_offsets = np.linspace(
-        -half_symbol, half_symbol, 2 * int(samples_per_symbol) + 1
+
+    def optimize(include_drift: bool) -> tuple[float, float, np.ndarray]:
+        coarse_offsets = np.linspace(
+            -half_symbol, half_symbol, 2 * int(samples_per_symbol) + 1
+        )
+        coarse = [
+            (solve(offset, include_drift=include_drift)[0], float(offset))
+            for offset in coarse_offsets
+        ]
+        _, best_offset = min(coarse, key=lambda item: item[0])
+        lower = max(-half_symbol, best_offset - 1.0)
+        upper = min(half_symbol, best_offset + 1.0)
+        optimized = minimize_scalar(
+            lambda offset: solve(
+                float(offset), include_drift=include_drift
+            )[0],
+            bounds=(lower, upper),
+            method="bounded",
+            options={"xatol": 0.01},
+        )
+        timing = float(optimized.x) if optimized.success else best_offset
+        residual, parameters = solve(timing, include_drift=include_drift)
+        return timing, residual, parameters
+
+    drift_timing, drift_residual, drift_parameters = optimize(True)
+    no_drift_timing, no_drift_residual, no_drift_parameters = optimize(False)
+    fit_count = int(fit_measured.size)
+    drift_bic = fit_count * np.log(max(drift_residual, np.finfo(float).tiny))
+    drift_bic += 3.0 * np.log(max(2, fit_count))
+    no_drift_bic = fit_count * np.log(
+        max(no_drift_residual, np.finfo(float).tiny)
     )
-    coarse = [(solve(offset)[0], float(offset)) for offset in coarse_offsets]
-    _, best_offset = min(coarse, key=lambda item: item[0])
-    lower = max(-half_symbol, best_offset - 1.0)
-    upper = min(half_symbol, best_offset + 1.0)
-    optimized = minimize_scalar(
-        lambda offset: solve(float(offset))[0],
-        bounds=(lower, upper),
-        method="bounded",
-        options={"xatol": 0.01},
+    no_drift_bic += 2.0 * np.log(max(2, fit_count))
+    drift_excursion_hz = abs(float(drift_parameters[2])) * float(
+        np.ptp(fit_relative)
     )
-    timing_offset = float(optimized.x) if optimized.success else best_offset
-    residual_power, parameters = solve(timing_offset)
+    excursion_threshold_hz = 0.5 * float(
+        np.sqrt(max(no_drift_residual, 0.0))
+    )
+    drift_bic_improvement = float(no_drift_bic - drift_bic)
+    drift_accepted = bool(
+        drift_bic_improvement > 0.0
+        and drift_excursion_hz > excursion_threshold_hz
+    )
+    if drift_accepted:
+        drift_rejection_reason = "Accepted"
+    elif drift_bic_improvement <= 0.0:
+        drift_rejection_reason = "BIC did not improve"
+    else:
+        drift_rejection_reason = "Excursion below residual threshold"
+    if drift_accepted:
+        timing_offset = drift_timing
+        residual_power = drift_residual
+        parameters = drift_parameters
+    else:
+        timing_offset = no_drift_timing
+        residual_power = no_drift_residual
+        parameters = no_drift_parameters
+
+    timing_probe = 0.25
+    neighboring_costs = [
+        solve(
+            float(np.clip(timing_offset + direction * timing_probe, -half_symbol, half_symbol)),
+            include_drift=drift_accepted,
+        )[0]
+        for direction in (-1.0, 1.0)
+    ]
+    timing_confidence = max(
+        0.0,
+        min(neighboring_costs) / max(residual_power, np.finfo(float).tiny) - 1.0,
+    )
     signed_deviation_hz, cfo_hz, drift_hz_per_symbol = map(float, parameters)
-    return (
-        signed_deviation_hz,
-        cfo_hz,
-        drift_hz_per_symbol,
-        timing_offset,
-        float(np.sqrt(residual_power)),
+    return _FrequencyModelFit(
+        signed_deviation_hz=signed_deviation_hz,
+        cfo_hz=cfo_hz,
+        drift_hz_per_symbol=drift_hz_per_symbol,
+        timing_offset_samples=timing_offset,
+        residual_rms_hz=float(np.sqrt(residual_power)),
+        no_drift_residual_rms_hz=float(np.sqrt(no_drift_residual)),
+        drift_accepted=drift_accepted,
+        candidate_drift_hz_per_symbol=float(drift_parameters[2]),
+        drift_residual_rms_hz=float(np.sqrt(drift_residual)),
+        drift_excursion_hz=float(drift_excursion_hz),
+        drift_bic_improvement=drift_bic_improvement,
+        drift_rejection_reason=drift_rejection_reason,
+        timing_confidence=float(timing_confidence),
+        estimation_sample_count=fit_count,
     )
 
 
@@ -397,9 +501,19 @@ def demodulate_gfsk(
         float(symbol_rate_hz),
         int(analysis_samples_per_symbol),
     )
-    frequency_hz = _instantaneous_frequency(resampled, analysis_rate_hz)
-    frequency_hz = uniform_filter1d(
-        frequency_hz,
+    raw_frequency_hz = _instantaneous_frequency(resampled, analysis_rate_hz)
+    frequency_hz = raw_frequency_hz
+    if gaussian_bt is not None:
+        frequency_hz = apply_gaussian_frequency_filter(
+            frequency_hz,
+            samples_per_symbol=int(analysis_samples_per_symbol),
+            bt=float(gaussian_bt),
+        )
+    # Pattern acquisition keeps the robust half-symbol integrate-and-dump
+    # correlator.  R&S-style symmetric measurement filtering is used by the
+    # subsequent all-point fine estimator and does not redefine coarse search.
+    detection_frequency_hz = uniform_filter1d(
+        raw_frequency_hz,
         size=max(1, int(analysis_samples_per_symbol) // 2),
         mode="nearest",
     )
@@ -409,7 +523,11 @@ def demodulate_gfsk(
     centered_expected = expected_levels - np.mean(expected_levels)
     expected_energy = float(np.sum(centered_expected**2))
     for phase in range(int(analysis_samples_per_symbol)):
-        values = _symbol_values(frequency_hz, phase, int(analysis_samples_per_symbol))
+        values = _symbol_values(
+            detection_frequency_hz,
+            phase,
+            int(analysis_samples_per_symbol),
+        )
         scores = _normalized_sliding_correlation(values, expected_levels)
         if scores.size == 0:
             continue
@@ -571,7 +689,31 @@ def demodulate_gfsk(
     access_start_source = int(
         round(access_start_resampled * float(sample_rate_hz) / analysis_rate_hz)
     )
+    training_stop = min(
+        frequency_hz.size,
+        access_start_resampled
+        + pattern.size * int(analysis_samples_per_symbol),
+    )
+    training_measured_frequency = frequency_hz[
+        int(access_start_resampled) : int(training_stop)
+    ]
+    if training_measured_frequency.size >= pattern.size * 4:
+        training_fit = _fit_frequency_distortion_model(
+            training_measured_frequency,
+            pattern,
+            samples_per_symbol=int(analysis_samples_per_symbol),
+            pattern_symbols=pattern.size,
+            gaussian_bt=gaussian_bt,
+            anchored_cfo_hz=None,
+        )
+        if _timing_fit_is_credible(
+            training_fit, int(analysis_samples_per_symbol)
+        ):
+            pattern_cfo_hz = training_fit.cfo_hz
+            cfo_hz = pattern_cfo_hz
+            signed_deviation = training_fit.signed_deviation_hz
     packet_observed_frequency = all_symbol_frequency[access_index:]
+    desired_packet_symbol_count = int(packet_observed_frequency.size)
     for _, burst_stop in bursts:
         if burst_stop > access_start_source:
             burst_symbols = int(
@@ -582,11 +724,15 @@ def demodulate_gfsk(
                 )
             )
             packet_observed_frequency = packet_observed_frequency[:burst_symbols]
+            desired_packet_symbol_count = burst_symbols
             break
     if maximum_symbols is not None:
         packet_observed_frequency = packet_observed_frequency[
             : int(maximum_symbols)
         ]
+        desired_packet_symbol_count = min(
+            desired_packet_symbol_count, int(maximum_symbols)
+        )
     packet_symbol_count = int(packet_observed_frequency.size)
     packet_relative_symbols = (
         np.arange(packet_symbol_count, dtype=np.float64)
@@ -611,17 +757,20 @@ def demodulate_gfsk(
     applied_timing_offset = 0.0
     timing_correction_accepted = True
     joint_residual_rms_hz = 0.0
+    no_drift_residual_rms_hz = 0.0
+    drift_model_accepted = False
+    candidate_drift_hz_per_symbol = 0.0
+    drift_model_residual_rms_hz = 0.0
+    drift_excursion_hz = 0.0
+    drift_bic_improvement = 0.0
+    drift_rejection_reason = "Not estimated"
+    timing_confidence = 0.0
+    estimation_sample_count = 0
     refinement_iterations = 3 if bits.size >= pattern.size + 32 else 0
     cfo_hz = pattern_cfo_hz
     drift_hz_per_symbol = 0.0
     for _ in range(refinement_iterations):
-        (
-            signed_deviation,
-            cfo_hz,
-            drift_hz_per_symbol,
-            joint_timing_offset,
-            joint_residual_rms_hz,
-        ) = _fit_frequency_distortion_model(
+        model_fit = _fit_frequency_distortion_model(
             packet_measured_frequency,
             bits,
             samples_per_symbol=int(analysis_samples_per_symbol),
@@ -629,12 +778,25 @@ def demodulate_gfsk(
             gaussian_bt=gaussian_bt,
             anchored_cfo_hz=pattern_cfo_hz,
         )
-        # Coarse search already evaluates every integer phase.  A fine result
-        # farther than 0.75 analysis sample therefore indicates a cycle slip
-        # or reference/filter mismatch rather than a credible sub-sample
-        # correction.  Keep the estimate for diagnostics, but do not feed an
-        # out-of-range value back into decisions or displayed timing.
-        timing_correction_accepted = abs(joint_timing_offset) <= 0.75
+        signed_deviation = model_fit.signed_deviation_hz
+        cfo_hz = model_fit.cfo_hz
+        drift_hz_per_symbol = model_fit.drift_hz_per_symbol
+        joint_timing_offset = model_fit.timing_offset_samples
+        joint_residual_rms_hz = model_fit.residual_rms_hz
+        no_drift_residual_rms_hz = model_fit.no_drift_residual_rms_hz
+        drift_model_accepted = model_fit.drift_accepted
+        candidate_drift_hz_per_symbol = (
+            model_fit.candidate_drift_hz_per_symbol
+        )
+        drift_model_residual_rms_hz = model_fit.drift_residual_rms_hz
+        drift_excursion_hz = model_fit.drift_excursion_hz
+        drift_bic_improvement = model_fit.drift_bic_improvement
+        drift_rejection_reason = model_fit.drift_rejection_reason
+        timing_confidence = model_fit.timing_confidence
+        estimation_sample_count = model_fit.estimation_sample_count
+        timing_correction_accepted = _timing_fit_is_credible(
+            model_fit, int(analysis_samples_per_symbol)
+        )
         applied_timing_offset = (
             joint_timing_offset if timing_correction_accepted else 0.0
         )
@@ -642,7 +804,7 @@ def demodulate_gfsk(
             frequency_hz,
             float(access_start_resampled) + applied_timing_offset,
             int(analysis_samples_per_symbol),
-            packet_symbol_count,
+            desired_packet_symbol_count,
         )
         if packet_observed_frequency.size != packet_symbol_count:
             packet_symbol_count = int(packet_observed_frequency.size)
@@ -714,6 +876,19 @@ def demodulate_gfsk(
         applied_timing_offset_samples=applied_timing_offset,
         timing_correction_accepted=timing_correction_accepted,
         frequency_model_residual_rms_hz=joint_residual_rms_hz,
+        frequency_model_no_drift_residual_rms_hz=(
+            no_drift_residual_rms_hz
+        ),
+        drift_model_accepted=drift_model_accepted,
+        candidate_drift_hz_per_s=(
+            candidate_drift_hz_per_symbol * float(symbol_rate_hz)
+        ),
+        drift_model_residual_rms_hz=drift_model_residual_rms_hz,
+        drift_excursion_hz=drift_excursion_hz,
+        drift_bic_improvement=drift_bic_improvement,
+        drift_rejection_reason=drift_rejection_reason,
+        timing_confidence=timing_confidence,
+        estimation_sample_count=estimation_sample_count,
         burst_ranges=bursts,
         selected_match_index=selected_match_index,
         eligible_match_count=eligible_match_count,

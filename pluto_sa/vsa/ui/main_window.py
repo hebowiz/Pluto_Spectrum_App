@@ -1902,6 +1902,16 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if self.session.settings.analysis_center_frequency_hz is not None
                 else (recording.center_frequency_hz if recording is not None else 0.0)
             )
+            reported_drift_hz_per_s = (
+                float(
+                    pattern_result.metadata.get(
+                        "candidate_drift_hz_per_s",
+                        pattern_result.carrier_frequency_drift_hz_per_s,
+                    )
+                )
+                if signal.modulation.family is ModulationFamily.FSK
+                else pattern_result.carrier_frequency_drift_hz_per_s
+            )
             summary_rows = [
                     ("Modulation", signal.modulation.value),
                     (
@@ -1916,7 +1926,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                     ),
                     (
                         "Carrier Drift",
-                        f"{pattern_result.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms",
+                        f"{reported_drift_hz_per_s / 1e6:+.3f} kHz/ms",
                     ),
             ]
             if signal.modulation.family is ModulationFamily.PSK:
@@ -1946,6 +1956,24 @@ class VSAWindow(QtWidgets.QMainWindow):
                 frequency_residual = pattern_result.metadata.get(
                     "frequency_model_residual_rms_hz"
                 )
+                no_drift_residual = pattern_result.metadata.get(
+                    "frequency_model_no_drift_residual_rms_hz"
+                )
+                timing_confidence = pattern_result.metadata.get(
+                    "timing_confidence"
+                )
+                deviation_error = pattern_result.metadata.get(
+                    "frequency_deviation_error_percent"
+                )
+                drift_accepted = pattern_result.metadata.get(
+                    "drift_model_accepted"
+                )
+                candidate_drift = pattern_result.metadata.get(
+                    "candidate_drift_hz_per_s"
+                )
+                drift_reason = pattern_result.metadata.get(
+                    "drift_rejection_reason"
+                )
                 if timing_offset is not None and timing_symbols is not None:
                     timing_status = (
                         ""
@@ -1961,10 +1989,41 @@ class VSAWindow(QtWidgets.QMainWindow):
                         )
                     )
                 if frequency_residual is not None:
+                    residual_status = (
+                        ""
+                        if no_drift_residual is None
+                        else f" / no drift {float(no_drift_residual) / 1e3:.3f}"
+                    )
                     summary_rows.append(
                         (
                             "Frequency Fit RMS",
-                            f"{float(frequency_residual) / 1e3:.3f} kHz",
+                            f"{float(frequency_residual) / 1e3:.3f}"
+                            f"{residual_status} kHz",
+                        )
+                    )
+                if timing_confidence is not None:
+                    summary_rows.append(
+                        ("Timing Confidence", f"{float(timing_confidence):.3f}")
+                    )
+                if deviation_error is not None:
+                    summary_rows.append(
+                        ("Deviation Error", f"{float(deviation_error):+.2f} %")
+                    )
+                summary_rows.append(
+                    (
+                        "Drift Model",
+                        (
+                            "Accepted"
+                            if drift_accepted
+                            else f"Rejected ({drift_reason or 'quality gate'})"
+                        ),
+                    )
+                )
+                if candidate_drift is not None:
+                    summary_rows.append(
+                        (
+                            "Applied Drift",
+                            f"{pattern_result.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms",
                         )
                     )
             summary_rows.extend(

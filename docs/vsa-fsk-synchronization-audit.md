@@ -1,6 +1,6 @@
 # VSA FSKシンボル同期監査
 
-最終更新: 2026-08-06
+最終更新: 2026-08-07
 
 ## 結論
 
@@ -8,10 +8,10 @@
 coarse時刻を選んだ後、Result Range全体から推定したfractional timing offset `tau`を
 最終symbol-frequency、symbol time、Result Range境界、表示markerへ反映する。
 
-短いtraining patternとTX/reference filter mismatchがある生成DH1では、joint fitが
-`-1.50 analysis sample`の誤った隣接解を選ぶケースも確認した。整数phaseを全探索した
-fine correctionとして`|tau| > 0.75 sample`はrejectし、推定値は診断用に残しながら
-適用値を0とする安全策を追加した。
+P0では短いtraining patternで得た`-1.50 analysis sample`を固定幅によりrejectしていた。
+P1でTransmit/Measurement Filterを共通化して再検証すると、この値はcoarse detectorの
+開始位置を実際のpacket boundaryへ戻す有効な補正だった。現在は固定幅ではなく、半symbol
+Estimation Range、timing cost曲率、frequency residual/deviation比で採否を決める。
 
 端数遅延を注入した生成GFSKでは、既存の`tau`推定値だけで20 dB SNR時の平均
 timing errorを0.269 analysis sampleから0.016 sampleへ低減できた。このため、
@@ -55,15 +55,16 @@ f_meas(t) = B * f_ref(t - tau) + f0 + fd * t + noise
 
 1. IQを8 samples/symbolへresampleする。
 2. 隣接IQのphase differenceからinstantaneous frequencyを生成する。
-3. 半symbolのmoving averageを適用する。
+3. coarse pattern acquisition用に半symbolのmoving averageを適用する。
 4. 8個の整数timing phaseでsymbol-frequency平均値を作る。
 5. known patternとのnormalized correlationとeye openingでcoarse phaseを選ぶ。
 6. patternからCFO、signed deviation、coarse driftを推定する。
 7. tentative payload decisionを作り、sample-rate reference frequency waveformを再構成する。
-8. Result Range全sampleを使い、deviation、drift、fractional `tau`を最小二乗fitする。
+8. 測定瞬時周波数とreference瞬時周波数へ同じMeasurement Filterを適用し、Result Range
+   全sampleを使ってdeviation、drift、fractional `tau`を最小二乗fitする。
 9. 採用された`tau`でsymbol-frequencyを補間し直し、decision、`symbol_time_s`、pattern
    start、Result Range、plot markerを同じfractional clockへ揃える。
-10. `|tau| > 0.75 sample`は推定値を保持したまま適用をrejectする。
+10. 半symbol Range、cost曲率、residual/deviation比を満たさないtiming補正はrejectする。
 
 PSK側はideal absolute reference waveformに対するcomplex-EVM objectiveでfractional
 timing offsetとsymbol timing rateを同時最適化し、最適化後のcenterでIQを補間し直す。
@@ -116,16 +117,58 @@ off/1.2/1.5/2/3/5 MHzで解析した。全条件でcorrelation 0.996以上、pat
 与えた4条件すべてでpattern start誤差0.08 sample未満、100 symbolsの復号error 0を
 確認した。保存済みPluto BR fixtureもAnalysis Bandwidth 1.2/1.5/2/3/5 MHzの全条件で
 timing補正が採用され、pattern error 0、開始時刻の幅0.1 analysis sample未満を維持した。
-短い32-symbol DH1で発生する`-1.50 sample`の誤推定はrejectされ、正しいcoarse startと
-全packet symbolsが維持されることを回帰テストへ固定した。
+P0時点では短い32-symbol DH1の`-1.50 sample`を誤推定としてrejectする回帰を置いたが、
+P1の対称filter化後は高confidenceでpacket boundaryへ近づくことが確認できたため、固定幅
+rejectを廃止した。現在の回帰は補正後startが既知packet boundaryの±1 source sample以内、
+全packet symbols一致、無drift波形でDrift model棄却を確認する。
 
-### P1: R&S型のmeasurement/reference waveform fitへ統一
+### P1: R&S型のmeasurement/reference waveform fitへ統一（2026-08-06 実装済み）
 
 - TX filterからFSK reference frequency pulseを一つの共通実装で生成する。
 - measurement signalとreference signalへ同じMeasurement Filterを適用する。
 - symbol平均値ではなくCapture Oversamplingの全frequency sampleをobjectiveへ使う。
 - `B / f0 / fd / tau`のjoint fitとno-drift fitを比較し、driftの過適合を拒否する。
 - known patternはtraining symbolsとして固定し、pattern外はDetected Dataでreferenceを作る。
+
+実装内容:
+
+- `demod/fsk_reference.py`へETSI/R&S Appendix F.5のGaussian BT impulseを共通化した。
+- 生成FSK/BR/EDRのGFSK部、coarse reference、fine referenceが同じTransmit Filter定義を使う。
+- Auto Measurement FilterはTransmit BTと同値とし、測定瞬時周波数へ1回、referenceへ
+  Transmit Filter後に1回適用する。
+- known pattern CFO/Deviationとpacket-wide `B/f0/fd/tau`をCapture Oversampling全点でfitする。
+- Driftあり／なしを個別最適化し、BIC改善に加えて推定区間のdrift excursionが
+  no-drift residual RMSの50%を超える場合だけ採用する。
+- BR/2-DH1/3-DH1生成fixtureは新しい解析Gaussian定義で再生成した。
+- Result SummaryへDeviation Error、Timing Confidence、Drift Model、drift有無双方のRMSを追加した。
+
+P1回帰結果:
+
+- 自動テスト200件が成功した。
+- 無drift生成DH1ではDrift modelを棄却して`0 kHz/ms`、既知の`150 kHz/ms`を
+  注入した反転IQではDrift modelを採用し、許容差`25 kHz/ms`以内で復元した。
+- 保存済みPluto BR fixtureのAnalysis Bandwidth 1.2/1.5/2/3/5 MHzではpattern error 0、
+  `tau=+0.180..+0.220 sample`、Timing Confidence `0.215..0.328`となった。
+- 同fixtureで一時的に得られた約`+22 kHz/ms`は、126 us区間の総変化が約2.8 kHzで
+  no-drift residual RMS約9 kHzに対して小さいため棄却した。最終条件では全帯域0 kHz/ms。
+
+### Pluto実機DH1反復確認（2026-08-07）
+
+アプリのDH1設定を再現し、8 MS/s、3 ms capture、Analysis BW 2 MHz、32-symbol
+pattern、366-symbol Result Range、Internal Gain 30 dBで30回＋診断追加20回を取得した。
+
+- 最初の30回は全captureでmatch、pattern error 0、correlation 0.9902～0.9971。
+- Timing Confidenceは0.117～0.704で、fine timingは全captureで有効だった。
+- 診断追加20回のcandidate driftは中央値`+4.049 kHz/ms`、範囲
+  `+0.728..+5.424 kHz/ms`で、符号と大きさは比較的一貫していた。
+- 366 us区間のdrift excursion中央値は1.47 kHz、no-drift residual RMSは概ね
+  5.4～9.9 kHzであり、全20回が品質gateでRejectedとなった。
+- 18/20回はBICが改善したが、excursionがresidual RMSの50%未満だった。小さな実driftの
+  可能性はあるものの、このpacket長で補正を適用するには効果が小さく、Rejectedは妥当。
+
+表示はR&Sに近づけ、`Carrier Drift`へ候補推定値、`Applied Drift`へ品質gate通過後の
+補正値を示す。Rejectedでも推定値を0へ潰さず、棄却理由、BIC差、excursion、双方の
+residualをmetadataへ保持する。
 
 ### P2: estimation rangeと品質指標
 
@@ -147,6 +190,7 @@ timing補正が採用され、pattern error 0、開始時刻の幅0.1 analysis s
 ## 判断
 
 PSKと同じコードを流用するのではなく、R&SどおりFSK専用frequency-waveform modelを使う。
-現行joint estimatorはその中核に近く、P0は比較的小さい変更で効果が見込める。P1以降は
-FSK error/EVM相当結果の基礎にもなるため、表示だけを補正する暫定対応ではなくDSP result
-contractから一貫して実装する。
+P0/P1によりR&S FSK frequency modelの中核と結果contractへの反映は実装された。次は
+Measurement Filterの手動設定、Estimation Range、confidence threshold設定、FSK error/EVM
+相当結果を追加する。実機captureではTX filter mismatchとclock/reference誤差を含むため、
+BR連続測定でTiming Confidence、Drift採否、symbol cluster分散を継続評価する。

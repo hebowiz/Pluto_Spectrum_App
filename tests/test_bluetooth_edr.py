@@ -6,6 +6,7 @@ import pytest
 from pluto_sa.vsa.model import SignalDescription
 from pluto_sa.vsa.pattern import (
     KnownPattern,
+    MatchSelectionPolicy,
     PatternAnalyzer,
     PatternSearchMode,
     PatternSearchSettings,
@@ -72,6 +73,7 @@ def test_generic_vsa_recovers_edr_sync_pattern(packet_name):
         PatternSearchSettings(
             pattern=KnownPattern(tuple(map(int, sync_phase_indices))),
             mode=PatternSearchMode.ON,
+            match_selection=MatchSelectionPolicy.STRONGEST,
             correlation_threshold_auto=False,
             iq_correlation_threshold=0.9,
         ),

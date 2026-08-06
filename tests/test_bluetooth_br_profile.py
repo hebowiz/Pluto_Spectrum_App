@@ -87,8 +87,11 @@ def test_pluto_smartphone_inquiry_capture_recovers_giac_without_errors() -> None
     assert result.demodulation.carrier_frequency_offset_hz == pytest.approx(
         1_037_494.0, abs=5_000.0
     )
+    # R&S-style symmetric Gaussian measurement/reference filtering removes
+    # the former positive deviation bias and stays close to the nominal BR
+    # deviation used by this transmitter.
     assert result.demodulation.frequency_deviation_hz == pytest.approx(
-        164_778.0, abs=5_000.0
+        160_000.0, abs=5_000.0
     )
 
 
@@ -348,6 +351,11 @@ def test_bluetooth_packet_tracks_frequency_drift_and_iq_inversion() -> None:
 
     assert result.demodulation.iq_inverted is True
     assert result.demodulation.carrier_frequency_drift_hz_per_s == pytest.approx(
+        -drift_hz_per_s, abs=25.0e6
+    )
+    assert result.demodulation.drift_model_accepted
+    assert result.demodulation.drift_rejection_reason == "Accepted"
+    assert result.demodulation.candidate_drift_hz_per_s == pytest.approx(
         -drift_hz_per_s, abs=25.0e6
     )
     assert result.header is not None and result.header.hec_valid is True

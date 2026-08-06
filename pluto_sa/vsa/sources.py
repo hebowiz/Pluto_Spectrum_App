@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import gaussian_filter1d
 
 from pluto_sa.sdr.trigger import IQAcquisitionRecord
 from pluto_sa.vsa.iqtar import load_iq_tar
+from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 
 
@@ -50,16 +50,16 @@ class GeneratedIQSource:
             raise ValueError("frequency_deviation_hz must be positive")
         rng = np.random.default_rng(int(seed))
         symbols = rng.integers(0, 2, size=int(symbol_count), dtype=np.uint8)
-        levels = np.repeat(2.0 * symbols.astype(np.float64) - 1.0, int(samples_per_symbol))
+        levels = fsk_reference_frequency_levels(
+            symbols,
+            samples_per_symbol=int(samples_per_symbol),
+            transmit_gaussian_bt=gaussian_bt,
+        )
         modulation = ModulationKind.FSK2
         tx_filter = "None"
         if gaussian_bt is not None:
             if float(gaussian_bt) <= 0.0:
                 raise ValueError("gaussian_bt must be positive")
-            # This deterministic approximation is a test-waveform shaper, not
-            # yet the reference Gaussian pulse used for measurement EVM.
-            sigma_samples = max(0.5, int(samples_per_symbol) / (2.0 * np.pi * float(gaussian_bt)))
-            levels = gaussian_filter1d(levels, sigma=sigma_samples, mode="nearest")
             modulation = ModulationKind.GFSK
             tx_filter = "Gaussian"
         sample_rate_hz = float(symbol_rate_hz) * int(samples_per_symbol)

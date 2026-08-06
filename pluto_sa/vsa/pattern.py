@@ -806,6 +806,41 @@ class PatternAnalyzer:
                 "frequency_model_residual_rms_hz": (
                     demodulation.frequency_model_residual_rms_hz
                 ),
+                "frequency_model_no_drift_residual_rms_hz": (
+                    demodulation.frequency_model_no_drift_residual_rms_hz
+                ),
+                "drift_model_accepted": demodulation.drift_model_accepted,
+                "candidate_drift_hz_per_s": (
+                    demodulation.candidate_drift_hz_per_s
+                ),
+                "drift_model_residual_rms_hz": (
+                    demodulation.drift_model_residual_rms_hz
+                ),
+                "drift_excursion_hz": demodulation.drift_excursion_hz,
+                "drift_bic_improvement": (
+                    demodulation.drift_bic_improvement
+                ),
+                "drift_rejection_reason": (
+                    demodulation.drift_rejection_reason
+                ),
+                "timing_confidence": demodulation.timing_confidence,
+                "estimation_sample_count": (
+                    demodulation.estimation_sample_count
+                ),
+                "fsk_measurement_filter": (
+                    "Gaussian Auto" if gaussian_bt is not None else "None"
+                ),
+                "frequency_deviation_error_percent": (
+                    100.0
+                    * (
+                        demodulation.frequency_deviation_hz
+                        / signal.frequency_deviation_hz
+                        - 1.0
+                    )
+                    if signal.frequency_deviation_hz is not None
+                    and signal.frequency_deviation_hz > 0.0
+                    else None
+                ),
             },
         )
 

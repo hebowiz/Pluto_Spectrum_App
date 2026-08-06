@@ -229,6 +229,11 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
             for row in range(window.result_summary.rowCount())
         }
         assert "CFO" in summary
+        assert "Fractional Timing" in summary
+        assert "Timing Confidence" in summary
+        assert "Deviation Error" in summary
+        assert summary["Drift Model"].startswith(("Accepted", "Rejected"))
+        assert "Applied Drift" in summary
         assert summary["Display"] == "Carrier Corrected"
 
         window.raw_carrier_action.trigger()

@@ -1,6 +1,6 @@
 # VSA Carrier周波数推定・補正仕様
 
-最終更新: 2026-08-06
+最終更新: 2026-08-07
 
 この文書は、Pattern SearchにおけるCarrier Frequency Offset（CFO）、carrier phase、linear frequency driftの計算方法と、表示・復調へ適用する補正の境界を記録する。R&S FPL1-K70 VSA User Manual rev.12のdemodulation process（pp.112-124）とDemodulation設定（pp.217-224）を用語・処理段階の参照モデルとする。
 
@@ -26,7 +26,15 @@ f[n] = Fs / (2 pi) * arg(x[n] * conj(x[n-1]))
 
 8 samples/symbolへresampleし、半symbol幅の移動平均を適用する。全timing phaseを試し、既知patternから生成したFSK levelとのnormalized correlationとeye openingからcoarse phaseと開始位置を採用する。Result Range全sampleを使うjoint fitでfractional timing offsetも推定し、採用されたoffsetは最終symbol-frequency、symbol time、Result Range境界、表示markerへ一貫して反映する。
 
-整数phaseを全探索済みであるため、fine offsetの絶対値が0.75 analysis sampleを超えた場合はcycle slipまたはTX/reference filter mismatchと判定する。この場合は推定値を診断表示へ残すが適用値は0とし、coarse timingを維持する。Result Summaryの`Fractional Timing`は推定値とreject状態、`Frequency Fit RMS`はfrequency modelの残差を示す。R&Sとの差分と定量評価は[vsa-fsk-synchronization-audit.md](vsa-fsk-synchronization-audit.md)を参照。
+coarse pattern acquisitionは従来の半symbol integrate-and-dump相関を維持し、fine estimatorはR&SどおりMeasurement Filter通過後の全瞬時周波数sampleを使う。Gaussian時は測定瞬時周波数へMeasurement Filterを1回、ideal referenceへTransmit Filterと同じMeasurement Filterを順番に適用する。Auto時のMeasurement Filter BTはTransmit Filter BTと同値である。
+
+Gaussian impulseはR&S Appendix F.5と同じ解析定義を使う。symbol periodを`T`とすると、sample grid上の標準偏差は次のとおりであり、周波数`B=BT/T`で振幅応答が-3 dBとなる。
+
+```text
+sigma_samples = sqrt(ln(2)) * samples_per_symbol / (2 pi BT)
+```
+
+fine timingの採否は固定±0.75 sampleではなく、半symbolのEstimation Range、最適点から±0.25 sampleにおけるcost上昇率、frequency fit residual/deviation比で判定する。Result Summaryの`Fractional Timing`は推定値とreject状態、`Timing Confidence`はcost上昇率、`Frequency Fit RMS`は採用modelとno-drift modelの残差を示す。R&Sとの差分と定量評価は[vsa-fsk-synchronization-audit.md](vsa-fsk-synchronization-audit.md)を参照。
 
 ### 2.2 CFO、Deviation、Driftの同時推定
 
@@ -44,6 +52,8 @@ f_k = CFO + signed_deviation * m_k + drift_per_symbol * k
 - `drift_per_symbol`: 1 symbol当たりのlinear frequency変化。
 
 十分なpacket後続部がある場合は、known patternを固定training dataとし、後続のtentative decisionから最大3回再fitする。このpacket-wide fitはsymbol判定とcoarse drift推定にだけ用いる。Result Summaryへ表示しsample単位補正へ用いるCFOは、送信symbolが確定しているknown pattern単独のfit値に固定する。tentative decisionでCFO基準を上書きしない。
+
+P1ではknown patternのCFO/Deviationもsymbol平均だけでなく、Transmit FilterとMeasurement Filterを通したideal frequency waveformとの全sample最小二乗fitで更新する。packet-wide fitではDriftあり／なしを別々に最適化し、BICが改善し、かつ推定区間内のdrift excursionがno-drift residual RMSの50%を超える場合だけDrift modelを採用する。棄却時のApplied Driftは0だが、推定したCarrier Drift候補値は診断結果として保持・表示する。
 
 ```text
 drift_hz_per_s = drift_per_symbol * symbol_rate_hz
@@ -105,7 +115,7 @@ UIの`Display Config > Carrier Display`で次を切り替える。
 - `Raw IQ`: Result Rangeの取得IQからSpectrumとInstantaneous Frequencyを生成。
 - `Carrier Corrected`: sample単位でCFOを除去したIQから再生成。既定値。
 
-Powerは位相回転で変化しないためRaw IQを使用する。CFO、推定carrier frequency、driftはResult Summaryへ表示する。
+Powerは位相回転で変化しないためRaw IQを使用する。CFO、推定carrier frequency、driftはResult Summaryへ表示する。FSKでは`Carrier Drift`がjoint fitの推定候補値、`Applied Drift`が品質gate通過後に補正へ使用する値である。
 
 ## 5. Drift補正の扱い
 
@@ -117,6 +127,6 @@ Powerは位相回転で変化しないためRaw IQを使用する。CFO、推定
 
 - Pattern Searchが成立しないcaptureではpattern-derived CFO補正を生成しない。
 - 短いpattern、同一symbolの連続、低SNR、TX filter不一致ではCFOとDeviationの分離が不安定になる。
-- FSKのfractional timingは最終measurementへ反映済み。measurement/reference filterの対称処理、offset探索costに基づくconfidence、設定可能なEstimation Rangeは未実装。R&S仕様ではFSKにsymbol-rate error補償とequalizerは存在しないため、これらをPSKから機械的に移植しない。
+- FSKのfractional timing、measurement/reference filterの対称処理、offset探索costに基づくconfidenceは実装済み。Measurement Filterの手動Type/BT設定と設定可能なEstimation Rangeは未実装。R&S仕様ではFSKにsymbol-rate error補償とequalizerは存在しないため、これらをPSKから機械的に移植しない。
 - 複数packet時は現在選択されたResult RangeのCFO modelだけを表示へ適用する。
 - CFO/drift estimatorの不確かさ、timing confidence、残留CFOをResult Summaryへ追加する必要がある。

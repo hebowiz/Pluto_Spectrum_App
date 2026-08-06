@@ -249,9 +249,16 @@ def test_analysis_bandwidth_preserves_gfsk_phase_difference_plot() -> None:
     filtered = analyze(2_000_000.0)
     unfiltered_phase = np.exp(2j * np.pi * unfiltered.measured_symbols.real / 1_000_000.0)
     filtered_phase = np.exp(2j * np.pi * filtered.measured_symbols.real / 1_000_000.0)
+    comparison_size = min(unfiltered_phase.size, filtered_phase.size)
 
     assert abs(filtered.carrier_frequency_drift_hz_per_s) < 20_000_000.0
-    assert np.mean(np.abs(filtered_phase - unfiltered_phase)) < 0.08
+    assert comparison_size >= 255
+    assert np.mean(
+        np.abs(
+            filtered_phase[:comparison_size]
+            - unfiltered_phase[:comparison_size]
+        )
+    ) < 0.08
 
 
 def _prbs9_bits(count: int) -> np.ndarray:
