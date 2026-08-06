@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from scipy.ndimage import shift as fractional_shift
 
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
@@ -165,6 +166,64 @@ def test_fsk_pattern_search_decodes_result_range(gaussian_bt):
     assert result.pattern_start_symbol == 40
     assert result.pattern_symbol_errors == 0
     np.testing.assert_array_equal(result.decoded_symbols, expected[40:120])
+
+
+@pytest.mark.parametrize("delay_samples", [0.125, 0.375, 0.625, 0.875])
+def test_fsk_frequency_model_applies_fractional_symbol_timing(delay_samples):
+    recording, signal = GeneratedIQSource.fsk(
+        symbol_count=220,
+        gaussian_bt=0.5,
+        seed=817,
+    )
+    expected = np.asarray(recording.metadata["generated_symbols"])
+    pattern_start_symbol = 40
+    pattern = _pattern_from_generated(recording, pattern_start_symbol, 64)
+    delayed = fractional_shift(
+        recording.iq.real,
+        shift=delay_samples,
+        order=3,
+        mode="constant",
+        cval=0.0,
+    ) + 1j * fractional_shift(
+        recording.iq.imag,
+        shift=delay_samples,
+        order=3,
+        mode="constant",
+        cval=0.0,
+    )
+    rng = np.random.default_rng(90210)
+    signal_power = float(np.mean(np.abs(delayed) ** 2))
+    noise_power = signal_power / 100.0  # 20 dB SNR
+    noise = np.sqrt(noise_power / 2.0) * (
+        rng.standard_normal(delayed.size) + 1j * rng.standard_normal(delayed.size)
+    )
+    shifted_recording = IQRecording(
+        iq=np.asarray(delayed + noise, dtype=np.complex64),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+
+    result = PatternAnalyzer().search(
+        shifted_recording,
+        signal,
+        PatternSearchSettings(
+            pattern=pattern,
+            mode=PatternSearchMode.ON,
+            correlation_threshold_auto=False,
+            iq_correlation_threshold=0.7,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+
+    expected_start_sample = pattern_start_symbol * 8 + delay_samples
+    measured_start_sample = result.pattern_start_time_s * recording.sample_rate_hz
+    assert measured_start_sample == pytest.approx(expected_start_sample, abs=0.08)
+    assert abs(result.metadata["fractional_timing_offset_samples"]) > 0.05
+    assert result.metadata["frequency_model_residual_rms_hz"] > 0.0
+    assert result.pattern_symbol_errors == 0
+    np.testing.assert_array_equal(
+        result.decoded_symbols,
+        expected[pattern_start_symbol : pattern_start_symbol + 100],
+    )
 
 
 def test_qpsk_pattern_search_handles_carrier_phase_and_frequency_offset():
@@ -418,6 +477,54 @@ def test_generic_pattern_session_finds_real_pluto_br_capture():
     np.testing.assert_array_equal(
         session.pattern_result.decoded_symbols[: access.size], access
     )
+
+
+def test_real_pluto_fsk_fractional_timing_is_stable_across_analysis_bandwidth():
+    fixture = (
+        Path(__file__).with_name("fixtures")
+        / "bluetooth_br_prbs9_pluto_16msps.npz"
+    )
+    recording = FileIQSource.load(fixture)
+    access = access_code_bits(0xC6967E)
+    signal = SignalDescription(
+        modulation=ModulationKind.GFSK,
+        symbol_rate_hz=1_000_000.0,
+        frequency_deviation_hz=160_000.0,
+        tx_filter="Gaussian",
+        filter_parameter=0.5,
+    )
+    start_times: list[float] = []
+    for bandwidth_hz in (
+        1_200_000.0,
+        1_500_000.0,
+        2_000_000.0,
+        3_000_000.0,
+        5_000_000.0,
+    ):
+        session = VSASession(recording=recording, signal=signal)
+        session.update_settings(
+            analysis_center_frequency_hz=2_441_000_000.0,
+            analysis_bandwidth_hz=bandwidth_hz,
+        )
+        session.configure_pattern_analysis(
+            PatternSearchSettings(
+                pattern=KnownPattern(tuple(map(int, access))),
+                mode=PatternSearchMode.ON,
+            ),
+            ResultRangeSettings(result_length=126),
+        )
+
+        session.analyze()
+
+        assert session.pattern_result is not None
+        assert session.pattern_result.pattern_symbol_errors == 0
+        assert session.pattern_result.metadata["timing_correction_accepted"]
+        start_times.append(session.pattern_result.pattern_start_time_s)
+
+    timing_span_analysis_samples = (
+        max(start_times) - min(start_times)
+    ) * 8_000_000.0
+    assert timing_span_analysis_samples < 0.1
 
 
 def test_real_pluto_cfo_stays_anchored_to_known_pattern():

@@ -1,6 +1,6 @@
 # VSA Carrier周波数推定・補正仕様
 
-最終更新: 2026-08-03
+最終更新: 2026-08-06
 
 この文書は、Pattern SearchにおけるCarrier Frequency Offset（CFO）、carrier phase、linear frequency driftの計算方法と、表示・復調へ適用する補正の境界を記録する。R&S FPL1-K70 VSA User Manual rev.12のdemodulation process（pp.112-124）とDemodulation設定（pp.217-224）を用語・処理段階の参照モデルとする。
 
@@ -24,7 +24,9 @@ Analysis Channelを使わない場合はrecording centerを基準とする。CFO
 f[n] = Fs / (2 pi) * arg(x[n] * conj(x[n-1]))
 ```
 
-8 samples/symbolへresampleし、半symbol幅の移動平均を適用する。全timing phaseを試し、既知patternから生成したFSK levelとのnormalized correlationが最大となるphaseと開始位置を採用する。
+8 samples/symbolへresampleし、半symbol幅の移動平均を適用する。全timing phaseを試し、既知patternから生成したFSK levelとのnormalized correlationとeye openingからcoarse phaseと開始位置を採用する。Result Range全sampleを使うjoint fitでfractional timing offsetも推定し、採用されたoffsetは最終symbol-frequency、symbol time、Result Range境界、表示markerへ一貫して反映する。
+
+整数phaseを全探索済みであるため、fine offsetの絶対値が0.75 analysis sampleを超えた場合はcycle slipまたはTX/reference filter mismatchと判定する。この場合は推定値を診断表示へ残すが適用値は0とし、coarse timingを維持する。Result Summaryの`Fractional Timing`は推定値とreject状態、`Frequency Fit RMS`はfrequency modelの残差を示す。R&Sとの差分と定量評価は[vsa-fsk-synchronization-audit.md](vsa-fsk-synchronization-audit.md)を参照。
 
 ### 2.2 CFO、Deviation、Driftの同時推定
 
@@ -115,6 +117,6 @@ Powerは位相回転で変化しないためRaw IQを使用する。CFO、推定
 
 - Pattern Searchが成立しないcaptureではpattern-derived CFO補正を生成しない。
 - 短いpattern、同一symbolの連続、低SNR、TX filter不一致ではCFOとDeviationの分離が不安定になる。
-- 現在の補正はcoarse synchronizationであり、R&S相当のFine Synchronization、symbol-rate error、channel equalizer、measurement/reference filterを含まない。
-- 複数packet時は現在選択されたstrongest matchのCFO modelだけを表示へ適用する。将来はResult Rangeごとに独立したCFO modelを保持する。
-- CFO/drift estimatorの不確かさ、confidence、残留CFOをResult Summaryへ追加する必要がある。
+- FSKのfractional timingは最終measurementへ反映済み。measurement/reference filterの対称処理、offset探索costに基づくconfidence、設定可能なEstimation Rangeは未実装。R&S仕様ではFSKにsymbol-rate error補償とequalizerは存在しないため、これらをPSKから機械的に移植しない。
+- 複数packet時は現在選択されたResult RangeのCFO modelだけを表示へ適用する。
+- CFO/drift estimatorの不確かさ、timing confidence、残留CFOをResult Summaryへ追加する必要がある。

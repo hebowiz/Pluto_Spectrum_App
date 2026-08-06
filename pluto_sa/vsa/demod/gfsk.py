@@ -29,6 +29,8 @@ class GFSKDemodulationResult:
     samples_per_symbol: int
     iq_inverted: bool
     frequency_model_timing_offset_samples: float
+    applied_timing_offset_samples: float
+    timing_correction_accepted: bool
     frequency_model_residual_rms_hz: float
     burst_ranges: tuple[tuple[int, int], ...]
     selected_match_index: int
@@ -129,6 +131,50 @@ def _symbol_values(frequency_hz: np.ndarray, phase: int, samples_per_symbol: int
     if edge * 2 < int(samples_per_symbol):
         values = values[:, edge : int(samples_per_symbol) - edge]
     return np.mean(values, axis=1)
+
+
+def _fractional_symbol_values(
+    frequency_hz: np.ndarray,
+    start_sample: float,
+    samples_per_symbol: int,
+    symbol_count: int,
+) -> np.ndarray:
+    """Average symbol-frequency windows at a fractional sample boundary.
+
+    The integer case is identical to :func:`_symbol_values`.  Interpolation is
+    only used after the all-point frequency-model fit has estimated the timing
+    offset, so the final decisions and timestamps use the fitted symbol clock
+    rather than the coarse integer phase selected by pattern correlation.
+    """
+    frequency = np.asarray(frequency_hz, dtype=np.float64)
+    sps = int(samples_per_symbol)
+    requested = int(symbol_count)
+    if frequency.size == 0 or requested <= 0:
+        return np.empty(0, dtype=np.float64)
+    edge = max(0, sps // 8)
+    offsets = np.arange(edge, sps - edge, dtype=np.float64)
+    if offsets.size == 0:
+        offsets = np.arange(sps, dtype=np.float64)
+    available = int(
+        np.floor(
+            (frequency.size - 1.0 - float(start_sample) - offsets[-1]) / sps
+        )
+        + 1
+    )
+    count = min(requested, max(0, available))
+    if count <= 0:
+        return np.empty(0, dtype=np.float64)
+    positions = (
+        float(start_sample)
+        + np.arange(count, dtype=np.float64)[:, None] * sps
+        + offsets[None, :]
+    )
+    interpolated = np.interp(
+        positions.ravel(),
+        np.arange(frequency.size, dtype=np.float64),
+        frequency,
+    ).reshape(count, offsets.size)
+    return np.mean(interpolated, axis=1)
 
 
 def _normalized_sliding_correlation(
@@ -541,8 +587,9 @@ def demodulate_gfsk(
         packet_observed_frequency = packet_observed_frequency[
             : int(maximum_symbols)
         ]
+    packet_symbol_count = int(packet_observed_frequency.size)
     packet_relative_symbols = (
-        np.arange(packet_observed_frequency.size, dtype=np.float64)
+        np.arange(packet_symbol_count, dtype=np.float64)
         - (pattern.size - 1.0) / 2.0
     )
     # Start decisions from the known-pattern estimate, then reconstruct the
@@ -561,6 +608,8 @@ def demodulate_gfsk(
     packet_sample_stop = min(frequency_hz.size, packet_start + packet_sample_count)
     packet_measured_frequency = frequency_hz[packet_start:packet_sample_stop]
     joint_timing_offset = 0.0
+    applied_timing_offset = 0.0
+    timing_correction_accepted = True
     joint_residual_rms_hz = 0.0
     refinement_iterations = 3 if bits.size >= pattern.size + 32 else 0
     cfo_hz = pattern_cfo_hz
@@ -580,6 +629,29 @@ def demodulate_gfsk(
             gaussian_bt=gaussian_bt,
             anchored_cfo_hz=pattern_cfo_hz,
         )
+        # Coarse search already evaluates every integer phase.  A fine result
+        # farther than 0.75 analysis sample therefore indicates a cycle slip
+        # or reference/filter mismatch rather than a credible sub-sample
+        # correction.  Keep the estimate for diagnostics, but do not feed an
+        # out-of-range value back into decisions or displayed timing.
+        timing_correction_accepted = abs(joint_timing_offset) <= 0.75
+        applied_timing_offset = (
+            joint_timing_offset if timing_correction_accepted else 0.0
+        )
+        packet_observed_frequency = _fractional_symbol_values(
+            frequency_hz,
+            float(access_start_resampled) + applied_timing_offset,
+            int(analysis_samples_per_symbol),
+            packet_symbol_count,
+        )
+        if packet_observed_frequency.size != packet_symbol_count:
+            packet_symbol_count = int(packet_observed_frequency.size)
+            bits = bits[:packet_symbol_count]
+            training_size = min(pattern.size, bits.size)
+            packet_relative_symbols = (
+                np.arange(packet_symbol_count, dtype=np.float64)
+                - (pattern.size - 1.0) / 2.0
+            )
         polarity = -1.0 if signed_deviation < 0.0 else 1.0
         estimated_center_frequency = (
             cfo_hz + drift_hz_per_symbol * packet_relative_symbols
@@ -603,8 +675,18 @@ def demodulate_gfsk(
     # quality observed before decision-directed packet tracking.
     training_size = min(pattern.size, bits.size)
     bits[:training_size] = pattern[:training_size]
+    refined_access_start_resampled = (
+        float(access_start_resampled) + applied_timing_offset
+    )
+    access_start_source = int(
+        round(
+            refined_access_start_resampled
+            * float(sample_rate_hz)
+            / analysis_rate_hz
+        )
+    )
     symbol_time_s = (
-        access_start_resampled
+        refined_access_start_resampled
         + (np.arange(bits.size, dtype=np.float64) + 0.5)
         * int(analysis_samples_per_symbol)
     ) / analysis_rate_hz
@@ -629,6 +711,8 @@ def demodulate_gfsk(
         samples_per_symbol=int(analysis_samples_per_symbol),
         iq_inverted=iq_inverted,
         frequency_model_timing_offset_samples=joint_timing_offset,
+        applied_timing_offset_samples=applied_timing_offset,
+        timing_correction_accepted=timing_correction_accepted,
         frequency_model_residual_rms_hz=joint_residual_rms_hz,
         burst_ranges=bursts,
         selected_match_index=selected_match_index,

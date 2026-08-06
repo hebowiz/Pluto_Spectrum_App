@@ -2,9 +2,9 @@
 
 このディレクトリは、Pluto Spectrum App の現行実装、改善方針、検証状況を記録する引継ぎ資料です。モード仕様はコード上で現在動作する内容を、改善資料は未完了項目を含む作業状態を基準にしています。
 
-- 現在の作業ブランチ: `feature/continuous-iq-stream`
-- 基準コミット: `b33f42e`
-- 最終更新日: 2026-08-02
+- 現在の作業ブランチ: `main`
+- 基準コミット: `701865e`
+- 最終更新日: 2026-08-06
 - 対象ハードウェア: ADALM-Pluto（PlutoSDR）
 
 ## ドキュメント一覧
@@ -20,6 +20,7 @@
 - [リアルタイムSA・VSA準拠の計測アーキテクチャ](measurement-architecture.md)
 - [R&S FPL-K70を参照したVSAアプリケーション設計方針](vsa-architecture.md)
 - [VSA Carrier周波数推定・補正仕様](vsa-carrier-synchronization.md)
+- [VSA FSKシンボル同期監査](vsa-fsk-synchronization-audit.md)
 - [RBW演算監査と改善方針](rbw-processing.md)
 - [PlutoSDR実機検証記録](hardware-validation.md)
 

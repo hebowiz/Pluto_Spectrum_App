@@ -745,12 +745,11 @@ class PatternAnalyzer:
             recording.sample_count,
             int(round((float(times[-1]) + half_symbol_s) * recording.sample_rate_hz)),
         )
+        refined_pattern_start_time_s = float(times[0]) - half_symbol_s
         return PatternSearchResult(
             modulation=signal.modulation,
             pattern_start_sample=demodulation.access_start_sample,
-            pattern_start_time_s=(
-                demodulation.access_start_sample / recording.sample_rate_hz
-            ),
+            pattern_start_time_s=refined_pattern_start_time_s,
             pattern_start_symbol=demodulation.access_start_bit,
             result_start_sample=result_start_sample,
             result_stop_sample=result_stop_sample,
@@ -773,7 +772,7 @@ class PatternAnalyzer:
             analysis_sample_rate_hz=demodulation.analysis_sample_rate_hz,
             recording_sample_rate_hz=recording.sample_rate_hz,
             carrier_reference_time_s=(
-                demodulation.access_start_sample / recording.sample_rate_hz
+                refined_pattern_start_time_s
                 + len(pattern.symbols) / (2.0 * signal.symbol_rate_hz)
             ),
             metadata={
@@ -790,6 +789,22 @@ class PatternAnalyzer:
                 "detected_match_count": demodulation.detected_match_count,
                 "exclude_incomplete_result": (
                     result_range.exclude_incomplete_result
+                ),
+                "fractional_timing_offset_samples": (
+                    demodulation.frequency_model_timing_offset_samples
+                ),
+                "fractional_timing_offset_symbols": (
+                    demodulation.frequency_model_timing_offset_samples
+                    / demodulation.samples_per_symbol
+                ),
+                "applied_timing_offset_samples": (
+                    demodulation.applied_timing_offset_samples
+                ),
+                "timing_correction_accepted": (
+                    demodulation.timing_correction_accepted
+                ),
+                "frequency_model_residual_rms_hz": (
+                    demodulation.frequency_model_residual_rms_hz
                 ),
             },
         )

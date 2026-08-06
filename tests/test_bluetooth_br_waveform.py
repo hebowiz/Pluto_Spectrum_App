@@ -76,6 +76,11 @@ def test_generic_vsa_recovers_complete_br_dh1_symbol_stream() -> None:
     assert result.correlation > 0.97
     assert result.pattern_symbol_errors == 0
     assert result.pattern_start_sample == 32_004
+    # The short 32-symbol training word and waveform-model mismatch can lead
+    # the packet-wide fit to a false adjacent timing minimum.  The fine timing
+    # guard must preserve the already-correct coarse phase in that case.
+    assert not result.metadata["timing_correction_accepted"]
+    assert result.metadata["applied_timing_offset_samples"] == 0.0
     assert result.carrier_frequency_offset_hz == pytest.approx(20_000.0, abs=2_000.0)
     np.testing.assert_array_equal(result.decoded_symbols, waveform.packet_bits)
 

@@ -1930,6 +1930,43 @@ class VSAWindow(QtWidgets.QMainWindow):
                     summary_rows.append(
                         ("Sync EVM RMS", f"{float(sync_evm) * 100.0:.2f} %")
                     )
+            elif signal.modulation.family is ModulationFamily.FSK:
+                timing_offset = pattern_result.metadata.get(
+                    "fractional_timing_offset_samples"
+                )
+                timing_symbols = pattern_result.metadata.get(
+                    "fractional_timing_offset_symbols"
+                )
+                applied_timing = pattern_result.metadata.get(
+                    "applied_timing_offset_samples"
+                )
+                timing_accepted = pattern_result.metadata.get(
+                    "timing_correction_accepted"
+                )
+                frequency_residual = pattern_result.metadata.get(
+                    "frequency_model_residual_rms_hz"
+                )
+                if timing_offset is not None and timing_symbols is not None:
+                    timing_status = (
+                        ""
+                        if timing_accepted is not False
+                        else f" (rejected; applied {float(applied_timing or 0.0):+.3f})"
+                    )
+                    summary_rows.append(
+                        (
+                            "Fractional Timing",
+                            f"{float(timing_offset):+.3f} sample "
+                            f"({float(timing_symbols) * 100.0:+.2f} % sym)"
+                            f"{timing_status}",
+                        )
+                    )
+                if frequency_residual is not None:
+                    summary_rows.append(
+                        (
+                            "Frequency Fit RMS",
+                            f"{float(frequency_residual) / 1e3:.3f} kHz",
+                        )
+                    )
             summary_rows.extend(
                 (
                     ("Display", display_name),
