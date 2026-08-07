@@ -104,6 +104,16 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             if window.symbol_table.item(index // 10, index % 10).background().color().green() > 80
         ]
         assert len(green_cells) == 32
+        configured_pattern = list(window._parse_pattern_symbols(2))
+        configured_pattern[7] = 1 - configured_pattern[7]
+        window._set_pattern_symbols(configured_pattern)
+        window._update_plots(reset_ranges=False)
+        green_cells = [
+            window.symbol_table.item(index // 10, index % 10)
+            for index in range(window.session.pattern_result.decoded_symbols.size)
+            if window.symbol_table.item(index // 10, index % 10).background().color().green() > 80
+        ]
+        assert len(green_cells) == 31
         assert window.modulation_plot.viewRange()[1] == pytest.approx([-375.0, 375.0])
         assert window.zero_span_plot.viewRange()[0] == pytest.approx(
             window.modulation_plot.viewRange()[0]
@@ -116,8 +126,21 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         ]
         assert window.zero_span_plot.viewRange()[0] == pytest.approx(expected_x)
         assert not window.symbol_display_action.isChecked()
+        assert window.symbol_display_action.shortcut().toString() == "S"
         assert len(window.zero_span_plot.listDataItems()) == 1
         assert len(window.modulation_plot.listDataItems()) == 1
+        for plot in (
+            window.zero_span_plot,
+            window.spectrum_plot,
+            window.modulation_plot,
+        ):
+            trace_color = plot.listDataItems()[0].opts["pen"].color()
+            assert trace_color.getRgb()[:3] == (255, 255, 0)
+        _spectrum_x, spectrum_y = window.spectrum_plot.listDataItems()[0].getData()
+        np.testing.assert_allclose(
+            spectrum_y,
+            window.session.carrier_corrected_pattern_range_result.spectrum_dbm,
+        )
         window.symbol_display_action.trigger()
         assert window.symbol_display_action.isChecked()
         assert len(window.zero_span_plot.listDataItems()) == 2
@@ -128,6 +151,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         marker_color = power_marker.opts["symbolBrush"].color()
         assert marker_color.green() > marker_color.red()
         assert marker_color.green() > marker_color.blue()
+        assert power_marker.opts["symbolSize"] == pytest.approx(5.5)
         assert window.rect_zoom_action.isChecked()
         assert all(
             plot.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
@@ -186,6 +210,21 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         QtWidgets.QApplication.processEvents()
         window._equalize_result_docks()
         QtWidgets.QApplication.processEvents()
+        for _name, plot in window._plot_widgets():
+            vertical_axis = plot.getAxis("left")
+            vertical_label_bounds = vertical_axis.label.mapRectToParent(
+                vertical_axis.label.boundingRect()
+            )
+            assert vertical_label_bounds.center().y() == pytest.approx(
+                vertical_axis.size().height() / 2.0, abs=1.0
+            )
+            horizontal_axis = plot.getAxis("bottom")
+            horizontal_label_bounds = horizontal_axis.label.mapRectToParent(
+                horizontal_axis.label.boundingRect()
+            )
+            assert horizontal_label_bounds.center().x() == pytest.approx(
+                horizontal_axis.size().width() / 2.0, abs=1.0
+            )
         docks = (
             window.zero_span_dock,
             window.spectrum_dock,
@@ -195,9 +234,26 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             window.symbol_dock,
         )
         assert all(isinstance(dock, QtWidgets.QDockWidget) for dock in docks)
+        assert all(dock.font().bold() for dock in docks)
+        assert all(
+            dock.font().pointSizeF() >= window.result_summary.font().pointSizeF() * 1.25
+            for dock in docks
+        )
+        assert not window.result_summary.font().bold()
+        assert not window.symbol_table.font().bold()
+        assert all(
+            not plot.getPlotItem().titleLabel.text
+            for _name, plot in window._plot_widgets()
+        )
+        assert window.spectrum_plot.getAxis("left").labelText == "Magnitude (dBm)"
         assert window.symbol_plot_dock.windowTitle() == "Symbol Plot"
         phase_items = window.symbol_plot.listDataItems()
         assert len(phase_items) == 2
+        assert phase_items[0].opts["symbolPen"].color().getRgb()[:3] == (
+            255,
+            255,
+            0,
+        )
         phase_i, phase_q = phase_items[0].getData()
         assert phase_i.size == phase_q.size
         assert phase_i.size == window.session.pattern_result.measured_symbols.size
@@ -233,7 +289,6 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         window._open_meas_config()
         assert active_modal_widgets == [window._meas_config_dialog]
         assert window.corrected_carrier_action.isChecked()
-        assert "Carrier Corrected" in window.spectrum_plot.getPlotItem().titleLabel.text
         summary = {
             window.result_summary.item(row, 0).text(): window.result_summary.item(
                 row, 1
@@ -250,7 +305,6 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
 
         window.raw_carrier_action.trigger()
 
-        assert "Raw IQ" in window.spectrum_plot.getPlotItem().titleLabel.text
         summary = {
             window.result_summary.item(row, 0).text(): window.result_summary.item(
                 row, 1
@@ -258,6 +312,50 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             for row in range(window.result_summary.rowCount())
         }
         assert summary["Display"] == "Raw IQ"
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_symbol_correct_search_failure_clears_previous_match_display(tmp_path) -> None:
+    pg.mkQApp("VSA exact pattern filter UI test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "exact-pattern-filter")
+    )
+    try:
+        window._load_generated(ModulationKind.GFSK)
+        generated = np.asarray(
+            window.session.recording.metadata["generated_symbols"]
+        )
+        exact_pattern = [int(value) for value in generated[20:52]]
+        window.pattern_search_check.setChecked(True)
+        window._set_pattern_symbols(exact_pattern)
+        window.result_length_spin.setValue(64)
+        assert window._analyze()
+        assert window.session.pattern_result is not None
+
+        incorrect_pattern = list(exact_pattern)
+        incorrect_pattern[11] = 1 - incorrect_pattern[11]
+        window._set_pattern_symbols(incorrect_pattern)
+        window.pattern_threshold_auto.setChecked(False)
+        window.pattern_threshold_spin.setValue(80.0)
+        window.pattern_meas_only_check.setChecked(True)
+
+        assert not window._analyze()
+        assert window.session.pattern_result is None
+        assert "no symbol-correct pattern match" in window.session.pattern_error
+        summary = {
+            window.result_summary.item(row, 0).text(): window.result_summary.item(
+                row, 1
+            ).text()
+            for row in range(window.result_summary.rowCount())
+        }
+        assert "Pattern Error" in summary
+        assert len(window.zero_span_plot.listDataItems()) == 1
+        assert not window.previous_result_action.isEnabled()
+        assert not window.next_result_action.isEnabled()
     finally:
         window._meas_config_dialog.close()
         window.close()
@@ -326,15 +424,29 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
         window.analysis_bandwidth_spin.setValue(1.5)
         window._analyze()
 
-        assert "IQ Trajectory" in window.modulation_plot.getPlotItem().titleLabel.text
         trajectory_items = window.modulation_plot.listDataItems()
         assert len(trajectory_items) == 1
+        assert trajectory_items[0].opts["pen"].color().getRgb()[:3] == (
+            255,
+            255,
+            0,
+        )
         trajectory_i, trajectory_q = trajectory_items[0].getData()
         assert trajectory_i.size == trajectory_q.size
         assert 1_000 < trajectory_i.size < 3_000
 
         plot_items = window.symbol_plot.listDataItems()
         assert len(plot_items) == 1
+        assert plot_items[0].opts["symbolBrush"].color().getRgb()[:3] == (
+            255,
+            255,
+            0,
+        )
+        assert plot_items[0].opts["symbolPen"].color().getRgb()[:3] == (
+            255,
+            255,
+            0,
+        )
         i_values, q_values = plot_items[0].getData()
         magnitude = np.hypot(i_values, q_values)
         assert magnitude.size == 244
@@ -350,12 +462,22 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
         assert y_range[0] <= -1.0 and y_range[1] >= 1.0
         assert x_range[1] - x_range[0] < 4.0
         assert y_range[1] - y_range[0] < 4.0
+        assert y_range == pytest.approx([-1.25, 1.25])
+        trajectory_x_range, trajectory_y_range = window.modulation_plot.viewRange()
+        assert trajectory_x_range[0] <= float(np.min(trajectory_i))
+        assert trajectory_x_range[1] >= float(np.max(trajectory_i))
+        assert trajectory_y_range[0] <= float(np.min(trajectory_q))
+        assert trajectory_y_range[1] >= float(np.max(trajectory_q))
+        assert window.modulation_plot.getViewBox().state["aspectLocked"] == pytest.approx(
+            1.0
+        )
 
         window.symbol_display_action.trigger()
         trajectory_items = window.modulation_plot.listDataItems()
         assert len(trajectory_items) == 2
         marker_i, marker_q = trajectory_items[1].getData()
         assert marker_i.size == marker_q.size == 244
+        assert trajectory_items[1].opts["symbolSize"] == pytest.approx(5.5)
         marker_magnitude = np.hypot(marker_i, marker_q)
         assert np.median(marker_magnitude) == pytest.approx(1.0, abs=0.02)
         assert np.std(marker_magnitude) < 0.08
@@ -511,6 +633,10 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
         assert second.session.recording is None
         assert second.session.result is None
         assert second.summary_label.text() == "No capture"
+        for plot in (second.modulation_plot, second.symbol_plot):
+            _x_range, y_range = plot.viewRange()
+            assert y_range == pytest.approx([-1.25, 1.25])
+            assert plot.getViewBox().state["aspectLocked"] == pytest.approx(1.0)
         assert second.input_source_combo.currentText() == "IQ File"
         assert second.capture_center_spin.value() == pytest.approx(2450.5)
         assert second.internal_gain_spin.value() == 17

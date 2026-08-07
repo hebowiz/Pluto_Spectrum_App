@@ -25,6 +25,7 @@ from pluto_sa.vsa.profiles.bluetooth_br import (
     giac_access_code_bits,
     modulate_packet_bits,
 )
+from pluto_sa.vsa.demod.gfsk import fsk_reference_frequency_levels
 
 
 def _pattern_from_generated(recording, start: int, length: int) -> KnownPattern:
@@ -110,6 +111,72 @@ def test_psk_multiple_matches_support_time_selection_and_incomplete_exclusion():
     assert excluded.metadata["eligible_match_count"] == 1
 
 
+def test_psk_symbol_correct_filter_keeps_later_valid_match_navigable():
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.PI4_DQPSK,
+        symbol_count=160,
+        seed=912,
+    )
+    pattern_start = 20
+    pattern = _pattern_from_generated(recording, pattern_start, 32)
+    corrupted_iq = np.array(recording.iq, copy=True)
+    corrupted_symbol = pattern_start + 12
+    corrupted_iq[corrupted_symbol * 8 : (corrupted_symbol + 1) * 8] *= 1j
+    gap = np.zeros(64, dtype=np.complex64)
+    combined = IQRecording(
+        iq=np.concatenate((corrupted_iq, gap, recording.iq)),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+    common = dict(
+        pattern=pattern,
+        mode=PatternSearchMode.ON,
+        correlation_threshold_auto=False,
+        iq_correlation_threshold=0.9,
+    )
+
+    filtered = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            **common,
+            meas_only_if_pattern_symbols_correct=True,
+            match_selection=MatchSelectionPolicy.FIRST,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+    unfiltered_first = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            **common,
+            meas_only_if_pattern_symbols_correct=False,
+            match_selection=MatchSelectionPolicy.FIRST,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+    unfiltered_second = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            **common,
+            meas_only_if_pattern_symbols_correct=False,
+            match_selection=MatchSelectionPolicy.INDEX,
+            match_index=2,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+
+    later_start = recording.sample_count + gap.size + pattern_start * 8
+    assert filtered.pattern_start_sample == later_start
+    assert filtered.pattern_symbol_errors == 0
+    assert filtered.metadata["eligible_match_count"] == 1
+    assert unfiltered_first.pattern_start_sample == pattern_start * 8
+    assert unfiltered_first.pattern_symbol_errors > 0
+    assert unfiltered_first.metadata["eligible_match_count"] == 2
+    assert unfiltered_second.pattern_start_sample == later_start
+    assert unfiltered_second.pattern_symbol_errors == 0
+
+
 def test_fsk_multiple_matches_use_one_physical_candidate_per_packet():
     recording, signal = GeneratedIQSource.fsk(
         symbol_count=180,
@@ -139,6 +206,82 @@ def test_fsk_multiple_matches_use_one_physical_candidate_per_packet():
     assert result.metadata["selected_match_index"] == 2
     assert result.metadata["eligible_match_count"] == 2
     assert result.metadata["detected_match_count"] == 2
+
+
+def test_fsk_symbol_correct_filter_keeps_later_valid_match_navigable():
+    recording, signal = GeneratedIQSource.fsk(
+        symbol_count=180,
+        gaussian_bt=None,
+        seed=146,
+    )
+    pattern_start = 30
+    pattern = _pattern_from_generated(recording, pattern_start, 32)
+    corrupted_symbols = np.array(
+        recording.metadata["generated_symbols"], copy=True
+    )
+    corrupted_symbols[pattern_start + 12] ^= 1
+    levels = fsk_reference_frequency_levels(
+        corrupted_symbols,
+        samples_per_symbol=8,
+        transmit_gaussian_bt=None,
+    )
+    phase = 2.0 * np.pi * np.cumsum(
+        signal.frequency_deviation_hz * levels
+    ) / recording.sample_rate_hz
+    corrupted_iq = np.exp(1j * phase).astype(np.complex64)
+    gap = np.zeros(64, dtype=np.complex64)
+    combined = IQRecording(
+        iq=np.concatenate((corrupted_iq, gap, recording.iq)),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+    common = dict(
+        pattern=pattern,
+        mode=PatternSearchMode.ON,
+        correlation_threshold_auto=False,
+        iq_correlation_threshold=0.9,
+    )
+
+    filtered = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            **common,
+            meas_only_if_pattern_symbols_correct=True,
+            match_selection=MatchSelectionPolicy.FIRST,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+    unfiltered_first = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            **common,
+            meas_only_if_pattern_symbols_correct=False,
+            match_selection=MatchSelectionPolicy.FIRST,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+    unfiltered_second = PatternAnalyzer().search(
+        combined,
+        signal,
+        PatternSearchSettings(
+            **common,
+            meas_only_if_pattern_symbols_correct=False,
+            match_selection=MatchSelectionPolicy.INDEX,
+            match_index=2,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+
+    later_start = recording.sample_count + gap.size + pattern_start * 8
+    assert filtered.pattern_start_sample == later_start
+    assert filtered.pattern_symbol_errors == 0
+    assert filtered.metadata["eligible_match_count"] == 1
+    assert unfiltered_first.pattern_start_sample == pattern_start * 8
+    assert unfiltered_first.pattern_symbol_errors > 0
+    assert unfiltered_first.metadata["eligible_match_count"] == 2
+    assert unfiltered_second.pattern_start_sample == later_start
+    assert unfiltered_second.pattern_symbol_errors == 0
 
 
 @pytest.mark.parametrize("gaussian_bt", [None, 0.5])

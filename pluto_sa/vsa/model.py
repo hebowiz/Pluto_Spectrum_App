@@ -231,6 +231,7 @@ class VSAAnalysisResult:
     power_dbm: np.ndarray
     spectrum_frequency_hz: np.ndarray
     spectrum_dbfs: np.ndarray
+    spectrum_dbm: np.ndarray
     instantaneous_frequency_hz: np.ndarray
     symbol_time_s: np.ndarray
     measured_symbols: np.ndarray
@@ -249,6 +250,7 @@ class VSAAnalysisResult:
             "power_dbm": (self.power_dbm, np.float64),
             "spectrum_frequency_hz": (self.spectrum_frequency_hz, np.float64),
             "spectrum_dbfs": (self.spectrum_dbfs, np.float64),
+            "spectrum_dbm": (self.spectrum_dbm, np.float64),
             "instantaneous_frequency_hz": (self.instantaneous_frequency_hz, np.float64),
             "symbol_time_s": (self.symbol_time_s, np.float64),
             "measured_symbols": (self.measured_symbols, np.complex64),

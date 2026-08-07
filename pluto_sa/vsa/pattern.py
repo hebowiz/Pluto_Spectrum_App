@@ -726,6 +726,9 @@ class PatternAnalyzer:
             match_index=search.match_index,
             required_result_symbols=maximum_symbols,
             exclude_incomplete_result=result_range.exclude_incomplete_result,
+            require_zero_pattern_errors=(
+                search.meas_only_if_pattern_symbols_correct
+            ),
         )
         selection = _result_slice(len(pattern.symbols), demodulation.bits.size, result_range)
         decoded = demodulation.bits[selection].astype(np.int16)
@@ -951,6 +954,35 @@ class PatternAnalyzer:
                 physical_candidates[duplicate_index] = candidate
 
         detected_match_count = len(physical_candidates)
+
+        def candidate_pattern_symbol_errors(candidate: tuple) -> int:
+            _, _, candidate_index, candidate_symbols, _, _ = candidate
+            if signal.modulation.differential:
+                observed = candidate_symbols[1:] * np.conj(candidate_symbols[:-1])
+                training = observed[
+                    candidate_index : candidate_index + len(pattern.symbols)
+                ]
+            else:
+                training = candidate_symbols[
+                    candidate_index : candidate_index + len(pattern.symbols)
+                ]
+            if training.size != len(pattern.symbols):
+                return len(pattern.symbols)
+            relative = np.arange(training.size, dtype=np.float64)
+            phase_error = np.unwrap(np.angle(training * np.conj(expected)))
+            slope, intercept = np.polyfit(relative, phase_error, 1)
+            corrected = training * np.exp(-1j * (intercept + slope * relative))
+            rms = float(np.sqrt(np.mean(np.abs(corrected) ** 2)))
+            normalized = corrected / max(rms, _EPSILON)
+            decisions = np.argmin(
+                np.abs(normalized[:, None] - alphabet[None, :]), axis=1
+            ).astype(np.int16)
+            return int(
+                np.count_nonzero(
+                    decisions != np.asarray(pattern.symbols, dtype=np.int16)
+                )
+            )
+
         eligible_candidates = []
         for candidate in physical_candidates:
             _, _, candidate_index, candidate_symbols, _, _ = candidate
@@ -962,8 +994,18 @@ class PatternAnalyzer:
                 or _result_is_complete(
                     len(pattern.symbols), available, result_range
                 )
+            ) and (
+                not search.meas_only_if_pattern_symbols_correct
+                or candidate_pattern_symbol_errors(candidate) == 0
             ):
                 eligible_candidates.append(candidate)
+        if (
+            search.meas_only_if_pattern_symbols_correct
+            and not eligible_candidates
+        ):
+            raise ValueError(
+                "no symbol-correct pattern match satisfies the search requirements"
+            )
         best, selected_match_index, eligible_match_count = _select_match_candidate(
             eligible_candidates,
             search.match_selection,

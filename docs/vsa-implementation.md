@@ -86,9 +86,9 @@ PSK検索はpattern symbol間の差分相関により一定phase回転とCFOに�
 R&SのResult Range表示に合わせ、Pattern Search成立時は次の表示規則とする。
 
 - IQ PowerとInstantaneous Frequencyはcapture全体のdataを保持したまま、表示X軸を選択中Result Rangeの前後10%へfitする。Pattern Waveformを緑、Result Rangeを青の領域、Pattern Startを縦線で示す。zoom/panでcapture内の他部分も確認できる。
-- Spectrumはcapture全体ではなく、検出されたResult RangeのIQだけから再計算し、titleを`Spectrum (Result Range)`とする。
+- Spectrumはcapture全体ではなく、検出されたResult RangeのIQだけから再計算する。FFTのcoherent amplitudeへIQ Powerと同じfull-scaleおよびfrontend補正を適用し、縦軸をdBmで表示する。bin中心CWのSpectrum peakは同じIQ振幅のZero Span powerと一致する。noise値はFFT bin帯域依存のdBmでありdBm/Hzではない。
 - FSK Instantaneous Frequencyの初期Y軸は`FSK Ref Deviation`の±150%とする。
-- Symbol Tableは`QTableWidget`を使い、Result Rangeの復調symbolを中央揃えの10列へ配置する。列headerは0～9、行headerはその行の先頭symbol indexとする。
+- Symbol Tableは`QTableWidget`を使い、Result Rangeの復調symbolを中央揃えの10列へ配置する。列headerは0～9、行headerはその行の先頭symbol indexとする。pattern範囲内でも、設定patternと実測decisionが一致したsymbolだけを緑背景にし、不一致symbolは通常背景のまま表示する。
 
 Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK、PSK、QAMを想定し、Binary/Hexadecimal/Decimal表示切替を追加する。表示formatはdecision結果を変更せず、R&Sの`Symbol Format`と同様にview設定として扱う。
 
@@ -103,6 +103,7 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
 - `Display Config > Show Symbol Points`をONにすると、IQ PowerとModulationのtrace上へ復調symbol中心位置を明るい緑の点で重ねる。FSKではtime/frequency座標、PSKではIQ軌跡座標を使用する。既定はOFF。
 - PSKのIQ軌跡は8 samples/symbolへresampleし、TX FilterがRoot Raised Cosineなら同じalphaのSRRC matched receive filterを通した連続IQを使用する。軌跡とsymbol markerは同一のfilter outputとsymbol時刻RMS正規化を共有する。
 - 解析完了時に全plotの初期X/Y rangeをsnapshotし、`Display Config > Reset Graph Scales`または`Home`で復元する。mouse modeは全plot共通で、既定の`Rect Zoom`は左drag矩形拡大、`Pan`は左drag移動とする。表示のみの更新では現在rangeを維持する。
+- 主traceはIQ Powerと同じyellowへ統一し、Power/Modulation上のsymbol markerは5.5 pxとする。Symbol Plotのsymbolは塗りと輪郭を同じyellowとする。空data時とPSK ConstellationはQ軸`-1.25..+1.25`を初期rangeとする。PSK IQ Trajectoryは解析完了時の全有限trace sampleが収まる最大I/Q成分へ5%の余白を加え、最小rangeを±1.25として自動設定する。両IQ平面ともI/Qの単位scaleは1:1に固定する。全plotの縦・横軸labelは実際の軸size中央へ合わせる。plot内titleはdock titleとの重複を避けるため表示しない。各result dockのtitleはboldかつ通常UI fontの130%とし、dock内容のfontは通常size/weightを維持する。`Display Config > Show Symbol Points`は単キー`S`でもON/OFFできる。
 - Carrier Frequency Drift補正はDemodulation設定から切り替えられるが、実測cross-validation未完了のため既定OFF。CFO補正はCarrier Corrected表示で常に適用する。
 - R&S相当のFine Synchronization、残留CFO評価、estimator confidenceは未実装。
 
@@ -128,6 +129,8 @@ Modulation  | Symbol Plot | Symbol Table
 ### Capture内の複数pattern
 
 2026-08-06にFSK/PSK共通の複数候補列挙を実装した。threshold以上のcorrelation local peakを列挙し、隣接timing phaseで同一packetを重複検出したものは物理候補1件へ統合する。`Match Selection`は`Strongest`（正規化相関最大、電力最大ではない）、`First`（既定値）、`Last`、`Match Index`（時刻順・1始まり）を選択できる。Result Summaryは選択方式と`selected/eligible`件数を表示し、metadataには検出件数も残す。`Sweep / Run > Previous/Next Result Range`または左右矢印で、IQを再取得せず同じcapture内の前後候補へ切り替える。端では停止し、切替後の設定は`Match Index`となる。解析結果そのものは引き続き選択した1件だけを保持する。
+
+`Meas only if Pattern Symbols Correct`がONの場合、全相関候補をsymbol判定してからpattern symbol errorが0の候補だけをeligible候補にする。先行する誤相関候補があっても、後続の完全一致候補を`First`として選択する。OFFの場合は誤りを含む候補も時間順の一覧へ残すが、その候補で探索を打ち切らず、後続の完全一致候補も`Match Index`または左右矢印で選択できる。`detected_match_count`は相関候補総数、`eligible_match_count`はResult Range条件とsymbol correctness条件を適用した後の候補数を表す。ONで完全一致候補が0件の場合は以前のPattern Resultとrange overlayを画面から消し、`Pattern Error`を表示する。
 
 `Result Range > Exclude incomplete Result Range`をONにすると、capture端またはFSK burst端までに指定Result Lengthを確保できない候補を選択前に除外する。OFFは従来互換で、選択候補の取得可能なsymbolだけを返す。除外後に候補がない場合はpattern analysis error、`Match Index`は除外後のeligible候補に対する番号とする。旧Configに項目がない場合は`First`、index 1、除外OFFを補完する。
 

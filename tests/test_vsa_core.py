@@ -44,6 +44,11 @@ def test_zero_span_power_uses_common_dbm_correction_convention() -> None:
     expected_dbm = 20.0 * np.log10(256.0) - 62.0 + 1.25 - 3.0
     np.testing.assert_allclose(result.power_dbm, expected_dbm, atol=1e-10)
     np.testing.assert_allclose(result.power_dbfs, 20.0 * np.log10(256.0 / 2048.0))
+    assert np.max(result.spectrum_dbm) == pytest.approx(expected_dbm, abs=1e-10)
+    np.testing.assert_allclose(
+        result.spectrum_dbm,
+        result.spectrum_dbfs + recording.dbfs_to_dbm_offset_db,
+    )
 
 
 def test_composite_signal_preserves_order_and_rejects_overlap() -> None:

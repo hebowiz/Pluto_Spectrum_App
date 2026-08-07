@@ -463,6 +463,7 @@ def demodulate_gfsk(
     match_index: int = 1,
     required_result_symbols: int | None = None,
     exclude_incomplete_result: bool = False,
+    require_zero_pattern_errors: bool = False,
 ) -> GFSKDemodulationResult:
     """Recover binary symbols using a known access pattern for timing/CFO.
 
@@ -630,15 +631,47 @@ def demodulate_gfsk(
                 return min(available, burst_symbols)
         return available
 
+    def pattern_symbol_errors(candidate: tuple) -> int:
+        _, _, _, index, values, _ = candidate
+        access_frequency = values[index : index + pattern.size]
+        if access_frequency.size != pattern.size:
+            return int(pattern.size)
+        relative = (
+            np.arange(pattern.size, dtype=np.float64)
+            - (pattern.size - 1.0) / 2.0
+        )
+        design = np.column_stack((np.ones(pattern.size), expected_levels, relative))
+        cfo_hz, signed_deviation, drift_hz_per_symbol = np.linalg.lstsq(
+            design, access_frequency, rcond=None
+        )[0]
+        center_frequency = cfo_hz + drift_hz_per_symbol * relative
+        polarity = -1.0 if signed_deviation < 0.0 else 1.0
+        decisions = (
+            polarity * (access_frequency - center_frequency) >= 0.0
+        ).astype(np.uint8)
+        return int(np.count_nonzero(decisions != pattern))
+
     detected_match_count = len(physical_candidates)
     eligible_candidates = [
         candidate
         for candidate in physical_candidates
-        if not exclude_incomplete_result
-        or required_result_symbols is None
-        or available_symbols(candidate) >= int(required_result_symbols)
+        if (
+            (
+                not exclude_incomplete_result
+                or required_result_symbols is None
+                or available_symbols(candidate) >= int(required_result_symbols)
+            )
+            and (
+                not require_zero_pattern_errors
+                or pattern_symbol_errors(candidate) == 0
+            )
+        )
     ]
     if not eligible_candidates:
+        if require_zero_pattern_errors:
+            raise ValueError(
+                "no symbol-correct pattern match satisfies the search requirements"
+            )
         raise ValueError("no pattern match satisfies the result-range requirements")
     ordered = sorted(eligible_candidates, key=lambda item: item[5])
     if match_selection == "First":

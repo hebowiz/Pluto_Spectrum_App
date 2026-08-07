@@ -109,6 +109,7 @@ class VSAAnalyzer:
         frequency_hz, spectrum_dbfs = _spectrum(
             iq / float(analysis_recording.full_scale), sample_rate_hz, resolved.fft_size
         )
+        spectrum_dbm = spectrum_dbfs + analysis_recording.dbfs_to_dbm_offset_db
         inst_frequency_hz = _instantaneous_frequency(iq, sample_rate_hz)
         samples_per_symbol = sample_rate_hz / float(signal.symbol_rate_hz)
         centers = _sample_centers(
@@ -125,6 +126,7 @@ class VSAAnalyzer:
                 power_dbm,
                 frequency_hz,
                 spectrum_dbfs,
+                spectrum_dbm,
                 inst_frequency_hz,
                 centers,
                 samples_per_symbol,
@@ -138,6 +140,7 @@ class VSAAnalyzer:
             power_dbm,
             frequency_hz,
             spectrum_dbfs,
+            spectrum_dbm,
             inst_frequency_hz,
             centers,
         )
@@ -207,6 +210,7 @@ class VSAAnalyzer:
         power_dbm: np.ndarray,
         spectrum_frequency_hz: np.ndarray,
         spectrum_dbfs: np.ndarray,
+        spectrum_dbm: np.ndarray,
         instantaneous_frequency_hz: np.ndarray,
         centers: np.ndarray,
         samples_per_symbol: float,
@@ -236,6 +240,7 @@ class VSAAnalyzer:
             power_dbm=power_dbm,
             spectrum_frequency_hz=spectrum_frequency_hz,
             spectrum_dbfs=spectrum_dbfs,
+            spectrum_dbm=spectrum_dbm,
             instantaneous_frequency_hz=instantaneous_frequency_hz,
             symbol_time_s=centers / recording.sample_rate_hz,
             measured_symbols=measured_symbols,
@@ -268,6 +273,7 @@ class VSAAnalyzer:
         power_dbm: np.ndarray,
         spectrum_frequency_hz: np.ndarray,
         spectrum_dbfs: np.ndarray,
+        spectrum_dbm: np.ndarray,
         instantaneous_frequency_hz: np.ndarray,
         centers: np.ndarray,
     ) -> VSAAnalysisResult:
@@ -295,6 +301,7 @@ class VSAAnalyzer:
             power_dbm=power_dbm,
             spectrum_frequency_hz=spectrum_frequency_hz,
             spectrum_dbfs=spectrum_dbfs,
+            spectrum_dbm=spectrum_dbm,
             instantaneous_frequency_hz=instantaneous_frequency_hz,
             symbol_time_s=centers / recording.sample_rate_hz,
             measured_symbols=decision_input,

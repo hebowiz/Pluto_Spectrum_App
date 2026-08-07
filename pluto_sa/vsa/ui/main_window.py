@@ -48,6 +48,34 @@ _MAX_DISPLAY_POINTS = 100_000
 _STARTUP_CONFIG_KEY = "startup/measurement_config"
 _STARTUP_CONFIG_SCHEMA = "pluto-vsa-startup-config"
 _STARTUP_CONFIG_VERSION = 1
+_TRACE_COLOR = "y"
+_IQ_PLANE_LIMIT = 1.25
+_TRACE_SYMBOL_SIZE = 5.5
+
+
+class _CenteredLabelAxisItem(pg.AxisItem):
+    """Keep horizontal and rotated vertical labels visually centered."""
+
+    def resizeEvent(self, event=None) -> None:
+        super().resizeEvent(event)
+        if (
+            not hasattr(self, "_linkedView")
+            or self.label is None
+        ):
+            return
+        label_bounds = self.label.mapRectToParent(self.label.boundingRect())
+        axis_center = QtCore.QPointF(
+            self.size().width() / 2.0,
+            self.size().height() / 2.0,
+        )
+        if self.orientation in {"left", "right"}:
+            self.label.setY(
+                self.label.y() + axis_center.y() - label_bounds.center().y()
+            )
+        else:
+            self.label.setX(
+                self.label.x() + axis_center.x() - label_bounds.center().x()
+            )
 
 
 def _decimation_indices(count: int, maximum: int = _MAX_DISPLAY_POINTS) -> slice:
@@ -197,6 +225,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_display_action = QtGui.QAction(
             "Show Symbol Points", self, checkable=True
         )
+        self.symbol_display_action.setShortcut("S")
         self.symbol_display_action.setChecked(False)
         self.symbol_display_action.triggered.connect(self._refresh_display_only)
         display_menu.addAction(self.symbol_display_action)
@@ -257,7 +286,14 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
 
     def _make_plot(self, title: str, left: str, bottom: str) -> pg.PlotWidget:
-        plot = pg.PlotWidget(title=title)
+        # The surrounding dock already owns the visible title. Keeping a
+        # second title inside the plot wastes vertical graph area.
+        plot = pg.PlotWidget(
+            axisItems={
+                "left": _CenteredLabelAxisItem(orientation="left"),
+                "bottom": _CenteredLabelAxisItem(orientation="bottom"),
+            }
+        )
         plot.showGrid(x=True, y=True, alpha=0.25)
         plot.setLabel("left", left)
         plot.setLabel("bottom", bottom)
@@ -272,7 +308,24 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _dock(self, title: str, widget: QtWidgets.QWidget) -> QtWidgets.QDockWidget:
         dock = QtWidgets.QDockWidget(title, self)
         dock.setObjectName(f"vsa-{title.lower().replace(' ', '-')}")
+        content_font = QtGui.QFont(widget.font())
+        content_point_size = content_font.pointSizeF()
+        content_font.setBold(False)
+        if content_point_size > 0.0:
+            # Explicitly resolve the original point size so the enlarged dock
+            # title font is not inherited by the dock contents.
+            content_font.setPointSizeF(content_point_size)
+        title_font = QtGui.QFont(dock.font())
+        title_font.setBold(True)
+        if title_font.pointSizeF() > 0.0:
+            title_font.setPointSizeF(title_font.pointSizeF() * 1.3)
+        elif title_font.pixelSize() > 0:
+            title_font.setPixelSize(max(1, round(title_font.pixelSize() * 1.3)))
+        dock.setFont(title_font)
         dock.setWidget(widget)
+        # QDockWidget's native Windows title renderer uses the dock font.
+        # Keep that bold font from propagating into plots and result tables.
+        widget.setFont(content_font)
         dock.setFeatures(
             QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
@@ -289,7 +342,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.zero_span_dock
         )
 
-        self.spectrum_plot = self._make_plot("Spectrum", "Magnitude (dBFS)", "Relative Frequency (MHz)")
+        self.spectrum_plot = self._make_plot("Spectrum", "Magnitude (dBm)", "Relative Frequency (MHz)")
         self.spectrum_dock = self._dock("Spectrum", self.spectrum_plot)
         self.splitDockWidget(
             self.zero_span_dock,
@@ -318,6 +371,13 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
 
         self.modulation_plot = self._make_plot("Modulation", "Q", "I")
+        self.modulation_plot.setAspectLocked(True, ratio=1.0)
+        self.modulation_plot.setXRange(
+            -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+        )
+        self.modulation_plot.setYRange(
+            -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+        )
         self.modulation_dock = self._dock("Modulation", self.modulation_plot)
         self.splitDockWidget(
             self.zero_span_dock,
@@ -331,6 +391,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_plot.setDownsampling(auto=False)
         self.symbol_plot.setClipToView(False)
         self.symbol_plot.setAspectLocked(True, ratio=1.0)
+        self.symbol_plot.setXRange(
+            -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+        )
+        self.symbol_plot.setYRange(
+            -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+        )
         self.symbol_plot_dock = self._dock("Symbol Plot", self.symbol_plot)
         # Compatibility alias for the original empty Reserved dock name.
         self.reserved_dock = self.symbol_plot_dock
@@ -1564,6 +1630,13 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._configure_pattern_analysis(signal)
             result = self.session.analyze()
         except Exception as error:
+            if self.session.pattern_error is not None and self.session.result is not None:
+                # The core has already invalidated the former Pattern Result.
+                # Repaint that state so a previous successful match is not
+                # mistaken for the result of this failed search.
+                self._update_summary()
+                self._update_plots(reset_ranges=True)
+                self._update_match_navigation_actions()
             self.statusBar().showMessage(f"Analysis failed: {error}")
             return False
         self._update_summary()
@@ -1693,7 +1766,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.zero_span_plot.plot(
             result.time_s[capture_slice] * 1e3,
             result.power_dbm[capture_slice],
-            pen=pg.mkPen("y", width=1),
+            pen=pg.mkPen(_TRACE_COLOR, width=1),
         )
         symbol_times_s = (
             self.session.pattern_result.symbol_time_s
@@ -1718,15 +1791,6 @@ class VSAWindow(QtWidgets.QMainWindow):
             if show_corrected
             else self.session.pattern_range_result
         ) or display_result
-        self.spectrum_plot.setTitle(
-            (
-                "Spectrum (Result Range, Carrier Corrected)"
-                if show_corrected
-                else "Spectrum (Result Range, Raw IQ)"
-            )
-            if self.session.pattern_range_result is not None
-            else "Spectrum"
-        )
         analysis_center_hz = float(
             spectrum_result.metadata.get("analysis_center_frequency_hz", 0.0) or 0.0
         )
@@ -1740,15 +1804,14 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.spectrum_plot.setLabel("bottom", "Relative Frequency (MHz)")
         self.spectrum_plot.plot(
             spectrum_x,
-            spectrum_result.spectrum_dbfs,
-            pen=pg.mkPen("c", width=1),
+            spectrum_result.spectrum_dbm,
+            pen=pg.mkPen(_TRACE_COLOR, width=1),
         )
         self.modulation_plot.clear()
         self.symbol_plot.clear()
         if signal.modulation.family is ModulationFamily.FSK:
             self.modulation_plot.setDownsampling(auto=True, mode="peak")
             self.modulation_plot.setClipToView(True)
-            self.modulation_plot.setTitle("Instantaneous Frequency")
             self.modulation_plot.getAxis("left").enableAutoSIPrefix(True)
             self.modulation_plot.getAxis("bottom").enableAutoSIPrefix(True)
             self.modulation_plot.setLabel("left", "Frequency (kHz)")
@@ -1757,7 +1820,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.plot(
                 display_result.time_s[capture_slice] * 1e3,
                 display_result.instantaneous_frequency_hz[capture_slice] / 1e3,
-                pen=pg.mkPen("m", width=1),
+                pen=pg.mkPen(_TRACE_COLOR, width=1),
             )
             if self.symbol_display_action.isChecked() and symbol_times_s.size:
                 symbol_frequency_khz = np.interp(
@@ -1779,7 +1842,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.modulation_plot, fit_range=reset_ranges
             )
 
-            self.symbol_plot.setTitle("FSK Symbol Phase Difference")
             self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
             self.symbol_plot.getAxis("bottom").enableAutoSIPrefix(False)
             self.symbol_plot.setLabel("left", "Q")
@@ -1806,7 +1868,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                 pen=None,
                 symbol="o",
                 symbolSize=6,
-                symbolBrush=pg.mkBrush("y"),
+                symbolBrush=pg.mkBrush(_TRACE_COLOR),
+                symbolPen=pg.mkPen(_TRACE_COLOR),
             )
             unit_angle = np.linspace(0.0, 2.0 * np.pi, 361)
             self.symbol_plot.plot(
@@ -1830,7 +1893,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         else:
             self.modulation_plot.setDownsampling(auto=False)
             self.modulation_plot.setClipToView(False)
-            self.modulation_plot.setTitle("IQ Trajectory")
             self.modulation_plot.getAxis("left").enableAutoSIPrefix(False)
             self.modulation_plot.getAxis("bottom").enableAutoSIPrefix(False)
             self.modulation_plot.setLabel("left", "Q")
@@ -1885,7 +1947,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.plot(
                 trajectory_iq.real,
                 trajectory_iq.imag,
-                pen=pg.mkPen((255, 210, 40, 170), width=1),
+                pen=pg.mkPen(_TRACE_COLOR, width=1),
             )
             if self.symbol_display_action.isChecked() and symbol_times_s.size:
                 self._plot_symbol_points(
@@ -1893,15 +1955,22 @@ class VSAWindow(QtWidgets.QMainWindow):
                     symbol_iq.real,
                     symbol_iq.imag,
                 )
-            trajectory_limit = (
-                max(
-                    1.25,
-                    1.15 * float(np.percentile(np.abs(trajectory_iq), 99.5)),
-                )
-                if trajectory_iq.size
-                else 1.25
-            )
             if reset_ranges:
+                finite_iq = trajectory_iq[
+                    np.isfinite(trajectory_iq.real) & np.isfinite(trajectory_iq.imag)
+                ]
+                maximum_component = (
+                    max(
+                        float(np.max(np.abs(finite_iq.real))),
+                        float(np.max(np.abs(finite_iq.imag))),
+                    )
+                    if finite_iq.size
+                    else 0.0
+                )
+                trajectory_limit = max(
+                    _IQ_PLANE_LIMIT,
+                    1.05 * maximum_component,
+                )
                 self.modulation_plot.setXRange(
                     -trajectory_limit, trajectory_limit, padding=0.0
                 )
@@ -1909,7 +1978,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                     -trajectory_limit, trajectory_limit, padding=0.0
                 )
 
-            self.symbol_plot.setTitle("Constellation")
             self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
             self.symbol_plot.getAxis("bottom").enableAutoSIPrefix(False)
             self.symbol_plot.setLabel("left", "Q")
@@ -1929,14 +1997,19 @@ class VSAWindow(QtWidgets.QMainWindow):
                 pen=None,
                 symbol="o",
                 symbolSize=6,
-                symbolBrush=pg.mkBrush("y"),
+                symbolBrush=pg.mkBrush(_TRACE_COLOR),
+                symbolPen=pg.mkPen(_TRACE_COLOR),
             )
             # clear() retains the previous ViewBox range.  Explicitly reset
             # both axes because an FSK frequency range or an earlier malformed
             # constellation can otherwise leave all unit-circle symbols offscreen.
             if reset_ranges:
-                self.symbol_plot.setXRange(-1.25, 1.25, padding=0.0)
-                self.symbol_plot.setYRange(-1.25, 1.25, padding=0.0)
+                self.symbol_plot.setXRange(
+                    -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+                )
+                self.symbol_plot.setYRange(
+                    -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+                )
             summary = f"EVM RMS: {result.evm_rms_percent or 0.0:.4f} %"
         pattern_result = self.session.pattern_result
         symbols = (
@@ -2118,15 +2191,26 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_table.setVerticalHeaderLabels(
             [str(row * 10) for row in range(row_count)]
         )
+        matched_pattern_symbols = (
+            self._parse_pattern_symbols(pattern_result.modulation.order)
+            if pattern_result is not None
+            else ()
+        )
         for index, symbol in enumerate(shown):
             item = QtWidgets.QTableWidgetItem(str(int(symbol)))
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             if pattern_result is not None and index < pattern_result.symbol_time_s.size:
                 symbol_time_s = float(pattern_result.symbol_time_s[index])
+                pattern_index = int(
+                    np.floor(
+                        (symbol_time_s - pattern_result.pattern_start_time_s)
+                        * float(pattern_result.metadata["symbol_rate_hz"])
+                        + 1e-6
+                    )
+                )
                 if (
-                    pattern_result.pattern_start_time_s
-                    <= symbol_time_s
-                    < pattern_result.pattern_stop_time_s
+                    0 <= pattern_index < len(matched_pattern_symbols)
+                    and int(symbol) == int(matched_pattern_symbols[pattern_index])
                 ):
                     item.setBackground(QtGui.QColor(24, 112, 55))
                     item.setForeground(QtGui.QColor(255, 255, 255))
@@ -2147,7 +2231,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             np.asarray(y_values)[selection],
             pen=None,
             symbol="o",
-            symbolSize=7,
+            symbolSize=_TRACE_SYMBOL_SIZE,
             symbolBrush=pg.mkBrush(70, 255, 145, 230),
             symbolPen=pg.mkPen(10, 35, 20, 230, width=1),
         )
