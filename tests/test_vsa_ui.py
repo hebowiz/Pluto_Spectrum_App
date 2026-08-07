@@ -1,4 +1,5 @@
 import os
+import json
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -17,9 +18,17 @@ from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
 
-def test_result_range_arrow_actions_select_adjacent_packet() -> None:
+def _isolated_preferences(tmp_path: Path, name: str) -> QtCore.QSettings:
+    return QtCore.QSettings(
+        str(tmp_path / f"{name}.ini"), QtCore.QSettings.Format.IniFormat
+    )
+
+
+def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
     pg.mkQApp("VSA result navigation test")
-    window = VSAWindow()
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "result-navigation")
+    )
     try:
         recording, signal = GeneratedIQSource.psk(
             modulation=ModulationKind.PI4_DQPSK,
@@ -64,10 +73,13 @@ def test_result_range_arrow_actions_select_adjacent_packet() -> None:
         QtWidgets.QApplication.processEvents()
 
 
-def test_pattern_result_uses_table_and_fitted_plot_ranges() -> None:
+def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
     pg.mkQApp("VSA UI test")
-    window = VSAWindow()
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "pattern-result")
+    )
     try:
+        window._load_generated(ModulationKind.GFSK)
         expected = np.asarray(window.session.recording.metadata["generated_symbols"])
         window.pattern_search_check.setChecked(True)
         window.pattern_symbols_edit.setText(
@@ -277,9 +289,11 @@ def test_fsk_phase_difference_preserves_rms_normalized_symbol_amplitude() -> Non
     )
 
 
-def test_psk_constellation_uses_normalized_pattern_result_only() -> None:
+def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None:
     pg.mkQApp("VSA PSK UI test")
-    window = VSAWindow()
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "psk-constellation")
+    )
     try:
         fixture = (
             Path(__file__).with_name("fixtures")
@@ -454,7 +468,87 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         QtWidgets.QApplication.processEvents()
 
 
-def test_pluto_run_single_uses_async_capture_and_updates_session() -> None:
+def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
+    pg.mkQApp("VSA startup persistence test")
+    preferences_path = tmp_path / "startup-preferences.ini"
+    preferences = QtCore.QSettings(
+        str(preferences_path), QtCore.QSettings.Format.IniFormat
+    )
+    first = VSAWindow(preferences=preferences)
+    try:
+        assert first.session.recording is None
+        assert first.summary_label.text() == "No capture"
+        recording, signal = GeneratedIQSource.fsk(symbol_count=96, seed=412)
+        first.load_recording(recording, signal)
+        first.input_source_combo.setCurrentText("IQ File")
+        first.capture_center_spin.setValue(2450.5)
+        first.internal_gain_spin.setValue(17)
+        first.external_attenuation_spin.setValue(24.0)
+        first.result_length_spin.setValue(91)
+        first.pattern_name_edit.setText("Restored startup pattern")
+        first._set_pattern_symbols([1, 0, 1, 1, 0, 0, 1, 0])
+    finally:
+        first._meas_config_dialog.close()
+        first.close()
+        first.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+    serialized = preferences.value("startup/measurement_config", "", type=str)
+    document = json.loads(serialized)
+    assert document["schema"] == "pluto-vsa-startup-config"
+    assert not {
+        "iq",
+        "iq_path",
+        "recording",
+        "recording_path",
+    }.intersection(document["settings"])
+
+    restored_preferences = QtCore.QSettings(
+        str(preferences_path), QtCore.QSettings.Format.IniFormat
+    )
+    second = VSAWindow(preferences=restored_preferences)
+    try:
+        assert second.session.recording is None
+        assert second.session.result is None
+        assert second.summary_label.text() == "No capture"
+        assert second.input_source_combo.currentText() == "IQ File"
+        assert second.capture_center_spin.value() == pytest.approx(2450.5)
+        assert second.internal_gain_spin.value() == 17
+        assert second.external_attenuation_spin.value() == pytest.approx(24.0)
+        assert second.result_length_spin.value() == 91
+        assert second.pattern_name_edit.text() == "Restored startup pattern"
+        assert second._parse_pattern_symbols(2) == (1, 0, 1, 1, 0, 0, 1, 0)
+        assert not second._analyze()
+        assert "configuration restored" in second.statusBar().currentMessage()
+    finally:
+        second._meas_config_dialog.close()
+        second.close()
+        second.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_invalid_startup_config_falls_back_to_empty_session(tmp_path) -> None:
+    pg.mkQApp("VSA invalid startup persistence test")
+    preferences = QtCore.QSettings(
+        str(tmp_path / "invalid-preferences.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    preferences.setValue("startup/measurement_config", "{invalid json")
+    preferences.sync()
+
+    window = VSAWindow(preferences=preferences)
+    try:
+        assert window.session.recording is None
+        assert window.summary_label.text() == "No capture"
+        assert not preferences.contains("startup/measurement_config")
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_pluto_run_single_uses_async_capture_and_updates_session(tmp_path) -> None:
     pg.mkQApp("VSA Pluto UI test")
 
     class FakePlutoSource:
@@ -475,7 +569,10 @@ def test_pluto_run_single_uses_async_capture_and_updates_session() -> None:
             self.closed = True
 
     source = FakePlutoSource()
-    window = VSAWindow(pluto_source=source)
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "pluto-run-single"),
+        pluto_source=source,
+    )
     try:
         window._run_pluto_single()
         for _index in range(200):

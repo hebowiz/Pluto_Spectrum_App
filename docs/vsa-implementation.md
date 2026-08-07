@@ -1,6 +1,6 @@
 # VSA実装状況・引き継ぎノート
 
-最終更新: 2026-08-06
+最終更新: 2026-08-07
 
 設計上の判断は[vsa-architecture.md](vsa-architecture.md)を参照してください。この文書は実際に動作する範囲、既知の制約、次の実装順を第三者が把握するための記録です。
 
@@ -18,7 +18,9 @@ CFO、carrier phase、linear driftの計算式とsample単位補正は[vsa-carri
 python -m pluto_sa.vsa.main
 ```
 
-起動時はPlutoへ接続せず、生成GFSKを自動解析します。画面から次を実行できます。
+起動時はPlutoへ接続せず、前回終了時のMeas Configだけを復元した`No capture`状態で
+開始します。IQ sample、IQ file path、直前の解析結果は保存・自動読込みしません。
+画面から次を実行できます。
 
 - GFSK、QPSK、pi/4-DQPSKのtest waveform生成。
 - NumPy `.npy` / `.npz`およびraw complex IQの読込み。
@@ -30,6 +32,12 @@ python -m pluto_sa.vsa.main
 - symbol tableとbasic EVMまたはfrequency errorのsummary表示。
 - result dockの移動、tab化、detach、表示/非表示。
 - 現captureを更新せずに再解析する`Refresh Analysis`。
+
+正常終了時は`_meas_config_values()`のJSON互換値をQt `QSettings`の
+`startup/measurement_config`へ保存する。schema/version付きdocumentとし、次回起動時は
+controlへ適用するだけで解析を開始しない。破損・旧version・不正schemaは削除してwidget
+defaultへfallbackし、起動を妨げない。手動Config fileと同じ測定項目を対象とするが、
+IQ dataとrecording metadataはstartup documentへ含めない。
 
 ## 2. 実装済みcontract
 

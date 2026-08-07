@@ -72,6 +72,20 @@ Existing version-1 configuration files that predate multiple-match selection
 remain valid. Missing fields load as `First`, match index `1`, and
 `Exclude incomplete Result Range = Off`.
 
+### Automatic startup configuration
+
+On a clean window close, the same measurement-control values are serialized
+as a compact schema/version-tagged JSON document in Qt `QSettings` under
+`startup/measurement_config`. The next VSA launch applies those controls but
+starts with an empty `VSASession`: no IQ array, IQ filename, source recording,
+or analysis result is persisted or reopened. The separate last-directory
+preferences remain available only as file-dialog starting locations.
+
+Invalid, truncated, wrong-schema, or unsupported-version startup JSON is
+removed and the application opens with widget defaults and no capture. Startup
+restore does not run analysis; `Run Single`, `Open IQ`, or a generated test
+signal must provide the next recording.
+
 ## Multiple pattern matches in one capture
 
 Pattern Search now keeps all above-threshold local correlation peaks and
@@ -232,5 +246,7 @@ display, preserve the current manual view instead of silently resetting it.
 
 `tests/test_vsa_persistence.py` covers versioned JSON round trips and schema
 rejection. `tests/test_vsa_ui.py` covers the editable pattern table, Config
-control round trip, separate folder preferences, matched-symbol highlighting,
-PSK IQ trajectory/constellation placement, and FSK phase-difference plotting.
+control round trip, automatic Config-only startup restore, empty-session and
+corrupt-preference fallback, separate folder preferences, matched-symbol
+highlighting, PSK IQ trajectory/constellation placement, and FSK
+phase-difference plotting.

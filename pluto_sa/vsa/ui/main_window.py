@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +45,9 @@ _MODULATIONS = (
     ModulationKind.DPSK8,
 )
 _MAX_DISPLAY_POINTS = 100_000
+_STARTUP_CONFIG_KEY = "startup/measurement_config"
+_STARTUP_CONFIG_SCHEMA = "pluto-vsa-startup-config"
+_STARTUP_CONFIG_VERSION = 1
 
 
 def _decimation_indices(count: int, maximum: int = _MAX_DISPLAY_POINTS) -> slice:
@@ -141,8 +145,14 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._build_summary_bar()
         self._build_results()
         self._build_configuration()
-        self.statusBar().showMessage("Ready - generate or load an IQ recording")
-        self._load_generated(ModulationKind.GFSK)
+        restored = self._restore_startup_meas_config()
+        self._update_summary()
+        if self.session.recording is None:
+            self.statusBar().showMessage(
+                "Ready - configuration restored; load or capture IQ"
+                if restored
+                else "Ready - load or capture an IQ recording"
+            )
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
@@ -1036,6 +1046,45 @@ class VSAWindow(QtWidgets.QMainWindow):
             },
         }
 
+    def _save_startup_meas_config(self) -> None:
+        document = {
+            "schema": _STARTUP_CONFIG_SCHEMA,
+            "version": _STARTUP_CONFIG_VERSION,
+            "settings": self._meas_config_values(),
+        }
+        self._preferences.setValue(
+            _STARTUP_CONFIG_KEY,
+            json.dumps(document, ensure_ascii=False, separators=(",", ":")),
+        )
+        self._preferences.sync()
+
+    def _restore_startup_meas_config(self) -> bool:
+        serialized = self._preferences.value(
+            _STARTUP_CONFIG_KEY, "", type=str
+        )
+        if not serialized:
+            return False
+        try:
+            document = json.loads(serialized)
+            if not isinstance(document, dict):
+                raise ValueError("startup configuration root must be an object")
+            if document.get("schema") != _STARTUP_CONFIG_SCHEMA:
+                raise ValueError("startup configuration schema is invalid")
+            if document.get("version") != _STARTUP_CONFIG_VERSION:
+                raise ValueError("startup configuration version is unsupported")
+            settings = document.get("settings")
+            if not isinstance(settings, dict):
+                raise ValueError("startup configuration settings must be an object")
+            self._apply_meas_config_values(settings)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # A stale or partially written preference must never prevent the
+            # analyzer from opening. Fall back to widget defaults and replace
+            # the invalid document on the next clean close.
+            self._preferences.remove(_STARTUP_CONFIG_KEY)
+            self._preferences.sync()
+            return False
+        return True
+
     @staticmethod
     def _set_combo_text(combo: QtWidgets.QComboBox, value: object, name: str) -> None:
         index = combo.findText(str(value))
@@ -1501,6 +1550,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             event.ignore()
             return
+        self._save_startup_meas_config()
         self._pluto_source.close()
         super().closeEvent(event)
 
