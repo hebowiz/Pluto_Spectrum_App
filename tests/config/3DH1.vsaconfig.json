@@ -28,6 +28,14 @@
       "tx_filter": "Root Raised Cosine",
       "filter_parameter": 0.4
     },
+    "iq_power_trigger": {
+      "enabled": true,
+      "level_dbm": -15.0,
+      "hysteresis_db": 3.0,
+      "dropout_symbols": 10.0,
+      "holdoff_symbols": 0.0,
+      "search_start_offset_symbols": 0.0
+    },
     "pattern_search": {
       "enabled": true,
       "name": "3DH1",
@@ -47,8 +55,7 @@
       "threshold_auto": true,
       "threshold_percent": 90.0,
       "meas_only_if_correct": true,
-      "match_selection": "Match Index",
-      "match_index": 2
+      "allow_inverted_fsk_pattern": false
     },
     "result_range": {
       "length_symbols": 244,
@@ -77,11 +84,15 @@
         "fsk_measured_deviation",
         "carrier_frequency_drift",
         "pattern_symbols_correct",
+        "pattern_match_variant",
         "iq_correlation",
         "match_selection",
         "result_symbols",
         "pattern_error"
       ]
+    },
+    "display_config": {
+      "constellation_trace_mode": "Density"
     }
   }
 }

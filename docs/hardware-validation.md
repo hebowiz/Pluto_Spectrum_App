@@ -500,8 +500,10 @@ source, not a standards-conformance EVM specification.
 Bluetooth Direct Test Mode GFSK packets were captured through Pluto at 2440 MHz.
 Pattern Search used the unwhitened OTA-order DTM Preamble + Access Address:
 
-- LE 1M: `1010101010010100100000100110111010001110` (40 symbols);
-- LE 2M: `101010101010101010010100100000100110111010001110` (48 symbols).
+- LE 1M: `0101010101101011011111011001000101110001` (40 symbols);
+- LE 2M: `010101010101010101101011011111011001000101110001` (48 symbols).
+
+2026-08-07の初回検証で記録したpatternは、Advertising Access Address `0x8E89BED6`のOTA sequenceに対する全bit反転値だった。当時のFSK demodulatorは既知patternに合わせてfrequency polarityを自動反転したため、相関とsymbol errorは成立したが、Symbol TableはNatural mappingと逆極性だった。2026-08-07の修正以降、VSA Pattern SearchのNatural mappingは`negative deviation = 0`、`positive deviation = 1`を固定し、自動polarity反転を行わない。保存patternはAdvertising用を`LE1M_ADV`/`LE2M_ADV`、Access Address `0x71764129`用を`LE1M`/`LE2M`として区別する。`0x71764129`は`0x8E89BED6`のbitwise complementでLSBも1のため、Preambleを含む両patternのbit列は互いに全bit反転となる。
 
 LE 1M used 1 Msym/s, 8 MS/s, Gaussian TX filter, and a 10 ms capture. The shown
 capture reported 99.82% I/Q correlation, zero pattern-symbol errors, +24.155 kHz

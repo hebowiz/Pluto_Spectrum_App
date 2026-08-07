@@ -75,7 +75,7 @@ Meas Configは縦並びのaccordionではなく、`Config Top Menu`にカテゴ�
 設定責務はmanual pp.164-170、208-224に従い、次のように分離した。
 
 - `KnownPattern`: Name、Description、Symbols。Result Lengthや検索しきい値は持たない。
-- `PatternSearchSettings`: Pattern Search Auto/On/Off、I/Q Correlation Threshold（AutoはR&Sと同じ90%）、`Meas only if Pattern Symbols Correct`。
+- `PatternSearchSettings`: Pattern Search Auto/On/Off、I/Q Correlation Threshold（AutoはR&Sと同じ90%）、`Meas only if Pattern Symbols Correct`、FSK専用の`Allow Inverted Pattern Match`。
 - `ResultRangeSettings`: Result Length、Reference、Alignment、Offset、`Symbol Number at Pattern Start`。
 - `DemodulationSettings`: Coarse/Fine Synchronization、Bit Ordering、FSKのCarrier Frequency Drift/Deviation Error補償選択。
 
@@ -89,13 +89,15 @@ R&SのResult Range表示に合わせ、Pattern Search成立時は次の表示規
 - Spectrumはcapture全体ではなく、検出されたResult RangeのIQだけから再計算する。現在は中央の最大`fft_size` samplesへHann windowを掛け、`|FFT| / sum(window)`のcoherent amplitudeを`20log10`した後、IQ Powerと同じfull-scaleおよびfrontend補正を適用してdBm表示する。bin中心CWのSpectrum peakは同じIQ振幅のZero Span powerと一致する。これはdBm/Hzのpower spectral densityではなく、Hann相当の各resolution filter出力のdBmである。broadband/modulated signalはpowerが複数filterへ分散するため各点がtotal powerより低くなる。実効noise bandwidthはzero padding後の表示bin間隔ではなく、使用record長`L`に対して概ね`1.5 * Fs / L`である。現時点ではwindow/RBW/ENBW normalizationを選択するSpectrum measurement設定がなく、R&S VSAのresult transformationと同じ高水準構成ではあるが測定値を完全再現する仕様ではない。
 - FSK Instantaneous Frequencyの初期Y軸は`FSK Ref Deviation`の±150%とする。
 - Symbol Tableは`QTableWidget`を使い、Result Rangeの復調symbolを中央揃えの10列へ配置する。列headerは0～9、行headerはその行の先頭symbol indexとする。pattern範囲内でも、設定patternと実測decisionが一致したsymbolだけを緑背景にし、不一致symbolは通常背景のまま表示する。
+- Symbol Tableは`File > Export Symbol Table...`または右クリックから、schema/version付きUTF-8 JSON（`.vsasymbols.json`）へ全Result Rangeをexportできる。source、signal/mapping/bit-ordering、pattern variant、列定義、symbol/time/pattern statusを保持し、UIの2048 symbol表示上限には切り詰めない。
+- Symbol Tableの入力済みcellをクリックすると、同じResult Range symbolをIQ Power、Modulation、Symbol Plotへcyan diamondで連動表示する。選択は1 symbolのみで、同じcellの再クリックにより解除する。IQ Powerはsymbol番号/dBm、FSK Modulationはsymbol番号/frequency、PSK Modulationはsymbol番号/normalized amplitude/phase、FSK Symbol Plotはsymbol番号/normalized amplitude/phase、PSK Symbol Plotはsymbol番号/normalized amplitude/phase/point EVMをplot内labelへ表示する。FSK Modulationはtraceを復元symbol中心で補間した瞬時周波数を使用する一方、FSK Symbol Plotは復調用symbol区間平均から実際の位相差vectorを生成する。両測定を混同しないようSymbol Plot markerへFrequencyは表示しない。選択markerは通常のFlat Symbol Plot point（6 px）とは独立した18 pxとし、黒輪郭付きで強調する。新規解析開始時には選択をclearする。
 
 Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK、PSK、QAMを想定し、Binary/Hexadecimal/Decimal表示切替を追加する。表示formatはdecision結果を変更せず、R&Sの`Symbol Format`と同様にview設定として扱う。
 
 ### Carrier周波数測定・補正の実装境界
 
 - 通常FSK解析はResult Range内symbol frequencyの平均を`frequency_error_hz`として算出する基礎処理がある。
-- GFSK/FSK Pattern Searchはpatternからcarrier frequency offset、frequency deviation、linear frequency driftを同時推定し、offset/drift/polarityを除去してsymbol decisionする。
+- GFSK/FSK Pattern Searchはpatternからcarrier frequency offset、frequency deviation、linear frequency driftを同時推定し、offset/driftを除去してsymbol decisionする。VSAのNatural mappingではpolarityを自動反転しない。
 - PSK Pattern Searchはpatternからcarrier phaseとcarrier frequency offsetを推定し、Result Rangeのsymbol decisionへ補正する。Differential PSKはphase increment上で補正する。
 - Root Raised Cosineを選んだPSKは二段carrier recoveryとする。第1 passでcoarse CFOを
   推定し、resample後のIQをNCOで中心へ移してからSRRC matched/measurement filterを
@@ -265,6 +267,20 @@ Analysis BandwidthのFIR適用後は、FSKの交互patternに対して複数のs
 
 また、短い交互patternだけから得たlinear driftはAnalysis Bandwidth FIRのcapture端過渡と強く結合する。誤ったdriftを初回payload decisionへ適用するとdecision-directed fitが自己強化し、瞬時周波数が同じでもFSK Symbol Phase Differenceだけが大きく変形する。patternはCFO、polarity、deviationの初期推定に使うが、十分長いResult Rangeがある場合のpacket-wide drift refinementは0 driftから開始し、全symbolのdecisionを使って再推定する。Symbol Plotとcarrier correctionへ同じ安定した推定値を渡す。
 
+### Post-capture I/Q Power Trigger / Pattern Search Gate
+
+2026-08-07 に、Pluto入力とファイル入力に共通のpost-capture I/Q Power Triggerを実装した。キャプチャ全体から全てのrising power eventを検出し、各active interval内の最初の有効patternを時系列Result Range候補にする。LevelはIQ Power traceと同じdBm換算、再trigger制御はHysteresis、Drop-Out、Holdoff、検索開始位置は符号付きSearch Start Offset（symbols）で設定する。新規IQでは先頭候補、Refreshでは現在Indexを維持し、既存の左右キーで候補を切り替える。詳細な演算・既定値・R&Sとの差分は[vsa-iq-power-trigger.md](vsa-iq-power-trigger.md)を参照。
+
+Burst終端制限ではlinear envelope powerを既定1 symbolで平均し、Hysteresis/Drop-Out成立位置をfilter delay補正してfalling edgeとする。`Limit Result Range to Active Interval`がONなら、そのedgeより後まで続く不完全symbolをResultから除外する。OOKはvalid zero runと無信号をpowerだけで一意に区別できないため、最大zero runより長いDrop-Outを設定するか終端制限をOFFにする。
+
+PlutoのADC取得開始を制御するacquisition triggerは引き続き未実装であり、本機能は1キャプチャ内の複数packetを全件評価するpost-capture gateである。
+
+### FSK Natural Mapping polarity
+
+2026-08-07以降、VSA Pattern Searchの`Natural` mappingは`0 = negative frequency deviation`、`1 = positive frequency deviation`を固定する。既知patternとの相関が逆極性で成立しても自動反転せず、候補から除外する。これによりpattern内容の誤りやI/Q inversionがSymbol Table上で暗黙に隠れない。低レベルBluetooth BR protocol profileには明示的なlegacy polarity探索を残すが、汎用VSAの`PatternAnalyzer`からは無効化している。保存patternはAdvertising Access Address `0x8E89BED6`用を`LE1M_ADV`/`LE2M_ADV`、Access Address `0x71764129`用を`LE1M`/`LE2M`とする。いずれもPreambleとAccess AddressのLSB-first OTA sequenceを保持する。保存済みLE ConfigはAdvertising用sequenceを内包するため、pattern名を`LE1M_ADV`/`LE2M_ADV`とする。
+
+2026-08-07にFSK専用の明示的な`Allow Inverted Pattern Match`を追加した。ONでは設定patternとbitwise complementを同一correlation探索の正負仮説として許可するが、復調decisionやInstantaneous Frequencyの極性は反転しない。反転一致時もSymbol TableはNatural mappingの実測bitを表示し、metadata/Result Summaryへ`Pattern Match = Inverted`を記録する。これは以前の暗黙的なmapping反転を復活させるものではない。PSKは位相回転・複素共役とbit反転が変調次数/mappingごとに異なるため対象外とする。
+
 ## 5. Test
 
 VSA unit test:
@@ -311,9 +327,9 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
   10 symbol spanの有限FIRである。coarse CFO補正はSRRC前に適用するが、resample_polyの
   anti-alias filterとAnalysis Bandwidth channel filterよりは後段である。
 - FSK error metricsはfrequency error/deviationの基礎のみです。
-- 一般VSA用pattern searchは実装済み。Burst Search、DECT profile、negative Result Range offsetによるpattern前symbol復調は未実装。
+- 一般VSA用pattern searchとpost-capture I/Q Power Trigger gateは実装済み。自動thresholdを持つ独立Burst Search、DECT profile、negative Result Range offsetによるpattern前symbol復調は未実装。
 - VSA UIはPluto Free Run / Run Singleとoffline Refreshに対応。Pluto取得は非同期だが、取得後のDSP解析はUI thread上で同期実行します。
-- Pluto Power Trigger、Continuous、SCPI sourceは未実装。
+- Pluto acquisition Power Trigger、Continuous、SCPI sourceは未実装。取得済みIQ内のmulti-event Power Trigger search gateは実装済み。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
 
 Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出、DH1 Payload/CRC、PRBS-9照合までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。さらに固定2441 MHzのBR test waveformを16 MSPSで取得し、通常Access Code、Header FEC、DH1 27-byte body、PRBS-9 216 bitを0 bit errorで復元しました。このtest waveformはUAP `0x6B`のHECとPayload CRCが一致せず、Whitening OFFかつcheck初期値が別設定の可能性があります。16 MSPS全帯域への直接相関は行わず、ユーザー指定Analysis Center/Bandwidthで1 channelを抽出してから復調します。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
@@ -322,7 +338,7 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 
 ## 7. 次の推奨実装順
 
-1. Pluto I/Q Power Trigger、Trigger Offset、Continuous/Stopを接続。
+1. Pluto acquisition I/Q Power Trigger、pre-trigger、Continuous/Stopを接続。
 2. pattern前を含むnegative Result Range offsetを実装。
 3. pulse shaping/matched/measurement filter contractとPSK symbol-rate recoveryを追加。
 4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。

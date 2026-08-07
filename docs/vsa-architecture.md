@@ -269,6 +269,9 @@ R&Sと同じく役割を分離します（manual pp.71-75、225-226）。
 
 ## 8. Trigger、Burst Search、Pattern Search
 
+実装済みのpost-capture I/Q Power TriggerとPattern Search gateは
+[vsa-iq-power-trigger.md](vsa-iq-power-trigger.md)を参照。取得済みbuffer内の全power eventを列挙し、各active intervalの最初の有効patternをResult Range候補にする。Plutoのcapture開始を決めるacquisition triggerとは別contractとして維持する。
+
 これらを同じ機能として扱いません。
 
 ### Acquisition Trigger
@@ -399,6 +402,8 @@ R&Sの設定（manual pp.217-224）を参照し、段階的に次を扱います
 - DECT/Bluetooth向け`AnalysisProfile`の基礎。
 
 汎用Pattern Searchはprotocol decoderより下位の共通機能とする。Bluetooth Access Code、DECT sync word、将来のEDR sync blockはいずれも`KnownPattern` presetとして利用できるが、検索結果はprotocol fieldへ固定せず、R&Sと同様にResult Rangeのsymbol/vectorデータとして公開する。
+
+Binary FSKでは設定でbitwise-complement patternも探索候補にできる。ただし候補生成とsymbol mappingは分離し、decisionは常に設定されたNatural mappingの物理周波数極性を保持する。PSKのambiguityはbit反転では一般化せず、将来のphase/conjugate/mapping仮説として別設計にする。
 
 ### Phase 3: Live source
 

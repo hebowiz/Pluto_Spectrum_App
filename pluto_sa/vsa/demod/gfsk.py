@@ -33,6 +33,7 @@ class GFSKDemodulationResult:
     analysis_sample_rate_hz: float
     samples_per_symbol: int
     iq_inverted: bool
+    complemented_pattern_match: bool
     frequency_model_timing_offset_samples: float
     applied_timing_offset_samples: float
     timing_correction_accepted: bool
@@ -464,6 +465,8 @@ def demodulate_gfsk(
     required_result_symbols: int | None = None,
     exclude_incomplete_result: bool = False,
     require_zero_pattern_errors: bool = False,
+    allow_polarity_inversion: bool = True,
+    allow_complemented_pattern_match: bool = False,
 ) -> GFSKDemodulationResult:
     """Recover binary symbols using a known access pattern for timing/CFO.
 
@@ -644,6 +647,12 @@ def demodulate_gfsk(
         cfo_hz, signed_deviation, drift_hz_per_symbol = np.linalg.lstsq(
             design, access_frequency, rcond=None
         )[0]
+        if (
+            signed_deviation <= 0.0
+            and not allow_polarity_inversion
+            and not allow_complemented_pattern_match
+        ):
+            return int(pattern.size)
         center_frequency = cfo_hz + drift_hz_per_symbol * relative
         polarity = -1.0 if signed_deviation < 0.0 else 1.0
         decisions = (
@@ -651,10 +660,34 @@ def demodulate_gfsk(
         ).astype(np.uint8)
         return int(np.count_nonzero(decisions != pattern))
 
+    def natural_mapping_polarity(candidate: tuple) -> bool:
+        _, _, _, index, values, _ = candidate
+        access_frequency = values[index : index + pattern.size]
+        if access_frequency.size != pattern.size:
+            return False
+        relative = (
+            np.arange(pattern.size, dtype=np.float64)
+            - (pattern.size - 1.0) / 2.0
+        )
+        design = np.column_stack((np.ones(pattern.size), expected_levels, relative))
+        _cfo_hz, signed_deviation, _drift = np.linalg.lstsq(
+            design, access_frequency, rcond=None
+        )[0]
+        return bool(
+            signed_deviation > 0.0
+            or allow_polarity_inversion
+            or allow_complemented_pattern_match
+        )
+
     detected_match_count = len(physical_candidates)
-    eligible_candidates = [
+    mapping_candidates = [
         candidate
         for candidate in physical_candidates
+        if natural_mapping_polarity(candidate)
+    ]
+    eligible_candidates = [
+        candidate
+        for candidate in mapping_candidates
         if (
             (
                 not exclude_incomplete_result
@@ -668,6 +701,10 @@ def demodulate_gfsk(
         )
     ]
     if not eligible_candidates:
+        if not mapping_candidates:
+            raise ValueError(
+                "no pattern match has Natural mapping frequency polarity"
+            )
         if require_zero_pattern_errors:
             raise ValueError(
                 "no symbol-correct pattern match satisfies the search requirements"
@@ -847,21 +884,41 @@ def demodulate_gfsk(
                 np.arange(packet_symbol_count, dtype=np.float64)
                 - (pattern.size - 1.0) / 2.0
             )
-        polarity = -1.0 if signed_deviation < 0.0 else 1.0
         estimated_center_frequency = (
             cfo_hz + drift_hz_per_symbol * packet_relative_symbols
         )
+        polarity = -1.0 if signed_deviation < 0.0 else 1.0
         packet_frequency = polarity * (
             packet_observed_frequency - estimated_center_frequency
         )
         bits = (packet_frequency >= 0.0).astype(np.uint8)
         bits[:training_size] = pattern[:training_size]
+    if (
+        signed_deviation <= 0.0
+        and not allow_polarity_inversion
+        and not allow_complemented_pattern_match
+    ):
+        raise ValueError(
+            "FSK pattern has inverted frequency polarity for Natural mapping"
+        )
     iq_inverted = signed_deviation < 0.0
-    polarity = -1.0 if iq_inverted else 1.0
+    complemented_pattern_match = bool(
+        iq_inverted and allow_complemented_pattern_match
+    )
+    # Legacy low-level Bluetooth profiles may intentionally rotate frequency
+    # polarity so the returned bits equal the supplied access pattern.  The
+    # generic VSA's explicit complemented-pattern search is different: it
+    # accepts ~pattern as a search hypothesis while preserving Natural mapping
+    # (-deviation=0, +deviation=1) in every displayed/exported decision.
+    polarity = (
+        1.0
+        if complemented_pattern_match
+        else (-1.0 if iq_inverted else 1.0)
+    )
     deviation_hz = abs(signed_deviation)
     estimated_center_frequency = cfo_hz + drift_hz_per_symbol * packet_relative_symbols
-    drift_compensated_packet_frequency = polarity * (
-        packet_observed_frequency - estimated_center_frequency
+    drift_compensated_packet_frequency = (
+        polarity * (packet_observed_frequency - estimated_center_frequency)
     )
     packet_frequency = polarity * (packet_observed_frequency - cfo_hz)
     bits = (drift_compensated_packet_frequency >= 0.0).astype(np.uint8)
@@ -869,7 +926,12 @@ def demodulate_gfsk(
     # in the recovered stream; access_errors above retains the raw hard-decision
     # quality observed before decision-directed packet tracking.
     training_size = min(pattern.size, bits.size)
-    bits[:training_size] = pattern[:training_size]
+    matched_training = (
+        1 - pattern
+        if complemented_pattern_match
+        else pattern
+    )
+    bits[:training_size] = matched_training[:training_size]
     refined_access_start_resampled = (
         float(access_start_resampled) + applied_timing_offset
     )
@@ -905,6 +967,7 @@ def demodulate_gfsk(
         analysis_sample_rate_hz=analysis_rate_hz,
         samples_per_symbol=int(analysis_samples_per_symbol),
         iq_inverted=iq_inverted,
+        complemented_pattern_match=complemented_pattern_match,
         frequency_model_timing_offset_samples=joint_timing_offset,
         applied_timing_offset_samples=applied_timing_offset,
         timing_correction_accepted=timing_correction_accepted,

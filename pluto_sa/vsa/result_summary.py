@@ -112,6 +112,8 @@ RESULT_SUMMARY_ITEMS = (
           implemented=True, default=True, description="Linear FSK carrier drift in Hz per symbol."),
     _item("pattern_symbols_correct", "Pattern Symbols Correct", ResultSummaryCategory.DIAGNOSTICS, _BOTH,
           implemented=True, default=True, description="Whether every configured pattern symbol matched."),
+    _item("pattern_match_variant", "Pattern Match", ResultSummaryCategory.DIAGNOSTICS, _FSK,
+          implemented=True, default=True, description="Whether the configured FSK pattern or its bitwise complement matched."),
     _item("iq_correlation", "I/Q Correlation", ResultSummaryCategory.DIAGNOSTICS, _BOTH,
           implemented=True, default=True, description="Normalized pattern waveform correlation."),
     _item("match_selection", "Selected Result", ResultSummaryCategory.DIAGNOSTICS, _BOTH,

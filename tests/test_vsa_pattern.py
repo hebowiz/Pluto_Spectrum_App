@@ -8,12 +8,14 @@ from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
+    IQPowerTriggerSettings,
     KnownPattern,
     MatchSelectionPolicy,
     PatternAnalyzer,
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeSettings,
+    detect_iq_power_trigger_events,
     _constellation,
     _fit_differential_psk_phase_model,
 )
@@ -31,6 +33,83 @@ from pluto_sa.vsa.demod.gfsk import fsk_reference_frequency_levels
 def _pattern_from_generated(recording, start: int, length: int) -> KnownPattern:
     symbols = np.asarray(recording.metadata["generated_symbols"])
     return KnownPattern(tuple(int(value) for value in symbols[start : start + length]))
+
+
+def test_iq_power_trigger_detects_all_bursts_with_dropout_and_holdoff():
+    iq = np.zeros(160, dtype=np.complex64)
+    iq[20:60] = 1.0
+    iq[35:38] = 0.01  # Short dip must not split the first burst.
+    iq[90:140] = 0.5
+    recording = IQRecording(iq=iq, sample_rate_hz=8_000_000.0)
+    settings = IQPowerTriggerSettings(
+        enabled=True,
+        level_dbm=-10.0,
+        hysteresis_db=3.0,
+        dropout_symbols=1.0,
+        holdoff_symbols=2.0,
+    )
+
+    events = detect_iq_power_trigger_events(
+        recording,
+        symbol_rate_hz=1_000_000.0,
+        settings=settings,
+    )
+
+    assert [event.trigger_sample for event in events] == [20, 90]
+    assert events[0].active_stop_sample == pytest.approx(60, abs=1)
+    assert events[1].active_stop_sample == pytest.approx(140, abs=1)
+
+
+def test_power_gated_pattern_search_returns_one_match_per_trigger_event():
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.PI4_DQPSK,
+        symbol_count=120,
+        seed=932,
+    )
+    pattern_start = 20
+    pattern = _pattern_from_generated(recording, pattern_start, 16)
+    silence = np.zeros(80, dtype=np.complex64)
+    combined = IQRecording(
+        iq=np.concatenate((silence, recording.iq, silence, recording.iq, silence)),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+    search = PatternSearchSettings(
+        pattern=pattern,
+        mode=PatternSearchMode.ON,
+        match_selection=MatchSelectionPolicy.INDEX,
+        match_index=2,
+        iq_power_trigger=IQPowerTriggerSettings(
+            enabled=True,
+            level_dbm=-10.0,
+            hysteresis_db=3.0,
+            dropout_symbols=2.0,
+            search_start_offset_symbols=1.0,
+        ),
+    )
+
+    result = PatternAnalyzer().search(
+        combined,
+        signal,
+        search,
+        ResultRangeSettings(result_length=200),
+    )
+
+    expected_second_start = silence.size + recording.sample_count + silence.size
+    assert result.pattern_start_sample == expected_second_start + pattern_start * 8
+    assert result.metadata["power_trigger_event_count"] == 2
+    assert result.metadata["power_trigger_matched_event_count"] == 2
+    assert result.metadata["selected_power_trigger_event_index"] == 2
+    assert result.metadata["selected_match_index"] == 2
+    assert result.metadata["eligible_match_count"] == 2
+    assert result.metadata["burst_limited_symbol_count"] < 200
+    assert result.result_stop_sample <= result.metadata[
+        "power_trigger_active_stop_sample"
+    ]
+    assert (
+        result.symbol_time_s[-1] + 0.5 / signal.symbol_rate_hz
+        <= result.metadata["power_trigger_active_stop_sample"]
+        / recording.sample_rate_hz
+    )
 
 
 def test_psk_multiple_matches_support_time_selection_and_incomplete_exclusion():
@@ -206,6 +285,77 @@ def test_fsk_multiple_matches_use_one_physical_candidate_per_packet():
     assert result.metadata["selected_match_index"] == 2
     assert result.metadata["eligible_match_count"] == 2
     assert result.metadata["detected_match_count"] == 2
+
+
+def test_fsk_natural_mapping_rejects_frequency_inverted_pattern():
+    recording, signal = GeneratedIQSource.fsk(
+        symbol_count=180,
+        gaussian_bt=0.5,
+        seed=514,
+    )
+    pattern = _pattern_from_generated(recording, 30, 32)
+    inverted = IQRecording(
+        iq=np.conj(recording.iq),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+
+    with pytest.raises(ValueError, match="Natural mapping frequency polarity"):
+        PatternAnalyzer().search(
+            inverted,
+            signal,
+            PatternSearchSettings(
+                pattern=pattern,
+                mode=PatternSearchMode.ON,
+                correlation_threshold_auto=False,
+                iq_correlation_threshold=0.7,
+                meas_only_if_pattern_symbols_correct=False,
+            ),
+            ResultRangeSettings(result_length=80),
+        )
+
+
+def test_fsk_inverted_pattern_match_preserves_natural_mapping_symbols():
+    recording, signal = GeneratedIQSource.fsk(
+        symbol_count=180,
+        gaussian_bt=0.5,
+        seed=515,
+    )
+    expected = np.asarray(recording.metadata["generated_symbols"], dtype=np.uint8)
+    pattern_start = 30
+    pattern = _pattern_from_generated(recording, pattern_start, 32)
+    inverted = IQRecording(
+        iq=np.conj(recording.iq),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+
+    result = PatternAnalyzer().search(
+        inverted,
+        signal,
+        PatternSearchSettings(
+            pattern=pattern,
+            mode=PatternSearchMode.ON,
+            correlation_threshold_auto=False,
+            iq_correlation_threshold=0.7,
+            allow_inverted_fsk_pattern=True,
+        ),
+        ResultRangeSettings(result_length=80),
+    )
+
+    assert result.metadata["pattern_match_variant"] == "Inverted"
+    assert result.polarity_inverted
+    assert result.pattern_symbol_errors == 0
+    np.testing.assert_array_equal(
+        result.metadata["matched_pattern_symbols"],
+        1 - np.asarray(pattern.symbols),
+    )
+    np.testing.assert_array_equal(
+        result.decoded_symbols,
+        1 - expected[pattern_start : pattern_start + 80],
+    )
+    np.testing.assert_array_equal(
+        result.decoded_symbols,
+        (result.measured_symbols.real >= 0.0).astype(np.int16),
+    )
 
 
 def test_fsk_symbol_correct_filter_keeps_later_valid_match_navigable():

@@ -41,6 +41,59 @@ The Symbol Table result view uses a green cell background for decoded symbols
 whose symbol-centre times are inside the matched Pattern Waveform interval.
 The comparison uses `PatternSearchResult.symbol_time_s` and the measured
 pattern start/stop times, so Result Range offsets and alignment are respected.
+For binary FSK, `Allow Inverted Pattern Match` makes the configured pattern
+and its bitwise complement eligible search hypotheses. This does not invert
+the demodulator output: Natural mapping remains negative deviation = 0 and
+positive deviation = 1. An inverted hit therefore displays and exports the
+actually observed complemented symbols. Result metadata records `Normal` or
+`Inverted`, and only cells agreeing with the selected hypothesis are green.
+The option is disabled for PSK because phase/conjugation ambiguities are not a
+general bitwise-complement operation for multilevel PSK mappings.
+
+## Linked symbol marker
+
+Clicking a populated result cell in the Symbol Table selects that Result Range
+symbol and places one linked cyan diamond marker in IQ Power, Modulation, and
+Symbol Plot. Clicking the same cell again removes the selection and all three
+markers; clicking another cell moves the single selection. A fresh file load,
+Pluto capture, generated recording, or analysis clears the marker.
+
+Each marker is a high-visibility 18 px diamond (three times the Flat Symbol
+Plot point size) and carries an in-plot label. IQ Power reports symbol index
+and dBm. FSK Modulation reports
+symbol index and the symbol-centre instantaneous frequency, while its Symbol Plot also reports
+normalized amplitude and phase. PSK Modulation
+reports normalized amplitude and phase, while its Symbol Plot additionally
+reports that decision point's EVM. Marker values are taken from the same
+processed arrays used by the corresponding traces rather than recalculated
+from a separate display-only signal path.
+
+For FSK, the Modulation trace itself remains the sample-by-sample instantaneous
+frequency. Its green symbol points and linked marker sample that trace at the
+recovered symbol centre. Symbol Plot instead visualizes the actual demodulation
+phase difference derived from the demodulator's symbol-window mean. Because
+these are intentionally different measurements, its marker omits Frequency
+instead of presenting a value that appears inconsistent with Modulation.
+
+## Symbol Table export
+
+`File > Export Symbol Table...` and the Symbol Table context menu export the
+complete selected Result Range, not the 2048-symbol UI display limit. The
+preferred extension is `.vsasymbols.json`; UTF-8, indented JSON is used rather
+than a spreadsheet format. Version 1 contains:
+
+- schema `pluto-vsa-symbol-table` and version `1`
+- source/sample-rate/center-frequency and signal-description metadata
+- modulation order, Natural mapping, Bit Ordering, and result symbol count
+- selected pattern name, normal/inverted variant, configured and actually
+  matched symbols, timing, correlation, and symbol-error count
+- an explicit `columns` array and compact `rows` arrays containing result
+  index, decimal symbol, ordered bit array, symbol-centre time, pattern index,
+  and `matched`/`mismatch`/`outside` status
+
+This schema is deliberately self-describing for Python, JavaScript, and AI
+consumers while remaining inspectable in a text editor. Symbol Table exports
+have their own last-used directory and do not embed or reopen IQ samples.
 
 ## Measurement configuration file
 
@@ -56,7 +109,7 @@ Version 1 stores all currently exposed measurement controls:
 - Signal Description modulation, symbol rate, FSK deviation, mapping, TX
   filter, and filter parameter
 - Pattern Search enable, name, format, symbols, threshold, correctness rule,
-  match-selection policy, and one-based match index
+  and binary-FSK inverted-pattern permission
 - Result Range length, reference, alignment, offset, reference numbering, and
   incomplete-range exclusion
 - Demodulation synchronization contracts, bit ordering, CFO-drift
@@ -123,12 +176,13 @@ accepted but ignored.
 
 ## Last-used folders
 
-Qt `QSettings` organization `PlutoSA`, application `PlutoVSA`, stores three
+Qt `QSettings` organization `PlutoSA`, application `PlutoVSA`, stores four
 independent directory keys:
 
 - `directories/iq`
 - `directories/pattern`
 - `directories/config`
+- `directories/symbol_table`
 
 Each corresponding Open/Save dialog starts in its own last selected folder.
 These preferences persist between application runs and do not form

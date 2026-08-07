@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
+from scipy.ndimage import uniform_filter1d
 from scipy.optimize import least_squares
 from scipy.signal import resample_poly
 
@@ -57,6 +58,51 @@ class MatchSelectionPolicy(str, Enum):
 
 
 @dataclass(frozen=True)
+class IQPowerTriggerSettings:
+    """Post-capture I/Q power trigger used to gate pattern search.
+
+    The level follows the same calibrated dBm convention as the VSA I/Q Power
+    trace.  Timing values are expressed in symbols so one configuration scales
+    naturally with the selected signal description.
+    """
+
+    enabled: bool = False
+    level_dbm: float = -20.0
+    hysteresis_db: float = 3.0
+    envelope_average_symbols: float = 1.0
+    dropout_symbols: float = 8.0
+    holdoff_symbols: float = 0.0
+    search_start_offset_symbols: float = 0.0
+    limit_result_to_active_interval: bool = True
+
+    def __post_init__(self) -> None:
+        values = (
+            self.level_dbm,
+            self.hysteresis_db,
+            self.envelope_average_symbols,
+            self.dropout_symbols,
+            self.holdoff_symbols,
+            self.search_start_offset_symbols,
+        )
+        if not all(np.isfinite(value) for value in values):
+            raise ValueError("I/Q power trigger settings must be finite")
+        if self.hysteresis_db < 0.0:
+            raise ValueError("hysteresis_db must be non-negative")
+        if self.envelope_average_symbols < 0.0:
+            raise ValueError("envelope_average_symbols must be non-negative")
+        if self.dropout_symbols < 0.0:
+            raise ValueError("dropout_symbols must be non-negative")
+        if self.holdoff_symbols < 0.0:
+            raise ValueError("holdoff_symbols must be non-negative")
+
+
+@dataclass(frozen=True)
+class IQPowerTriggerEvent:
+    trigger_sample: int
+    active_stop_sample: int
+
+
+@dataclass(frozen=True)
 class PatternSearchSettings:
     """Settings corresponding to R&S VSA ``Pattern Search``."""
 
@@ -67,6 +113,10 @@ class PatternSearchSettings:
     meas_only_if_pattern_symbols_correct: bool = True
     match_selection: MatchSelectionPolicy = MatchSelectionPolicy.FIRST
     match_index: int = 1
+    iq_power_trigger: IQPowerTriggerSettings = field(
+        default_factory=IQPowerTriggerSettings
+    )
+    allow_inverted_fsk_pattern: bool = False
 
     def __post_init__(self) -> None:
         threshold = float(self.iq_correlation_threshold)
@@ -85,6 +135,85 @@ class PatternSearchSettings:
             self.iq_correlation_threshold
         )
 
+
+def detect_iq_power_trigger_events(
+    recording: IQRecording,
+    *,
+    symbol_rate_hz: float,
+    settings: IQPowerTriggerSettings,
+) -> tuple[IQPowerTriggerEvent, ...]:
+    """Return every rising I/Q-power event and its hysteretic active interval."""
+
+    if not np.isfinite(symbol_rate_hz) or float(symbol_rate_hz) <= 0.0:
+        raise ValueError("symbol_rate_hz must be positive")
+    samples_per_symbol = float(recording.sample_rate_hz) / float(symbol_rate_hz)
+    normalized_power = (
+        np.abs(np.asarray(recording.iq, dtype=np.complex128))
+        / float(recording.full_scale)
+    ) ** 2
+    average_samples = max(
+        1,
+        int(round(float(settings.envelope_average_symbols) * samples_per_symbol)),
+    )
+    envelope_power = normalized_power
+    if average_samples > 1:
+        envelope_power = uniform_filter1d(
+            normalized_power,
+            size=average_samples,
+            mode="nearest",
+        )
+    raw_power_dbm = (
+        10.0 * np.log10(np.maximum(normalized_power, _EPSILON))
+        + recording.dbfs_to_dbm_offset_db
+    )
+    envelope_power_dbm = (
+        10.0 * np.log10(np.maximum(envelope_power, _EPSILON))
+        + recording.dbfs_to_dbm_offset_db
+    )
+    level = float(settings.level_dbm)
+    rearm_level = level - float(settings.hysteresis_db)
+    dropout_samples = max(
+        1, int(round(float(settings.dropout_symbols) * samples_per_symbol))
+    )
+    holdoff_samples = max(
+        0, int(round(float(settings.holdoff_symbols) * samples_per_symbol))
+    )
+
+    events: list[IQPowerTriggerEvent] = []
+    sample_count = int(raw_power_dbm.size)
+    cursor = 0
+    last_trigger = -holdoff_samples
+    while cursor < sample_count:
+        above = np.flatnonzero(raw_power_dbm[cursor:] >= level)
+        if above.size == 0:
+            break
+        trigger = cursor + int(above[0])
+        if trigger - last_trigger < holdoff_samples:
+            cursor = max(trigger + 1, last_trigger + holdoff_samples)
+            continue
+
+        low_run = 0
+        active_stop = sample_count
+        scan = trigger + 1
+        while scan < sample_count:
+            if envelope_power_dbm[scan] <= rearm_level:
+                low_run += 1
+                if low_run >= dropout_samples:
+                    active_stop = max(
+                        trigger + 1,
+                        scan - dropout_samples + 1 - average_samples // 2,
+                    )
+                    scan += 1
+                    break
+            else:
+                low_run = 0
+            scan += 1
+        events.append(IQPowerTriggerEvent(trigger, active_stop))
+        last_trigger = trigger
+        if active_stop >= sample_count:
+            break
+        cursor = max(scan, trigger + holdoff_samples)
+    return tuple(events)
 
 class ResultRangeReference(str, Enum):
     CAPTURE = "Capture"
@@ -690,11 +819,197 @@ class PatternAnalyzer:
             raise RuntimeError("pattern search is disabled")
         if any(symbol >= signal.modulation.order for symbol in pattern.symbols):
             raise ValueError("known pattern contains a symbol outside the modulation order")
+        if search.iq_power_trigger.enabled:
+            return self._search_power_gated(
+                recording, signal, search, result_range, demodulation
+            )
+        return self._search_ungated(
+            recording, signal, search, result_range, demodulation
+        )
+
+    def _search_ungated(
+        self,
+        recording: IQRecording,
+        signal: SignalDescription,
+        search: PatternSearchSettings,
+        result_range: ResultRangeSettings,
+        demodulation: DemodulationSettings,
+    ) -> PatternSearchResult:
         if signal.modulation.family is ModulationFamily.FSK:
             return self._search_fsk(
                 recording, signal, search, result_range, demodulation
             )
         return self._search_psk(recording, signal, search, result_range, demodulation)
+
+    def _search_power_gated(
+        self,
+        recording: IQRecording,
+        signal: SignalDescription,
+        search: PatternSearchSettings,
+        result_range: ResultRangeSettings,
+        demodulation: DemodulationSettings,
+    ) -> PatternSearchResult:
+        trigger = search.iq_power_trigger
+        events = detect_iq_power_trigger_events(
+            recording,
+            symbol_rate_hz=signal.symbol_rate_hz,
+            settings=trigger,
+        )
+        if not events:
+            raise ValueError(
+                f"no I/Q power trigger event exceeded {trigger.level_dbm:.2f} dBm"
+            )
+
+        samples_per_symbol = recording.sample_rate_hz / signal.symbol_rate_hz
+        offset_samples = int(
+            round(trigger.search_start_offset_symbols * samples_per_symbol)
+        )
+        local_search = replace(
+            search,
+            match_selection=MatchSelectionPolicy.FIRST,
+            match_index=1,
+            iq_power_trigger=replace(trigger, enabled=False),
+        )
+        matches: list[tuple[int, PatternSearchResult]] = []
+        for event_index, event in enumerate(events, start=1):
+            search_start = int(
+                np.clip(event.trigger_sample + offset_samples, 0, recording.sample_count)
+            )
+            next_trigger = (
+                events[event_index].trigger_sample
+                if event_index < len(events)
+                else recording.sample_count
+            )
+            search_stop = max(search_start, int(next_trigger))
+            if search_start >= search_stop or search_start >= event.active_stop_sample:
+                continue
+            local_recording = replace(
+                recording,
+                iq=recording.iq[search_start:search_stop],
+                start_sample_index=recording.start_sample_index + search_start,
+                trigger_sample_index=None,
+                source=f"{recording.source} | I/Q Power Trigger {event_index}",
+            )
+            try:
+                local_result = self._search_ungated(
+                    local_recording,
+                    signal,
+                    local_search,
+                    result_range,
+                    demodulation,
+                )
+            except ValueError:
+                continue
+            global_pattern_start = search_start + local_result.pattern_start_sample
+            if global_pattern_start >= event.active_stop_sample:
+                # The first eligible match occurred in the following no-signal
+                # interval, so this trigger did not contain a valid pattern.
+                continue
+            time_offset_s = search_start / recording.sample_rate_hz
+            metadata = {
+                **dict(local_result.metadata),
+                "power_trigger_enabled": True,
+                "power_trigger_level_dbm": trigger.level_dbm,
+                "power_trigger_event_index": event_index,
+                "power_trigger_sample": event.trigger_sample,
+                "power_trigger_active_stop_sample": event.active_stop_sample,
+                "power_trigger_search_start_sample": search_start,
+                "power_trigger_search_offset_symbols": (
+                    trigger.search_start_offset_symbols
+                ),
+                "power_trigger_envelope_average_symbols": (
+                    trigger.envelope_average_symbols
+                ),
+                "power_trigger_limit_result_to_active_interval": (
+                    trigger.limit_result_to_active_interval
+                ),
+            }
+            decoded_symbols = local_result.decoded_symbols
+            decoded_bits = local_result.decoded_bits
+            measured_symbols = local_result.measured_symbols
+            symbol_time_s = local_result.symbol_time_s + time_offset_s
+            global_result_stop = search_start + local_result.result_stop_sample
+            if trigger.limit_result_to_active_interval:
+                last_complete_center_s = (
+                    event.active_stop_sample / recording.sample_rate_hz
+                    - 0.5 / signal.symbol_rate_hz
+                )
+                complete_count = int(
+                    np.searchsorted(
+                        symbol_time_s,
+                        last_complete_center_s,
+                        side="right",
+                    )
+                )
+                if complete_count <= 0:
+                    continue
+                decoded_symbols = decoded_symbols[:complete_count]
+                measured_symbols = measured_symbols[:complete_count]
+                symbol_time_s = symbol_time_s[:complete_count]
+                decoded_bits = _symbols_to_bits(
+                    decoded_symbols,
+                    signal.modulation.order,
+                    demodulation.bit_ordering,
+                )
+                global_result_stop = min(
+                    global_result_stop,
+                    event.active_stop_sample,
+                )
+                metadata["burst_limited_symbol_count"] = complete_count
+            matches.append(
+                (
+                    event_index,
+                    replace(
+                        local_result,
+                        pattern_start_sample=global_pattern_start,
+                        pattern_start_time_s=(
+                            local_result.pattern_start_time_s + time_offset_s
+                        ),
+                        pattern_start_symbol=(
+                            local_result.pattern_start_symbol
+                            + int(round(search_start / samples_per_symbol))
+                        ),
+                        result_start_sample=(
+                            search_start + local_result.result_start_sample
+                        ),
+                        result_stop_sample=global_result_stop,
+                        decoded_symbols=decoded_symbols,
+                        decoded_bits=decoded_bits,
+                        measured_symbols=measured_symbols,
+                        symbol_time_s=symbol_time_s,
+                        carrier_reference_time_s=(
+                            local_result.carrier_reference_time_s + time_offset_s
+                        ),
+                        recording_sample_rate_hz=recording.sample_rate_hz,
+                        metadata=metadata,
+                    ),
+                )
+            )
+
+        if not matches:
+            raise ValueError(
+                f"no valid pattern was found in {len(events)} I/Q power trigger event(s)"
+            )
+        requested = int(search.match_index)
+        if requested > len(matches):
+            raise ValueError(
+                f"Match Index {requested} is unavailable; "
+                f"{len(matches)} triggered match(es) were found"
+            )
+        event_index, selected = matches[requested - 1]
+        return replace(
+            selected,
+            metadata={
+                **dict(selected.metadata),
+                "match_selection_policy": search.match_selection.value,
+                "selected_match_index": requested,
+                "eligible_match_count": len(matches),
+                "detected_match_count": len(matches),
+                "power_trigger_event_count": len(events),
+                "power_trigger_matched_event_count": len(matches),
+                "selected_power_trigger_event_index": event_index,
+            },
+        )
 
     def _search_fsk(
         self,
@@ -705,6 +1020,10 @@ class PatternAnalyzer:
         demodulation_settings: DemodulationSettings,
     ) -> PatternSearchResult:
         pattern = search.pattern
+        if signal.symbol_mapping != "Natural":
+            raise ValueError(
+                f"unsupported FSK modulation mapping: {signal.symbol_mapping}"
+            )
         if len(pattern.symbols) < 8:
             raise ValueError("FSK known pattern must contain at least eight bits")
         bits = np.asarray(pattern.symbols, dtype=np.uint8)
@@ -740,6 +1059,10 @@ class PatternAnalyzer:
             exclude_incomplete_result=result_range.exclude_incomplete_result,
             require_zero_pattern_errors=(
                 search.meas_only_if_pattern_symbols_correct
+            ),
+            allow_polarity_inversion=False,
+            allow_complemented_pattern_match=(
+                search.allow_inverted_fsk_pattern
             ),
         )
         selection = _result_slice(len(pattern.symbols), demodulation.bits.size, result_range)
@@ -782,7 +1105,7 @@ class PatternAnalyzer:
             ),
             frequency_deviation_hz=demodulation.frequency_deviation_hz,
             evm_rms_percent=None,
-            polarity_inverted=demodulation.iq_inverted,
+            polarity_inverted=demodulation.complemented_pattern_match,
             phase_rotation_rad=None,
             timing_phase_samples=demodulation.timing_phase_samples,
             analysis_sample_rate_hz=demodulation.analysis_sample_rate_hz,
@@ -794,6 +1117,16 @@ class PatternAnalyzer:
             metadata={
                 "pattern_name": pattern.name,
                 "pattern_symbol_count": len(pattern.symbols),
+                "pattern_match_variant": (
+                    "Inverted"
+                    if demodulation.complemented_pattern_match
+                    else "Normal"
+                ),
+                "matched_pattern_symbols": (
+                    [1 - int(symbol) for symbol in pattern.symbols]
+                    if demodulation.complemented_pattern_match
+                    else [int(symbol) for symbol in pattern.symbols]
+                ),
                 "symbol_rate_hz": signal.symbol_rate_hz,
                 "result_length": result_range.result_length,
                 "result_offset_symbols": result_range.offset_symbols,

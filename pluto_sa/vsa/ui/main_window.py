@@ -15,6 +15,7 @@ from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, Si
 from pluto_sa.vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
+    IQPowerTriggerSettings,
     KnownPattern,
     MatchSelectionPolicy,
     PatternSearchMode,
@@ -56,9 +57,14 @@ _MAX_DISPLAY_POINTS = 100_000
 _STARTUP_CONFIG_KEY = "startup/measurement_config"
 _STARTUP_CONFIG_SCHEMA = "pluto-vsa-startup-config"
 _STARTUP_CONFIG_VERSION = 1
+_SYMBOL_TABLE_EXPORT_SCHEMA = "pluto-vsa-symbol-table"
+_SYMBOL_TABLE_EXPORT_VERSION = 1
 _TRACE_COLOR = "y"
 _IQ_PLANE_LIMIT = 1.25
 _TRACE_SYMBOL_SIZE = 5.5
+_SYMBOL_PLOT_FLAT_SIZE = 6.0
+_SELECTED_MARKER_SIZE = 18.0
+_SELECTED_MARKER_COLOR = (0, 255, 255)
 _CONSTELLATION_DENSITY_BINS = 96
 _CONSTELLATION_DENSITY_SIGMA_BINS = 0.7
 _CONSTELLATION_DENSITY_RED_LEVEL = 0.75
@@ -131,6 +137,26 @@ def _constellation_display_symbols(
     }:
         values = values * np.exp(-1j * np.pi / 4.0)
     return values
+
+
+def _psk_reference_symbols(
+    modulation: ModulationKind, decoded_symbols: np.ndarray
+) -> np.ndarray:
+    """Return the ideal internal PSK vectors for decoded symbol indices."""
+    symbols = np.asarray(decoded_symbols, dtype=np.int16)
+    if modulation is ModulationKind.BPSK:
+        phases = symbols * np.pi
+    elif modulation in {
+        ModulationKind.QPSK,
+        ModulationKind.OQPSK,
+        ModulationKind.PI4_DQPSK,
+    }:
+        phases = np.pi / 4.0 + symbols * np.pi / 2.0
+    elif modulation is ModulationKind.DPSK8:
+        phases = symbols * np.pi / 4.0
+    else:
+        raise ValueError(f"{modulation.value} is not a PSK modulation")
+    return np.exp(1j * phases)
 
 
 def _constellation_density(
@@ -257,6 +283,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._result_summary_values: dict[str, str] = {}
         self._updating_result_summary_selection = False
         self._selected_match_index = 1
+        self._selected_symbol_marker_index: int | None = None
+        self._symbol_marker_items: dict[
+            str, tuple[pg.PlotDataItem, pg.TextItem]
+        ] = {}
         self._constellation_density_item: pg.ImageItem | None = None
         self.setWindowTitle("Pluto VSA - FSK / PSK")
         self.resize(1600, 960)
@@ -283,6 +313,14 @@ class VSAWindow(QtWidgets.QMainWindow):
         open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._open_iq)
         file_menu.addAction(open_action)
+        self.export_symbol_table_action = QtGui.QAction(
+            "Export Symbol Table...", self
+        )
+        self.export_symbol_table_action.triggered.connect(
+            self._export_symbol_table
+        )
+        self.export_symbol_table_action.setEnabled(False)
+        file_menu.addAction(self.export_symbol_table_action)
         file_menu.addSeparator()
         close_action = QtGui.QAction("Close", self)
         close_action.triggered.connect(self.close)
@@ -528,6 +566,15 @@ class VSAWindow(QtWidgets.QMainWindow):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems
         )
         self.symbol_table.setAlternatingRowColors(False)
+        self.symbol_table.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.symbol_table.customContextMenuRequested.connect(
+            self._show_symbol_table_context_menu
+        )
+        self.symbol_table.cellClicked.connect(
+            self._symbol_table_cell_clicked
+        )
         self.symbol_table.horizontalHeader().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Stretch
         )
@@ -726,6 +773,73 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._sync_capture_settings()
         config_pages.append(("Signal Capture", capture_page))
 
+        trigger_page = QtWidgets.QWidget()
+        trigger_form = QtWidgets.QFormLayout(trigger_page)
+        self.iq_power_trigger_check = QtWidgets.QCheckBox("I/Q Power Trigger On")
+        self.iq_power_trigger_check.setToolTip(
+            "Detect every rising power event in the current I/Q capture and "
+            "run pattern search once inside each active interval."
+        )
+        self.iq_power_trigger_level_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_level_spin.setRange(-200.0, 100.0)
+        self.iq_power_trigger_level_spin.setDecimals(2)
+        self.iq_power_trigger_level_spin.setValue(-20.0)
+        self.iq_power_trigger_level_spin.setSuffix(" dBm")
+        self.iq_power_trigger_hysteresis_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_hysteresis_spin.setRange(0.0, 60.0)
+        self.iq_power_trigger_hysteresis_spin.setDecimals(2)
+        self.iq_power_trigger_hysteresis_spin.setValue(3.0)
+        self.iq_power_trigger_hysteresis_spin.setSuffix(" dB")
+        self.iq_power_trigger_average_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_average_spin.setRange(0.0, 1_000.0)
+        self.iq_power_trigger_average_spin.setDecimals(2)
+        self.iq_power_trigger_average_spin.setValue(1.0)
+        self.iq_power_trigger_average_spin.setSuffix(" sym")
+        self.iq_power_trigger_average_spin.setToolTip(
+            "Moving average applied to linear I/Q envelope power before "
+            "threshold comparison."
+        )
+        self.iq_power_trigger_dropout_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_dropout_spin.setRange(0.0, 1_000_000.0)
+        self.iq_power_trigger_dropout_spin.setDecimals(2)
+        self.iq_power_trigger_dropout_spin.setValue(8.0)
+        self.iq_power_trigger_dropout_spin.setSuffix(" sym")
+        self.iq_power_trigger_dropout_spin.setToolTip(
+            "Power must remain below Level - Hysteresis for this duration "
+            "before another trigger can be detected."
+        )
+        self.iq_power_trigger_holdoff_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_holdoff_spin.setRange(0.0, 1_000_000.0)
+        self.iq_power_trigger_holdoff_spin.setDecimals(2)
+        self.iq_power_trigger_holdoff_spin.setValue(0.0)
+        self.iq_power_trigger_holdoff_spin.setSuffix(" sym")
+        self.iq_power_trigger_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_offset_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self.iq_power_trigger_offset_spin.setDecimals(3)
+        self.iq_power_trigger_offset_spin.setValue(0.0)
+        self.iq_power_trigger_offset_spin.setSuffix(" sym")
+        self.iq_power_trigger_offset_spin.setToolTip(
+            "Signed offset from each trigger event to the pattern-search start; "
+            "positive values delay the search and negative values include pre-trigger data."
+        )
+        self.iq_power_trigger_limit_result_check = QtWidgets.QCheckBox(
+            "Limit Result Range to Active Interval"
+        )
+        self.iq_power_trigger_limit_result_check.setChecked(True)
+        self.iq_power_trigger_limit_result_check.setToolTip(
+            "Keep only complete symbols ending before the hysteretic burst stop. "
+            "Disable for OOK or signals whose valid data contains long power gaps."
+        )
+        trigger_form.addRow(self.iq_power_trigger_check)
+        trigger_form.addRow("Level", self.iq_power_trigger_level_spin)
+        trigger_form.addRow("Hysteresis", self.iq_power_trigger_hysteresis_spin)
+        trigger_form.addRow("Envelope Average", self.iq_power_trigger_average_spin)
+        trigger_form.addRow("Drop-Out Time", self.iq_power_trigger_dropout_spin)
+        trigger_form.addRow("Holdoff", self.iq_power_trigger_holdoff_spin)
+        trigger_form.addRow("Search Start Offset", self.iq_power_trigger_offset_spin)
+        trigger_form.addRow(self.iq_power_trigger_limit_result_check)
+        config_pages.append(("Trigger", trigger_page))
+
         pattern_page = QtWidgets.QWidget()
         pattern_layout = QtWidgets.QVBoxLayout(pattern_page)
         pattern_form = QtWidgets.QFormLayout()
@@ -775,12 +889,21 @@ class VSAWindow(QtWidgets.QMainWindow):
             "Meas only if Pattern Symbols Correct"
         )
         self.pattern_meas_only_check.setChecked(True)
+        self.pattern_allow_inverted_fsk_check = QtWidgets.QCheckBox(
+            "Allow Inverted Pattern Match (FSK only)"
+        )
+        self.pattern_allow_inverted_fsk_check.setChecked(False)
+        self.pattern_allow_inverted_fsk_check.setToolTip(
+            "Also search the bitwise complement of the configured binary FSK "
+            "pattern. Decoded symbols remain in Natural mapping."
+        )
         pattern_form.addRow(self.pattern_search_check)
         pattern_form.addRow("Name", self.pattern_name_edit)
         pattern_form.addRow("Symbol Format", self.pattern_format_combo)
         pattern_form.addRow("I/Q Correlation Threshold", self.pattern_threshold_spin)
         pattern_form.addRow(self.pattern_threshold_auto)
         pattern_form.addRow(self.pattern_meas_only_check)
+        pattern_form.addRow(self.pattern_allow_inverted_fsk_check)
         pattern_layout.addLayout(pattern_form)
         pattern_layout.addWidget(QtWidgets.QLabel("Pattern Symbols"))
         pattern_layout.addWidget(self.pattern_symbol_table, 1)
@@ -1122,6 +1245,29 @@ class VSAWindow(QtWidgets.QMainWindow):
         menu = self._create_result_summary_context_menu()
         menu.exec(self.result_summary.mapToGlobal(position))
 
+    def _create_symbol_table_context_menu(self) -> QtWidgets.QMenu:
+        menu = QtWidgets.QMenu(self.symbol_table)
+        export_action = menu.addAction("Export Symbol Table...")
+        export_action.setEnabled(self.session.result is not None)
+        export_action.triggered.connect(self._export_symbol_table)
+        return menu
+
+    def _show_symbol_table_context_menu(self, position: QtCore.QPoint) -> None:
+        menu = self._create_symbol_table_context_menu()
+        menu.exec(self.symbol_table.viewport().mapToGlobal(position))
+
+    def _symbol_table_cell_clicked(self, row: int, column: int) -> None:
+        item = self.symbol_table.item(int(row), int(column))
+        if item is None:
+            return
+        symbol_index = int(row) * self.symbol_table.columnCount() + int(column)
+        self._selected_symbol_marker_index = (
+            None
+            if self._selected_symbol_marker_index == symbol_index
+            else symbol_index
+        )
+        self._update_plots(reset_ranges=False)
+
     def _show_config_top(self) -> None:
         self._show_config_page(0)
 
@@ -1320,6 +1466,145 @@ class VSAWindow(QtWidgets.QMainWindow):
         except ValueError as error:
             QtWidgets.QMessageBox.critical(self, "Pattern Load Error", str(error))
 
+    def _symbol_table_export_document(self) -> dict[str, object]:
+        result = self.session.result
+        signal = self.session.signal
+        recording = self.session.recording
+        if result is None or signal is None or recording is None:
+            raise RuntimeError("no analyzed Symbol Table is available")
+        pattern_result = self.session.pattern_result
+        symbols = np.asarray(
+            pattern_result.decoded_symbols
+            if pattern_result is not None
+            else result.decoded_symbols,
+            dtype=np.int16,
+        )
+        symbol_times = np.asarray(
+            pattern_result.symbol_time_s
+            if pattern_result is not None
+            else result.symbol_time_s,
+            dtype=np.float64,
+        )
+        bit_width = int(round(np.log2(signal.modulation.order)))
+        lsb_first = self.bit_order_combo.currentText() == BitOrdering.LSB.value
+        matched_pattern_symbols: tuple[int, ...] = ()
+        pattern_metadata: dict[str, object] | None = None
+        if pattern_result is not None:
+            matched_pattern_symbols = tuple(
+                int(value)
+                for value in pattern_result.metadata.get(
+                    "matched_pattern_symbols",
+                    self._parse_pattern_symbols(pattern_result.modulation.order),
+                )
+            )
+            pattern_metadata = {
+                "name": str(pattern_result.metadata.get("pattern_name", "")),
+                "match_variant": str(
+                    pattern_result.metadata.get("pattern_match_variant", "Normal")
+                ),
+                "configured_symbols": list(
+                    self._parse_pattern_symbols(pattern_result.modulation.order)
+                ),
+                "matched_symbols": list(matched_pattern_symbols),
+                "start_sample": int(pattern_result.pattern_start_sample),
+                "start_time_s": float(pattern_result.pattern_start_time_s),
+                "symbol_count": len(matched_pattern_symbols),
+                "symbol_errors": int(pattern_result.pattern_symbol_errors),
+                "correlation": float(pattern_result.correlation),
+            }
+
+        rows: list[list[object]] = []
+        for index, symbol_value in enumerate(symbols):
+            symbol = int(symbol_value)
+            ordered_bits = [
+                (symbol >> shift) & 1
+                for shift in (
+                    range(bit_width)
+                    if lsb_first
+                    else range(bit_width - 1, -1, -1)
+                )
+            ]
+            time_s = (
+                float(symbol_times[index])
+                if index < symbol_times.size
+                else None
+            )
+            pattern_index: int | None = None
+            pattern_status = "outside"
+            if pattern_result is not None and time_s is not None:
+                candidate_index = int(
+                    np.floor(
+                        (time_s - pattern_result.pattern_start_time_s)
+                        * float(pattern_result.metadata["symbol_rate_hz"])
+                        + 1e-6
+                    )
+                )
+                if 0 <= candidate_index < len(matched_pattern_symbols):
+                    pattern_index = candidate_index
+                    pattern_status = (
+                        "matched"
+                        if symbol == matched_pattern_symbols[candidate_index]
+                        else "mismatch"
+                    )
+            rows.append(
+                [index, symbol, ordered_bits, time_s, pattern_index, pattern_status]
+            )
+
+        return {
+            "schema": _SYMBOL_TABLE_EXPORT_SCHEMA,
+            "version": _SYMBOL_TABLE_EXPORT_VERSION,
+            "metadata": {
+                "source": recording.source,
+                "center_frequency_hz": float(recording.center_frequency_hz),
+                "sample_rate_hz": float(recording.sample_rate_hz),
+                "modulation": signal.modulation.value,
+                "modulation_order": int(signal.modulation.order),
+                "symbol_rate_hz": float(signal.symbol_rate_hz),
+                "symbol_mapping": signal.symbol_mapping,
+                "bit_ordering": self.bit_order_combo.currentText(),
+                "result_symbol_count": int(symbols.size),
+                "pattern": pattern_metadata,
+            },
+            "columns": [
+                "index",
+                "symbol",
+                "bits",
+                "time_s",
+                "pattern_index",
+                "pattern_status",
+            ],
+            "rows": rows,
+        }
+
+    def _export_symbol_table(self) -> None:
+        try:
+            document = self._symbol_table_export_document()
+        except RuntimeError as error:
+            self.statusBar().showMessage(str(error))
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export Symbol Table",
+            self._last_directory("symbol_table"),
+            "VSA Symbol Table (*.vsasymbols.json);;JSON files (*.json)",
+        )
+        if not path:
+            return
+        path = self._with_suffix(path, ".vsasymbols.json")
+        self._remember_directory("symbol_table", path)
+        try:
+            Path(path).write_text(
+                json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            self.statusBar().showMessage(
+                f"Symbol Table exported - {Path(path).name}"
+            )
+        except OSError as error:
+            QtWidgets.QMessageBox.critical(
+                self, "Symbol Table Export Error", str(error)
+            )
+
     def _meas_config_values(self) -> dict[str, object]:
         return {
             "input_frontend": {
@@ -1350,6 +1635,22 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "tx_filter": self.tx_filter_combo.currentText(),
                 "filter_parameter": self.filter_parameter_spin.value(),
             },
+            "iq_power_trigger": {
+                "enabled": self.iq_power_trigger_check.isChecked(),
+                "level_dbm": self.iq_power_trigger_level_spin.value(),
+                "hysteresis_db": self.iq_power_trigger_hysteresis_spin.value(),
+                "envelope_average_symbols": (
+                    self.iq_power_trigger_average_spin.value()
+                ),
+                "dropout_symbols": self.iq_power_trigger_dropout_spin.value(),
+                "holdoff_symbols": self.iq_power_trigger_holdoff_spin.value(),
+                "search_start_offset_symbols": (
+                    self.iq_power_trigger_offset_spin.value()
+                ),
+                "limit_result_to_active_interval": (
+                    self.iq_power_trigger_limit_result_check.isChecked()
+                ),
+            },
             "pattern_search": {
                 "enabled": self.pattern_search_check.isChecked(),
                 "name": self.pattern_name_edit.text(),
@@ -1362,6 +1663,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "threshold_auto": self.pattern_threshold_auto.isChecked(),
                 "threshold_percent": self.pattern_threshold_spin.value(),
                 "meas_only_if_correct": self.pattern_meas_only_check.isChecked(),
+                "allow_inverted_fsk_pattern": (
+                    self.pattern_allow_inverted_fsk_check.isChecked()
+                ),
             },
             "result_range": {
                 "length_symbols": self.result_length_spin.value(),
@@ -1447,6 +1751,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             source = settings["input_frontend"]
             signal = settings["signal_description"]
             pattern = settings["pattern_search"]
+            iq_power_trigger = settings.get("iq_power_trigger", {})
             result_range = settings["result_range"]
             demodulation = settings["demodulation"]
             signal_capture = settings.get("signal_capture", {})
@@ -1456,6 +1761,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 source,
                 signal,
                 pattern,
+                iq_power_trigger,
                 result_range,
                 demodulation,
                 signal_capture,
@@ -1502,6 +1808,42 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.pattern_threshold_auto.setChecked(bool(pattern["threshold_auto"]))
             self.pattern_threshold_spin.setValue(float(pattern["threshold_percent"]))
             self.pattern_meas_only_check.setChecked(bool(pattern["meas_only_if_correct"]))
+            self.pattern_allow_inverted_fsk_check.setChecked(
+                bool(pattern.get("allow_inverted_fsk_pattern", False))
+            )
+            if iq_power_trigger:
+                self.iq_power_trigger_check.setChecked(
+                    bool(iq_power_trigger.get("enabled", False))
+                )
+                self.iq_power_trigger_level_spin.setValue(
+                    float(iq_power_trigger.get("level_dbm", -20.0))
+                )
+                self.iq_power_trigger_hysteresis_spin.setValue(
+                    float(iq_power_trigger.get("hysteresis_db", 3.0))
+                )
+                self.iq_power_trigger_average_spin.setValue(
+                    float(iq_power_trigger.get("envelope_average_symbols", 1.0))
+                )
+                self.iq_power_trigger_dropout_spin.setValue(
+                    float(iq_power_trigger.get("dropout_symbols", 8.0))
+                )
+                self.iq_power_trigger_holdoff_spin.setValue(
+                    float(iq_power_trigger.get("holdoff_symbols", 0.0))
+                )
+                self.iq_power_trigger_offset_spin.setValue(
+                    float(
+                        iq_power_trigger.get(
+                            "search_start_offset_symbols", 0.0
+                        )
+                    )
+                )
+                self.iq_power_trigger_limit_result_check.setChecked(
+                    bool(
+                        iq_power_trigger.get(
+                            "limit_result_to_active_interval", True
+                        )
+                    )
+                )
             self.result_length_spin.setValue(int(result_range["length_symbols"]))
             self._set_combo_text(self.result_reference_combo, result_range["reference"], "result reference")
             self._set_combo_text(self.result_alignment_combo, result_range["alignment"], "result alignment")
@@ -1737,6 +2079,10 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _sync_signal_controls(self) -> None:
         modulation = self._selected_modulation()
         self.deviation_spin.setEnabled(modulation.family is ModulationFamily.FSK)
+        if hasattr(self, "pattern_allow_inverted_fsk_check"):
+            self.pattern_allow_inverted_fsk_check.setEnabled(
+                modulation.family is ModulationFamily.FSK
+            )
         if modulation is ModulationKind.GFSK:
             self.tx_filter_combo.setCurrentText("Gaussian")
         if hasattr(self, "pattern_symbol_table"):
@@ -1900,8 +2246,28 @@ class VSAWindow(QtWidgets.QMainWindow):
             meas_only_if_pattern_symbols_correct=(
                 self.pattern_meas_only_check.isChecked()
             ),
+            allow_inverted_fsk_pattern=(
+                self.pattern_allow_inverted_fsk_check.isChecked()
+                and signal.modulation.family is ModulationFamily.FSK
+            ),
             match_selection=MatchSelectionPolicy.INDEX,
             match_index=self._selected_match_index,
+            iq_power_trigger=IQPowerTriggerSettings(
+                enabled=self.iq_power_trigger_check.isChecked(),
+                level_dbm=self.iq_power_trigger_level_spin.value(),
+                hysteresis_db=self.iq_power_trigger_hysteresis_spin.value(),
+                envelope_average_symbols=(
+                    self.iq_power_trigger_average_spin.value()
+                ),
+                dropout_symbols=self.iq_power_trigger_dropout_spin.value(),
+                holdoff_symbols=self.iq_power_trigger_holdoff_spin.value(),
+                search_start_offset_symbols=(
+                    self.iq_power_trigger_offset_spin.value()
+                ),
+                limit_result_to_active_interval=(
+                    self.iq_power_trigger_limit_result_check.isChecked()
+                ),
+            ),
         )
         result_range = ResultRangeSettings(
             result_length=self.result_length_spin.value(),
@@ -2018,6 +2384,7 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _analyze(self) -> bool:
         if self.session.recording is None:
             return False
+        self._selected_symbol_marker_index = None
         try:
             signal = self._signal_from_controls()
             self.session.set_signal(signal)
@@ -2144,11 +2511,174 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
         )
 
+    def _add_selected_symbol_marker(
+        self,
+        name: str,
+        plot: pg.PlotWidget,
+        x_value: float,
+        y_value: float,
+        text: str,
+    ) -> None:
+        if not np.isfinite(x_value) or not np.isfinite(y_value):
+            return
+        x_range, y_range = plot.viewRange()
+        anchor_x = 0.0 if x_value <= float(np.mean(x_range)) else 1.0
+        anchor_y = 1.0 if y_value <= float(np.mean(y_range)) else 0.0
+        point = plot.plot(
+            [x_value],
+            [y_value],
+            pen=None,
+            symbol="d",
+            symbolSize=_SELECTED_MARKER_SIZE,
+            symbolBrush=pg.mkBrush(*_SELECTED_MARKER_COLOR),
+            symbolPen=pg.mkPen(0, 0, 0, 255, width=2.0),
+        )
+        point.setZValue(1000.0)
+        label = pg.TextItem(
+            text=text,
+            color=_SELECTED_MARKER_COLOR,
+            fill=pg.mkBrush(0, 0, 0, 210),
+            border=pg.mkPen(*_SELECTED_MARKER_COLOR, 190, width=1),
+            anchor=(anchor_x, anchor_y),
+        )
+        label.setPos(float(x_value), float(y_value))
+        label.setZValue(1001.0)
+        plot.addItem(label)
+        self._symbol_marker_items[name] = (point, label)
+
+    def _draw_selected_symbol_markers(
+        self,
+        context: dict[str, object],
+    ) -> None:
+        symbol_index = self._selected_symbol_marker_index
+        if symbol_index is None:
+            return
+        symbol_times_s = np.asarray(
+            context.get("symbol_times_s", ()), dtype=np.float64
+        )
+        symbol_power_dbm = np.asarray(
+            context.get("symbol_power_dbm", ()), dtype=np.float64
+        )
+        if (
+            symbol_index < 0
+            or symbol_index >= symbol_times_s.size
+            or symbol_index >= symbol_power_dbm.size
+        ):
+            self._selected_symbol_marker_index = None
+            return
+        symbol_time_ms = float(symbol_times_s[symbol_index]) * 1e3
+        power_dbm = float(symbol_power_dbm[symbol_index])
+        self._add_selected_symbol_marker(
+            "iq_power",
+            self.zero_span_plot,
+            symbol_time_ms,
+            power_dbm,
+            f"Symbol: {symbol_index}\nPower: {power_dbm:+.2f} dBm",
+        )
+
+        signal = self.session.signal
+        if signal is None:
+            return
+        if signal.modulation.family is ModulationFamily.FSK:
+            modulation_frequency_hz = np.asarray(
+                context.get("modulation_frequency_hz", ()), dtype=np.float64
+            )
+            symbol_frequency_hz = np.asarray(
+                context.get("symbol_frequency_hz", ()), dtype=np.float64
+            )
+            phase_difference = np.asarray(
+                context.get("symbol_plot_vectors", ()), dtype=np.complex128
+            )
+            if symbol_index < modulation_frequency_hz.size:
+                frequency_khz = float(modulation_frequency_hz[symbol_index]) / 1e3
+                self._add_selected_symbol_marker(
+                    "modulation",
+                    self.modulation_plot,
+                    symbol_time_ms,
+                    frequency_khz,
+                    f"Symbol: {symbol_index}\nFrequency: {frequency_khz:+.3f} kHz",
+                )
+            if (
+                symbol_index < phase_difference.size
+                and symbol_index < symbol_frequency_hz.size
+            ):
+                vector = complex(phase_difference[symbol_index])
+                amplitude = abs(vector)
+                phase_degree = float(np.degrees(np.angle(vector)))
+                self._add_selected_symbol_marker(
+                    "symbol_plot",
+                    self.symbol_plot,
+                    vector.real,
+                    vector.imag,
+                    (
+                        f"Symbol: {symbol_index}\n"
+                        f"Amplitude: {amplitude:.4f}\n"
+                        f"Phase: {phase_degree:+.2f} degree"
+                    ),
+                )
+            return
+
+        modulation_vectors = np.asarray(
+            context.get("modulation_vectors", ()), dtype=np.complex128
+        )
+        symbol_plot_vectors = np.asarray(
+            context.get("symbol_plot_vectors", ()), dtype=np.complex128
+        )
+        raw_symbol_vectors = np.asarray(
+            context.get("raw_symbol_vectors", ()), dtype=np.complex128
+        )
+        decoded_symbols = np.asarray(
+            context.get("decoded_symbols", ()), dtype=np.int16
+        )
+        if symbol_index < modulation_vectors.size:
+            vector = complex(modulation_vectors[symbol_index])
+            self._add_selected_symbol_marker(
+                "modulation",
+                self.modulation_plot,
+                vector.real,
+                vector.imag,
+                (
+                    f"Symbol: {symbol_index}\n"
+                    f"Amplitude: {abs(vector):.4f}\n"
+                    f"Phase: {np.degrees(np.angle(vector)):+.2f} degree"
+                ),
+            )
+        if (
+            symbol_index < symbol_plot_vectors.size
+            and symbol_index < raw_symbol_vectors.size
+            and symbol_index < decoded_symbols.size
+        ):
+            vector = complex(symbol_plot_vectors[symbol_index])
+            reference = complex(
+                _psk_reference_symbols(
+                    signal.modulation,
+                    decoded_symbols[symbol_index : symbol_index + 1],
+                )[0]
+            )
+            evm_percent = (
+                100.0
+                * abs(complex(raw_symbol_vectors[symbol_index]) - reference)
+                / max(abs(reference), np.finfo(np.float64).tiny)
+            )
+            self._add_selected_symbol_marker(
+                "symbol_plot",
+                self.symbol_plot,
+                vector.real,
+                vector.imag,
+                (
+                    f"Symbol: {symbol_index}\n"
+                    f"Amplitude: {abs(vector):.4f}\n"
+                    f"Phase: {np.degrees(np.angle(vector)):+.2f} degree\n"
+                    f"EVM: {evm_percent:.2f} %"
+                ),
+            )
+
     def _update_plots(self, *, reset_ranges: bool = False) -> None:
         result = self.session.result
         signal = self.session.signal
         if result is None or signal is None:
             return
+        self._symbol_marker_items = {}
         if reset_ranges:
             for _name, plot in self._plot_widgets():
                 plot.enableAutoRange(enable=True)
@@ -2171,10 +2701,16 @@ class VSAWindow(QtWidgets.QMainWindow):
             if self.session.pattern_result is not None
             else result.symbol_time_s
         )
+        symbol_power_dbm = (
+            np.interp(symbol_times_s, result.time_s, result.power_dbm)
+            if symbol_times_s.size
+            else np.empty(0, dtype=np.float64)
+        )
+        marker_context: dict[str, object] = {
+            "symbol_times_s": symbol_times_s,
+            "symbol_power_dbm": symbol_power_dbm,
+        }
         if self.symbol_display_action.isChecked() and symbol_times_s.size:
-            symbol_power_dbm = np.interp(
-                symbol_times_s, result.time_s, result.power_dbm
-            )
             self._plot_symbol_points(
                 self.zero_span_plot,
                 symbol_times_s * 1e3,
@@ -2221,16 +2757,30 @@ class VSAWindow(QtWidgets.QMainWindow):
                 display_result.instantaneous_frequency_hz[capture_slice] / 1e3,
                 pen=pg.mkPen(_TRACE_COLOR, width=1),
             )
-            if self.symbol_display_action.isChecked() and symbol_times_s.size:
-                symbol_frequency_khz = np.interp(
+            modulation_frequency_hz = (
+                np.interp(
                     symbol_times_s,
                     display_result.time_s,
                     display_result.instantaneous_frequency_hz,
-                ) / 1e3
+                )
+                if symbol_times_s.size
+                else np.empty(0, dtype=np.float64)
+            )
+            marker_context["modulation_frequency_hz"] = (
+                modulation_frequency_hz
+            )
+            if (
+                self.symbol_display_action.isChecked()
+                and symbol_times_s.size
+                and modulation_frequency_hz.size
+            ):
+                symbol_count = min(
+                    symbol_times_s.size, modulation_frequency_hz.size
+                )
                 self._plot_symbol_points(
                     self.modulation_plot,
-                    symbol_times_s * 1e3,
-                    symbol_frequency_khz,
+                    symbol_times_s[:symbol_count] * 1e3,
+                    modulation_frequency_hz[:symbol_count] / 1e3,
                 )
             if reset_ranges and signal.frequency_deviation_hz is not None:
                 y_limit_khz = 1.5 * signal.frequency_deviation_hz / 1e3
@@ -2258,6 +2808,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                 measured_frequency_hz,
                 signal.symbol_rate_hz,
             )
+            marker_context["symbol_frequency_hz"] = measured_frequency_hz
+            marker_context["symbol_plot_vectors"] = phase_difference
             phase_slice = _decimation_indices(
                 phase_difference.size, maximum=20_000
             )
@@ -2324,6 +2876,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
                 processed_iq = processed_iq / trajectory_rms
                 symbol_iq = symbol_iq / trajectory_rms
+            marker_context["modulation_vectors"] = symbol_iq
             pattern_result = self.session.pattern_result
             if pattern_result is not None:
                 in_result_range = (
@@ -2381,8 +2934,18 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if self.session.pattern_result is not None
                 else display_result.measured_symbols
             )
+            raw_constellation_symbols = np.asarray(
+                constellation_symbols, dtype=np.complex128
+            )
             constellation_symbols = _constellation_display_symbols(
                 signal.modulation, constellation_symbols
+            )
+            marker_context["raw_symbol_vectors"] = raw_constellation_symbols
+            marker_context["symbol_plot_vectors"] = constellation_symbols
+            marker_context["decoded_symbols"] = (
+                self.session.pattern_result.decoded_symbols
+                if self.session.pattern_result is not None
+                else display_result.decoded_symbols
             )
             self._plot_symbol_distribution(
                 constellation_symbols,
@@ -2398,6 +2961,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.symbol_plot.setYRange(
                     -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
                 )
+        self._draw_selected_symbol_markers(marker_context)
         pattern_result = self.session.pattern_result
         symbols = (
             pattern_result.decoded_symbols
@@ -2408,6 +2972,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             "modulation": signal.modulation.value,
             "result_symbols": str(symbols.size),
         }
+        self.export_symbol_table_action.setEnabled(True)
         finite_power_dbm = spectrum_result.power_dbm[
             np.isfinite(spectrum_result.power_dbm)
         ]
@@ -2443,10 +3008,23 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if signal.modulation.family is ModulationFamily.FSK
                 else pattern_result.carrier_frequency_drift_hz_per_s
             )
+            selected_result_text = (
+                f"{pattern_result.metadata.get('selected_match_index', 1)} / "
+                f"{pattern_result.metadata.get('eligible_match_count', 1)}"
+            )
+            if pattern_result.metadata.get("power_trigger_enabled", False):
+                selected_result_text += (
+                    " (Trigger "
+                    f"{pattern_result.metadata.get('selected_power_trigger_event_index', 1)} / "
+                    f"{pattern_result.metadata.get('power_trigger_event_count', 1)})"
+                )
             summary_values.update(
                 {
                     "pattern_symbols_correct": (
                         "Yes" if pattern_result.pattern_symbol_errors == 0 else "No"
+                    ),
+                    "pattern_match_variant": str(
+                        pattern_result.metadata.get("pattern_match_variant", "Normal")
                     ),
                     "iq_correlation": f"{pattern_result.correlation * 100.0:.2f} %",
                     "carrier_frequency_error": (
@@ -2456,10 +3034,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                         f"{(analysis_center_hz + pattern_result.carrier_frequency_offset_hz) / 1e6:.6f} MHz"
                     ),
                     "display": display_name,
-                    "match_selection": (
-                        f"{pattern_result.metadata.get('selected_match_index', 1)} / "
-                        f"{pattern_result.metadata.get('eligible_match_count', 1)}"
-                    ),
+                    "match_selection": selected_result_text,
                 }
             )
             if signal.modulation.family is ModulationFamily.PSK:
@@ -2585,11 +3160,16 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_table.setVerticalHeaderLabels(
             [str(row * 10) for row in range(row_count)]
         )
-        matched_pattern_symbols = (
-            self._parse_pattern_symbols(pattern_result.modulation.order)
-            if pattern_result is not None
-            else ()
-        )
+        matched_pattern_symbols = ()
+        if pattern_result is not None:
+            configured_symbols = self._parse_pattern_symbols(
+                pattern_result.modulation.order
+            )
+            matched_pattern_symbols = (
+                tuple(1 - int(symbol) for symbol in configured_symbols)
+                if pattern_result.metadata.get("pattern_match_variant") == "Inverted"
+                else configured_symbols
+            )
         for index, symbol in enumerate(shown):
             item = QtWidgets.QTableWidgetItem(str(int(symbol)))
             item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -2609,6 +3189,14 @@ class VSAWindow(QtWidgets.QMainWindow):
                     item.setBackground(QtGui.QColor(24, 112, 55))
                     item.setForeground(QtGui.QColor(255, 255, 255))
             self.symbol_table.setItem(index // 10, index % 10, item)
+        if (
+            self._selected_symbol_marker_index is not None
+            and self._selected_symbol_marker_index < shown.size
+        ):
+            marker_index = self._selected_symbol_marker_index
+            self.symbol_table.setCurrentCell(marker_index // 10, marker_index % 10)
+        else:
+            self.symbol_table.clearSelection()
         self.symbol_table.setToolTip(
             f"Showing {shown.size} of {symbols.size} result-range symbols"
         )
@@ -2644,7 +3232,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 values.imag,
                 pen=None,
                 symbol="o",
-                symbolSize=6,
+                symbolSize=_SYMBOL_PLOT_FLAT_SIZE,
                 symbolBrush=pg.mkBrush(_TRACE_COLOR),
                 symbolPen=pg.mkPen(_TRACE_COLOR),
             )

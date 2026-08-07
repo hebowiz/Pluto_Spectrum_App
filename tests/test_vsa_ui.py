@@ -274,6 +274,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             "Input / Frontend",
             "Signal Description",
             "Signal Capture",
+            "Trigger",
             "Pattern Search",
             "Result Range",
             "Demodulation",
@@ -458,6 +459,138 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             for row in range(window.result_summary.rowCount())
         }
         assert summary["Display"] == "Raw IQ"
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_symbol_table_click_places_and_toggles_fsk_plot_markers(tmp_path) -> None:
+    pg.mkQApp("VSA FSK symbol marker test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "fsk-symbol-marker")
+    )
+    try:
+        window._load_generated(ModulationKind.GFSK)
+        expected = np.asarray(window.session.recording.metadata["generated_symbols"])
+        window.pattern_search_check.setChecked(True)
+        window._set_pattern_symbols(expected[20:52])
+        window.result_length_spin.setValue(64)
+        assert window._analyze()
+
+        symbol_index = 7
+        window._symbol_table_cell_clicked(0, symbol_index)
+
+        assert window._selected_symbol_marker_index == symbol_index
+        assert set(window._symbol_marker_items) == {
+            "iq_power",
+            "modulation",
+            "symbol_plot",
+        }
+        power_point, power_label = window._symbol_marker_items["iq_power"]
+        modulation_point, modulation_label = window._symbol_marker_items[
+            "modulation"
+        ]
+        symbol_point, symbol_label = window._symbol_marker_items["symbol_plot"]
+        assert power_point.opts["symbolSize"] == pytest.approx(18.0)
+        assert modulation_point.opts["symbolSize"] == pytest.approx(18.0)
+        assert symbol_point.opts["symbolSize"] == pytest.approx(18.0)
+        assert power_point.opts["symbolBrush"].color().getRgb()[:3] == (
+            0,
+            255,
+            255,
+        )
+        power_text = power_label.textItem.toPlainText()
+        modulation_text = modulation_label.textItem.toPlainText()
+        symbol_text = symbol_label.textItem.toPlainText()
+        assert f"Symbol: {symbol_index}" in power_text
+        assert "Power:" in power_text and "dBm" in power_text
+        assert f"Symbol: {symbol_index}" in modulation_text
+        assert "Frequency:" in modulation_text and "kHz" in modulation_text
+        assert f"Symbol: {symbol_index}" in symbol_text
+        assert "Amplitude:" in symbol_text
+        assert "Phase:" in symbol_text and "degree" in symbol_text
+        assert "Frequency:" not in symbol_text
+
+        marker_x, marker_y = power_point.getData()
+        result = window.session.result
+        pattern_result = window.session.pattern_result
+        expected_time_s = float(pattern_result.symbol_time_s[symbol_index])
+        expected_power = float(
+            np.interp(expected_time_s, result.time_s, result.power_dbm)
+        )
+        assert marker_x[0] == pytest.approx(expected_time_s * 1e3)
+        assert marker_y[0] == pytest.approx(expected_power)
+
+        _modulation_x, modulation_y = modulation_point.getData()
+        symbol_i, symbol_q = symbol_point.getData()
+        symbol_plot_frequency_hz = (
+            np.angle(complex(symbol_i[0], symbol_q[0]))
+            * window.session.signal.symbol_rate_hz
+            / (2.0 * np.pi)
+        )
+        display_result = window.session.carrier_corrected_result
+        assert modulation_y[0] * 1e3 == pytest.approx(
+            float(
+                np.interp(
+                    expected_time_s,
+                    display_result.time_s,
+                    display_result.instantaneous_frequency_hz,
+                )
+            )
+        )
+        assert symbol_plot_frequency_hz == pytest.approx(
+            float(np.real(pattern_result.measured_symbols[symbol_index]))
+        )
+
+        window._symbol_table_cell_clicked(0, symbol_index)
+        assert window._selected_symbol_marker_index is None
+        assert window._symbol_marker_items == {}
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_symbol_table_click_places_psk_amplitude_phase_and_evm_markers(
+    tmp_path,
+) -> None:
+    pg.mkQApp("VSA PSK symbol marker test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "psk-symbol-marker")
+    )
+    try:
+        window._load_generated(ModulationKind.PI4_DQPSK)
+        expected = np.asarray(window.session.recording.metadata["generated_symbols"])
+        window.pattern_search_check.setChecked(True)
+        window._set_pattern_symbols(expected[20:36])
+        window.result_length_spin.setValue(80)
+        assert window._analyze()
+
+        symbol_index = 9
+        window._symbol_table_cell_clicked(0, symbol_index)
+
+        assert set(window._symbol_marker_items) == {
+            "iq_power",
+            "modulation",
+            "symbol_plot",
+        }
+        modulation_text = window._symbol_marker_items[
+            "modulation"
+        ][1].textItem.toPlainText()
+        symbol_text = window._symbol_marker_items[
+            "symbol_plot"
+        ][1].textItem.toPlainText()
+        assert f"Symbol: {symbol_index}" in modulation_text
+        assert "Amplitude:" in modulation_text
+        assert "Phase:" in modulation_text and "degree" in modulation_text
+        assert f"Symbol: {symbol_index}" in symbol_text
+        assert "Amplitude:" in symbol_text
+        assert "Phase:" in symbol_text and "degree" in symbol_text
+        assert "EVM:" in symbol_text and "%" in symbol_text
+        assert "Frequency:" not in symbol_text
     finally:
         window._meas_config_dialog.close()
         window.close()
@@ -763,6 +896,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.pattern_format_combo.setCurrentText("Decimal")
         window._set_pattern_symbols([0, 1, 1, 0, 1, 0])
         window.pattern_name_edit.setText("Saved Pattern")
+        window.pattern_allow_inverted_fsk_check.setChecked(True)
         window.result_length_spin.setValue(73)
         window.exclude_incomplete_result_check.setChecked(True)
         window.bit_order_combo.setCurrentText("LSB")
@@ -776,14 +910,24 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.internal_gain_spin.setValue(12)
         window.external_attenuation_spin.setValue(30.0)
         window.external_gain_spin.setValue(3.0)
+        window.iq_power_trigger_check.setChecked(True)
+        window.iq_power_trigger_level_spin.setValue(-18.5)
+        window.iq_power_trigger_hysteresis_spin.setValue(4.0)
+        window.iq_power_trigger_average_spin.setValue(1.5)
+        window.iq_power_trigger_dropout_spin.setValue(12.0)
+        window.iq_power_trigger_holdoff_spin.setValue(20.0)
+        window.iq_power_trigger_offset_spin.setValue(1.5)
+        window.iq_power_trigger_limit_result_check.setChecked(False)
         window._apply_result_summary_preset("diagnostics")
         window.constellation_density_action.setChecked(True)
         selected_summary_items = set(window._selected_result_summary_ids)
         saved = window._meas_config_values()
         assert "match_selection" not in saved["pattern_search"]
         assert "match_index" not in saved["pattern_search"]
+        assert saved["pattern_search"]["allow_inverted_fsk_pattern"] is True
 
         window._set_pattern_symbols([1, 1, 1, 1])
+        window.pattern_allow_inverted_fsk_check.setChecked(False)
         window.result_length_spin.setValue(12)
         window.exclude_incomplete_result_check.setChecked(False)
         window.bit_order_combo.setCurrentText("MSB")
@@ -791,12 +935,16 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
             window.capture_oversampling_combo.findData(16)
         )
         window.internal_gain_spin.setValue(0)
+        window.iq_power_trigger_check.setChecked(False)
+        window.iq_power_trigger_average_spin.setValue(0.0)
+        window.iq_power_trigger_limit_result_check.setChecked(True)
         window._apply_result_summary_preset("defaults")
         window.constellation_flat_action.setChecked(True)
         window._apply_meas_config_values(saved)
 
         assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
         assert window.pattern_name_edit.text() == "Saved Pattern"
+        assert window.pattern_allow_inverted_fsk_check.isChecked()
         assert window.result_length_spin.value() == 73
         assert window.exclude_incomplete_result_check.isChecked()
         assert window.bit_order_combo.currentText() == "LSB"
@@ -806,6 +954,14 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.capture_usable_bandwidth_label.text() == "6.400 MHz"
         assert window.internal_gain_spin.value() == 12
         assert window.capture_correction_label.text().startswith("+15.0 dB")
+        assert window.iq_power_trigger_check.isChecked()
+        assert window.iq_power_trigger_level_spin.value() == pytest.approx(-18.5)
+        assert window.iq_power_trigger_hysteresis_spin.value() == pytest.approx(4.0)
+        assert window.iq_power_trigger_average_spin.value() == pytest.approx(1.5)
+        assert window.iq_power_trigger_dropout_spin.value() == pytest.approx(12.0)
+        assert window.iq_power_trigger_holdoff_spin.value() == pytest.approx(20.0)
+        assert window.iq_power_trigger_offset_spin.value() == pytest.approx(1.5)
+        assert not window.iq_power_trigger_limit_result_check.isChecked()
         assert window._selected_result_summary_ids == selected_summary_items
         assert set(saved["result_summary"]["visible_items"]) == selected_summary_items
         assert saved["display_config"]["constellation_trace_mode"] == "Density"
@@ -820,22 +976,146 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         iq_path = tmp_path / "captures" / "sample.npz"
         pattern_path = tmp_path / "patterns" / "access.vsapattern.json"
         config_path = tmp_path / "configs" / "measurement.vsaconfig.json"
+        symbol_path = tmp_path / "exports" / "symbols.vsasymbols.json"
         iq_path.parent.mkdir()
         pattern_path.parent.mkdir()
         config_path.parent.mkdir()
+        symbol_path.parent.mkdir()
         window._remember_directory("iq", iq_path)
         window._remember_directory("pattern", pattern_path)
         window._remember_directory("config", config_path)
+        window._remember_directory("symbol_table", symbol_path)
         assert window._last_directory("iq") == str(iq_path.parent.resolve())
         assert window._last_directory("pattern") == str(pattern_path.parent.resolve())
         assert window._last_directory("config") == str(config_path.parent.resolve())
+        assert window._last_directory("symbol_table") == str(
+            symbol_path.parent.resolve()
+        )
         assert len(
             {
                 window._last_directory("iq"),
                 window._last_directory("pattern"),
                 window._last_directory("config"),
+                window._last_directory("symbol_table"),
             }
-        ) == 3
+        ) == 4
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_symbol_table_json_export_document_contains_machine_readable_context(
+    tmp_path, monkeypatch,
+) -> None:
+    pg.mkQApp("VSA Symbol Table export test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "symbol-export")
+    )
+    try:
+        window._load_generated(ModulationKind.GFSK)
+        expected = np.asarray(window.session.recording.metadata["generated_symbols"])
+        window.pattern_search_check.setChecked(True)
+        window._set_pattern_symbols(expected[20:52])
+        window.result_length_spin.setValue(64)
+        assert window._analyze()
+
+        document = window._symbol_table_export_document()
+
+        assert document["schema"] == "pluto-vsa-symbol-table"
+        assert document["version"] == 1
+        assert document["metadata"]["modulation"] == "GFSK"
+        assert document["metadata"]["symbol_mapping"] == "Natural"
+        assert document["metadata"]["pattern"]["match_variant"] == "Normal"
+        assert document["columns"] == [
+            "index",
+            "symbol",
+            "bits",
+            "time_s",
+            "pattern_index",
+            "pattern_status",
+        ]
+        assert len(document["rows"]) == 64
+        assert document["rows"][0][0:3] == [0, int(expected[20]), [int(expected[20])]]
+        assert document["rows"][0][4:] == [0, "matched"]
+        assert all(row[5] == "matched" for row in document["rows"][:32])
+        assert all(row[5] == "outside" for row in document["rows"][32:])
+        export_stem = tmp_path / "symbol-exports" / "capture-symbols"
+        export_stem.parent.mkdir()
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            lambda *args, **kwargs: (str(export_stem), ""),
+        )
+        window._export_symbol_table()
+        export_path = export_stem.with_suffix(".vsasymbols.json")
+        written = json.loads(export_path.read_text(encoding="utf-8"))
+        assert written == document
+        assert window._last_directory("symbol_table") == str(
+            export_stem.parent.resolve()
+        )
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_inverted_fsk_match_ui_keeps_observed_symbols_and_reports_variant(
+    tmp_path,
+) -> None:
+    pg.mkQApp("VSA inverted FSK pattern UI test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "inverted-fsk-ui")
+    )
+    try:
+        recording, signal = GeneratedIQSource.fsk(
+            symbol_count=180,
+            gaussian_bt=0.5,
+            seed=616,
+        )
+        expected = np.asarray(recording.metadata["generated_symbols"], dtype=np.uint8)
+        inverted = IQRecording(
+            iq=np.conj(recording.iq),
+            sample_rate_hz=recording.sample_rate_hz,
+            source="conjugated test capture",
+        )
+        window.load_recording(inverted, signal)
+        window.pattern_search_check.setChecked(True)
+        window._set_pattern_symbols(expected[30:62])
+        window.pattern_allow_inverted_fsk_check.setChecked(True)
+        window.result_length_spin.setValue(80)
+        assert window._analyze()
+
+        result = window.session.pattern_result
+        assert result is not None
+        np.testing.assert_array_equal(
+            result.decoded_symbols,
+            1 - expected[30:110],
+        )
+        displayed = [
+            int(window.symbol_table.item(index // 10, index % 10).text())
+            for index in range(result.decoded_symbols.size)
+        ]
+        np.testing.assert_array_equal(displayed, result.decoded_symbols)
+        green_cells = [
+            window.symbol_table.item(index // 10, index % 10)
+            for index in range(result.decoded_symbols.size)
+            if window.symbol_table.item(
+                index // 10, index % 10
+            ).background().color().green() > 80
+        ]
+        assert len(green_cells) == 32
+        summary = {
+            window.result_summary.item(row, 0).text():
+            window.result_summary.item(row, 1).text()
+            for row in range(window.result_summary.rowCount())
+        }
+        assert summary["Pattern Match"] == "Inverted"
+        document = window._symbol_table_export_document()
+        assert document["metadata"]["pattern"]["match_variant"] == "Inverted"
+        assert document["rows"][0][1] == int(1 - expected[30])
     finally:
         window._meas_config_dialog.close()
         window.close()
