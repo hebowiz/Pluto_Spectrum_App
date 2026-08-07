@@ -86,7 +86,7 @@ PSK検索はpattern symbol間の差分相関により一定phase回転とCFOに�
 R&SのResult Range表示に合わせ、Pattern Search成立時は次の表示規則とする。
 
 - IQ PowerとInstantaneous Frequencyはcapture全体のdataを保持したまま、表示X軸を選択中Result Rangeの前後10%へfitする。Pattern Waveformを緑、Result Rangeを青の領域、Pattern Startを縦線で示す。zoom/panでcapture内の他部分も確認できる。
-- Spectrumはcapture全体ではなく、検出されたResult RangeのIQだけから再計算する。FFTのcoherent amplitudeへIQ Powerと同じfull-scaleおよびfrontend補正を適用し、縦軸をdBmで表示する。bin中心CWのSpectrum peakは同じIQ振幅のZero Span powerと一致する。noise値はFFT bin帯域依存のdBmでありdBm/Hzではない。
+- Spectrumはcapture全体ではなく、検出されたResult RangeのIQだけから再計算する。現在は中央の最大`fft_size` samplesへHann windowを掛け、`|FFT| / sum(window)`のcoherent amplitudeを`20log10`した後、IQ Powerと同じfull-scaleおよびfrontend補正を適用してdBm表示する。bin中心CWのSpectrum peakは同じIQ振幅のZero Span powerと一致する。これはdBm/Hzのpower spectral densityではなく、Hann相当の各resolution filter出力のdBmである。broadband/modulated signalはpowerが複数filterへ分散するため各点がtotal powerより低くなる。実効noise bandwidthはzero padding後の表示bin間隔ではなく、使用record長`L`に対して概ね`1.5 * Fs / L`である。現時点ではwindow/RBW/ENBW normalizationを選択するSpectrum measurement設定がなく、R&S VSAのresult transformationと同じ高水準構成ではあるが測定値を完全再現する仕様ではない。
 - FSK Instantaneous Frequencyの初期Y軸は`FSK Ref Deviation`の±150%とする。
 - Symbol Tableは`QTableWidget`を使い、Result Rangeの復調symbolを中央揃えの10列へ配置する。列headerは0～9、行headerはその行の先頭symbol indexとする。pattern範囲内でも、設定patternと実測decisionが一致したsymbolだけを緑背景にし、不一致symbolは通常背景のまま表示する。
 
