@@ -5,13 +5,13 @@
     "input_frontend": {
       "input_source": "Pluto",
       "pluto_uri": "",
-      "center_frequency_mhz": 2441.0,
+      "center_frequency_mhz": 2440.0,
       "rf_bandwidth_mhz": 8.0,
       "internal_gain_db": 30,
       "external_attenuation_db": 30.0,
       "external_gain_db": 0.0,
       "analysis_channel_enabled": false,
-      "analysis_center_mhz": 2441.0,
+      "analysis_center_mhz": 2440.0,
       "analysis_bandwidth_mhz": 1.5
     },
     "signal_capture": {
@@ -23,14 +23,14 @@
     "signal_description": {
       "modulation": "GFSK",
       "symbol_rate_hz": 1000000.0,
-      "frequency_deviation_hz": 160000.0,
+      "frequency_deviation_hz": 250000.0,
       "symbol_mapping": "Natural",
       "tx_filter": "Gaussian",
       "filter_parameter": 0.5
     },
     "pattern_search": {
       "enabled": true,
-      "name": "DH1",
+      "name": "LE1M",
       "symbol_format": "Decimal",
       "symbols": [
         1,
@@ -40,40 +40,48 @@
         1,
         0,
         1,
-        1,
         0,
         1,
-        1,
-        1,
-        1,
-        1,
-        0,
-        0,
-        1,
-        1,
-        0,
-        0,
         0,
         0,
         1,
         0,
         1,
+        0,
+        0,
         1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
         0,
         1,
         1,
         0,
+        1,
+        1,
+        1,
         0,
-        1
+        1,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        0
       ],
       "threshold_auto": true,
       "threshold_percent": 90.0,
       "meas_only_if_correct": false,
       "match_selection": "Match Index",
-      "match_index": 2
+      "match_index": 4
     },
     "result_range": {
-      "length_symbols": 366,
+      "length_symbols": 374,
       "reference": "Pattern Waveform",
       "alignment": "Left",
       "offset_symbols": 0,
@@ -104,6 +112,9 @@
         "result_symbols",
         "pattern_error"
       ]
+    },
+    "display_config": {
+      "constellation_trace_mode": "Density"
     }
   }
 }

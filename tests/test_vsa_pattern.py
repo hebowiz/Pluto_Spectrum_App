@@ -485,6 +485,13 @@ def test_differential_psk_short_pattern_uses_joint_result_range_synchronization(
     assert result.phase_rotation_rad is not None
     assert result.metadata["absolute_reference_waveform_sync"] is True
     assert result.metadata["synchronization_evm_rms"] < 1e-6
+    reference = _constellation(modulation)[result.decoded_symbols]
+    expected_evm_percent = 100.0 * np.sqrt(
+        np.sum(np.abs(result.measured_symbols - reference) ** 2)
+        / np.sum(np.abs(reference) ** 2)
+    )
+    assert result.evm_rms_percent == pytest.approx(expected_evm_percent)
+    assert result.evm_rms_percent < 1e-4
     np.testing.assert_array_equal(
         result.decoded_symbols, expected[pattern_start : pattern_start + 244]
     )

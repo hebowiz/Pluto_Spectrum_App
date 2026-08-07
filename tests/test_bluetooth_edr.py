@@ -5,6 +5,7 @@ import pytest
 
 from pluto_sa.vsa.model import SignalDescription
 from pluto_sa.vsa.pattern import (
+    DemodulationSettings,
     KnownPattern,
     MatchSelectionPolicy,
     PatternAnalyzer,
@@ -91,6 +92,66 @@ def test_generic_vsa_recovers_edr_sync_pattern(packet_name):
     )
     assert np.median(np.abs(result.measured_symbols)) == pytest.approx(1.0, abs=0.02)
     assert np.max(np.abs(result.measured_symbols)) < 1.05
+
+
+@pytest.mark.parametrize("packet_name", ("2-DH1", "3-DH1"))
+def test_psk_carrier_is_centered_before_matched_filter(packet_name):
+    waveform = generate_edr_dh1(
+        packet_name,
+        carrier_frequency_offset_hz=100_000.0,
+        snr_db=80.0,
+        seed=9,
+    )
+    signal = SignalDescription(
+        modulation=waveform.modulation,
+        symbol_rate_hz=1_000_000.0,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+    )
+    search = PatternSearchSettings(
+        pattern=KnownPattern(
+            tuple(map(int, waveform.differential_phase_indices[:10]))
+        ),
+        mode=PatternSearchMode.ON,
+        correlation_threshold_auto=False,
+        iq_correlation_threshold=0.8,
+    )
+    result_range = ResultRangeSettings(result_length=244)
+    demodulation = DemodulationSettings()
+    analyzer = PatternAnalyzer()
+
+    filter_first = analyzer._search_psk_pass(
+        waveform.recording,
+        signal,
+        search,
+        result_range,
+        demodulation,
+        prefilter_carrier_frequency_offset_hz=0.0,
+    )
+    centered_first = analyzer.search(
+        waveform.recording,
+        signal,
+        search,
+        result_range,
+        demodulation,
+    )
+
+    assert centered_first.metadata["prefilter_cfo_correction_applied"] is True
+    assert centered_first.metadata["prefilter_coarse_cfo_hz"] == pytest.approx(
+        100_000.0, abs=500.0
+    )
+    assert centered_first.metadata["postfilter_residual_cfo_hz"] == pytest.approx(
+        0.0, abs=500.0
+    )
+    assert centered_first.carrier_frequency_offset_hz == pytest.approx(
+        100_000.0, abs=500.0
+    )
+    assert centered_first.evm_rms_percent < 1.0
+    assert centered_first.evm_rms_percent < filter_first.evm_rms_percent / 5.0
+    np.testing.assert_array_equal(
+        centered_first.decoded_symbols,
+        waveform.differential_phase_indices,
+    )
 
 
 @pytest.mark.parametrize(

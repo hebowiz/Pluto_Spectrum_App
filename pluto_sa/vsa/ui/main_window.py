@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+from scipy.ndimage import gaussian_filter
 
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
@@ -30,6 +31,13 @@ from pluto_sa.vsa.persistence import (
     save_meas_config,
     save_pattern,
 )
+from pluto_sa.vsa.result_summary import (
+    DEFAULT_RESULT_SUMMARY_IDS,
+    RESULT_SUMMARY_BY_ID,
+    RESULT_SUMMARY_ITEMS,
+    ResultSummaryCategory,
+    normalize_result_summary_ids,
+)
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.pluto_source import PlutoCaptureSettings, PlutoLiveSource
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
@@ -51,6 +59,9 @@ _STARTUP_CONFIG_VERSION = 1
 _TRACE_COLOR = "y"
 _IQ_PLANE_LIMIT = 1.25
 _TRACE_SYMBOL_SIZE = 5.5
+_CONSTELLATION_DENSITY_BINS = 96
+_CONSTELLATION_DENSITY_SIGMA_BINS = 0.7
+_CONSTELLATION_DENSITY_RED_LEVEL = 0.75
 
 
 class _CenteredLabelAxisItem(pg.AxisItem):
@@ -78,6 +89,31 @@ class _CenteredLabelAxisItem(pg.AxisItem):
             )
 
 
+class _FixedInteractionViewBox(pg.ViewBox):
+    """Left-drag rectangle zoom with middle-drag pan, without mode switching."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+        super().setMouseMode(pg.ViewBox.RectMode)
+
+    def setMouseMode(self, _mode: int) -> None:
+        """Keep left-button interaction fixed to rectangular zoom."""
+        super().setMouseMode(pg.ViewBox.RectMode)
+
+    def mouseDragEvent(self, event: object, axis: int | None = None) -> None:
+        if event.button() != QtCore.Qt.MouseButton.MiddleButton:
+            super().mouseDragEvent(event, axis=axis)
+            return
+        # pyqtgraph implements middle-button panning in its three-button
+        # PanMode. Use that path for this event only, while keeping left drag
+        # permanently assigned to RectMode.
+        self.state["mouseMode"] = pg.ViewBox.PanMode
+        try:
+            super().mouseDragEvent(event, axis=axis)
+        finally:
+            self.state["mouseMode"] = pg.ViewBox.RectMode
+
+
 def _decimation_indices(count: int, maximum: int = _MAX_DISPLAY_POINTS) -> slice:
     step = max(1, int(np.ceil(int(count) / int(maximum))))
     return slice(None, None, step)
@@ -95,6 +131,59 @@ def _constellation_display_symbols(
     }:
         values = values * np.exp(-1j * np.pi / 4.0)
     return values
+
+
+def _constellation_density(
+    symbols: np.ndarray,
+    *,
+    limit: float = _IQ_PLANE_LIMIT,
+    bins: int = _CONSTELLATION_DENSITY_BINS,
+    smoothing_sigma_bins: float = _CONSTELLATION_DENSITY_SIGMA_BINS,
+) -> np.ndarray:
+    """Return a smoothed row-major log-density image over the fixed I/Q plane."""
+    values = np.asarray(symbols, dtype=np.complex128)
+    finite = np.isfinite(values.real) & np.isfinite(values.imag)
+    values = values[finite]
+    if values.size == 0:
+        return np.zeros((int(bins), int(bins)), dtype=np.float64)
+    histogram, _i_edges, _q_edges = np.histogram2d(
+        values.real,
+        values.imag,
+        bins=int(bins),
+        range=((-float(limit), float(limit)), (-float(limit), float(limit))),
+    )
+    # ImageItem row-major data is indexed [Q, I].  A small Gaussian kernel
+    # turns each hard histogram cell into a continuous density contribution,
+    # which better represents repeated observations than a grid of enlarged
+    # dots.  The kernel is normalized, so relative occurrence remains intact.
+    density = histogram.T
+    sigma = max(0.0, float(smoothing_sigma_bins))
+    if sigma > 0.0:
+        density = gaussian_filter(
+            density,
+            sigma=sigma,
+            mode="constant",
+            cval=0.0,
+            truncate=3.0,
+        )
+    # log1p keeps low-occurrence regions visible without allowing the most
+    # common decision cell to hide all surrounding distribution detail.
+    return np.log1p(density)
+
+
+def _constellation_density_color_levels(
+    density: np.ndarray,
+    *,
+    red_level: float = _CONSTELLATION_DENSITY_RED_LEVEL,
+) -> tuple[float, float]:
+    """Map the upper density region to saturated red without widening it."""
+    values = np.asarray(density, dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    peak = float(np.max(finite)) if finite.size else 0.0
+    if peak <= 0.0:
+        return 0.0, 1.0
+    saturation = float(np.clip(red_level, 0.01, 1.0))
+    return 0.0, peak * saturation
 
 
 def _fsk_phase_difference_symbols(
@@ -163,6 +252,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._updating_pattern_table = False
         self._pattern_values: list[int] = []
         self._analysis_plot_ranges: dict[str, tuple[list[float], list[float]]] = {}
+        self._plot_context_actions: dict[str, dict[str, QtGui.QAction]] = {}
+        self._selected_result_summary_ids = set(DEFAULT_RESULT_SUMMARY_IDS)
+        self._result_summary_values: dict[str, str] = {}
+        self._updating_result_summary_selection = False
+        self._selected_match_index = 1
+        self._constellation_density_item: pg.ImageItem | None = None
         self.setWindowTitle("Pluto VSA - FSK / PSK")
         self.resize(1600, 960)
         self.setDockOptions(
@@ -229,23 +324,31 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_display_action.setChecked(False)
         self.symbol_display_action.triggered.connect(self._refresh_display_only)
         display_menu.addAction(self.symbol_display_action)
+        constellation_trace_menu = display_menu.addMenu("Symbol Plot Trace")
+        self.constellation_flat_action = QtGui.QAction(
+            "Flat", self, checkable=True
+        )
+        self.constellation_density_action = QtGui.QAction(
+            "Density", self, checkable=True
+        )
+        constellation_trace_group = QtGui.QActionGroup(self)
+        constellation_trace_group.setExclusive(True)
+        constellation_trace_group.addAction(self.constellation_flat_action)
+        constellation_trace_group.addAction(self.constellation_density_action)
+        self.constellation_flat_action.setChecked(True)
+        self.constellation_flat_action.triggered.connect(
+            self._refresh_display_only
+        )
+        self.constellation_density_action.triggered.connect(
+            self._refresh_display_only
+        )
+        constellation_trace_menu.addActions(constellation_trace_group.actions())
         self.reset_graph_scales_action = QtGui.QAction(
             "Reset Graph Scales", self
         )
         self.reset_graph_scales_action.setShortcut("Home")
         self.reset_graph_scales_action.triggered.connect(self._reset_graph_scales)
         display_menu.addAction(self.reset_graph_scales_action)
-        mouse_menu = display_menu.addMenu("Mouse Interaction")
-        self.rect_zoom_action = QtGui.QAction("Rect Zoom", self, checkable=True)
-        self.pan_action = QtGui.QAction("Pan", self, checkable=True)
-        mouse_group = QtGui.QActionGroup(self)
-        mouse_group.setExclusive(True)
-        mouse_group.addAction(self.rect_zoom_action)
-        mouse_group.addAction(self.pan_action)
-        self.rect_zoom_action.setChecked(True)
-        self.rect_zoom_action.triggered.connect(self._apply_mouse_interaction_mode)
-        self.pan_action.triggered.connect(self._apply_mouse_interaction_mode)
-        mouse_menu.addActions(mouse_group.actions())
         display_menu.addSeparator()
         carrier_menu = display_menu.addMenu("Carrier Display")
         self.raw_carrier_action = QtGui.QAction("Raw IQ", self, checkable=True)
@@ -289,6 +392,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         # The surrounding dock already owns the visible title. Keeping a
         # second title inside the plot wastes vertical graph area.
         plot = pg.PlotWidget(
+            viewBox=_FixedInteractionViewBox(),
             axisItems={
                 "left": _CenteredLabelAxisItem(orientation="left"),
                 "bottom": _CenteredLabelAxisItem(orientation="bottom"),
@@ -360,6 +464,12 @@ class VSAWindow(QtWidgets.QMainWindow):
             QtWidgets.QAbstractItemView.SelectionMode.NoSelection
         )
         self.result_summary.setAlternatingRowColors(False)
+        self.result_summary.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.result_summary.customContextMenuRequested.connect(
+            self._show_result_summary_context_menu
+        )
         self.result_summary.horizontalHeader().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Stretch
         )
@@ -431,7 +541,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.symbol_dock,
             QtCore.Qt.Orientation.Vertical,
         )
-        self._apply_mouse_interaction_mode()
+        self._configure_plot_context_menus()
         QtCore.QTimer.singleShot(0, self._equalize_result_docks)
 
     def _equalize_result_docks(self) -> None:
@@ -665,37 +775,18 @@ class VSAWindow(QtWidgets.QMainWindow):
             "Meas only if Pattern Symbols Correct"
         )
         self.pattern_meas_only_check.setChecked(True)
-        self.pattern_match_selection_combo = QtWidgets.QComboBox()
-        for policy in MatchSelectionPolicy:
-            self.pattern_match_selection_combo.addItem(policy.value, policy.value)
-        self.pattern_match_selection_combo.setCurrentText(
-            MatchSelectionPolicy.FIRST.value
-        )
-        self.pattern_match_index_spin = QtWidgets.QSpinBox()
-        self.pattern_match_index_spin.setRange(1, 1_000_000)
-        self.pattern_match_index_spin.setValue(1)
-        self.pattern_match_index_spin.setEnabled(False)
         pattern_form.addRow(self.pattern_search_check)
         pattern_form.addRow("Name", self.pattern_name_edit)
         pattern_form.addRow("Symbol Format", self.pattern_format_combo)
         pattern_form.addRow("I/Q Correlation Threshold", self.pattern_threshold_spin)
         pattern_form.addRow(self.pattern_threshold_auto)
         pattern_form.addRow(self.pattern_meas_only_check)
-        pattern_form.addRow(
-            "Match Selection", self.pattern_match_selection_combo
-        )
-        pattern_form.addRow("Match Index", self.pattern_match_index_spin)
         pattern_layout.addLayout(pattern_form)
         pattern_layout.addWidget(QtWidgets.QLabel("Pattern Symbols"))
         pattern_layout.addWidget(self.pattern_symbol_table, 1)
         pattern_layout.addLayout(pattern_table_buttons)
         self.pattern_threshold_auto.toggled.connect(
             lambda checked: self.pattern_threshold_spin.setEnabled(not checked)
-        )
-        self.pattern_match_selection_combo.currentTextChanged.connect(
-            lambda value: self.pattern_match_index_spin.setEnabled(
-                value == MatchSelectionPolicy.INDEX.value
-            )
         )
         self.pattern_format_combo.currentTextChanged.connect(
             self._refresh_pattern_table_format
@@ -773,6 +864,45 @@ class VSAWindow(QtWidgets.QMainWindow):
         demod_form.addRow("", self.compensate_deviation_check)
         config_pages.append(("Demodulation", demod_page))
 
+        summary_page = QtWidgets.QWidget()
+        summary_layout = QtWidgets.QVBoxLayout(summary_page)
+        summary_layout.addWidget(
+            QtWidgets.QLabel(
+                "Choose Result Summary rows. Planned R&S items remain visible "
+                "but cannot be selected yet."
+            )
+        )
+        self.result_summary_item_tree = QtWidgets.QTreeWidget()
+        self.result_summary_item_tree.setColumnCount(2)
+        self.result_summary_item_tree.setHeaderLabels(("Result", "Status"))
+        self.result_summary_item_tree.header().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.result_summary_item_tree.header().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.result_summary_item_tree.itemChanged.connect(
+            self._result_summary_tree_item_changed
+        )
+        summary_layout.addWidget(self.result_summary_item_tree, 1)
+        summary_presets = QtWidgets.QHBoxLayout()
+        for label, preset in (
+            ("Show All", "all"),
+            ("Measurement Only", "measurement"),
+            ("Diagnostics Only", "diagnostics"),
+            ("Restore Defaults", "defaults"),
+        ):
+            button = QtWidgets.QPushButton(label)
+            button.clicked.connect(
+                lambda _checked=False, selected=preset: (
+                    self._apply_result_summary_preset(selected)
+                )
+            )
+            summary_presets.addWidget(button)
+        summary_layout.addLayout(summary_presets)
+        self._populate_result_summary_item_tree()
+        config_pages.append(("Result Summary", summary_page))
+
         run_page = QtWidgets.QWidget()
         run_layout = QtWidgets.QVBoxLayout(run_page)
         self.run_single_button = QtWidgets.QPushButton("Run Single (Pluto)")
@@ -849,6 +979,148 @@ class VSAWindow(QtWidgets.QMainWindow):
         close_buttons.rejected.connect(self._meas_config_dialog.reject)
         dialog_layout.addWidget(close_buttons)
         self._show_config_page(0)
+
+    def _populate_result_summary_item_tree(self) -> None:
+        self._updating_result_summary_selection = True
+        try:
+            self.result_summary_item_tree.clear()
+            self._result_summary_tree_items: dict[str, QtWidgets.QTreeWidgetItem] = {}
+            for category in ResultSummaryCategory:
+                parent = QtWidgets.QTreeWidgetItem((category.value, ""))
+                parent.setFirstColumnSpanned(True)
+                category_font = parent.font(0)
+                category_font.setBold(True)
+                parent.setFont(0, category_font)
+                self.result_summary_item_tree.addTopLevelItem(parent)
+                for definition in RESULT_SUMMARY_ITEMS:
+                    if definition.category is not category:
+                        continue
+                    status = "Available" if definition.implemented else "Not implemented"
+                    child = QtWidgets.QTreeWidgetItem((definition.label, status))
+                    child.setData(0, QtCore.Qt.ItemDataRole.UserRole, definition.item_id)
+                    child.setToolTip(0, definition.description)
+                    child.setToolTip(1, status)
+                    flags = child.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                    if not definition.implemented:
+                        flags &= ~QtCore.Qt.ItemFlag.ItemIsEnabled
+                    child.setFlags(flags)
+                    child.setCheckState(
+                        0,
+                        QtCore.Qt.CheckState.Checked
+                        if definition.item_id in self._selected_result_summary_ids
+                        else QtCore.Qt.CheckState.Unchecked,
+                    )
+                    parent.addChild(child)
+                    self._result_summary_tree_items[definition.item_id] = child
+                parent.setExpanded(True)
+        finally:
+            self._updating_result_summary_selection = False
+
+    def _sync_result_summary_item_tree(self) -> None:
+        if not hasattr(self, "_result_summary_tree_items"):
+            return
+        self._updating_result_summary_selection = True
+        try:
+            for item_id, child in self._result_summary_tree_items.items():
+                child.setCheckState(
+                    0,
+                    QtCore.Qt.CheckState.Checked
+                    if item_id in self._selected_result_summary_ids
+                    else QtCore.Qt.CheckState.Unchecked,
+                )
+        finally:
+            self._updating_result_summary_selection = False
+
+    def _result_summary_tree_item_changed(
+        self, item: QtWidgets.QTreeWidgetItem, column: int
+    ) -> None:
+        if self._updating_result_summary_selection or column != 0:
+            return
+        item_id = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not item_id or item_id not in RESULT_SUMMARY_BY_ID:
+            return
+        self._set_result_summary_item_visible(
+            str(item_id), item.checkState(0) == QtCore.Qt.CheckState.Checked
+        )
+
+    def _set_result_summary_item_visible(self, item_id: str, visible: bool) -> None:
+        definition = RESULT_SUMMARY_BY_ID.get(item_id)
+        if definition is None or not definition.implemented:
+            return
+        if visible:
+            self._selected_result_summary_ids.add(item_id)
+        else:
+            self._selected_result_summary_ids.discard(item_id)
+        self._sync_result_summary_item_tree()
+        self._render_result_summary()
+
+    def _apply_result_summary_preset(self, preset: str) -> None:
+        if preset == "all":
+            selected = {
+                item.item_id for item in RESULT_SUMMARY_ITEMS if item.implemented
+            }
+        elif preset == "measurement":
+            selected = {
+                item.item_id
+                for item in RESULT_SUMMARY_ITEMS
+                if item.implemented
+                and item.category is not ResultSummaryCategory.DIAGNOSTICS
+            }
+        elif preset == "diagnostics":
+            selected = {
+                item.item_id
+                for item in RESULT_SUMMARY_ITEMS
+                if item.implemented
+                and item.category is ResultSummaryCategory.DIAGNOSTICS
+            }
+        elif preset == "defaults":
+            selected = set(DEFAULT_RESULT_SUMMARY_IDS)
+        else:
+            raise ValueError(f"unsupported Result Summary preset: {preset}")
+        self._selected_result_summary_ids = selected
+        self._sync_result_summary_item_tree()
+        self._render_result_summary()
+
+    def _create_result_summary_context_menu(self) -> QtWidgets.QMenu:
+        menu = QtWidgets.QMenu(self.result_summary)
+        for category in ResultSummaryCategory:
+            category_menu = menu.addMenu(category.value)
+            for definition in RESULT_SUMMARY_ITEMS:
+                if definition.category is not category:
+                    continue
+                label = definition.label
+                if not definition.implemented:
+                    label += " (Not implemented)"
+                action = category_menu.addAction(label)
+                action.setCheckable(True)
+                action.setChecked(
+                    definition.item_id in self._selected_result_summary_ids
+                )
+                action.setEnabled(definition.implemented)
+                action.setToolTip(definition.description)
+                action.toggled.connect(
+                    lambda checked, item_id=definition.item_id: (
+                        self._set_result_summary_item_visible(item_id, checked)
+                    )
+                )
+        menu.addSeparator()
+        for label, preset in (
+            ("Show All", "all"),
+            ("Measurement Results Only", "measurement"),
+            ("Diagnostics Only", "diagnostics"),
+            ("Restore Defaults", "defaults"),
+        ):
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, selected=preset: (
+                    self._apply_result_summary_preset(selected)
+                )
+            )
+        return menu
+
+    def _show_result_summary_context_menu(self, position: QtCore.QPoint) -> None:
+        menu = self._create_result_summary_context_menu()
+        menu.exec(self.result_summary.mapToGlobal(position))
 
     def _show_config_top(self) -> None:
         self._show_config_page(0)
@@ -1090,8 +1362,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "threshold_auto": self.pattern_threshold_auto.isChecked(),
                 "threshold_percent": self.pattern_threshold_spin.value(),
                 "meas_only_if_correct": self.pattern_meas_only_check.isChecked(),
-                "match_selection": self.pattern_match_selection_combo.currentText(),
-                "match_index": self.pattern_match_index_spin.value(),
             },
             "result_range": {
                 "length_symbols": self.result_length_spin.value(),
@@ -1109,6 +1379,20 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "bit_ordering": self.bit_order_combo.currentText(),
                 "compensate_carrier_frequency_drift": self.compensate_drift_check.isChecked(),
                 "compensate_fsk_deviation_error": self.compensate_deviation_check.isChecked(),
+            },
+            "result_summary": {
+                "visible_items": [
+                    item.item_id
+                    for item in RESULT_SUMMARY_ITEMS
+                    if item.item_id in self._selected_result_summary_ids
+                ],
+            },
+            "display_config": {
+                "constellation_trace_mode": (
+                    "Density"
+                    if self.constellation_density_action.isChecked()
+                    else "Flat"
+                ),
             },
         }
 
@@ -1166,8 +1450,17 @@ class VSAWindow(QtWidgets.QMainWindow):
             result_range = settings["result_range"]
             demodulation = settings["demodulation"]
             signal_capture = settings.get("signal_capture", {})
+            result_summary = settings.get("result_summary", {})
+            display_config = settings.get("display_config", {})
             if not all(isinstance(section, dict) for section in (
-                source, signal, pattern, result_range, demodulation, signal_capture
+                source,
+                signal,
+                pattern,
+                result_range,
+                demodulation,
+                signal_capture,
+                result_summary,
+                display_config,
             )):
                 raise TypeError("configuration sections must be objects")
             self._set_combo_text(self.modulation_combo, signal["modulation"], "modulation")
@@ -1209,14 +1502,6 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.pattern_threshold_auto.setChecked(bool(pattern["threshold_auto"]))
             self.pattern_threshold_spin.setValue(float(pattern["threshold_percent"]))
             self.pattern_meas_only_check.setChecked(bool(pattern["meas_only_if_correct"]))
-            self._set_combo_text(
-                self.pattern_match_selection_combo,
-                pattern.get("match_selection", MatchSelectionPolicy.FIRST.value),
-                "match selection",
-            )
-            self.pattern_match_index_spin.setValue(
-                int(pattern.get("match_index", 1))
-            )
             self.result_length_spin.setValue(int(result_range["length_symbols"]))
             self._set_combo_text(self.result_reference_combo, result_range["reference"], "result reference")
             self._set_combo_text(self.result_alignment_combo, result_range["alignment"], "result alignment")
@@ -1253,11 +1538,29 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.swap_iq_check.setChecked(
                     bool(signal_capture.get("swap_iq", False))
                 )
+            self._selected_result_summary_ids = normalize_result_summary_ids(
+                result_summary.get("visible_items")
+            )
+            constellation_trace_mode = str(
+                display_config.get("constellation_trace_mode", "Flat")
+            )
+            if constellation_trace_mode not in {"Flat", "Density"}:
+                raise ValueError(
+                    "constellation trace mode must be Flat or Density"
+                )
+            self.constellation_flat_action.setChecked(
+                constellation_trace_mode == "Flat"
+            )
+            self.constellation_density_action.setChecked(
+                constellation_trace_mode == "Density"
+            )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"invalid measurement configuration: {error}") from error
         self._sync_signal_controls()
         self._sync_analysis_controls()
         self._sync_capture_settings()
+        self._sync_result_summary_item_tree()
+        self._render_result_summary()
 
     def _save_meas_config_file(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
@@ -1311,14 +1614,110 @@ class VSAWindow(QtWidgets.QMainWindow):
             ("symbol_plot", self.symbol_plot),
         )
 
-    def _apply_mouse_interaction_mode(self) -> None:
-        mode = (
-            pg.ViewBox.RectMode
-            if self.rect_zoom_action.isChecked()
-            else pg.ViewBox.PanMode
-        )
-        for _name, plot in self._plot_widgets():
-            plot.getViewBox().setMouseMode(mode)
+    def _configure_plot_context_menus(self) -> None:
+        """Add VSA scale actions while preserving pyqtgraph's menu."""
+
+        self._plot_context_actions.clear()
+        for name, plot in self._plot_widgets():
+            menu = plot.getViewBox().getMenu(None)
+            if menu is None:
+                continue
+            reset_action = QtGui.QAction("Reset", menu)
+            reset_action.setToolTip("Restore this plot's analysis-complete scale")
+            reset_action.triggered.connect(
+                lambda _checked=False, plot_name=name, target=plot: (
+                    self._reset_plot_scale(plot_name, target)
+                )
+            )
+            menu.insertAction(menu.viewAll, reset_action)
+            menu.insertSeparator(menu.viewAll)
+
+            # ViewBox.autoRange also considers overlay graphics such as result
+            # regions and infinite boundary lines.  Those items can dominate
+            # the bounds and make the actual traces appear tiny.  Reuse the
+            # standard action label/location but give it trace-only semantics.
+            menu.viewAll.triggered.disconnect(menu.autoRange)
+            menu.viewAll.triggered.connect(
+                lambda _checked=False, target=plot: self._view_all_plot(target)
+            )
+            for action in tuple(menu.actions()):
+                if action.text() == "Mouse Mode":
+                    menu.removeAction(action)
+            self._plot_context_actions[name] = {
+                "reset": reset_action,
+                "view_all": menu.viewAll,
+            }
+
+    @staticmethod
+    def _trace_bounds(
+        plot: pg.PlotWidget,
+    ) -> tuple[float, float, float, float] | None:
+        """Return finite bounds of visible data traces, excluding overlays."""
+
+        x_min = y_min = np.inf
+        x_max = y_max = -np.inf
+        found = False
+        for item in plot.listDataItems():
+            if not item.isVisible():
+                continue
+            # getData() returns the transformed display dataset and therefore
+            # may contain only the current ViewBox when clipToView is enabled.
+            # View All must inspect the complete source trace instead.
+            x_values, y_values = item.getOriginalDataset()
+            if x_values is None or y_values is None:
+                continue
+            x_values = np.asarray(x_values)
+            y_values = np.asarray(y_values)
+            count = min(x_values.size, y_values.size)
+            if count == 0:
+                continue
+            x_values = x_values[:count]
+            y_values = y_values[:count]
+            finite = np.isfinite(x_values) & np.isfinite(y_values)
+            if not np.any(finite):
+                continue
+            x_finite = x_values[finite]
+            y_finite = y_values[finite]
+            x_min = min(x_min, float(np.min(x_finite)))
+            x_max = max(x_max, float(np.max(x_finite)))
+            y_min = min(y_min, float(np.min(y_finite)))
+            y_max = max(y_max, float(np.max(y_finite)))
+            found = True
+        if not found:
+            return None
+        return x_min, x_max, y_min, y_max
+
+    @staticmethod
+    def _padded_range(lower: float, upper: float) -> list[float]:
+        span = upper - lower
+        if span <= np.finfo(float).eps:
+            span = max(abs(lower), abs(upper), 1.0) * 0.1
+        margin = 0.05 * span
+        return [lower - margin, upper + margin]
+
+    def _view_all_plot(self, plot: pg.PlotWidget) -> None:
+        bounds = self._trace_bounds(plot)
+        if bounds is None:
+            return
+        x_min, x_max, y_min, y_max = bounds
+        view_box = plot.getViewBox()
+        if view_box.state.get("aspectLocked", False) is not False:
+            limit = max(
+                _IQ_PLANE_LIMIT,
+                1.05 * max(abs(x_min), abs(x_max), abs(y_min), abs(y_max)),
+            )
+            x_range = y_range = [-limit, limit]
+        else:
+            x_range = self._padded_range(x_min, x_max)
+            y_range = self._padded_range(y_min, y_max)
+        plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
+
+    def _reset_plot_scale(self, name: str, plot: pg.PlotWidget) -> None:
+        ranges = self._analysis_plot_ranges.get(name)
+        if ranges is None:
+            return
+        x_range, y_range = ranges
+        plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
 
     def _capture_analysis_plot_ranges(self) -> None:
         captured: dict[str, tuple[list[float], list[float]]] = {}
@@ -1330,11 +1729,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _reset_graph_scales(self) -> None:
         for name, plot in self._plot_widgets():
-            ranges = self._analysis_plot_ranges.get(name)
-            if ranges is None:
-                continue
-            x_range, y_range = ranges
-            plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
+            self._reset_plot_scale(name, plot)
 
     def _selected_modulation(self) -> ModulationKind:
         return ModulationKind(str(self.modulation_combo.currentData()))
@@ -1505,10 +1900,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             meas_only_if_pattern_symbols_correct=(
                 self.pattern_meas_only_check.isChecked()
             ),
-            match_selection=MatchSelectionPolicy(
-                self.pattern_match_selection_combo.currentData()
-            ),
-            match_index=self.pattern_match_index_spin.value(),
+            match_selection=MatchSelectionPolicy.INDEX,
+            match_index=self._selected_match_index,
         )
         result_range = ResultRangeSettings(
             result_length=self.result_length_spin.value(),
@@ -1559,6 +1952,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
         else:
             recording, signal = GeneratedIQSource.psk(modulation=modulation)
+        self._selected_match_index = 1
         self.session.set_recording(recording)
         self.session.set_signal(signal)
         self._set_analysis_controls_from_recording(recording)
@@ -1566,6 +1960,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._analyze()
 
     def load_recording(self, recording: IQRecording, signal: SignalDescription | None = None) -> None:
+        self._selected_match_index = 1
         self.session.set_recording(recording)
         self._set_analysis_controls_from_recording(recording)
         if signal is not None:
@@ -1641,6 +2036,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             return False
         self._update_summary()
         self._update_plots(reset_ranges=True)
+        if self.session.pattern_result is not None:
+            self._selected_match_index = int(
+                self.session.pattern_result.metadata.get("selected_match_index", 1)
+            )
         self._update_match_navigation_actions()
         self.statusBar().showMessage(
             f"Analysis complete - {self.session.recording.sample_count:,} samples"
@@ -1668,11 +2067,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         if target < 1 or target > count:
             self._update_match_navigation_actions()
             return False
-        self.pattern_match_selection_combo.setCurrentText(
-            MatchSelectionPolicy.INDEX.value
-        )
-        self.pattern_match_index_spin.setValue(target)
+        previous_index = self._selected_match_index
+        self._selected_match_index = target
         if not self._analyze():
+            self._selected_match_index = previous_index
             return False
         selected = self.session.pattern_result
         if selected is not None:
@@ -1809,6 +2207,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         self.modulation_plot.clear()
         self.symbol_plot.clear()
+        self._constellation_density_item = None
         if signal.modulation.family is ModulationFamily.FSK:
             self.modulation_plot.setDownsampling(auto=True, mode="peak")
             self.modulation_plot.setClipToView(True)
@@ -1862,14 +2261,18 @@ class VSAWindow(QtWidgets.QMainWindow):
             phase_slice = _decimation_indices(
                 phase_difference.size, maximum=20_000
             )
-            self.symbol_plot.plot(
-                phase_difference.real[phase_slice],
-                phase_difference.imag[phase_slice],
-                pen=None,
-                symbol="o",
-                symbolSize=6,
-                symbolBrush=pg.mkBrush(_TRACE_COLOR),
-                symbolPen=pg.mkPen(_TRACE_COLOR),
+            symbol_limit = (
+                max(
+                    _IQ_PLANE_LIMIT,
+                    1.15
+                    * float(np.percentile(np.abs(phase_difference), 99.5)),
+                )
+                if phase_difference.size
+                else _IQ_PLANE_LIMIT
+            )
+            self._plot_symbol_distribution(
+                phase_difference[phase_slice],
+                density_limit=symbol_limit,
             )
             unit_angle = np.linspace(0.0, 2.0 * np.pi, 361)
             self.symbol_plot.plot(
@@ -1878,18 +2281,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                 pen=pg.mkPen((120, 120, 120, 110), width=1),
             )
             if reset_ranges:
-                symbol_limit = (
-                    max(
-                        1.25,
-                        1.15
-                        * float(np.percentile(np.abs(phase_difference), 99.5)),
-                    )
-                    if phase_difference.size
-                    else 1.25
-                )
                 self.symbol_plot.setXRange(-symbol_limit, symbol_limit, padding=0.0)
                 self.symbol_plot.setYRange(-symbol_limit, symbol_limit, padding=0.0)
-            summary = f"Frequency Error: {result.frequency_error_hz or 0.0:.1f} Hz"
         else:
             self.modulation_plot.setDownsampling(auto=False)
             self.modulation_plot.setClipToView(False)
@@ -1991,14 +2384,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             constellation_symbols = _constellation_display_symbols(
                 signal.modulation, constellation_symbols
             )
-            self.symbol_plot.plot(
-                constellation_symbols.real,
-                constellation_symbols.imag,
-                pen=None,
-                symbol="o",
-                symbolSize=6,
-                symbolBrush=pg.mkBrush(_TRACE_COLOR),
-                symbolPen=pg.mkPen(_TRACE_COLOR),
+            self._plot_symbol_distribution(
+                constellation_symbols,
+                density_limit=_IQ_PLANE_LIMIT,
             )
             # clear() retains the previous ViewBox range.  Explicitly reset
             # both axes because an FSK frequency range or an earlier malformed
@@ -2010,13 +2398,33 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.symbol_plot.setYRange(
                     -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
                 )
-            summary = f"EVM RMS: {result.evm_rms_percent or 0.0:.4f} %"
         pattern_result = self.session.pattern_result
         symbols = (
             pattern_result.decoded_symbols
             if pattern_result is not None
             else result.decoded_symbols
         )
+        summary_values: dict[str, str] = {
+            "modulation": signal.modulation.value,
+            "result_symbols": str(symbols.size),
+        }
+        finite_power_dbm = spectrum_result.power_dbm[
+            np.isfinite(spectrum_result.power_dbm)
+        ]
+        if finite_power_dbm.size:
+            mean_mw = float(np.mean(10.0 ** (finite_power_dbm / 10.0)))
+            if mean_mw > 0.0:
+                summary_values["power"] = f"{10.0 * np.log10(mean_mw):+.2f} dBm"
+        displayed_evm_rms_percent = (
+            pattern_result.evm_rms_percent
+            if pattern_result is not None
+            and signal.modulation.family is ModulationFamily.PSK
+            else spectrum_result.evm_rms_percent
+        )
+        if displayed_evm_rms_percent is not None:
+            summary_values["evm_rms"] = (
+                f"{float(displayed_evm_rms_percent):.2f} %"
+            )
         if pattern_result is not None:
             display_name = "Carrier Corrected" if show_corrected else "Raw IQ"
             recording = self.session.recording
@@ -2035,34 +2443,39 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if signal.modulation.family is ModulationFamily.FSK
                 else pattern_result.carrier_frequency_drift_hz_per_s
             )
-            summary_rows = [
-                    ("Modulation", signal.modulation.value),
-                    (
-                        "Pattern Symbols Correct",
-                        "Yes" if pattern_result.pattern_symbol_errors == 0 else "No",
+            summary_values.update(
+                {
+                    "pattern_symbols_correct": (
+                        "Yes" if pattern_result.pattern_symbol_errors == 0 else "No"
                     ),
-                    ("I/Q Correlation", f"{pattern_result.correlation * 100.0:.2f} %"),
-                    ("CFO", f"{pattern_result.carrier_frequency_offset_hz / 1e3:+.3f} kHz"),
-                    (
-                        "Estimated Carrier",
-                        f"{(analysis_center_hz + pattern_result.carrier_frequency_offset_hz) / 1e6:.6f} MHz",
+                    "iq_correlation": f"{pattern_result.correlation * 100.0:.2f} %",
+                    "carrier_frequency_error": (
+                        f"{pattern_result.carrier_frequency_offset_hz / 1e3:+.3f} kHz"
                     ),
-                    (
-                        "Carrier Drift",
-                        f"{reported_drift_hz_per_s / 1e6:+.3f} kHz/ms",
+                    "estimated_carrier": (
+                        f"{(analysis_center_hz + pattern_result.carrier_frequency_offset_hz) / 1e6:.6f} MHz"
                     ),
-            ]
+                    "display": display_name,
+                    "match_selection": (
+                        f"{pattern_result.metadata.get('selected_match_index', 1)} / "
+                        f"{pattern_result.metadata.get('eligible_match_count', 1)}"
+                    ),
+                }
+            )
             if signal.modulation.family is ModulationFamily.PSK:
                 rate_error_ppm = pattern_result.metadata.get("symbol_rate_error_ppm")
                 sync_evm = pattern_result.metadata.get("synchronization_evm_rms")
                 if rate_error_ppm is not None:
-                    summary_rows.append(
-                        ("Symbol Rate Error", f"{float(rate_error_ppm):+.2f} ppm")
+                    summary_values["symbol_rate_error"] = (
+                        f"{float(rate_error_ppm):+.2f} ppm"
                     )
                 if sync_evm is not None:
-                    summary_rows.append(
-                        ("Sync EVM RMS", f"{float(sync_evm) * 100.0:.2f} %")
+                    summary_values["sync_evm_rms"] = (
+                        f"{float(sync_evm) * 100.0:.2f} %"
                     )
+                summary_values["psk_carrier_drift"] = (
+                    f"{reported_drift_hz_per_s / 1e6:+.3f} kHz/ms"
+                )
             elif signal.modulation.family is ModulationFamily.FSK:
                 timing_offset = pattern_result.metadata.get(
                     "fractional_timing_offset_samples"
@@ -2097,19 +2510,33 @@ class VSAWindow(QtWidgets.QMainWindow):
                 drift_reason = pattern_result.metadata.get(
                     "drift_rejection_reason"
                 )
+                measured_deviation = pattern_result.frequency_deviation_hz
+                reference_deviation = signal.frequency_deviation_hz
+                if measured_deviation is not None:
+                    summary_values["fsk_measured_deviation"] = (
+                        f"{float(measured_deviation) / 1e3:.3f} kHz"
+                    )
+                if reference_deviation is not None:
+                    summary_values["fsk_reference_deviation"] = (
+                        f"{float(reference_deviation) / 1e3:.3f} kHz"
+                    )
+                if measured_deviation is not None and reference_deviation is not None:
+                    summary_values["fsk_deviation_error"] = (
+                        f"{float(measured_deviation) - float(reference_deviation):+.0f} Hz"
+                    )
+                summary_values["carrier_frequency_drift"] = (
+                    f"{reported_drift_hz_per_s / signal.symbol_rate_hz:+.3f} Hz/Sym"
+                )
                 if timing_offset is not None and timing_symbols is not None:
                     timing_status = (
                         ""
                         if timing_accepted is not False
                         else f" (rejected; applied {float(applied_timing or 0.0):+.3f})"
                     )
-                    summary_rows.append(
-                        (
-                            "Fractional Timing",
-                            f"{float(timing_offset):+.3f} sample "
-                            f"({float(timing_symbols) * 100.0:+.2f} % sym)"
-                            f"{timing_status}",
-                        )
+                    summary_values["fractional_timing"] = (
+                        f"{float(timing_offset):+.3f} sample "
+                        f"({float(timing_symbols) * 100.0:+.2f} % sym)"
+                        f"{timing_status}"
                     )
                 if frequency_residual is not None:
                     residual_status = (
@@ -2117,73 +2544,40 @@ class VSAWindow(QtWidgets.QMainWindow):
                         if no_drift_residual is None
                         else f" / no drift {float(no_drift_residual) / 1e3:.3f}"
                     )
-                    summary_rows.append(
-                        (
-                            "Frequency Fit RMS",
-                            f"{float(frequency_residual) / 1e3:.3f}"
-                            f"{residual_status} kHz",
-                        )
+                    summary_values["frequency_fit_rms"] = (
+                        f"{float(frequency_residual) / 1e3:.3f}"
+                        f"{residual_status} kHz"
                     )
+                    if measured_deviation is not None and measured_deviation > 0.0:
+                        summary_values["frequency_error_rms"] = (
+                            f"{100.0 * float(frequency_residual) / float(measured_deviation):.2f} %"
+                        )
                 if timing_confidence is not None:
-                    summary_rows.append(
-                        ("Timing Confidence", f"{float(timing_confidence):.3f}")
+                    summary_values["timing_confidence"] = (
+                        f"{float(timing_confidence):.3f}"
                     )
                 if deviation_error is not None:
-                    summary_rows.append(
-                        ("Deviation Error", f"{float(deviation_error):+.2f} %")
+                    summary_values["deviation_error_percent"] = (
+                        f"{float(deviation_error):+.2f} %"
                     )
-                summary_rows.append(
-                    (
-                        "Drift Model",
-                        (
-                            "Accepted"
-                            if drift_accepted
-                            else f"Rejected ({drift_reason or 'quality gate'})"
-                        ),
-                    )
+                summary_values["drift_model"] = (
+                    "Accepted"
+                    if drift_accepted
+                    else f"Rejected ({drift_reason or 'quality gate'})"
                 )
                 if candidate_drift is not None:
-                    summary_rows.append(
-                        (
-                            "Applied Drift",
-                            f"{pattern_result.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms",
-                        )
+                    summary_values["applied_drift"] = (
+                        f"{pattern_result.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms"
                     )
-            summary_rows.extend(
-                (
-                    ("Display", display_name),
-                    (
-                        "Match Selection",
-                        f"{pattern_result.metadata.get('match_selection_policy', 'First')} "
-                        f"({pattern_result.metadata.get('selected_match_index', 1)}/"
-                        f"{pattern_result.metadata.get('eligible_match_count', 1)})",
-                    ),
-                    ("Result Symbols", str(symbols.size)),
-                )
-            )
-            self._set_result_summary(tuple(summary_rows))
         elif self.session.pattern_error:
-            self._set_result_summary(
-                (
-                    ("Modulation", signal.modulation.value),
-                    ("Pattern Symbols Correct", "No"),
-                    ("Pattern Error", self.session.pattern_error),
-                    ("Result Symbols", str(symbols.size)),
-                )
-            )
+            summary_values["pattern_symbols_correct"] = "No"
+            summary_values["pattern_error"] = self.session.pattern_error
         else:
-            self._set_result_summary(
-                (
-                    ("Modulation", signal.modulation.value),
-                    ("Result Symbols", str(result.decoded_symbols.size)),
-                    (
-                        "Frequency Error"
-                        if signal.modulation.family is ModulationFamily.FSK
-                        else "EVM RMS",
-                        summary.split(":", 1)[-1].strip(),
-                    ),
+            if result.frequency_error_hz is not None:
+                summary_values["carrier_frequency_error"] = (
+                    f"{float(result.frequency_error_hz) / 1e3:+.3f} kHz"
                 )
-            )
+        self._set_result_summary(summary_values)
         shown = symbols[:2048]
         row_count = int(np.ceil(shown.size / 10.0))
         self.symbol_table.clearContents()
@@ -2236,7 +2630,73 @@ class VSAWindow(QtWidgets.QMainWindow):
             symbolPen=pg.mkPen(10, 35, 20, 230, width=1),
         )
 
-    def _set_result_summary(self, rows: tuple[tuple[str, str], ...]) -> None:
+    def _plot_symbol_distribution(
+        self,
+        symbols: np.ndarray,
+        *,
+        density_limit: float,
+    ) -> None:
+        """Draw the current PSK or FSK symbol vectors as flat points or density."""
+        values = np.asarray(symbols, dtype=np.complex128)
+        if not self.constellation_density_action.isChecked():
+            self.symbol_plot.plot(
+                values.real,
+                values.imag,
+                pen=None,
+                symbol="o",
+                symbolSize=6,
+                symbolBrush=pg.mkBrush(_TRACE_COLOR),
+                symbolPen=pg.mkPen(_TRACE_COLOR),
+            )
+            return
+
+        limit = max(float(density_limit), np.finfo(np.float64).eps)
+        density = _constellation_density(values, limit=limit)
+        density_item = pg.ImageItem(axisOrder="row-major")
+        lookup_table = np.array(
+            pg.colormap.get("turbo").getLookupTable(nPts=256, alpha=True),
+            copy=True,
+        )
+        lookup_table[0, 3] = 0
+        density_item.setLookupTable(lookup_table)
+        density_item.setImage(
+            density,
+            levels=_constellation_density_color_levels(density),
+        )
+        density_item.setRect(
+            QtCore.QRectF(-limit, -limit, 2.0 * limit, 2.0 * limit)
+        )
+        self.symbol_plot.addItem(density_item)
+        self._constellation_density_item = density_item
+        # Keep a non-rendering data trace so View All uses the finite symbol
+        # bounds instead of the density image rectangle.
+        self.symbol_plot.plot(
+            values.real,
+            values.imag,
+            pen=None,
+            symbol=None,
+        )
+
+    def _set_result_summary(self, values: dict[str, str]) -> None:
+        self._result_summary_values = dict(values)
+        self._render_result_summary()
+
+    def _render_result_summary(self) -> None:
+        signal = self.session.signal
+        if signal is None:
+            rows: list[tuple[str, str]] = []
+        else:
+            rows = [
+                (definition.label, self._result_summary_values.get(definition.item_id, "—"))
+                for definition in RESULT_SUMMARY_ITEMS
+                if definition.implemented
+                and definition.item_id in self._selected_result_summary_ids
+                and definition.applies_to(signal.modulation.family)
+                and not (
+                    definition.item_id == "pattern_error"
+                    and definition.item_id not in self._result_summary_values
+                )
+            ]
         self.result_summary.clearContents()
         self.result_summary.setRowCount(len(rows))
         for row, (name, value) in enumerate(rows):

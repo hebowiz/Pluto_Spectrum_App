@@ -154,6 +154,7 @@ class PatternSearchResult:
     carrier_frequency_offset_hz: float
     carrier_frequency_drift_hz_per_s: float
     frequency_deviation_hz: float | None
+    evm_rms_percent: float | None
     polarity_inverted: bool
     phase_rotation_rad: float | None
     timing_phase_samples: int
@@ -172,6 +173,10 @@ class PatternSearchResult:
         )
         object.__setattr__(self, "symbol_time_s", _readonly(self.symbol_time_s, np.float64))
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        if self.evm_rms_percent is not None and (
+            not np.isfinite(self.evm_rms_percent) or self.evm_rms_percent < 0.0
+        ):
+            raise ValueError("evm_rms_percent must be finite and non-negative")
 
     @property
     def pattern_stop_symbol(self) -> int:
@@ -394,14 +399,21 @@ def prepare_psk_iq(
     tx_filter: str,
     filter_parameter: float | None,
     samples_per_symbol: int = 8,
+    prefilter_carrier_frequency_offset_hz: float = 0.0,
 ) -> tuple[np.ndarray, float]:
-    """Resample PSK IQ and apply the configured matched receive filter."""
+    """Resample PSK IQ and apply carrier centering before the receive filter."""
     waveform, analysis_rate_hz = _resample_for_symbols(
         iq,
         sample_rate_hz,
         symbol_rate_hz,
         samples_per_symbol=samples_per_symbol,
     )
+    coarse_cfo_hz = float(prefilter_carrier_frequency_offset_hz)
+    if not np.isfinite(coarse_cfo_hz):
+        raise ValueError("prefilter carrier frequency offset must be finite")
+    if coarse_cfo_hz != 0.0:
+        time_s = np.arange(waveform.size, dtype=np.float64) / analysis_rate_hz
+        waveform = waveform * np.exp(-2j * np.pi * coarse_cfo_hz * time_s)
     if tx_filter.lower() in {
         "root raised cosine",
         "root-raised-cosine",
@@ -769,6 +781,7 @@ class PatternAnalyzer:
                 demodulation.carrier_frequency_drift_hz_per_s
             ),
             frequency_deviation_hz=demodulation.frequency_deviation_hz,
+            evm_rms_percent=None,
             polarity_inverted=demodulation.iq_inverted,
             phase_rotation_rad=None,
             timing_phase_samples=demodulation.timing_phase_samples,
@@ -855,6 +868,73 @@ class PatternAnalyzer:
         result_range: ResultRangeSettings,
         demodulation: DemodulationSettings,
     ) -> PatternSearchResult:
+        preliminary = self._search_psk_pass(
+            recording,
+            signal,
+            search,
+            result_range,
+            demodulation,
+            prefilter_carrier_frequency_offset_hz=0.0,
+        )
+        if not preliminary.metadata["matched_filter_applied"]:
+            return preliminary
+
+        coarse_cfo_hz = float(preliminary.carrier_frequency_offset_hz)
+        if abs(coarse_cfo_hz) <= np.finfo(np.float64).eps:
+            return replace(
+                preliminary,
+                metadata={
+                    **dict(preliminary.metadata),
+                    "prefilter_cfo_correction_applied": False,
+                    "prefilter_coarse_cfo_hz": 0.0,
+                    "postfilter_residual_cfo_hz": coarse_cfo_hz,
+                },
+            )
+
+        refined = self._search_psk_pass(
+            recording,
+            signal,
+            search,
+            result_range,
+            demodulation,
+            prefilter_carrier_frequency_offset_hz=coarse_cfo_hz,
+        )
+        residual_cfo_hz = float(refined.carrier_frequency_offset_hz)
+        total_cfo_hz = coarse_cfo_hz + residual_cfo_hz
+        total_phase_rotation = refined.phase_rotation_rad
+        if total_phase_rotation is not None:
+            total_phase_rotation = _wrap_phase(
+                total_phase_rotation
+                + 2.0
+                * np.pi
+                * coarse_cfo_hz
+                * refined.carrier_reference_time_s
+            )
+        return replace(
+            refined,
+            carrier_frequency_offset_hz=total_cfo_hz,
+            phase_rotation_rad=total_phase_rotation,
+            metadata={
+                **dict(refined.metadata),
+                "prefilter_cfo_correction_applied": True,
+                "prefilter_coarse_cfo_hz": coarse_cfo_hz,
+                "postfilter_residual_cfo_hz": residual_cfo_hz,
+                "carrier_recovery_stages": (
+                    "coarse CFO -> carrier centering -> matched filter -> fine synchronization"
+                ),
+            },
+        )
+
+    def _search_psk_pass(
+        self,
+        recording: IQRecording,
+        signal: SignalDescription,
+        search: PatternSearchSettings,
+        result_range: ResultRangeSettings,
+        demodulation: DemodulationSettings,
+        *,
+        prefilter_carrier_frequency_offset_hz: float,
+    ) -> PatternSearchResult:
         pattern = search.pattern
         samples_per_symbol = 8
         resampled, analysis_rate_hz = prepare_psk_iq(
@@ -864,6 +944,9 @@ class PatternAnalyzer:
             tx_filter=signal.tx_filter,
             filter_parameter=signal.filter_parameter,
             samples_per_symbol=samples_per_symbol,
+            prefilter_carrier_frequency_offset_hz=(
+                prefilter_carrier_frequency_offset_hz
+            ),
         )
         matched_filter_applied = signal.tx_filter.lower() in {
             "root raised cosine",
@@ -1385,6 +1468,19 @@ class PatternAnalyzer:
                 )
             ),
         )
+        displayed_symbols = np.asarray(normalized, dtype=np.complex64)
+        decision_reference = alphabet[decoded]
+        evm_rms_percent = (
+            100.0
+            * float(
+                np.sqrt(
+                    np.sum(np.abs(displayed_symbols - decision_reference) ** 2)
+                    / np.sum(np.abs(decision_reference) ** 2)
+                )
+            )
+            if decision_reference.size
+            else None
+        )
         return PatternSearchResult(
             modulation=signal.modulation,
             pattern_start_sample=start_sample,
@@ -1398,11 +1494,12 @@ class PatternAnalyzer:
             decoded_bits=_symbols_to_bits(
                 decoded, signal.modulation.order, demodulation.bit_ordering
             ),
-            measured_symbols=normalized,
+            measured_symbols=displayed_symbols,
             symbol_time_s=result_centers / analysis_rate_hz,
             carrier_frequency_offset_hz=float(carrier_offset_hz),
             carrier_frequency_drift_hz_per_s=float(drift_hz_per_s),
             frequency_deviation_hz=None,
+            evm_rms_percent=evm_rms_percent,
             polarity_inverted=False,
             phase_rotation_rad=phase_rotation,
             timing_phase_samples=phase,
@@ -1424,6 +1521,9 @@ class PatternAnalyzer:
                 "result_offset_symbols": result_range.offset_symbols,
                 "differential": signal.modulation.differential,
                 "matched_filter_applied": matched_filter_applied,
+                "prefilter_carrier_frequency_offset_hz": (
+                    prefilter_carrier_frequency_offset_hz
+                ),
                 "carrier_drift_compensated": (
                     demodulation.compensate_carrier_frequency_drift
                 ),

@@ -97,13 +97,30 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
 - 通常FSK解析はResult Range内symbol frequencyの平均を`frequency_error_hz`として算出する基礎処理がある。
 - GFSK/FSK Pattern Searchはpatternからcarrier frequency offset、frequency deviation、linear frequency driftを同時推定し、offset/drift/polarityを除去してsymbol decisionする。
 - PSK Pattern Searchはpatternからcarrier phaseとcarrier frequency offsetを推定し、Result Rangeのsymbol decisionへ補正する。Differential PSKはphase increment上で補正する。
+- Root Raised Cosineを選んだPSKは二段carrier recoveryとする。第1 passでcoarse CFOを
+  推定し、resample後のIQをNCOで中心へ移してからSRRC matched/measurement filterを
+  適用し、第2 passでresidual CFO、timing、phase、driftをfine推定する。外部へ返すCFOは
+  coarse+residual、phaseは原recordingのtime originへ再合成する。これはBluetooth専用
+  profileではなくPSK共通処理である。metadataには
+  `prefilter_cfo_correction_applied`、`prefilter_coarse_cfo_hz`、
+  `postfilter_residual_cfo_hz`を保存する。
 - これらはPattern Searchを基準にしたcoarse synchronizationである。
 - CFO、推定carrier frequency、linear driftをResult Summaryへ表示する。
 - `Display Config > Carrier Display`で`Raw IQ`と`Carrier Corrected`を切り替える。補正表示ではsample単位の位相補正後IQからInstantaneous FrequencyとResult Range Spectrumを再計算する。既定はCarrier Corrected。
 - `Display Config > Show Symbol Points`をONにすると、IQ PowerとModulationのtrace上へ復調symbol中心位置を明るい緑の点で重ねる。FSKではtime/frequency座標、PSKではIQ軌跡座標を使用する。既定はOFF。
 - PSKのIQ軌跡は8 samples/symbolへresampleし、TX FilterがRoot Raised Cosineなら同じalphaのSRRC matched receive filterを通した連続IQを使用する。軌跡とsymbol markerは同一のfilter outputとsymbol時刻RMS正規化を共有する。
-- 解析完了時に全plotの初期X/Y rangeをsnapshotし、`Display Config > Reset Graph Scales`または`Home`で復元する。mouse modeは全plot共通で、既定の`Rect Zoom`は左drag矩形拡大、`Pan`は左drag移動とする。表示のみの更新では現在rangeを維持する。
+- 解析完了時に全plotの初期X/Y rangeをsnapshotし、`Display Config > Reset Graph Scales`または`Home`で全plotを復元する。各plotの既存右クリックメニュー先頭には、そのplotだけを復元する`Reset`と、有限な表示traceだけを5%余白付きで収める`View All`を置く。後者はPattern/Result Rangeの帯・境界線等のoverlayを範囲計算から除外し、IQ平面の1:1 scaleを維持する。全plotは専用ViewBoxで左drag=`Rect Zoom`、middle button（wheel押込み）drag=`Pan`、right click=context menuへ固定する。Display ConfigのMouse Interaction menuと右クリックmenuの`Mouse Mode`は設けず、外部からPanModeを指定しても左dragはRect Zoomへ戻す。right dragのpyqtgraph軸scaleは維持する。表示のみの更新では現在rangeを維持する。
 - 主traceはIQ Powerと同じyellowへ統一し、Power/Modulation上のsymbol markerは5.5 pxとする。Symbol Plotのsymbolは塗りと輪郭を同じyellowとする。空data時とPSK ConstellationはQ軸`-1.25..+1.25`を初期rangeとする。PSK IQ Trajectoryは解析完了時の全有限trace sampleが収まる最大I/Q成分へ5%の余白を加え、最小rangeを±1.25として自動設定する。両IQ平面ともI/Qの単位scaleは1:1に固定する。全plotの縦・横軸labelは実際の軸size中央へ合わせる。plot内titleはdock titleとの重複を避けるため表示しない。各result dockのtitleはboldかつ通常UI fontの130%とし、dock内容のfontは通常size/weightを維持する。`Display Config > Show Symbol Points`は単キー`S`でもON/OFFできる。
+- `Display Config > Symbol Plot Trace`でPSK/FSK Symbol Plotを`Flat`（既定のyellow
+  scatter）または`Density`へ切り替える。Densityはcurrent Result Rangeの最終
+  symbol vectorを96×96 I/Q histogramへ集計する。PSKは固定`-1.25..+1.25`、FSK
+  phase-difference vectorは現在の振幅分布を収めるI/Q範囲を使用する。
+  各観測を標準偏差0.7 binのGaussian kernelで平滑化してから`log(1+density)`を
+  turbo color mapで表示し、peak densityの75%以上はredで飽和させる。kernel外の
+  density 0は透明。表示切替はDSP結果と
+  EVMを変更せず、manual Configと終了時Configへ保存する。R&S FPL K70 pp.31-34の
+  density traceと同じ「出現頻度を色で示す」表示契約だが、bin数・log scale・color
+  map・Gaussian kernelはPluto VSA固有とする。
 - Carrier Frequency Drift補正はDemodulation設定から切り替えられるが、実測cross-validation未完了のため既定OFF。CFO補正はCarrier Corrected表示で常に適用する。
 - R&S相当のFine Synchronization、残留CFO評価、estimator confidenceは未実装。
 
@@ -123,16 +140,18 @@ Modulation  | Symbol Plot | Symbol Table
 - IQ Powerも他resultと同様に移動、float、close、再表示できる。
 - Result SummaryはSymbol Tableから分離し、`Parameter`と`Current`の2列へ項目を縦方向に並べる。
 - Result SummaryとSymbol Tableのdata cell背景は交互色を使わず、単一色で統一する。
+- Result Summary項目は`pluto_sa/vsa/result_summary.py`の安定した内部ID、表示名、Common/PSK/FSK/Diagnostics分類、対応modulation family、実装状態、既定表示を唯一の定義元とする。Result Summary右クリックの階層check menuと`Meas Config > Result Summary`のcheck treeは同じ選択setを共有する。`Show All`、`Measurement Results Only`、`Diagnostics Only`、`Restore Defaults`を備え、選択IDは手動Configと終了時Configへ保存する。旧Configのsection欠落時は既定へ戻し、未知の将来IDは無視する。R&S項目の未実装分は`Not implemented`として表示するが選択不可とし、同期用`Sync EVM RMS`/`Frequency Fit RMS`を正式な`EVM RMS`/`Frequency Error RMS`と混同しない。
+- 既定表示はCommonのModulation/Power/Carrier Frequency Error、PSKのEVM RMS/Symbol Rate Error、FSKのFrequency Error RMS/FSK Meas Deviation/FSK Deviation Error/Carrier Frequency Drift、DiagnosticsのPattern Symbols Correct/IQ Correlation/Selected Result/Result Symbols/Pattern Errorとする。PowerはResult Range解析dataのdBmをlinear powerへ戻して平均する。FSK Deviation Errorは`measured-reference`をHz、Carrier Frequency DriftはHz/Symで表示する。Frequency Error RMSは現行FSK frequency-model residualをmeasured deviationで正規化した開発値であり、規格適合値ではない。
 - Symbol PlotはPSK時にConstellation、FSK時に1 symbol期間の位相差分をI/Q平面へ表示するDock Widget。
 - 初期geometryは各列幅と各行高を均等化する。ユーザーが移動・resizeした後はQt dock layoutに従う。
 
 ### Capture内の複数pattern
 
-2026-08-06にFSK/PSK共通の複数候補列挙を実装した。threshold以上のcorrelation local peakを列挙し、隣接timing phaseで同一packetを重複検出したものは物理候補1件へ統合する。`Match Selection`は`Strongest`（正規化相関最大、電力最大ではない）、`First`（既定値）、`Last`、`Match Index`（時刻順・1始まり）を選択できる。Result Summaryは選択方式と`selected/eligible`件数を表示し、metadataには検出件数も残す。`Sweep / Run > Previous/Next Result Range`または左右矢印で、IQを再取得せず同じcapture内の前後候補へ切り替える。端では停止し、切替後の設定は`Match Index`となる。解析結果そのものは引き続き選択した1件だけを保持する。
+2026-08-06にFSK/PSK共通の複数候補列挙を実装した。threshold以上のcorrelation local peakを列挙し、隣接timing phaseで同一packetを重複検出したものは物理候補1件へ統合する。2026-08-07にUIの`First`/`Strongest`/`Last`/`Match Index`選択を廃止し、eligible候補を常にcapture時刻順・1始まりで管理する方式へ統一した。ファイルload、generated recording、Pluto新規取得では必ずindex 1へ戻り、同じIQに対するRefreshや設定変更後の再解析では現在indexを維持する。Result Summaryの`Selected Result`は`selected / eligible`件数を表示し、metadataには検出件数も残す。`Sweep / Run > Previous/Next Result Range`または左右矢印で、IQを再取得せず同じcapture内の前後候補へ切り替える。端では停止する。解析結果そのものは引き続き選択した1件だけを保持する。選択indexはcapture固有の一時状態でConfigへ保存せず、旧Configの`match_selection`/`match_index`は読み込み時に無視する。
 
-`Meas only if Pattern Symbols Correct`がONの場合、全相関候補をsymbol判定してからpattern symbol errorが0の候補だけをeligible候補にする。先行する誤相関候補があっても、後続の完全一致候補を`First`として選択する。OFFの場合は誤りを含む候補も時間順の一覧へ残すが、その候補で探索を打ち切らず、後続の完全一致候補も`Match Index`または左右矢印で選択できる。`detected_match_count`は相関候補総数、`eligible_match_count`はResult Range条件とsymbol correctness条件を適用した後の候補数を表す。ONで完全一致候補が0件の場合は以前のPattern Resultとrange overlayを画面から消し、`Pattern Error`を表示する。
+`Meas only if Pattern Symbols Correct`がONの場合、全相関候補をsymbol判定してからpattern symbol errorが0の候補だけをeligible候補にする。先行する誤相関候補があっても、後続の最初の完全一致候補がindex 1となる。OFFの場合は誤りを含む候補も時間順の一覧へ残すが、その候補で探索を打ち切らず、後続の完全一致候補も左右矢印で選択できる。`detected_match_count`は相関候補総数、`eligible_match_count`はResult Range条件とsymbol correctness条件を適用した後の候補数を表す。ONで完全一致候補が0件の場合は以前のPattern Resultとrange overlayを画面から消し、`Pattern Error`を表示する。
 
-`Result Range > Exclude incomplete Result Range`をONにすると、capture端またはFSK burst端までに指定Result Lengthを確保できない候補を選択前に除外する。OFFは従来互換で、選択候補の取得可能なsymbolだけを返す。除外後に候補がない場合はpattern analysis error、`Match Index`は除外後のeligible候補に対する番号とする。旧Configに項目がない場合は`First`、index 1、除外OFFを補完する。
+`Result Range > Exclude incomplete Result Range`をONにすると、capture端またはFSK burst端までに指定Result Lengthを確保できない候補を選択前に除外する。OFFは従来互換で、選択候補の取得可能なsymbolだけを返す。除外後に候補がない場合はpattern analysis error、選択indexは除外後のeligible候補に対する番号とする。
 
 R&S manual pp.116-117、143-145では、Burst Search有効時は各burst内の最初のpatternを検索し、複数の離散Result Rangeをcapture buffer上に持ち、`Select Result Rng`で現在範囲を切り替える。今後は単純なcorrelation local peak列挙ではなく、Burst Searchでpacket候補を分離してから各burstの最初のpatternを対応づけ、available Result Rangesとselected Result Rangeを別管理する。この段階でNext/Previousまたはcapture上のrange選択UIを追加する。
 
@@ -179,7 +198,11 @@ PSK:
 - symbol centerをlinear interpolation。
 - ideal constellationへのnearest decision。
 - pi/4-DQPSK/8DPSKは隣接symbol間のphase differenceをdecision。
-- ideal referenceとの差からbasic RMS EVMを計算。
+- Pattern Search成立時のPSK EVM RMSは、Constellationへ渡す最終
+  `PatternSearchResult.measured_symbols`と、decode結果に対応するideal alphabetを
+  同じResult Range・1 point/symbolで比較する。式は
+  `100 * sqrt(sum(|measured-reference|^2) / sum(|reference|^2))`で、R&Sの
+  Mean Reference Power正規化に対応する。同期最適化用の`Sync EVM RMS`とは別値。
 
 ## 4. Source
 
@@ -279,7 +302,14 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 - 通常解析pipeline単独のtiming/carrier recoveryは未実装。Pattern Search成立後の差動PSKでは、判定差動symbolを累積しTX Filter設定に対応する絶対referenceを生成する。8 samples/symbolへのresampleとmatched filter後、Result Range全体の測定絶対IQとreferenceの複素EVMを目的関数としてfractional timing、symbol-rate error、carrier phase/CFO、linear driftを同時推定する。既知patternを固定reference、残りをdecision-directed referenceとして反復し、zero-drift開始とM乗coarse開始の低EVM側を採用する。
 - TX/RX/Measurement/Reference filter chainは未実装。
 - generated Gaussian waveformは開発用近似であり、規格reference/EVM用filterではありません。
-- PSK EVMはbasic decision-directed値。R&S相当のnormalization、同期、evaluation range、measurement filter条件をまだ満たしません。
+- PSK EVMは最終同期・補正後のConstellation点と同じsymbol列を使用し、表示との
+  内部整合性を保証する。現状はcurrent Result Range、1 point/symbol、Mean Reference
+  Power正規化に固定される。R&S相当の独立Evaluation Range、Display Points/Symbol、
+  Optimization、Measurement Filter、`Normalize EVM to`選択は未実装のため、規格適合値
+  またはR&Sとの数値同等性はまだ保証しない。
+- 現PSK SRRCは8 samples/symbol、betaはSignal DescriptionのRolloff（未指定時0.4）、
+  10 symbol spanの有限FIRである。coarse CFO補正はSRRC前に適用するが、resample_polyの
+  anti-alias filterとAnalysis Bandwidth channel filterよりは後段である。
 - FSK error metricsはfrequency error/deviationの基礎のみです。
 - 一般VSA用pattern searchは実装済み。Burst Search、DECT profile、negative Result Range offsetによるpattern前symbol復調は未実装。
 - VSA UIはPluto Free Run / Run Singleとoffline Refreshに対応。Pluto取得は非同期だが、取得後のDSP解析はUI thread上で同期実行します。
@@ -296,8 +326,36 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 2. pattern前を含むnegative Result Range offsetを実装。
 3. pulse shaping/matched/measurement filter contractとPSK symbol-rate recoveryを追加。
 4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。
-5. EVM用Fine Synchronization、compensation、Evaluation Rangeを接続。
+5. EVM用の独立Evaluation Range、Display Points/Symbol、Optimization、Measurement
+   Filter、normalization選択を接続。
 6. VSA analysis workerを追加しUI threadからDSPを分離。
 7. SigMF、SCPI sourceとiq-tarのUI channel selectorを追加。
 
 実機接続前に、生成waveformへCFO、timing offset、AWGNを注入したpytestを追加し、推定器の許容誤差を固定してください。
+
+## 8. 将来構想: 未知信号のフリーラン解析
+
+既知patternなしでも、ユーザー指定または候補探索したmodulation、symbol rate、TX
+filterが信号に合えばsymbol同期と波形復調は可能。ただし現行の高精度Fine Syncは
+既知patternがpacket位置、timing、CFO/phase、FSK polarityまたはPSK rotationを拘束
+しているため、通常解析の固定Timing Offsetだけでは安定しない。
+
+段階的な実装方針:
+
+1. Pluto Power Triggerとpre-triggerを使ってburstを取り込み、capture内ではpowerの
+   hysteresis/holdoffを持つBurst Searchで実際の開始・終了とResult Rangeを決める。
+2. modulation、symbol rate、TX/RX filterをユーザーが指定する`Free Run Demod`を追加。
+   PSKはGardner等のdata-aidedでないtiming recoveryとCostas/Viterbi-Viterbi系carrier
+   recovery、FSKは瞬時周波数波形のtransition/eye metricとdecision-directed frequency
+   modelでfractional timing、CFO、deviationを推定する。
+3. 設定候補をgrid searchし、eye opening、timing confidence、cluster separation、
+   PSK EVM/DEVM、FSK frequency residualなどを共通Quality Scoreとして順位表示する。
+4. symbol rateのcyclostationary/スペクトル推定、帯域・center推定、modulation classifier
+   を加え、候補生成を自動化する。自動判定値は断定せずconfidenceと代替候補を表示する。
+
+Power TriggerはADC captureの開始条件でありsymbol boundaryを保証しない。trigger latencyを
+吸収するpre-triggerとcapture後Burst Searchは別に必要。既知patternがないPSKでは絶対
+carrier phase、constellation rotation、bit mapping、差動列の先頭symbolが不定になり、
+FSKではmark/space polarityが不定になり得る。したがって未知信号でも波形品質評価と
+相対symbol列の復調は可能だが、絶対bit値やpacket field解釈にはpreamble、codingまたは
+protocol情報が別途必要。

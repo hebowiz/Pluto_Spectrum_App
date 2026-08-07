@@ -61,6 +61,8 @@ Version 1 stores all currently exposed measurement controls:
   incomplete-range exclusion
 - Demodulation synchronization contracts, bit ordering, CFO-drift
   compensation, and FSK deviation compensation
+- Result Summary visible item IDs. Missing sections from older version-1 files
+  restore the current default selection; unknown future IDs are ignored.
 
 Loading a configuration applies the controls and immediately reruns analysis
 against the currently loaded IQ capture. Display-only window layout and
@@ -90,30 +92,23 @@ signal must provide the next recording.
 
 Pattern Search now keeps all above-threshold local correlation peaks and
 collapses detections from adjacent symbol-timing phases into one physical
-packet candidate. This behavior is shared by FSK and PSK. `Match Selection`
-then chooses one eligible candidate:
+packet candidate. This behavior is shared by FSK and PSK. The UI has no match
+selection policy: eligible candidates are always numbered in capture-time order.
+A newly loaded file, generated recording, or Pluto capture always selects index
+1. Refreshing or reconfiguring analysis for the same immutable IQ recording
+keeps the current one-based index. `Meas only if Pattern Symbols Correct` and
+the incomplete-range option determine which detections enter this eligible list.
 
-- `Strongest`: greatest normalized pattern correlation; an exact tie selects
-  the earlier candidate. This is correlation strength, not received power.
-- `First`: earliest candidate in capture time.
-- `Last`: latest candidate in capture time.
-- `Match Index`: one-based index in capture-time order.
-
-`First` is the application default. It means the earliest above-threshold
-pattern occurrence, so a very short pattern can still produce an earlier false
-candidate in unrelated symbols. Use a longer pattern, raise the correlation
-threshold, or temporarily choose `Strongest` when that ambiguity matters.
-
-The Result Summary displays both the policy and selected/eligible index, for
-example `Last (2/2)`. Result metadata also records
+The Result Summary displays the selected/eligible index as `Selected Result`,
+for example `2 / 8`. Result metadata also records
 `detected_match_count`, `eligible_match_count`, and `selected_match_index`.
 
 `Result Range > Exclude incomplete Result Range` controls captures that end
 before the requested result length is available. When Off (the backward-
 compatible default), the selected result is returned with the available
-symbols only. When On, incomplete candidates are removed before First/Last/
-Strongest/Match Index selection. Consequently, `Match Index` numbers the
-remaining eligible candidates, not the raw detections. If none remain, pattern
+symbols only. When On, incomplete candidates are removed before indexing.
+Consequently, the selected index numbers the remaining eligible candidates,
+not the raw detections. If none remain, pattern
 analysis reports that no match satisfies the result-range requirements.
 
 The completeness requirement includes Result Range alignment and offset. FSK
@@ -121,9 +116,10 @@ also respects the detected burst end; PSK uses the available demodulated
 symbols up to the capture end. The current analyzer still returns one selected
 result at a time. `Sweep / Run > Previous Result Range` (`Left`) and
 `Next Result Range` (`Right`) change to the adjacent eligible match without a
-new IQ acquisition. Navigation changes the active setting to `Match Index` and
-reruns analysis against the same immutable capture. The actions stop at the
-first/last result rather than wrapping.
+new IQ acquisition and rerun analysis against the same immutable capture. The
+actions stop at the first/last result rather than wrapping. Match policy and
+index are no longer measurement Config properties; legacy Config fields are
+accepted but ignored.
 
 ## Last-used folders
 
@@ -170,6 +166,14 @@ For differential PSK, the trajectory markers are absolute filtered IQ samples,
 while the constellation contains differential products between adjacent
 symbols. Their amplitude distributions can therefore still differ slightly,
 but the earlier pre-filter/post-filter mismatch has been removed.
+
+When Root Raised Cosine is selected, PSK pattern analysis uses two carrier
+recovery passes. The first pass estimates coarse CFO. The resampled IQ is then
+frequency-centered before the SRRC matched/measurement filter, and the second
+pass estimates residual CFO, phase, timing, and drift. Reported carrier error is
+the sum of coarse and residual CFO and remains referenced to the original IQ
+recording. This ordering is modulation-generic; Bluetooth EDR merely supplies
+the conventional rolloff value 0.4.
 
 ### Normalization difference from R&S FPL1-K70
 
@@ -233,14 +237,82 @@ snapshot. `Display Config > Reset Graph Scales` restores all four plots to the
 snapshot; the `Home` key is its shortcut. Re-running analysis discards the old
 snapshot and calculates a new one from the new result.
 
-`Display Config > Mouse Interaction` selects one common interaction mode for
-all four plots:
+Each plot's standard right-click menu is retained and extended at the top:
 
-- `Rect Zoom` (default): left-drag a rectangular area to zoom to it.
-- `Pan`: left-drag to move the visible range.
+- `Reset` restores only that plot to the latest analysis-complete snapshot.
+- `View All` fits all finite points in the visible data traces with 5% margin.
+  Result-range regions, pattern markers, infinite boundary lines, and other
+  overlays are deliberately excluded from the bounds calculation. IQ-plane
+  plots keep equal I/Q scaling and at least the default +/-1.25 range.
+
+Mouse interaction is fixed and has no mode-selection menu:
+
+- left drag selects a rectangle and zooms to it;
+- middle-button (mouse-wheel) drag pans the visible range;
+- right click opens the plot context menu; right drag retains pyqtgraph's axis
+  scaling behavior.
+
+This is implemented by a VSA-specific ViewBox: its persistent left-button mode
+is Rect Zoom, while a middle-button drag alone uses pyqtgraph's three-button
+Pan path. `Display Config > Mouse Interaction` and the standard context-menu
+`Mouse Mode` submenu are removed so all four plots keep the same behavior.
 
 Display-only refreshes, such as toggling symbol points or raw/carrier-corrected
 display, preserve the current manual view instead of silently resetting it.
+
+`Display Config > Symbol Plot Trace` switches both PSK constellation symbols
+and FSK phase-difference vectors between `Flat` and `Density`. Flat draws every
+final symbol as a yellow point. Density bins the same symbols into a 96 by 96
+I/Q histogram. PSK uses the fixed +/-1.25 plane; FSK uses a symmetric plane
+large enough for its RMS-normalized phase-difference amplitude. Each
+observation is spread with a Gaussian kernel having a
+standard deviation of 0.7 bins, and maps `log(1 + density)` through a
+blue-to-red color map. Density at 75% of the current peak and above saturates
+to red, making a tightly converged cluster core clearly visible without
+widening the density kernel; zero-density cells are transparent. The smoothing makes
+small single-packet result sets appear as a continuous occurrence field while
+preserving relative occurrence. It is a display-only R&S-inspired view, not a
+new DSP result, so decoded symbols and EVM are unchanged. The selected mode is
+stored in manual and automatic startup Config. Older Config files without
+`display_config` default to Flat.
+
+## Result Summary item selection
+
+The Result Summary context menu and `Meas Config > Result Summary` use the same
+canonical item registry in `pluto_sa/vsa/result_summary.py`. The context menu is
+grouped into Common, PSK, FSK, and Synchronization Diagnostics submenus. The
+Config page exposes the same entries as a persistent checklist. `Show All`,
+`Measurement Results Only`, `Diagnostics Only`, and `Restore Defaults` presets
+are available from both locations.
+
+R&S-defined items that are not calculated yet remain visible as disabled `Not
+implemented` entries. This avoids silently presenting synchronization metrics as
+standards-compatible measurement results. In particular, `Sync EVM RMS` and
+`Frequency Fit RMS` remain diagnostics distinct from `EVM RMS` and `Frequency
+Error RMS`.
+
+Current implemented measurement rows include linear-mean result power, carrier
+frequency error, PSK EVM RMS and symbol-rate error, and FSK frequency-error RMS,
+measured/reference/deviation error, and carrier drift. FSK deviation error is
+reported in Hz and carrier drift in Hz/symbol to match the R&S Result Summary
+convention. These values remain development measurements, not conformance data.
+
+For Pattern Search PSK results, `EVM RMS` now uses the exact final complex symbol
+array supplied to the Constellation (`PatternSearchResult.measured_symbols`) and
+the ideal alphabet points selected by the corresponding decoded symbols. It is
+calculated over the current Result Range as
+`100 * sqrt(sum(|measured-reference|^2) / sum(|reference|^2))`. The denominator
+therefore implements mean-reference-power normalization for a constant number of
+symbols. The display rotation is already included in both arrays and does not
+change the vector error.
+
+This makes the displayed EVM and Constellation internally consistent at one
+decision point per symbol. It follows the R&S principle that EVM is evaluated
+between the synchronized, corrected measurement and reference at the selected
+evaluation points. It is not yet full R&S equivalence: Pluto VSA does not expose
+an independent Evaluation Range, Display Points/Symbol, Optimization, Measurement
+Filter, or `Normalize EVM to` selector. `Sync EVM RMS` remains a separate fitting
+diagnostic and is not used as the displayed measurement EVM.
 
 ## Tests
 

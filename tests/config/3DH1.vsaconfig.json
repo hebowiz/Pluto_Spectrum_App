@@ -3,9 +3,22 @@
   "version": 1,
   "settings": {
     "input_frontend": {
+      "input_source": "Pluto",
+      "pluto_uri": "",
+      "center_frequency_mhz": 2441.0,
+      "rf_bandwidth_mhz": 8.0,
+      "internal_gain_db": 30,
+      "external_attenuation_db": 30.0,
+      "external_gain_db": 0.0,
       "analysis_channel_enabled": false,
       "analysis_center_mhz": 2441.0,
       "analysis_bandwidth_mhz": 1.5
+    },
+    "signal_capture": {
+      "capture_length": 10000.0,
+      "capture_length_unit": "Symbols",
+      "samples_per_symbol": 8,
+      "swap_iq": false
     },
     "signal_description": {
       "modulation": "8DPSK",
@@ -33,21 +46,42 @@
       ],
       "threshold_auto": true,
       "threshold_percent": 90.0,
-      "meas_only_if_correct": true
+      "meas_only_if_correct": true,
+      "match_selection": "Match Index",
+      "match_index": 2
     },
     "result_range": {
       "length_symbols": 244,
       "reference": "Pattern Waveform",
       "alignment": "Left",
       "offset_symbols": 0,
-      "symbol_number_at_pattern_start": 0
+      "symbol_number_at_pattern_start": 0,
+      "exclude_incomplete_result": false
     },
     "demodulation": {
       "coarse_synchronization": "Auto",
       "fine_synchronization": "Auto",
       "bit_ordering": "MSB",
-      "compensate_carrier_frequency_drift": false,
+      "compensate_carrier_frequency_drift": true,
       "compensate_fsk_deviation_error": true
+    },
+    "result_summary": {
+      "visible_items": [
+        "modulation",
+        "power",
+        "carrier_frequency_error",
+        "evm_rms",
+        "symbol_rate_error",
+        "frequency_error_rms",
+        "fsk_deviation_error",
+        "fsk_measured_deviation",
+        "carrier_frequency_drift",
+        "pattern_symbols_correct",
+        "iq_correlation",
+        "match_selection",
+        "result_symbols",
+        "pattern_error"
+      ]
     }
   }
 }

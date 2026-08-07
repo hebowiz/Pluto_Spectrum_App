@@ -494,3 +494,37 @@ fixed-channel 3DH1 captures at 2441 MHz, 8 MS/s and 3 ms produced:
 The prior tight/dispersed two-state trajectory behavior and high-drift outlier did
 not recur. These are implementation repeatability figures for the connected test
 source, not a standards-conformance EVM specification.
+
+## 2026-08-07 Bluetooth LE 1M / LE 2M fixed-channel validation
+
+Bluetooth Direct Test Mode GFSK packets were captured through Pluto at 2440 MHz.
+Pattern Search used the unwhitened OTA-order DTM Preamble + Access Address:
+
+- LE 1M: `1010101010010100100000100110111010001110` (40 symbols);
+- LE 2M: `101010101010101010010100100000100110111010001110` (48 symbols).
+
+LE 1M used 1 Msym/s, 8 MS/s, Gaussian TX filter, and a 10 ms capture. The shown
+capture reported 99.82% I/Q correlation, zero pattern-symbol errors, +24.155 kHz
+CFO, 252.621 kHz measured deviation, and 2.77% Frequency Error RMS.
+
+LE 2M used 2 Msym/s, 16 MS/s, Gaussian TX filter, and a 5 ms capture. The shown
+capture reported 99.87% I/Q correlation, zero pattern-symbol errors, +22.080 kHz
+CFO, 504.303 kHz measured deviation, and 1.44% Frequency Error RMS. After the
+Result Length was set to the complete 37-byte DTM packet, Result Symbols was 384:
+16 preamble + 32 Access Address + 16 PDU header/length + 296 payload + 24 CRC.
+The final symbol center is only 0.25 us before Result Stop at 2 Msym/s. A later
+zoomed IQ Power view confirmed that this is not only marker overlap: the final
+symbol-center power was about 1.3 dB below the packet plateau and the RF
+ramp-down had already begun. Result Symbols and the 0..383 indexing remain
+correct, but whether this is transmitter envelope behavior or residual timing
+offset must be checked from saved IQ at sample resolution. Modulation-quality
+evaluation should eventually use an Evaluation Range distinct from the complete
+decode Result Range so edge transients can be excluded without dropping packet
+symbols.
+
+Both modes therefore completed pattern synchronization and result-range symbol
+decoding with the common GFSK pipeline at 8 samples/symbol. The FSK density plot
+also retained the expected sequence-dependent Gaussian-filter transition arcs;
+the matching normalized phase geometry at 1 and 2 Msym/s is consistent with the
+doubled LE 2M deviation. This is a functional real-IQ validation, not a Bluetooth
+RF-PHY conformance result.

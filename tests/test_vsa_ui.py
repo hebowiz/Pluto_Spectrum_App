@@ -11,6 +11,9 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_sa.vsa.ui.main_window import (
     VSAWindow,
+    _FixedInteractionViewBox,
+    _constellation_density,
+    _constellation_density_color_levels,
     _constellation_display_symbols,
     _fsk_phase_difference_symbols,
 )
@@ -30,6 +33,8 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
         preferences=_isolated_preferences(tmp_path, "result-navigation")
     )
     try:
+        assert not hasattr(window, "pattern_match_selection_combo")
+        assert not hasattr(window, "pattern_match_index_spin")
         recording, signal = GeneratedIQSource.psk(
             modulation=ModulationKind.PI4_DQPSK,
             symbol_count=160,
@@ -46,8 +51,31 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
         window._set_pattern_symbols(generated[20:36])
         window.result_length_spin.setValue(100)
 
-        assert window.pattern_match_selection_combo.currentText() == "First"
+        assert window._selected_match_index == 1
         assert window._analyze()
+        summary_labels = {
+            window.result_summary.item(row, 0).text()
+            for row in range(window.result_summary.rowCount())
+        }
+        assert {"EVM RMS", "Symbol Rate Error"}.issubset(summary_labels)
+        assert "FSK Deviation Error" not in summary_labels
+        pattern_result = window.session.pattern_result
+        reference = np.exp(
+            1j * (np.pi / 4.0 + pattern_result.decoded_symbols * np.pi / 2.0)
+        )
+        plotted_symbol_evm = 100.0 * np.sqrt(
+            np.sum(np.abs(pattern_result.measured_symbols - reference) ** 2)
+            / np.sum(np.abs(reference) ** 2)
+        )
+        summary_values = {
+            window.result_summary.item(row, 0).text(): window.result_summary.item(
+                row, 1
+            ).text()
+            for row in range(window.result_summary.rowCount())
+        }
+        assert float(summary_values["EVM RMS"].split()[0]) == pytest.approx(
+            plotted_symbol_evm, abs=0.005
+        )
         first_start = window.session.pattern_result.pattern_start_sample
         assert first_start == 20 * 8
         assert not window.previous_result_action.isEnabled()
@@ -58,14 +86,28 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
         window.next_result_action.trigger()
         second = window.session.pattern_result
         assert second.pattern_start_sample == recording.sample_count + 64 + 20 * 8
-        assert window.pattern_match_selection_combo.currentText() == "Match Index"
-        assert window.pattern_match_index_spin.value() == 2
+        assert window._selected_match_index == 2
         assert window.previous_result_action.isEnabled()
         assert not window.next_result_action.isEnabled()
 
+        # Refreshing analysis of the same IQ keeps the selected packet.
+        assert window._analyze()
+        assert window._selected_match_index == 2
+        assert (
+            window.session.pattern_result.pattern_start_sample
+            == recording.sample_count + 64 + 20 * 8
+        )
+
         window.previous_result_action.trigger()
         assert window.session.pattern_result.pattern_start_sample == first_start
-        assert window.pattern_match_index_spin.value() == 1
+        assert window._selected_match_index == 1
+
+        window.next_result_action.trigger()
+        assert window._selected_match_index == 2
+        # Loading new IQ always returns focus to the first eligible packet.
+        window.load_recording(combined, signal)
+        assert window._selected_match_index == 1
+        assert window.session.pattern_result.pattern_start_sample == first_start
     finally:
         window._meas_config_dialog.close()
         window.close()
@@ -152,17 +194,27 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         assert marker_color.green() > marker_color.red()
         assert marker_color.green() > marker_color.blue()
         assert power_marker.opts["symbolSize"] == pytest.approx(5.5)
-        assert window.rect_zoom_action.isChecked()
+        assert not hasattr(window, "pan_action")
+        assert not hasattr(window, "rect_zoom_action")
+        assert "Mouse Interaction" not in {
+            action.text() for action in window._display_menu.actions()
+        }
         assert all(
-            plot.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
+            isinstance(plot.getViewBox(), _FixedInteractionViewBox)
+            and plot.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
             for _name, plot in window._plot_widgets()
         )
-        window.pan_action.trigger()
-        assert all(
-            plot.getViewBox().state["mouseMode"] == pg.ViewBox.PanMode
-            for _name, plot in window._plot_widgets()
-        )
-        window.rect_zoom_action.trigger()
+        for name, plot in window._plot_widgets():
+            menu = plot.getViewBox().getMenu(None)
+            menu_labels = [action.text() for action in menu.actions()]
+            assert menu_labels[:3] == [
+                "Reset",
+                "",
+                "View All",
+            ]
+            assert {"X axis", "Y axis"}.issubset(menu_labels)
+            assert "Mouse Mode" not in menu_labels
+            assert window._plot_context_actions[name]["view_all"] is menu.viewAll
         initial_ranges = {
             name: (list(ranges[0]), list(ranges[1]))
             for name, ranges in window._analysis_plot_ranges.items()
@@ -173,6 +225,46 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         for name, plot in window._plot_widgets():
             assert plot.viewRange()[0] == pytest.approx(initial_ranges[name][0])
             assert plot.viewRange()[1] == pytest.approx(initial_ranges[name][1])
+        window.zero_span_plot.setRange(
+            xRange=(-99.0, -98.0), yRange=(-77.0, -76.0), padding=0.0
+        )
+        window._plot_context_actions["iq_power"]["reset"].trigger()
+        assert window.zero_span_plot.viewRange()[0] == pytest.approx(
+            initial_ranges["iq_power"][0]
+        )
+        assert window.zero_span_plot.viewRange()[1] == pytest.approx(
+            initial_ranges["iq_power"][1]
+        )
+
+        # View All must fit every finite trace point without allowing a distant
+        # overlay line to inflate the range.
+        far_overlay = pg.InfiniteLine(pos=1e9, angle=90)
+        window.zero_span_plot.addItem(far_overlay)
+        trace_x, trace_y = window.zero_span_plot.listDataItems()[0].getData()
+        window.zero_span_plot.setRange(
+            xRange=(-99.0, -98.0), yRange=(-77.0, -76.0), padding=0.0
+        )
+        window._plot_context_actions["iq_power"]["view_all"].trigger()
+        view_x, view_y = window.zero_span_plot.viewRange()
+        assert view_x[0] <= float(np.min(trace_x))
+        assert view_x[1] >= float(np.max(trace_x))
+        assert view_y[0] <= float(np.min(trace_y))
+        assert view_y[1] >= float(np.max(trace_y))
+        assert view_x[1] < 1e6
+
+        symbol_x, symbol_y = (
+            window.symbol_plot.listDataItems()[0].getOriginalDataset()
+        )
+        window.symbol_plot.setRange(
+            xRange=(-0.1, 0.1), yRange=(-0.1, 0.1), padding=0.0
+        )
+        window._plot_context_actions["symbol_plot"]["view_all"].trigger()
+        symbol_view_x, symbol_view_y = window.symbol_plot.viewRange()
+        assert symbol_view_x[0] <= float(np.min(symbol_x))
+        assert symbol_view_x[1] >= float(np.max(symbol_x))
+        assert symbol_view_y[0] <= float(np.min(symbol_y))
+        assert symbol_view_y[1] >= float(np.max(symbol_y))
+        assert window.symbol_plot.getViewBox().state["aspectLocked"] == 1.0
         assert window._meas_config_dialog.isModal()
         assert window._meas_config_dialog.windowModality() != (
             QtCore.Qt.WindowModality.NonModal
@@ -185,6 +277,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             "Pattern Search",
             "Result Range",
             "Demodulation",
+            "Result Summary",
             "Sweep / Run",
         }
         assert all(
@@ -289,16 +382,69 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         window._open_meas_config()
         assert active_modal_widgets == [window._meas_config_dialog]
         assert window.corrected_carrier_action.isChecked()
+        default_summary = {
+            window.result_summary.item(row, 0).text(): window.result_summary.item(
+                row, 1
+            ).text()
+            for row in range(window.result_summary.rowCount())
+        }
+        assert "Power" in default_summary
+        assert "Carrier Frequency Error" in default_summary
+        assert default_summary["FSK Deviation Error"].endswith("Hz")
+        assert default_summary["Carrier Frequency Drift"].endswith("Hz/Sym")
+        assert "Frequency Fit RMS" not in default_summary
+
+        context_menu = window._create_result_summary_context_menu()
+        category_labels = {
+            action.text() for action in context_menu.actions() if action.menu() is not None
+        }
+        assert category_labels == {
+            "Common Measurement Results",
+            "PSK Measurement Results",
+            "FSK Measurement Results",
+            "Synchronization Diagnostics",
+        }
+        psk_menu = next(
+            submenu
+            for submenu in context_menu.findChildren(QtWidgets.QMenu)
+            if submenu.title() == "PSK Measurement Results"
+        )
+        evm_peak_action = next(
+            action for action in psk_menu.actions() if action.text().startswith("EVM Peak")
+        )
+        assert not evm_peak_action.isEnabled()
+        assert "Not implemented" in evm_peak_action.text()
+
+        window._apply_result_summary_preset("all")
+        context_menu = window._create_result_summary_context_menu()
+        diagnostics_menu = next(
+            submenu
+            for submenu in context_menu.findChildren(QtWidgets.QMenu)
+            if submenu.title() == "Synchronization Diagnostics"
+        )
+        frequency_fit_action = next(
+            action
+            for action in diagnostics_menu.actions()
+            if action.text() == "Frequency Fit RMS"
+        )
+        assert frequency_fit_action.isChecked()
+        frequency_fit_action.trigger()
+        assert "frequency_fit_rms" not in window._selected_result_summary_ids
+        assert window._result_summary_tree_items[
+            "frequency_fit_rms"
+        ].checkState(0) == QtCore.Qt.CheckState.Unchecked
+        frequency_fit_action.trigger()
+        assert "frequency_fit_rms" in window._selected_result_summary_ids
         summary = {
             window.result_summary.item(row, 0).text(): window.result_summary.item(
                 row, 1
             ).text()
             for row in range(window.result_summary.rowCount())
         }
-        assert "CFO" in summary
+        assert "Carrier Frequency Error" in summary
         assert "Fractional Timing" in summary
         assert "Timing Confidence" in summary
-        assert "Deviation Error" in summary
+        assert "Deviation Error (%)" in summary
         assert summary["Drift Model"].startswith(("Accepted", "Rejected"))
         assert "Applied Drift" in summary
         assert summary["Display"] == "Carrier Corrected"
@@ -317,6 +463,32 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         window.close()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
+
+
+def test_fixed_plot_interaction_uses_middle_drag_for_pan(monkeypatch) -> None:
+    pg.mkQApp("VSA fixed mouse interaction test")
+    observed_modes: list[int] = []
+
+    def observe_drag(view_box, _event, axis=None) -> None:
+        observed_modes.append(view_box.state["mouseMode"])
+
+    monkeypatch.setattr(pg.ViewBox, "mouseDragEvent", observe_drag)
+    view_box = _FixedInteractionViewBox()
+
+    class Event:
+        def __init__(self, button: QtCore.Qt.MouseButton) -> None:
+            self._button = button
+
+        def button(self) -> QtCore.Qt.MouseButton:
+            return self._button
+
+    view_box.mouseDragEvent(Event(QtCore.Qt.MouseButton.LeftButton))
+    view_box.mouseDragEvent(Event(QtCore.Qt.MouseButton.MiddleButton))
+
+    assert observed_modes == [pg.ViewBox.RectMode, pg.ViewBox.PanMode]
+    assert view_box.state["mouseMode"] == pg.ViewBox.RectMode
+    view_box.setMouseMode(pg.ViewBox.PanMode)
+    assert view_box.state["mouseMode"] == pg.ViewBox.RectMode
 
 
 def test_symbol_correct_search_failure_clears_previous_match_display(tmp_path) -> None:
@@ -387,6 +559,32 @@ def test_fsk_phase_difference_preserves_rms_normalized_symbol_amplitude() -> Non
     )
 
 
+def test_fsk_symbol_plot_supports_density_trace(tmp_path) -> None:
+    pg.mkQApp("VSA FSK density UI test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "fsk-density")
+    )
+    try:
+        window._load_generated(ModulationKind.GFSK)
+        assert window._constellation_density_item is None
+
+        window.constellation_density_action.trigger()
+
+        density_item = window._constellation_density_item
+        assert density_item is not None
+        assert density_item.image.shape == (96, 96)
+        assert np.count_nonzero(density_item.image) > 0
+        assert density_item.lut[0, 3] == 0
+        assert window.session.signal.modulation.family.value == "FSK"
+        # Unit-circle reference plus the hidden finite-data trace remain.
+        assert len(window.symbol_plot.listDataItems()) == 2
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None:
     pg.mkQApp("VSA PSK UI test")
     window = VSAWindow(
@@ -400,7 +598,7 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
         with np.load(fixture, allow_pickle=False) as values:
             pattern = " ".join(
                 str(int(value))
-                for value in values["differential_phase_indices"][:10]
+                for value in values["differential_phase_indices"][:32]
             )
         window.load_recording(
             FileIQSource.load(fixture),
@@ -415,10 +613,6 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
         window.pattern_format_combo.setCurrentText("Decimal")
         window.pattern_symbols_edit.setText(pattern)
         window.result_length_spin.setValue(244)
-        # This test validates the known high-correlation packet fixture rather
-        # than the application's time-first default. A short ten-symbol word
-        # also has an earlier 90%-correlation occurrence in this capture.
-        window.pattern_match_selection_combo.setCurrentText("Strongest")
         window.channel_filter_check.setChecked(True)
         window.analysis_center_spin.setValue(2441.0)
         window.analysis_bandwidth_spin.setValue(1.5)
@@ -472,6 +666,27 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
             1.0
         )
 
+        assert window.constellation_flat_action.isChecked()
+        assert window._constellation_density_item is None
+        pattern_result = window.session.pattern_result
+        evm_before_display_change = pattern_result.evm_rms_percent
+        flat_view_range = window.symbol_plot.viewRange()
+        window.constellation_density_action.trigger()
+        assert window.constellation_density_action.isChecked()
+        assert window.session.pattern_result is pattern_result
+        assert window.session.pattern_result.evm_rms_percent == evm_before_display_change
+        density_item = window._constellation_density_item
+        assert density_item is not None
+        assert density_item.image.shape == (96, 96)
+        assert np.count_nonzero(density_item.image) > 0
+        assert float(np.max(density_item.image)) > 0.0
+        assert density_item.lut[0, 3] == 0
+        assert window.symbol_plot.viewRange()[0] == pytest.approx(flat_view_range[0])
+        assert window.symbol_plot.viewRange()[1] == pytest.approx(flat_view_range[1])
+        window.constellation_flat_action.trigger()
+        assert window.constellation_flat_action.isChecked()
+        assert window._constellation_density_item is None
+
         window.symbol_display_action.trigger()
         trajectory_items = window.modulation_plot.listDataItems()
         assert len(trajectory_items) == 2
@@ -505,6 +720,39 @@ def test_constellation_display_rotation_is_qpsk_family_only() -> None:
     )
 
 
+def test_constellation_density_encodes_occurrence_count() -> None:
+    symbols = np.asarray([-0.75 + 0.0j] * 8 + [0.75 + 0.0j])
+
+    density = _constellation_density(symbols, bins=40)
+
+    assert density.shape == (40, 40)
+    assert np.count_nonzero(density) > 2
+    assert np.all(np.isfinite(density))
+    # Gaussian spreading must preserve the stronger occurrence cluster.
+    assert float(np.max(density[:, :20])) > float(np.max(density[:, 20:]))
+
+
+def test_constellation_density_can_disable_smoothing() -> None:
+    symbols = np.asarray([0.0 + 0.0j] * 8 + [1.0 + 0.0j])
+
+    density = _constellation_density(
+        symbols, bins=20, smoothing_sigma_bins=0.0
+    )
+
+    nonzero = density[density > 0.0]
+    assert nonzero.size == 2
+    assert float(np.max(nonzero)) == pytest.approx(np.log1p(8.0))
+    assert float(np.min(nonzero)) == pytest.approx(np.log1p(1.0))
+
+
+def test_constellation_density_saturates_high_density_region_to_red() -> None:
+    density = np.asarray([[0.0, 1.0], [2.0, 4.0]])
+
+    levels = _constellation_density_color_levels(density)
+
+    assert levels == pytest.approx((0.0, 3.0))
+
+
 def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> None:
     pg.mkQApp("VSA config UI test")
     preferences = QtCore.QSettings(
@@ -516,8 +764,6 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window._set_pattern_symbols([0, 1, 1, 0, 1, 0])
         window.pattern_name_edit.setText("Saved Pattern")
         window.result_length_spin.setValue(73)
-        window.pattern_match_selection_combo.setCurrentText("Match Index")
-        window.pattern_match_index_spin.setValue(3)
         window.exclude_incomplete_result_check.setChecked(True)
         window.bit_order_combo.setCurrentText("LSB")
         window.capture_length_spin.setValue(3.0)
@@ -530,25 +776,28 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.internal_gain_spin.setValue(12)
         window.external_attenuation_spin.setValue(30.0)
         window.external_gain_spin.setValue(3.0)
+        window._apply_result_summary_preset("diagnostics")
+        window.constellation_density_action.setChecked(True)
+        selected_summary_items = set(window._selected_result_summary_ids)
         saved = window._meas_config_values()
+        assert "match_selection" not in saved["pattern_search"]
+        assert "match_index" not in saved["pattern_search"]
 
         window._set_pattern_symbols([1, 1, 1, 1])
         window.result_length_spin.setValue(12)
-        window.pattern_match_selection_combo.setCurrentText("First")
         window.exclude_incomplete_result_check.setChecked(False)
         window.bit_order_combo.setCurrentText("MSB")
         window.capture_oversampling_combo.setCurrentIndex(
             window.capture_oversampling_combo.findData(16)
         )
         window.internal_gain_spin.setValue(0)
+        window._apply_result_summary_preset("defaults")
+        window.constellation_flat_action.setChecked(True)
         window._apply_meas_config_values(saved)
 
         assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
         assert window.pattern_name_edit.text() == "Saved Pattern"
         assert window.result_length_spin.value() == 73
-        assert window.pattern_match_selection_combo.currentText() == "Match Index"
-        assert window.pattern_match_index_spin.value() == 3
-        assert window.pattern_match_index_spin.isEnabled()
         assert window.exclude_incomplete_result_check.isChecked()
         assert window.bit_order_combo.currentText() == "LSB"
         assert window.capture_oversampling_combo.currentData() == 8
@@ -557,6 +806,10 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.capture_usable_bandwidth_label.text() == "6.400 MHz"
         assert window.internal_gain_spin.value() == 12
         assert window.capture_correction_label.text().startswith("+15.0 dB")
+        assert window._selected_result_summary_ids == selected_summary_items
+        assert set(saved["result_summary"]["visible_items"]) == selected_summary_items
+        assert saved["display_config"]["constellation_trace_mode"] == "Density"
+        assert window.constellation_density_action.isChecked()
         assert window.pattern_symbol_table.item(0, 1).text() == "1"
         new_item = QtWidgets.QTableWidgetItem("1")
         window.pattern_symbol_table.setItem(0, 6, new_item)
@@ -609,6 +862,9 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
         first.result_length_spin.setValue(91)
         first.pattern_name_edit.setText("Restored startup pattern")
         first._set_pattern_symbols([1, 0, 1, 1, 0, 0, 1, 0])
+        first._apply_result_summary_preset("measurement")
+        first.constellation_density_action.setChecked(True)
+        expected_summary_items = set(first._selected_result_summary_ids)
     finally:
         first._meas_config_dialog.close()
         first.close()
@@ -644,6 +900,8 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
         assert second.result_length_spin.value() == 91
         assert second.pattern_name_edit.text() == "Restored startup pattern"
         assert second._parse_pattern_symbols(2) == (1, 0, 1, 1, 0, 0, 1, 0)
+        assert second._selected_result_summary_ids == expected_summary_items
+        assert second.constellation_density_action.isChecked()
         assert not second._analyze()
         assert "configuration restored" in second.statusBar().currentMessage()
     finally:
