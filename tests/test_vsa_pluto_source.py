@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -100,6 +102,26 @@ def test_pluto_single_capture_defaults_to_eight_samples_per_symbol() -> None:
 
     source.close()
     assert receiver.closed
+
+
+def test_pluto_single_capture_reuses_unchanged_receiver_configuration() -> None:
+    _FakeReceiver.instances.clear()
+    source = PlutoLiveSource(receiver_factory=_FakeReceiver)
+    settings = PlutoCaptureSettings(capture_length_s=0.010)
+
+    first = source.capture_single(settings)
+    second = source.capture_single(settings)
+
+    receiver = _FakeReceiver.instances[0]
+    assert len(_FakeReceiver.instances) == 1
+    assert receiver.reconfigured == []
+    assert first.sample_count == second.sample_count == 80_000
+
+    changed = replace(settings, center_frequency_hz=2_402_000_000.0)
+    source.capture_single(changed)
+
+    assert len(receiver.reconfigured) == 1
+    assert receiver.reconfigured[0].center_freq_hz == 2_402_000_000
 
 
 def test_pluto_capture_applies_external_path_and_swap_iq() -> None:

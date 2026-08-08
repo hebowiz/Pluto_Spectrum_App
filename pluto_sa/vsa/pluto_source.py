@@ -83,7 +83,7 @@ class PlutoLiveSource:
         config = self._spectrum_config(settings)
         if self._receiver is None:
             self._receiver = self._receiver_factory(config)
-        else:
+        elif self._active_config != config:
             self._receiver.reconfigure(config)
         self._active_config = config
 

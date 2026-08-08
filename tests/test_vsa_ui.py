@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -18,6 +19,7 @@ from pluto_sa.vsa.ui.main_window import (
     _fsk_phase_difference_symbols,
 )
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
 
@@ -25,6 +27,18 @@ def _isolated_preferences(tmp_path: Path, name: str) -> QtCore.QSettings:
     return QtCore.QSettings(
         str(tmp_path / f"{name}.ini"), QtCore.QSettings.Format.IniFormat
     )
+
+
+def _wait_for_background_analysis(window: VSAWindow) -> None:
+    for _index in range(500):
+        QtWidgets.QApplication.processEvents()
+        thread = window._analysis_thread
+        if thread is None and window._pending_analysis is None:
+            QtWidgets.QApplication.processEvents()
+            return
+        if thread is not None:
+            thread.wait(10)
+    raise AssertionError("background VSA analysis did not finish")
 
 
 def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
@@ -47,6 +61,7 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
             sample_rate_hz=recording.sample_rate_hz,
         )
         window.load_recording(combined, signal)
+        _wait_for_background_analysis(window)
         window.pattern_search_check.setChecked(True)
         window._set_pattern_symbols(generated[20:36])
         window.result_length_spin.setValue(100)
@@ -84,6 +99,7 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
         assert window.next_result_action.shortcut().toString() == "Right"
 
         window.next_result_action.trigger()
+        _wait_for_background_analysis(window)
         second = window.session.pattern_result
         assert second.pattern_start_sample == recording.sample_count + 64 + 20 * 8
         assert window._selected_match_index == 2
@@ -99,13 +115,16 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
         )
 
         window.previous_result_action.trigger()
+        _wait_for_background_analysis(window)
         assert window.session.pattern_result.pattern_start_sample == first_start
         assert window._selected_match_index == 1
 
         window.next_result_action.trigger()
+        _wait_for_background_analysis(window)
         assert window._selected_match_index == 2
         # Loading new IQ always returns focus to the first eligible packet.
         window.load_recording(combined, signal)
+        _wait_for_background_analysis(window)
         assert window._selected_match_index == 1
         assert window.session.pattern_result.pattern_start_sample == first_start
     finally:
@@ -122,6 +141,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
     )
     try:
         window._load_generated(ModulationKind.GFSK)
+        _wait_for_background_analysis(window)
         expected = np.asarray(window.session.recording.metadata["generated_symbols"])
         window.pattern_search_check.setChecked(True)
         window.pattern_symbols_edit.setText(
@@ -473,11 +493,16 @@ def test_symbol_table_click_places_and_toggles_fsk_plot_markers(tmp_path) -> Non
     )
     try:
         window._load_generated(ModulationKind.GFSK)
+        _wait_for_background_analysis(window)
         expected = np.asarray(window.session.recording.metadata["generated_symbols"])
         window.pattern_search_check.setChecked(True)
         window._set_pattern_symbols(expected[20:52])
         window.result_length_spin.setValue(64)
         assert window._analyze()
+        assert window._last_analysis_timings_ms["total_dsp"] >= 0.0
+        assert window._last_analysis_timings_ms["display"] >= 0.0
+        assert "DSP" in window.statusBar().currentMessage()
+        assert "Display" in window.statusBar().currentMessage()
 
         symbol_index = 7
         window._symbol_table_cell_clicked(0, symbol_index)
@@ -563,6 +588,7 @@ def test_symbol_table_click_places_psk_amplitude_phase_and_evm_markers(
     )
     try:
         window._load_generated(ModulationKind.PI4_DQPSK)
+        _wait_for_background_analysis(window)
         expected = np.asarray(window.session.recording.metadata["generated_symbols"])
         window.pattern_search_check.setChecked(True)
         window._set_pattern_symbols(expected[20:36])
@@ -631,6 +657,7 @@ def test_symbol_correct_search_failure_clears_previous_match_display(tmp_path) -
     )
     try:
         window._load_generated(ModulationKind.GFSK)
+        _wait_for_background_analysis(window)
         generated = np.asarray(
             window.session.recording.metadata["generated_symbols"]
         )
@@ -699,6 +726,7 @@ def test_fsk_symbol_plot_supports_density_trace(tmp_path) -> None:
     )
     try:
         window._load_generated(ModulationKind.GFSK)
+        _wait_for_background_analysis(window)
         assert window._constellation_density_item is None
 
         window.constellation_density_action.trigger()
@@ -742,6 +770,7 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
                 filter_parameter=0.4,
             ),
         )
+        _wait_for_background_analysis(window)
         window.pattern_search_check.setChecked(True)
         window.pattern_format_combo.setCurrentText("Decimal")
         window.pattern_symbols_edit.setText(pattern)
@@ -1015,6 +1044,7 @@ def test_symbol_table_json_export_document_contains_machine_readable_context(
     )
     try:
         window._load_generated(ModulationKind.GFSK)
+        _wait_for_background_analysis(window)
         expected = np.asarray(window.session.recording.metadata["generated_symbols"])
         window.pattern_search_check.setChecked(True)
         window._set_pattern_symbols(expected[20:52])
@@ -1082,6 +1112,7 @@ def test_inverted_fsk_match_ui_keeps_observed_symbols_and_reports_variant(
             source="conjugated test capture",
         )
         window.load_recording(inverted, signal)
+        _wait_for_background_analysis(window)
         window.pattern_search_check.setChecked(True)
         window._set_pattern_symbols(expected[30:62])
         window.pattern_allow_inverted_fsk_check.setChecked(True)
@@ -1135,6 +1166,7 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
         assert first.summary_label.text() == "No capture"
         recording, signal = GeneratedIQSource.fsk(symbol_count=96, seed=412)
         first.load_recording(recording, signal)
+        _wait_for_background_analysis(first)
         first.input_source_combo.setCurrentText("IQ File")
         first.capture_center_spin.setValue(2450.5)
         first.internal_gain_spin.setValue(17)
@@ -1246,6 +1278,8 @@ def test_pluto_run_single_uses_async_capture_and_updates_session(tmp_path) -> No
                 break
             thread.wait(10)
 
+        _wait_for_background_analysis(window)
+
         assert window._pluto_capture_thread is None
         assert source.settings is not None
         assert source.settings.samples_per_symbol == 8
@@ -1254,9 +1288,66 @@ def test_pluto_run_single_uses_async_capture_and_updates_session(tmp_path) -> No
         assert window.input_source_combo.currentText() == "Pluto"
         assert window.run_single_action.isEnabled()
         assert window.session.recording.sample_rate_hz == 8_000_000.0
+        status = window.statusBar().currentMessage()
+        assert "Capture" in status
+        assert "DSP" in status
+        assert "Display" in status
+        assert "Total" in status
     finally:
         window._meas_config_dialog.close()
         window.close()
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
     assert source.closed
+
+
+def test_analysis_runs_outside_gui_thread_and_latest_request_wins(
+    tmp_path, monkeypatch
+) -> None:
+    pg.mkQApp("VSA background analysis test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "background-analysis")
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    observed_threads: list[QtCore.QThread] = []
+    original_analyze = VSASession.analyze
+
+    def delayed_analyze(session):
+        observed_threads.append(QtCore.QThread.currentThread())
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(timeout=5.0)
+        return original_analyze(session)
+
+    monkeypatch.setattr(VSASession, "analyze", delayed_analyze)
+    try:
+        recording, signal = GeneratedIQSource.fsk(symbol_count=64, seed=919)
+        window.load_recording(recording, signal)
+        assert entered.wait(timeout=2.0)
+
+        window.symbol_rate_spin.setValue(900_000.0)
+        assert window._request_analysis()
+        window.symbol_rate_spin.setValue(800_000.0)
+        assert window._request_analysis()
+        assert window._pending_analysis is not None
+
+        release.set()
+        _wait_for_background_analysis(window)
+
+        assert observed_threads
+        assert all(
+            thread is not QtWidgets.QApplication.instance().thread()
+            for thread in observed_threads
+        )
+        assert len(observed_threads) == 2
+        assert window.session.signal.symbol_rate_hz == pytest.approx(800_000.0)
+        assert window.session.result is not None
+        assert "Analysis complete" in window.statusBar().currentMessage()
+    finally:
+        release.set()
+        _wait_for_background_analysis(window)
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()

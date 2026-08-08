@@ -219,6 +219,18 @@ PSK:
 
 R&S VSAの`Input / Frontend`、`Signal Capture > Data Acquisition`、`Sweep / Run`の区分に合わせ、Pluto finite captureを追加した。`Run Single`（F6）はGUI threadとは別のcapture threadでPluto接続、設定、IQ取得を行い、完了したimmutable `IQRecording`だけをmain threadへ返す。`Refresh Analysis`（F5）は従来どおり現在のcaptureを再解析し、再取得しない。
 
+### Analysis latency optimization
+
+2026-08-07に、測定定義を変えない第1段のlatency最適化を追加した。Analysis Center/BandwidthのDDC/FIR/decimationとoptional DC removalは、従来のbase analysis用とpattern analysis用の二重実行を廃止し、1回だけ生成した同一`IQRecording`を両処理へ渡す。実測Pluto fixtureではcore全体が概ね50 msから40 msへ短縮した。
+
+I/Q Power Triggerで得た複数burstは、timing、CFO、drift、pattern correlationをburstごとに従来どおり独立推定する。別burstの推定値やsymbol clockを共有せず、候補の時系列順序、selected index、Result Range制限も変更しない。FSK 9 burstの実測相当benchmarkではPython worker並列がNumPy内部処理と競合して直列より遅く、Pattern成立後の3結果解析もthread生成costを回収できなかったため、どちらの並列化も採用していない。
+
+`VSASession.analysis_timings_ms`は`preprocess`、`base_analysis`、`pattern_search`、`post_prepare`、`post_analysis`、`total_dsp`を保持する。GUIはoffline解析完了時に`DSP`/`Display`、Pluto Run Single完了時に`Capture`/`DSP`/`Display`/`Total`の経過時間をstatus barへ表示する。これは性能診断値でありResult Summaryの測定結果ではない。Capture時間は別threadで計測しDSP値へ含めない。
+
+2026-08-08にDSP解析をGUI threadから専用`_AnalysisThread`へ分離した。GUI threadはcontrol値からrevision付き`VSASession.analysis_snapshot()`を作るだけで、channel extraction、pattern search、復調、各result解析はworker内で実行する。完了時にrevisionが一致する結果だけをmain sessionへpublishし、plot/table生成だけをGUI threadで行う。解析中にRefresh、Result Range移動、新規IQ load/capture等が複数要求された場合、現在のworkerを並列実行せず、途中の待機要求を置換して最新1件だけを次に実行する。古いgenerationの完了結果は描画しない。このため操作受付をDSP時間から分離しつつ、異なる設定の結果が新しい画面へ巻き戻る競合を防ぐ。アプリ終了時は実行中workerを破棄せず、解析完了後の終了を要求する。
+
+Pluto Run Singleはreceiver/USB contextをsource lifetime中再利用する。2026-08-07に、取得設定が前回と完全に同一ならhardware reconfigureを省略し、前回と同じsample countのpyadi RX bufferも再利用するよう修正した。従来は各Runで標準bufferへ戻した直後にrecord lengthへ再変更しており、同一設定の反復測定でも不要なIIO buffer再生成が発生していた。Center、sample rate、RF bandwidth、gain、record length等の`SpectrumConfig`が変われば従来どおり再設定する。初回だけはUSB context生成、Pluto属性設定、最初のIIO buffer生成を含むため、後続RunよりCapture時間が長い。この初期化時間は測定DSPの差ではない。
+
 初期設定はsymbol rate 1 Msym/s、capture oversampling 8 samples/symbol、source sample rate 8 MS/s、RF bandwidth 8 MHz、capture length 3 ms、record length 24,000 samples、nominal usable I/Q bandwidth 6.4 MHz。Capture Lengthはmsまたはsymbolsで指定し、実sample countへ変換する。Plutoからread backした実sample rateとRF bandwidthをrecord metadataの正本とする。
 
 振幅補正はSA/VSAで別実装にしない。`pluto_sa.config.input_frontend.InputPowerCorrection`を共通contractとし、次式を`SpectrumConfig.input_correction_db`とVSA live captureの両方で使う。
@@ -328,7 +340,7 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
   anti-alias filterとAnalysis Bandwidth channel filterよりは後段である。
 - FSK error metricsはfrequency error/deviationの基礎のみです。
 - 一般VSA用pattern searchとpost-capture I/Q Power Trigger gateは実装済み。自動thresholdを持つ独立Burst Search、DECT profile、negative Result Range offsetによるpattern前symbol復調は未実装。
-- VSA UIはPluto Free Run / Run Singleとoffline Refreshに対応。Pluto取得は非同期だが、取得後のDSP解析はUI thread上で同期実行します。
+- VSA UIはPluto Free Run / Run Singleとoffline Refreshに対応。Pluto取得とDSP解析はそれぞれ専用threadで実行し、GUI threadは結果の描画だけを行います。
 - Pluto acquisition Power Trigger、Continuous、SCPI sourceは未実装。取得済みIQ内のmulti-event Power Trigger search gateは実装済み。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
 
@@ -344,8 +356,7 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。
 5. EVM用の独立Evaluation Range、Display Points/Symbol、Optimization、Measurement
    Filter、normalization選択を接続。
-6. VSA analysis workerを追加しUI threadからDSPを分離。
-7. SigMF、SCPI sourceとiq-tarのUI channel selectorを追加。
+6. SigMF、SCPI sourceとiq-tarのUI channel selectorを追加。
 
 実機接続前に、生成waveformへCFO、timing offset、AWGNを注入したpytestを追加し、推定器の許容誤差を固定してください。
 

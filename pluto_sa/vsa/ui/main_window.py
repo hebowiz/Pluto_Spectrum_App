@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import pyqtgraph as pg
@@ -261,6 +262,31 @@ class _PlutoSingleCaptureThread(QtCore.QThread):
             self.capture_failed.emit(str(error))
 
 
+class _AnalysisThread(QtCore.QThread):
+    """Run one immutable VSA session snapshot outside the GUI thread."""
+
+    analysis_ready = QtCore.Signal(int, object)
+    analysis_failed = QtCore.Signal(int, object, str)
+
+    def __init__(
+        self,
+        generation: int,
+        session: VSASession,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.generation = int(generation)
+        self.session = session
+
+    def run(self) -> None:
+        try:
+            self.session.analyze()
+        except Exception as error:
+            self.analysis_failed.emit(self.generation, self.session, str(error))
+            return
+        self.analysis_ready.emit(self.generation, self.session)
+
+
 class VSAWindow(QtWidgets.QMainWindow):
     """One VSA measurement session with detachable result windows."""
 
@@ -275,6 +301,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._preferences = preferences or QtCore.QSettings("PlutoSA", "PlutoVSA")
         self._pluto_source = pluto_source or PlutoLiveSource()
         self._pluto_capture_thread: _PlutoSingleCaptureThread | None = None
+        self._analysis_thread: _AnalysisThread | None = None
+        self._analysis_generation = 0
+        self._pending_analysis: tuple[int, VSASession, dict[str, float]] | None = None
+        self._active_analysis_context: dict[str, float] = {}
         self._updating_pattern_table = False
         self._pattern_values: list[int] = []
         self._analysis_plot_ranges: dict[str, tuple[list[float], list[float]]] = {}
@@ -284,6 +314,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._updating_result_summary_selection = False
         self._selected_match_index = 1
         self._selected_symbol_marker_index: int | None = None
+        self._last_analysis_timings_ms: dict[str, float] = {}
+        self._pluto_capture_started_at: float | None = None
         self._symbol_marker_items: dict[
             str, tuple[pg.PlotDataItem, pg.TextItem]
         ] = {}
@@ -333,7 +365,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         run_menu.addAction(self.run_single_action)
         analyze_action = QtGui.QAction("Refresh Analysis", self)
         analyze_action.setShortcut("F5")
-        analyze_action.triggered.connect(self._analyze)
+        analyze_action.triggered.connect(self._request_analysis)
         run_menu.addAction(analyze_action)
         run_menu.addSeparator()
         self.previous_result_action = QtGui.QAction(
@@ -1032,7 +1064,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.run_single_button.clicked.connect(self._run_pluto_single)
         run_layout.addWidget(self.run_single_button)
         refresh_button = QtWidgets.QPushButton("Refresh Analysis")
-        refresh_button.clicked.connect(self._analyze)
+        refresh_button.clicked.connect(self._request_analysis)
         run_layout.addWidget(refresh_button)
         run_layout.addWidget(
             QtWidgets.QLabel(
@@ -1933,7 +1965,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._remember_directory("config", path)
         try:
             self._apply_meas_config_values(load_meas_config(path))
-            if self._analyze():
+            if self._request_analysis():
                 self.statusBar().showMessage(
                     f"Configuration loaded - {Path(path).name}"
                 )
@@ -2165,24 +2197,32 @@ class VSAWindow(QtWidgets.QMainWindow):
         thread.finished.connect(self._pluto_capture_stopped)
         thread.finished.connect(thread.deleteLater)
         self._pluto_capture_thread = thread
+        self._pluto_capture_started_at = perf_counter()
         thread.start()
 
     def _pluto_capture_ready(self, recording: object) -> None:
         if not isinstance(recording, IQRecording):
             self._pluto_capture_failed("capture returned an invalid IQ record")
             return
-        self.load_recording(recording, self._signal_from_controls())
-        self.statusBar().showMessage(
-            "Pluto Single complete - "
-            f"{recording.sample_count:,} samples, "
-            f"{recording.sample_rate_hz / 1e6:.3f} MS/s"
+        capture_finished = perf_counter()
+        capture_ms = (
+            (capture_finished - self._pluto_capture_started_at) * 1e3
+            if self._pluto_capture_started_at is not None
+            else 0.0
+        )
+        self.load_recording(
+            recording,
+            self._signal_from_controls(),
+            analysis_context={"capture_ms": capture_ms},
         )
 
     def _pluto_capture_failed(self, message: str) -> None:
+        self._pluto_capture_started_at = None
         self.statusBar().showMessage(f"Pluto capture failed: {message}")
         QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", message)
 
     def _pluto_capture_stopped(self) -> None:
+        self._pluto_capture_started_at = None
         self._pluto_capture_thread = None
         self.run_single_action.setEnabled(True)
         self.run_single_button.setEnabled(True)
@@ -2323,16 +2363,22 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.session.set_signal(signal)
         self._set_analysis_controls_from_recording(recording)
         self._set_controls_from_signal(signal)
-        self._analyze()
+        self._request_analysis()
 
-    def load_recording(self, recording: IQRecording, signal: SignalDescription | None = None) -> None:
+    def load_recording(
+        self,
+        recording: IQRecording,
+        signal: SignalDescription | None = None,
+        *,
+        analysis_context: dict[str, float] | None = None,
+    ) -> None:
         self._selected_match_index = 1
         self.session.set_recording(recording)
         self._set_analysis_controls_from_recording(recording)
         if signal is not None:
             self.session.set_signal(signal)
             self._set_controls_from_signal(signal)
-        self._analyze()
+        self._request_analysis(analysis_context=analysis_context)
 
     def _open_iq(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2377,13 +2423,140 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             event.ignore()
             return
+        if self._analysis_thread is not None:
+            self.statusBar().showMessage(
+                "Analysis is still running; close again after it completes."
+            )
+            event.ignore()
+            return
         self._save_startup_meas_config()
         self._pluto_source.close()
         super().closeEvent(event)
 
+    def _request_analysis(
+        self,
+        _checked: bool = False,
+        *,
+        analysis_context: dict[str, float] | None = None,
+    ) -> bool:
+        """Queue the newest configured analysis without blocking the GUI."""
+        if self.session.recording is None:
+            return False
+        self._selected_symbol_marker_index = None
+        try:
+            signal = self._signal_from_controls()
+            self.session.set_signal(signal)
+            self._update_analysis_settings()
+            self._configure_pattern_analysis(signal)
+            snapshot = self.session.analysis_snapshot()
+        except Exception as error:
+            self.statusBar().showMessage(f"Analysis setup failed: {error}")
+            return False
+
+        self._analysis_generation += 1
+        request = (
+            self._analysis_generation,
+            snapshot,
+            dict(analysis_context or {}),
+        )
+        if self._analysis_thread is not None:
+            self._pending_analysis = request
+            self.statusBar().showMessage("Analysis queued - waiting for current DSP")
+            return True
+        self._start_analysis_request(request)
+        return True
+
+    def _start_analysis_request(
+        self,
+        request: tuple[int, VSASession, dict[str, float]],
+    ) -> None:
+        generation, snapshot, context = request
+        thread = _AnalysisThread(generation, snapshot, self)
+        thread.analysis_ready.connect(self._analysis_ready)
+        thread.analysis_failed.connect(self._analysis_failed)
+        thread.finished.connect(self._analysis_stopped)
+        thread.finished.connect(thread.deleteLater)
+        self._analysis_thread = thread
+        self._active_analysis_context = context
+        self.statusBar().showMessage("Analyzing I/Q data...")
+        thread.start()
+
+    def _analysis_ready(self, generation: int, completed: object) -> None:
+        if not isinstance(completed, VSASession):
+            self._analysis_failed(generation, completed, "invalid analysis result")
+            return
+        if generation != self._analysis_generation:
+            return
+        try:
+            self.session.adopt_analysis_results(completed)
+        except ValueError:
+            return
+        display_started = perf_counter()
+        self._update_summary()
+        self._update_plots(reset_ranges=True)
+        display_ms = (perf_counter() - display_started) * 1e3
+        self._last_analysis_timings_ms = {
+            **self.session.analysis_timings_ms,
+            "display": display_ms,
+            "total_ui": (
+                self.session.analysis_timings_ms.get("total_dsp", 0.0) + display_ms
+            ),
+        }
+        if self.session.pattern_result is not None:
+            self._selected_match_index = int(
+                self.session.pattern_result.metadata.get("selected_match_index", 1)
+            )
+        self._update_match_navigation_actions()
+        capture_ms = self._active_analysis_context.get("capture_ms")
+        if capture_ms is None:
+            self.statusBar().showMessage(
+                f"Analysis complete - {self.session.recording.sample_count:,} samples | "
+                f"DSP {self._last_analysis_timings_ms.get('total_dsp', 0.0):.0f} ms | "
+                f"Display {display_ms:.0f} ms"
+            )
+            return
+        dsp_ms = self._last_analysis_timings_ms.get("total_dsp", 0.0)
+        total_ms = float(capture_ms) + dsp_ms + display_ms
+        self.statusBar().showMessage(
+            "Pluto Single complete - "
+            f"{self.session.recording.sample_count:,} samples, "
+            f"{self.session.recording.sample_rate_hz / 1e6:.3f} MS/s | "
+            f"Capture {capture_ms:.0f} ms | DSP {dsp_ms:.0f} ms | "
+            f"Display {display_ms:.0f} ms | Total {total_ms:.0f} ms"
+        )
+
+    def _analysis_failed(
+        self,
+        generation: int,
+        completed: object,
+        message: str,
+    ) -> None:
+        if generation != self._analysis_generation:
+            return
+        if isinstance(completed, VSASession):
+            try:
+                self.session.adopt_analysis_results(completed)
+            except ValueError:
+                pass
+        if self.session.pattern_error is not None and self.session.result is not None:
+            self._update_summary()
+            self._update_plots(reset_ranges=True)
+            self._update_match_navigation_actions()
+        self.statusBar().showMessage(f"Analysis failed: {message}")
+
+    def _analysis_stopped(self) -> None:
+        self._analysis_thread = None
+        self._active_analysis_context = {}
+        if self._pending_analysis is None:
+            return
+        request = self._pending_analysis
+        self._pending_analysis = None
+        self._start_analysis_request(request)
+
     def _analyze(self) -> bool:
         if self.session.recording is None:
             return False
+        analysis_started = perf_counter()
         self._selected_symbol_marker_index = None
         try:
             signal = self._signal_from_controls()
@@ -2401,15 +2574,24 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self._update_match_navigation_actions()
             self.statusBar().showMessage(f"Analysis failed: {error}")
             return False
+        display_started = perf_counter()
         self._update_summary()
         self._update_plots(reset_ranges=True)
+        display_ms = (perf_counter() - display_started) * 1e3
+        self._last_analysis_timings_ms = {
+            **self.session.analysis_timings_ms,
+            "display": display_ms,
+            "total_ui": (perf_counter() - analysis_started) * 1e3,
+        }
         if self.session.pattern_result is not None:
             self._selected_match_index = int(
                 self.session.pattern_result.metadata.get("selected_match_index", 1)
             )
         self._update_match_navigation_actions()
         self.statusBar().showMessage(
-            f"Analysis complete - {self.session.recording.sample_count:,} samples"
+            f"Analysis complete - {self.session.recording.sample_count:,} samples | "
+            f"DSP {self._last_analysis_timings_ms.get('total_dsp', 0.0):.0f} ms | "
+            f"Display {display_ms:.0f} ms"
         )
         return True
 
@@ -2436,20 +2618,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             return False
         previous_index = self._selected_match_index
         self._selected_match_index = target
-        if not self._analyze():
+        if not self._request_analysis():
             self._selected_match_index = previous_index
             return False
-        selected = self.session.pattern_result
-        if selected is not None:
-            selected_index = int(
-                selected.metadata.get("selected_match_index", target)
-            )
-            selected_count = int(
-                selected.metadata.get("eligible_match_count", count)
-            )
-            self.statusBar().showMessage(
-                f"Selected Result Range {selected_index}/{selected_count}"
-            )
         return True
 
     def _update_summary(self) -> None:

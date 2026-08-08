@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from scipy.ndimage import shift as fractional_shift
 
+import pluto_sa.vsa.session as session_module
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     BitOrdering,
@@ -732,6 +733,56 @@ def test_session_publishes_generic_pattern_result():
     assert session.pattern_range_result is not None
     assert session.pattern_range_result.iq.size == 48 * 8
     np.testing.assert_array_equal(session.pattern_result.decoded_symbols, expected[24:72])
+
+
+def test_session_prepares_analysis_channel_once_and_reports_stage_timings(
+    monkeypatch,
+):
+    recording, signal = GeneratedIQSource.fsk(symbol_count=160, seed=102)
+    expected = np.asarray(recording.metadata["generated_symbols"])
+    original_extract = session_module.extract_analysis_channel
+    calls = []
+
+    def counted_extract(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(
+        session_module,
+        "extract_analysis_channel",
+        counted_extract,
+    )
+    session = VSASession(recording=recording, signal=signal)
+    session.update_settings(
+        analysis_center_frequency_hz=0.0,
+        analysis_bandwidth_hz=1_500_000.0,
+    )
+    session.configure_pattern_analysis(
+        PatternSearchSettings(
+            pattern=KnownPattern(tuple(map(int, expected[24:56]))),
+            mode=PatternSearchMode.ON,
+            correlation_threshold_auto=False,
+            iq_correlation_threshold=0.7,
+        ),
+        ResultRangeSettings(result_length=48),
+    )
+
+    session.analyze()
+
+    assert len(calls) == 1
+    assert {
+        "preprocess",
+        "base_analysis",
+        "pattern_search",
+        "post_prepare",
+        "post_analysis",
+        "total_dsp",
+    }.issubset(session.analysis_timings_ms)
+    assert all(value >= 0.0 for value in session.analysis_timings_ms.values())
+    np.testing.assert_array_equal(
+        session.pattern_result.decoded_symbols,
+        expected[24:72],
+    )
 
 
 def test_generic_pattern_session_finds_real_pluto_br_capture():
