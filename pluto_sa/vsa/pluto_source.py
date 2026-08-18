@@ -90,6 +90,7 @@ class PlutoLiveSource:
         block = self._receiver.capture_iq_block(
             settings.capture_samples,
             source="VSA Pluto Single",
+            fresh=True,
         )
         actual_sample_rate_hz = self._receiver.get_current_sample_rate_hz()
         actual_rf_bandwidth_hz = self._receiver.get_current_rf_bandwidth_hz()

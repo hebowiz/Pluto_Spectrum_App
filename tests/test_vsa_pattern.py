@@ -103,6 +103,10 @@ def test_power_gated_pattern_search_returns_one_match_per_trigger_event():
     assert result.metadata["selected_match_index"] == 2
     assert result.metadata["eligible_match_count"] == 2
     assert result.metadata["burst_limited_symbol_count"] < 200
+    assert np.sqrt(np.mean(np.abs(result.measured_symbols) ** 2)) == pytest.approx(
+        1.0, abs=1e-6
+    )
+    assert result.evm_rms_percent < 5.0
     assert result.result_stop_sample <= result.metadata[
         "power_trigger_active_stop_sample"
     ]

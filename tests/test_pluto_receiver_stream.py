@@ -61,6 +61,19 @@ def test_synchronous_capture_publishes_common_iq_block(monkeypatch) -> None:
     assert block.discontinuity_before is True
 
 
+def test_fresh_synchronous_capture_recreates_rx_buffer(monkeypatch) -> None:
+    receiver = build_receiver(monkeypatch)
+
+    receiver.capture_iq_block(4, source="first")
+    first_stream_id = receiver.get_iq_stream_stats().stream_id
+    destroy_count = receiver.sdr.destroy_count
+    captured = receiver.capture_iq_block(4, source="fresh", fresh=True)
+
+    assert receiver.sdr.destroy_count == destroy_count + 1
+    assert receiver.get_iq_stream_stats().stream_id == first_stream_id + 1
+    assert captured.discontinuity_before is True
+
+
 def test_retune_starts_new_stream_epoch(monkeypatch) -> None:
     receiver = build_receiver(monkeypatch)
     first = receiver.capture_iq_block(4, source="sweep")

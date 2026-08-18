@@ -53,8 +53,19 @@ For each rising crossing of `Level`:
    interval.
 7. Add the first eligible match from the interval to the chronological Result
    Range list.
-8. When `Limit Result Range to Active Interval` is enabled, discard symbols
-   whose complete symbol interval extends beyond the detected falling edge.
+8. When `Limit Result Range to Active Interval` is enabled, limit the waveform
+   to the detected falling edge before demodulation, synchronization, amplitude
+   normalization, and EVM/frequency-error evaluation. Discard any final symbol
+   whose complete interval still extends beyond that edge.
+
+The pre-demodulation limit is important when the configured Result Length is
+deliberately longer than a burst. Before the 2026-08-18 fix, the application
+could normalize PSK and calculate EVM over the requested length (for example
+3500 symbols), then trim only the displayed arrays to the detected active count
+(for example 699 symbols). `Result Symbols` was correct, but Symbol Plot scale
+and EVM retained the inactive tail as their measurement population. The active
+interval is now the common population for demodulation, normalization, EVM,
+Symbol Plot, and Symbol Table.
 
 The rising trigger uses unsmoothed power so the averaging filter does not move
 Pattern Search earlier than the physical crossing. The falling edge uses the

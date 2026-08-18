@@ -112,11 +112,14 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
 - `Display Config > Show Symbol Points`をONにすると、IQ PowerとModulationのtrace上へ復調symbol中心位置を明るい緑の点で重ねる。FSKではtime/frequency座標、PSKではIQ軌跡座標を使用する。既定はOFF。
 - PSKのIQ軌跡は8 samples/symbolへresampleし、TX FilterがRoot Raised Cosineなら同じalphaのSRRC matched receive filterを通した連続IQを使用する。軌跡とsymbol markerは同一のfilter outputとsymbol時刻RMS正規化を共有する。
 - 解析完了時に全plotの初期X/Y rangeをsnapshotし、`Display Config > Reset Graph Scales`または`Home`で全plotを復元する。各plotの既存右クリックメニュー先頭には、そのplotだけを復元する`Reset`と、有限な表示traceだけを5%余白付きで収める`View All`を置く。後者はPattern/Result Rangeの帯・境界線等のoverlayを範囲計算から除外し、IQ平面の1:1 scaleを維持する。全plotは専用ViewBoxで左drag=`Rect Zoom`、middle button（wheel押込み）drag=`Pan`、right click=context menuへ固定する。Display ConfigのMouse Interaction menuと右クリックmenuの`Mouse Mode`は設けず、外部からPanModeを指定しても左dragはRect Zoomへ戻す。right dragのpyqtgraph軸scaleは維持する。表示のみの更新では現在rangeを維持する。
-- 主traceはIQ Powerと同じyellowへ統一し、Power/Modulation上のsymbol markerは5.5 pxとする。Symbol Plotのsymbolは塗りと輪郭を同じyellowとする。空data時とPSK ConstellationはQ軸`-1.25..+1.25`を初期rangeとする。PSK IQ Trajectoryは解析完了時の全有限trace sampleが収まる最大I/Q成分へ5%の余白を加え、最小rangeを±1.25として自動設定する。両IQ平面ともI/Qの単位scaleは1:1に固定する。全plotの縦・横軸labelは実際の軸size中央へ合わせる。plot内titleはdock titleとの重複を避けるため表示しない。各result dockのtitleはboldかつ通常UI fontの130%とし、dock内容のfontは通常size/weightを維持する。`Display Config > Show Symbol Points`は単キー`S`でもON/OFFできる。
+- 主traceはIQ Powerと同じyellowへ統一し、Power/Modulation上のsymbol markerは5.5 pxとする。Symbol Plotのsymbolは塗りと輪郭を同じyellowとする。空data時、およびFSK/PSK Symbol PlotはQ軸`-1.25..+1.25`を初期rangeとし、packetごとの振幅percentileでは変更しない。I軸はwidgetの縦横比と1:1単位scaleを維持するため、横長widgetでは±1.25より広く見える。FSK Phase DifferenceとPSK Constellationの双方へ半径1のgray reference circleを表示する。PSK IQ Trajectoryは解析完了時の全有限trace sampleが収まる最大I/Q成分へ5%の余白を加え、最小rangeを±1.25として自動設定する。両IQ平面ともI/Qの単位scaleは1:1に固定する。全plotの縦・横軸labelは実際の軸size中央へ合わせる。plot内titleはdock titleとの重複を避けるため表示しない。各result dockのtitleはboldかつ通常UI fontの130%とし、dock内容のfontは通常size/weightを維持する。`Display Config > Show Symbol Points`は単キー`S`でもON/OFFできる。
 - `Display Config > Symbol Plot Trace`でPSK/FSK Symbol Plotを`Flat`（既定のyellow
   scatter）または`Density`へ切り替える。Densityはcurrent Result Rangeの最終
-  symbol vectorを96×96 I/Q histogramへ集計する。PSKは固定`-1.25..+1.25`、FSK
-  phase-difference vectorは現在の振幅分布を収めるI/Q範囲を使用する。
+  symbol vectorを96×96 I/Q histogramへ集計する。2026-08-18以降はPSK/FSKとも
+  全有限symbolのI/Q成分最大値に2%の余白を加えた範囲を使用し、最小範囲だけを
+  `-1.25..+1.25`とする。したがって±1.25外の点もhistogramから欠落しない。
+  PSKの解析完了時の初期viewは従来どおり±1.25を維持し、外側はzoomまたは
+  `View All`で確認する。
   各観測を標準偏差0.7 binのGaussian kernelで平滑化してから`log(1+density)`を
   turbo color mapで表示し、peak densityの75%以上はredで飽和させる。kernel外の
   density 0は透明。表示切替はDSP結果と
@@ -229,7 +232,11 @@ I/Q Power Triggerで得た複数burstは、timing、CFO、drift、pattern correl
 
 2026-08-08にDSP解析をGUI threadから専用`_AnalysisThread`へ分離した。GUI threadはcontrol値からrevision付き`VSASession.analysis_snapshot()`を作るだけで、channel extraction、pattern search、復調、各result解析はworker内で実行する。完了時にrevisionが一致する結果だけをmain sessionへpublishし、plot/table生成だけをGUI threadで行う。解析中にRefresh、Result Range移動、新規IQ load/capture等が複数要求された場合、現在のworkerを並列実行せず、途中の待機要求を置換して最新1件だけを次に実行する。古いgenerationの完了結果は描画しない。このため操作受付をDSP時間から分離しつつ、異なる設定の結果が新しい画面へ巻き戻る競合を防ぐ。アプリ終了時は実行中workerを破棄せず、解析完了後の終了を要求する。
 
-Pluto Run Singleはreceiver/USB contextをsource lifetime中再利用する。2026-08-07に、取得設定が前回と完全に同一ならhardware reconfigureを省略し、前回と同じsample countのpyadi RX bufferも再利用するよう修正した。従来は各Runで標準bufferへ戻した直後にrecord lengthへ再変更しており、同一設定の反復測定でも不要なIIO buffer再生成が発生していた。Center、sample rate、RF bandwidth、gain、record length等の`SpectrumConfig`が変われば従来どおり再設定する。初回だけはUSB context生成、Pluto属性設定、最初のIIO buffer生成を含むため、後続RunよりCapture時間が長い。この初期化時間は測定DSPの差ではない。
+2026-08-18に長時間captureのDisplay処理をbounded化した。PSK IQ Trajectoryの表示用resample/RX filterはcapture全体ではなく、選択Result Rangeの前後16 symbolsをguardとして加えた区間だけへ適用する。guardは現行10-symbol SRRCとpolyphase resamplerの過渡領域をResult Range外へ置くためで、表示区間内のfilter出力とsymbol振幅正規化は全capture処理時と同じに保つ。IQ PowerとFSK Instantaneous Frequencyは最大約30,000 plot pointsへ制限するが、単純strideではなく各時間bucketのmin/maxを時系列順に残すpeak-preserving decimationを使い、短いpower dipやfrequency excursionを表示から落としにくくする。Pattern Search失敗時など全captureのsymbolがfallback表示される場合に備え、Power/Modulation上のsymbol pointsは最大2,000点、PSK IQ Trajectoryは最大10,000点、画面上のSymbol Tableは先頭1,000 symbolsへ制限し、table更新中の再描画も停止する。測定演算、Result SummaryおよびSymbol Table export dataは間引かず全数を保持する。
+
+Pluto Run Singleはreceiver/USB contextをsource lifetime中再利用する。2026-08-07に、取得設定が前回と完全に同一ならhardware reconfigureを省略した。従来は各Runで標準bufferへ戻した直後にrecord lengthへ再変更しており、同一設定の反復測定でも不要な二重設定が発生していた。Center、sample rate、RF bandwidth、gain、record length等の`SpectrumConfig`が変われば従来どおり再設定する。初回だけはUSB context生成とPluto属性設定を含むため、後続RunよりCapture時間が長い。この初期化時間は測定DSPの差ではない。
+
+2026-08-18に、同一pyadi RX bufferをRun Single間で維持すると、DSP/display中にIIO/kernel側へ滞留した過去sampleを次回Runで先に読み出すことを実機で確認した。finite acquisitionの時刻基準を「Run要求後」に戻すため、VSA Pluto Singleだけは各read直前に`rx_destroy_buffer()`を行い、同じsample countであっても新しいIIO RX bufferから取得する。receiver/USB contextと変更のないhardware属性は引き続き再利用する。これはcapture連続性より鮮度を優先するSingleの契約であり、共通streamやSweepの既定captureには適用しない。buffer再生成分だけCapture時間が増える可能性がある。
 
 初期設定はsymbol rate 1 Msym/s、capture oversampling 8 samples/symbol、source sample rate 8 MS/s、RF bandwidth 8 MHz、capture length 3 ms、record length 24,000 samples、nominal usable I/Q bandwidth 6.4 MHz。Capture Lengthはmsまたはsymbolsで指定し、実sample countへ変換する。Plutoからread backした実sample rateとRF bandwidthをrecord metadataの正本とする。
 
@@ -283,7 +290,7 @@ Analysis BandwidthのFIR適用後は、FSKの交互patternに対して複数のs
 
 2026-08-07 に、Pluto入力とファイル入力に共通のpost-capture I/Q Power Triggerを実装した。キャプチャ全体から全てのrising power eventを検出し、各active interval内の最初の有効patternを時系列Result Range候補にする。LevelはIQ Power traceと同じdBm換算、再trigger制御はHysteresis、Drop-Out、Holdoff、検索開始位置は符号付きSearch Start Offset（symbols）で設定する。新規IQでは先頭候補、Refreshでは現在Indexを維持し、既存の左右キーで候補を切り替える。詳細な演算・既定値・R&Sとの差分は[vsa-iq-power-trigger.md](vsa-iq-power-trigger.md)を参照。
 
-Burst終端制限ではlinear envelope powerを既定1 symbolで平均し、Hysteresis/Drop-Out成立位置をfilter delay補正してfalling edgeとする。`Limit Result Range to Active Interval`がONなら、そのedgeより後まで続く不完全symbolをResultから除外する。OOKはvalid zero runと無信号をpowerだけで一意に区別できないため、最大zero runより長いDrop-Outを設定するか終端制限をOFFにする。
+Burst終端制限ではlinear envelope powerを既定1 symbolで平均し、Hysteresis/Drop-Out成立位置をfilter delay補正してfalling edgeとする。`Limit Result Range to Active Interval`がONなら、pattern search用local waveformを復調前にそのedgeで制限し、復調・PSK振幅正規化・EVM/frequency error・Symbol Plot/Tableの母集団を同じactive symbol列へ統一する。そのうえでedgeより後まで続く不完全symbolをResultから除外する。2026-08-18以前は設定Result Lengthで正規化/EVMを計算した後に表示配列だけをburst長へ切り詰めていたため、3500 symbols指定を699 symbolsへtrigger制限した場合などにPSKクラスタが過大表示される不具合があった。OOKはvalid zero runと無信号をpowerだけで一意に区別できないため、最大zero runより長いDrop-Outを設定するか終端制限をOFFにする。
 
 PlutoのADC取得開始を制御するacquisition triggerは引き続き未実装であり、本機能は1キャプチャ内の複数packetを全件評価するpost-capture gateである。
 

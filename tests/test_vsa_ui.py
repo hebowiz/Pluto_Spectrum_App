@@ -15,12 +15,90 @@ from pluto_sa.vsa.ui.main_window import (
     _FixedInteractionViewBox,
     _constellation_density,
     _constellation_density_color_levels,
+    _constellation_density_extent,
     _constellation_display_symbols,
     _fsk_phase_difference_symbols,
+    _peak_decimate_xy,
+    _prepare_psk_display_waveform,
 )
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_sa.vsa.pattern import prepare_psk_iq
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
+
+
+def test_peak_decimation_keeps_bucket_extrema() -> None:
+    x = np.arange(1000, dtype=np.float64)
+    y = np.sin(x / 13.0)
+    y[123] = -20.0
+    y[456] = 30.0
+
+    plotted_x, plotted_y = _peak_decimate_xy(x, y, maximum=100)
+
+    assert plotted_x.size <= 102
+    assert -20.0 in plotted_y
+    assert 30.0 in plotted_y
+
+
+def test_psk_display_preparation_limits_work_to_result_range() -> None:
+    sample_rate_hz = 8e6
+    symbol_rate_hz = 1e6
+    iq = np.exp(1j * np.arange(800_000, dtype=np.float64) * 0.01)
+
+    prepared, time_s = _prepare_psk_display_waveform(
+        iq,
+        sample_rate_hz=sample_rate_hz,
+        symbol_rate_hz=symbol_rate_hz,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        result_start_time_s=0.050,
+        result_stop_time_s=0.051,
+    )
+
+    assert prepared.size < 12_000
+    assert time_s[0] < 0.050
+    assert time_s[-1] > 0.051
+
+    full, full_rate_hz = prepare_psk_iq(
+        iq,
+        sample_rate_hz=sample_rate_hz,
+        symbol_rate_hz=symbol_rate_hz,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+    )
+    visible = (time_s >= 0.050) & (time_s < 0.051)
+    full_index = np.rint(time_s[visible] * full_rate_hz).astype(np.int64)
+    assert prepared[visible] == pytest.approx(full[full_index], abs=1e-10)
+
+
+def test_large_symbol_result_limits_table_display_but_not_export(tmp_path) -> None:
+    pg.mkQApp("VSA bounded symbol table test")
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.PI4_DQPSK,
+        symbol_count=1500,
+        seed=91,
+    )
+    session = VSASession()
+    session.set_recording(recording)
+    session.set_signal(signal)
+    session.analyze()
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "bounded-symbol-table")
+    )
+    try:
+        window.session = session
+        window._update_summary()
+        window._update_plots(reset_ranges=True)
+
+        assert window.symbol_table.rowCount() == 100
+        result_symbol_count = session.result.decoded_symbols.size
+        assert f"Showing 1000 of {result_symbol_count}" in window.symbol_table.toolTip()
+        assert (
+            len(window._symbol_table_export_document()["rows"])
+            == result_symbol_count
+        )
+    finally:
+        window.close()
 
 
 def _isolated_preferences(tmp_path: Path, name: str) -> QtCore.QSettings:
@@ -737,6 +815,9 @@ def test_fsk_symbol_plot_supports_density_trace(tmp_path) -> None:
         assert np.count_nonzero(density_item.image) > 0
         assert density_item.lut[0, 3] == 0
         assert window.session.signal.modulation.family.value == "FSK"
+        assert window.symbol_plot.viewRange()[1] == pytest.approx([-1.25, 1.25])
+        assert window.symbol_plot.viewRange()[0][0] <= -1.25
+        assert window.symbol_plot.viewRange()[0][1] >= 1.25
         # Unit-circle reference plus the hidden finite-data trace remain.
         assert len(window.symbol_plot.listDataItems()) == 2
     finally:
@@ -792,7 +873,7 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
         assert 1_000 < trajectory_i.size < 3_000
 
         plot_items = window.symbol_plot.listDataItems()
-        assert len(plot_items) == 1
+        assert len(plot_items) == 2
         assert plot_items[0].opts["symbolBrush"].color().getRgb()[:3] == (
             255,
             255,
@@ -813,6 +894,10 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
         # decision points on the I/Q axes while leaving decoded symbols intact.
         distance_from_nearest_axis = np.minimum(np.abs(i_values), np.abs(q_values))
         assert np.percentile(distance_from_nearest_axis, 95) < 0.08
+        circle_i, circle_q = plot_items[1].getData()
+        np.testing.assert_allclose(
+            np.hypot(circle_i, circle_q), 1.0, atol=1e-12
+        )
         x_range, y_range = window.symbol_plot.viewRange()
         assert x_range[0] <= -1.0 and x_range[1] >= 1.0
         assert y_range[0] <= -1.0 and y_range[1] >= 1.0
@@ -905,6 +990,16 @@ def test_constellation_density_can_disable_smoothing() -> None:
     assert nonzero.size == 2
     assert float(np.max(nonzero)) == pytest.approx(np.log1p(8.0))
     assert float(np.min(nonzero)) == pytest.approx(np.log1p(1.0))
+
+
+def test_constellation_density_extent_includes_symbols_outside_nominal_plane() -> None:
+    symbols = np.asarray([-1.6 + 0.2j, 0.1 + 1.4j, np.nan + 0.0j])
+
+    limit = _constellation_density_extent(symbols)
+    density = _constellation_density(symbols, limit=limit, bins=40)
+
+    assert limit > 1.6
+    assert np.count_nonzero(density) > 0
 
 
 def test_constellation_density_saturates_high_density_region_to_red() -> None:

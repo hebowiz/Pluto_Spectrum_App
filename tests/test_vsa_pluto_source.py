@@ -20,13 +20,17 @@ class _FakeReceiver:
         self.config = config
         self.closed = False
         self.reconfigured: list[SpectrumConfig] = []
+        self.capture_fresh: list[bool] = []
         self.__class__.instances.append(self)
 
     def reconfigure(self, config: SpectrumConfig) -> None:
         self.config = config
         self.reconfigured.append(config)
 
-    def capture_iq_block(self, count: int, *, source: str) -> IQBlock:
+    def capture_iq_block(
+        self, count: int, *, source: str, fresh: bool = False
+    ) -> IQBlock:
+        self.capture_fresh.append(bool(fresh))
         iq = np.full(count, 100.0 + 0.0j, dtype=np.complex64)
         return IQBlock(
             sequence=0,
@@ -90,6 +94,7 @@ def test_pluto_single_capture_defaults_to_eight_samples_per_symbol() -> None:
     assert receiver.config.rx_gain_db == 30
     assert receiver.config.time_analyzer_sample_rate_hz == 8_000_000
     assert receiver.config.time_analyzer_rf_bandwidth_hz == 8_000_000
+    assert receiver.capture_fresh == [True]
 
     result = VSAAnalyzer().analyze(
         recording,

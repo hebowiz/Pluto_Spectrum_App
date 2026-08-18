@@ -881,6 +881,13 @@ class PatternAnalyzer:
                 else recording.sample_count
             )
             search_stop = max(search_start, int(next_trigger))
+            if trigger.limit_result_to_active_interval:
+                # Limit the waveform before demodulation.  Trimming only the
+                # returned arrays afterwards leaves PSK RMS normalization and
+                # EVM based on the requested Result Length (including the
+                # inactive tail) even though Result Symbols reports the
+                # shorter trigger-limited count.
+                search_stop = min(search_stop, int(event.active_stop_sample))
             if search_start >= search_stop or search_start >= event.active_stop_sample:
                 continue
             local_recording = replace(

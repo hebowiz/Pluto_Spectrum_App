@@ -271,15 +271,23 @@ class PlutoReceiver:
         num_samples: int,
         *,
         source: str = "capture",
+        fresh: bool = False,
     ) -> IQBlock:
-        """Synchronously capture and publish one common IQ block."""
+        """Synchronously capture and publish one common IQ block.
+
+        ``fresh`` recreates the IIO RX buffer before reading so a finite
+        acquisition starts after the request instead of draining samples that
+        accumulated in a reusable kernel/USB buffer.
+        """
         capture_size = max(1, int(num_samples))
 
         with self._iq_lock:
             capture_started_at = time.perf_counter()
             with self._sdr_lock:
-                if self.sdr.rx_buffer_size != capture_size:
+                buffer_size_changed = self.sdr.rx_buffer_size != capture_size
+                if buffer_size_changed:
                     self.sdr.rx_buffer_size = capture_size
+                if fresh or buffer_size_changed:
                     try:
                         self.sdr.rx_destroy_buffer()
                     except Exception:

@@ -54,7 +54,10 @@ _MODULATIONS = (
     ModulationKind.PI4_DQPSK,
     ModulationKind.DPSK8,
 )
-_MAX_DISPLAY_POINTS = 100_000
+_MAX_DISPLAY_POINTS = 30_000
+_MAX_TRACE_SYMBOL_POINTS = 2_000
+_MAX_IQ_TRAJECTORY_POINTS = 10_000
+_MAX_SYMBOL_TABLE_DISPLAY_SYMBOLS = 1_000
 _STARTUP_CONFIG_KEY = "startup/measurement_config"
 _STARTUP_CONFIG_SCHEMA = "pluto-vsa-startup-config"
 _STARTUP_CONFIG_VERSION = 1
@@ -124,6 +127,79 @@ class _FixedInteractionViewBox(pg.ViewBox):
 def _decimation_indices(count: int, maximum: int = _MAX_DISPLAY_POINTS) -> slice:
     step = max(1, int(np.ceil(int(count) / int(maximum))))
     return slice(None, None, step)
+
+
+def _peak_decimate_xy(
+    x_values: np.ndarray,
+    y_values: np.ndarray,
+    *,
+    maximum: int = _MAX_DISPLAY_POINTS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bound plot data while retaining each time bucket's min/max excursion."""
+    x = np.asarray(x_values)
+    y = np.asarray(y_values)
+    count = min(x.size, y.size)
+    if count <= int(maximum):
+        return x[:count], y[:count]
+    bucket_count = max(1, int(maximum) // 2)
+    step = max(1, int(np.ceil(count / bucket_count)))
+    full_count = (count // step) * step
+    grouped = y[:full_count].reshape(-1, step)
+    group_offset = np.arange(grouped.shape[0], dtype=np.int64) * step
+    minimum = group_offset + np.argmin(grouped, axis=1)
+    maximum_index = group_offset + np.argmax(grouped, axis=1)
+    paired = np.column_stack((minimum, maximum_index))
+    paired.sort(axis=1)
+    indices = paired.reshape(-1)
+    if full_count < count:
+        tail = y[full_count:count]
+        tail_indices = np.asarray(
+            [full_count + int(np.argmin(tail)), full_count + int(np.argmax(tail))],
+            dtype=np.int64,
+        )
+        indices = np.concatenate((indices, np.sort(tail_indices)))
+    return x[indices], y[indices]
+
+
+def _prepare_psk_display_waveform(
+    iq: np.ndarray,
+    *,
+    sample_rate_hz: float,
+    symbol_rate_hz: float,
+    tx_filter: str,
+    filter_parameter: float | None,
+    result_start_time_s: float | None = None,
+    result_stop_time_s: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Prepare only the visible PSK range, including receive-filter guards."""
+    values = np.asarray(iq)
+    start_sample = 0
+    stop_sample = values.size
+    if result_start_time_s is not None and result_stop_time_s is not None:
+        # The SRRC filter spans ten symbols. Sixteen symbols on either side
+        # also cover scipy's polyphase-resampler transient for normal VSA
+        # sample-rate ratios, keeping the visible Result Range unchanged.
+        guard_s = 16.0 / float(symbol_rate_hz)
+        start_sample = max(
+            0,
+            int(np.floor((float(result_start_time_s) - guard_s) * sample_rate_hz)),
+        )
+        stop_sample = min(
+            values.size,
+            int(np.ceil((float(result_stop_time_s) + guard_s) * sample_rate_hz)),
+        )
+    prepared, prepared_rate_hz = prepare_psk_iq(
+        values[start_sample:stop_sample],
+        sample_rate_hz=sample_rate_hz,
+        symbol_rate_hz=symbol_rate_hz,
+        tx_filter=tx_filter,
+        filter_parameter=filter_parameter,
+    )
+    time_offset_s = start_sample / float(sample_rate_hz)
+    time_s = time_offset_s + np.arange(prepared.size, dtype=np.float64) / float(
+        prepared_rate_hz
+    )
+    return prepared, time_s
 
 
 def _constellation_display_symbols(
@@ -211,6 +287,25 @@ def _constellation_density_color_levels(
         return 0.0, 1.0
     saturation = float(np.clip(red_level, 0.01, 1.0))
     return 0.0, peak * saturation
+
+
+def _constellation_density_extent(
+    symbols: np.ndarray,
+    *,
+    minimum: float = _IQ_PLANE_LIMIT,
+) -> float:
+    """Cover every finite I/Q point while retaining the nominal minimum view."""
+    values = np.asarray(symbols, dtype=np.complex128)
+    finite = np.isfinite(values.real) & np.isfinite(values.imag)
+    values = values[finite]
+    if values.size == 0:
+        return max(float(minimum), np.finfo(np.float64).eps)
+    component_peak = float(
+        max(np.max(np.abs(values.real)), np.max(np.abs(values.imag)))
+    )
+    # Keep the outermost point away from the histogram boundary.  Apart from
+    # making it visible, this avoids relying on the last-bin inclusive edge.
+    return max(float(minimum), component_peak * 1.02, np.finfo(np.float64).eps)
 
 
 def _fsk_phase_difference_symbols(
@@ -2860,11 +2955,14 @@ class VSAWindow(QtWidgets.QMainWindow):
         display_result = (
             self.session.carrier_corrected_result if show_corrected else result
         )
-        capture_slice = _decimation_indices(result.time_s.size)
+        capture_time_ms, capture_power_dbm = _peak_decimate_xy(
+            result.time_s * 1e3,
+            result.power_dbm,
+        )
         self.zero_span_plot.clear()
         self.zero_span_plot.plot(
-            result.time_s[capture_slice] * 1e3,
-            result.power_dbm[capture_slice],
+            capture_time_ms,
+            capture_power_dbm,
             pen=pg.mkPen(_TRACE_COLOR, width=1),
         )
         symbol_times_s = (
@@ -2923,9 +3021,13 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.setLabel("left", "Frequency (kHz)")
             self.modulation_plot.setLabel("bottom", "Time (ms)")
             self.modulation_plot.setAspectLocked(False)
+            frequency_time_ms, display_frequency_khz = _peak_decimate_xy(
+                display_result.time_s * 1e3,
+                display_result.instantaneous_frequency_hz / 1e3,
+            )
             self.modulation_plot.plot(
-                display_result.time_s[capture_slice] * 1e3,
-                display_result.instantaneous_frequency_hz[capture_slice] / 1e3,
+                frequency_time_ms,
+                display_frequency_khz,
                 pen=pg.mkPen(_TRACE_COLOR, width=1),
             )
             modulation_frequency_hz = (
@@ -2984,28 +3086,18 @@ class VSAWindow(QtWidgets.QMainWindow):
             phase_slice = _decimation_indices(
                 phase_difference.size, maximum=20_000
             )
-            symbol_limit = (
-                max(
-                    _IQ_PLANE_LIMIT,
-                    1.15
-                    * float(np.percentile(np.abs(phase_difference), 99.5)),
-                )
-                if phase_difference.size
-                else _IQ_PLANE_LIMIT
-            )
             self._plot_symbol_distribution(
                 phase_difference[phase_slice],
-                density_limit=symbol_limit,
+                density_limit=_IQ_PLANE_LIMIT,
             )
-            unit_angle = np.linspace(0.0, 2.0 * np.pi, 361)
-            self.symbol_plot.plot(
-                np.cos(unit_angle),
-                np.sin(unit_angle),
-                pen=pg.mkPen((120, 120, 120, 110), width=1),
-            )
+            self._plot_unit_circle(self.symbol_plot)
             if reset_ranges:
-                self.symbol_plot.setXRange(-symbol_limit, symbol_limit, padding=0.0)
-                self.symbol_plot.setYRange(-symbol_limit, symbol_limit, padding=0.0)
+                self.symbol_plot.setXRange(
+                    -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+                )
+                self.symbol_plot.setYRange(
+                    -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+                )
         else:
             self.modulation_plot.setDownsampling(auto=False)
             self.modulation_plot.setClipToView(False)
@@ -3014,21 +3106,29 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.setLabel("left", "Q")
             self.modulation_plot.setLabel("bottom", "I")
             self.modulation_plot.setAspectLocked(True, ratio=1.0)
-            processed_iq, processed_rate_hz = prepare_psk_iq(
+            pattern_result = self.session.pattern_result
+            analysis_sample_rate_hz = float(
+                display_result.metadata.get(
+                    "analysis_sample_rate_hz",
+                    self.session.recording.sample_rate_hz,
+                )
+            )
+            processed_iq, processed_time_s = _prepare_psk_display_waveform(
                 display_result.iq,
-                sample_rate_hz=float(
-                    display_result.metadata.get(
-                        "analysis_sample_rate_hz",
-                        self.session.recording.sample_rate_hz,
-                    )
-                ),
+                sample_rate_hz=analysis_sample_rate_hz,
                 symbol_rate_hz=signal.symbol_rate_hz,
                 tx_filter=signal.tx_filter,
                 filter_parameter=signal.filter_parameter,
-            )
-            processed_time_s = (
-                np.arange(processed_iq.size, dtype=np.float64)
-                / processed_rate_hz
+                result_start_time_s=(
+                    pattern_result.result_start_time_s
+                    if pattern_result is not None
+                    else None
+                ),
+                result_stop_time_s=(
+                    pattern_result.result_stop_time_s
+                    if pattern_result is not None
+                    else None
+                ),
             )
             symbol_iq = np.interp(
                 symbol_times_s,
@@ -3048,7 +3148,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                 processed_iq = processed_iq / trajectory_rms
                 symbol_iq = symbol_iq / trajectory_rms
             marker_context["modulation_vectors"] = symbol_iq
-            pattern_result = self.session.pattern_result
             if pattern_result is not None:
                 in_result_range = (
                     (processed_time_s >= pattern_result.result_start_time_s)
@@ -3058,7 +3157,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             else:
                 trajectory_iq = processed_iq
             trajectory_slice = _decimation_indices(
-                trajectory_iq.size, maximum=20_000
+                trajectory_iq.size, maximum=_MAX_IQ_TRAJECTORY_POINTS
             )
             trajectory_iq = trajectory_iq[trajectory_slice]
             self.modulation_plot.plot(
@@ -3122,6 +3221,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 constellation_symbols,
                 density_limit=_IQ_PLANE_LIMIT,
             )
+            self._plot_unit_circle(self.symbol_plot)
             # clear() retains the previous ViewBox range.  Explicitly reset
             # both axes because an FSK frequency range or an earlier malformed
             # constellation can otherwise leave all unit-circle symbols offscreen.
@@ -3324,42 +3424,46 @@ class VSAWindow(QtWidgets.QMainWindow):
                     f"{float(result.frequency_error_hz) / 1e3:+.3f} kHz"
                 )
         self._set_result_summary(summary_values)
-        shown = symbols[:2048]
+        shown = symbols[:_MAX_SYMBOL_TABLE_DISPLAY_SYMBOLS]
         row_count = int(np.ceil(shown.size / 10.0))
-        self.symbol_table.clearContents()
-        self.symbol_table.setRowCount(row_count)
-        self.symbol_table.setVerticalHeaderLabels(
-            [str(row * 10) for row in range(row_count)]
-        )
-        matched_pattern_symbols = ()
-        if pattern_result is not None:
-            configured_symbols = self._parse_pattern_symbols(
-                pattern_result.modulation.order
+        self.symbol_table.setUpdatesEnabled(False)
+        try:
+            self.symbol_table.clearContents()
+            self.symbol_table.setRowCount(row_count)
+            self.symbol_table.setVerticalHeaderLabels(
+                [str(row * 10) for row in range(row_count)]
             )
-            matched_pattern_symbols = (
-                tuple(1 - int(symbol) for symbol in configured_symbols)
-                if pattern_result.metadata.get("pattern_match_variant") == "Inverted"
-                else configured_symbols
-            )
-        for index, symbol in enumerate(shown):
-            item = QtWidgets.QTableWidgetItem(str(int(symbol)))
-            item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            if pattern_result is not None and index < pattern_result.symbol_time_s.size:
-                symbol_time_s = float(pattern_result.symbol_time_s[index])
-                pattern_index = int(
-                    np.floor(
-                        (symbol_time_s - pattern_result.pattern_start_time_s)
-                        * float(pattern_result.metadata["symbol_rate_hz"])
-                        + 1e-6
-                    )
+            matched_pattern_symbols = ()
+            if pattern_result is not None:
+                configured_symbols = self._parse_pattern_symbols(
+                    pattern_result.modulation.order
                 )
-                if (
-                    0 <= pattern_index < len(matched_pattern_symbols)
-                    and int(symbol) == int(matched_pattern_symbols[pattern_index])
-                ):
-                    item.setBackground(QtGui.QColor(24, 112, 55))
-                    item.setForeground(QtGui.QColor(255, 255, 255))
-            self.symbol_table.setItem(index // 10, index % 10, item)
+                matched_pattern_symbols = (
+                    tuple(1 - int(symbol) for symbol in configured_symbols)
+                    if pattern_result.metadata.get("pattern_match_variant") == "Inverted"
+                    else configured_symbols
+                )
+            for index, symbol in enumerate(shown):
+                item = QtWidgets.QTableWidgetItem(str(int(symbol)))
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                if pattern_result is not None and index < pattern_result.symbol_time_s.size:
+                    symbol_time_s = float(pattern_result.symbol_time_s[index])
+                    pattern_index = int(
+                        np.floor(
+                            (symbol_time_s - pattern_result.pattern_start_time_s)
+                            * float(pattern_result.metadata["symbol_rate_hz"])
+                            + 1e-6
+                        )
+                    )
+                    if (
+                        0 <= pattern_index < len(matched_pattern_symbols)
+                        and int(symbol) == int(matched_pattern_symbols[pattern_index])
+                    ):
+                        item.setBackground(QtGui.QColor(24, 112, 55))
+                        item.setForeground(QtGui.QColor(255, 255, 255))
+                self.symbol_table.setItem(index // 10, index % 10, item)
+        finally:
+            self.symbol_table.setUpdatesEnabled(True)
         if (
             self._selected_symbol_marker_index is not None
             and self._selected_symbol_marker_index < shown.size
@@ -3378,7 +3482,9 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _plot_symbol_points(
         plot: pg.PlotWidget, x_values: np.ndarray, y_values: np.ndarray
     ) -> None:
-        selection = _decimation_indices(len(x_values), maximum=20_000)
+        selection = _decimation_indices(
+            len(x_values), maximum=_MAX_TRACE_SYMBOL_POINTS
+        )
         plot.plot(
             np.asarray(x_values)[selection],
             np.asarray(y_values)[selection],
@@ -3387,6 +3493,15 @@ class VSAWindow(QtWidgets.QMainWindow):
             symbolSize=_TRACE_SYMBOL_SIZE,
             symbolBrush=pg.mkBrush(70, 255, 145, 230),
             symbolPen=pg.mkPen(10, 35, 20, 230, width=1),
+        )
+
+    @staticmethod
+    def _plot_unit_circle(plot: pg.PlotWidget) -> None:
+        unit_angle = np.linspace(0.0, 2.0 * np.pi, 361)
+        plot.plot(
+            np.cos(unit_angle),
+            np.sin(unit_angle),
+            pen=pg.mkPen((120, 120, 120, 110), width=1),
         )
 
     def _plot_symbol_distribution(
@@ -3409,7 +3524,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             return
 
-        limit = max(float(density_limit), np.finfo(np.float64).eps)
+        limit = _constellation_density_extent(values, minimum=density_limit)
         density = _constellation_density(values, limit=limit)
         density_item = pg.ImageItem(axisOrder="row-major")
         lookup_table = np.array(
