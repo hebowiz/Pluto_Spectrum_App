@@ -12,6 +12,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 from scipy.ndimage import gaussian_filter
 
 from pluto_sa.config.input_frontend import InputPowerCorrection
+from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     BitOrdering,
@@ -41,7 +42,11 @@ from pluto_sa.vsa.result_summary import (
     normalize_result_summary_ids,
 )
 from pluto_sa.vsa.session import VSASession
-from pluto_sa.vsa.pluto_source import PlutoCaptureSettings, PlutoLiveSource
+from pluto_sa.vsa.pluto_source import (
+    CaptureCancelledError,
+    PlutoCaptureSettings,
+    PlutoLiveSource,
+)
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
 
@@ -339,6 +344,7 @@ def _fsk_phase_difference_symbols(
 class _PlutoSingleCaptureThread(QtCore.QThread):
     capture_ready = QtCore.Signal(object)
     capture_failed = QtCore.Signal(str)
+    capture_cancelled = QtCore.Signal()
 
     def __init__(
         self,
@@ -352,9 +358,21 @@ class _PlutoSingleCaptureThread(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            self.capture_ready.emit(self._source.capture_single(self._settings))
+            recording = self._source.capture_single(
+                self._settings,
+                cancelled=self.isInterruptionRequested,
+            )
+            if self.isInterruptionRequested():
+                self.capture_cancelled.emit()
+            else:
+                self.capture_ready.emit(recording)
+        except CaptureCancelledError:
+            self.capture_cancelled.emit()
         except Exception as error:
             self.capture_failed.emit(str(error))
+
+    def cancel(self) -> None:
+        self.requestInterruption()
 
 
 class _AnalysisThread(QtCore.QThread):
@@ -897,12 +915,53 @@ class VSAWindow(QtWidgets.QMainWindow):
                 control.currentIndexChanged.connect(self._sync_capture_settings)
             else:
                 control.valueChanged.connect(self._sync_capture_settings)
-        self._sync_capture_settings()
         config_pages.append(("Signal Capture", capture_page))
 
         trigger_page = QtWidgets.QWidget()
         trigger_form = QtWidgets.QFormLayout(trigger_page)
-        self.iq_power_trigger_check = QtWidgets.QCheckBox("I/Q Power Trigger On")
+        acquisition_heading = QtWidgets.QLabel("Acquisition Trigger")
+        acquisition_heading.setStyleSheet("font-weight: bold;")
+        self.acquisition_trigger_source_combo = QtWidgets.QComboBox()
+        self.acquisition_trigger_source_combo.addItem(
+            "Free Run", TriggerKind.FREE_RUN.value
+        )
+        self.acquisition_trigger_source_combo.addItem(
+            "I/Q Power", TriggerKind.POWER_LEVEL.value
+        )
+        self.acquisition_trigger_level_spin = QtWidgets.QDoubleSpinBox()
+        self.acquisition_trigger_level_spin.setRange(-200.0, 100.0)
+        self.acquisition_trigger_level_spin.setDecimals(2)
+        self.acquisition_trigger_level_spin.setValue(-20.0)
+        self.acquisition_trigger_level_spin.setSuffix(" dBm")
+        self.acquisition_trigger_slope_combo = QtWidgets.QComboBox()
+        for slope in TriggerSlope:
+            self.acquisition_trigger_slope_combo.addItem(
+                slope.value.capitalize(), slope.value
+            )
+        self.acquisition_trigger_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.acquisition_trigger_offset_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self.acquisition_trigger_offset_spin.setDecimals(3)
+        self.acquisition_trigger_offset_spin.setSuffix(" sym")
+        self.acquisition_trigger_offset_spin.setToolTip(
+            "R&S Trigger Offset: positive starts the record after the crossing; "
+            "negative retains pretrigger samples."
+        )
+        self.acquisition_trigger_hysteresis_spin = QtWidgets.QDoubleSpinBox()
+        self.acquisition_trigger_hysteresis_spin.setRange(0.0, 50.0)
+        self.acquisition_trigger_hysteresis_spin.setDecimals(1)
+        self.acquisition_trigger_hysteresis_spin.setValue(3.0)
+        self.acquisition_trigger_hysteresis_spin.setSuffix(" dB")
+        trigger_form.addRow(acquisition_heading)
+        trigger_form.addRow("Trigger Source", self.acquisition_trigger_source_combo)
+        trigger_form.addRow("Level", self.acquisition_trigger_level_spin)
+        trigger_form.addRow("Slope", self.acquisition_trigger_slope_combo)
+        trigger_form.addRow("Trigger Offset", self.acquisition_trigger_offset_spin)
+        trigger_form.addRow("Hysteresis", self.acquisition_trigger_hysteresis_spin)
+
+        burst_heading = QtWidgets.QLabel("Post-capture Burst Search")
+        burst_heading.setStyleSheet("font-weight: bold;")
+        trigger_form.addRow(burst_heading)
+        self.iq_power_trigger_check = QtWidgets.QCheckBox("Burst Search On")
         self.iq_power_trigger_check.setToolTip(
             "Detect every rising power event in the current I/Q capture and "
             "run pattern search once inside each active interval."
@@ -965,6 +1024,11 @@ class VSAWindow(QtWidgets.QMainWindow):
         trigger_form.addRow("Holdoff", self.iq_power_trigger_holdoff_spin)
         trigger_form.addRow("Search Start Offset", self.iq_power_trigger_offset_spin)
         trigger_form.addRow(self.iq_power_trigger_limit_result_check)
+        self.acquisition_trigger_source_combo.currentIndexChanged.connect(
+            self._sync_acquisition_trigger_controls
+        )
+        self._sync_acquisition_trigger_controls()
+        self._sync_capture_settings()
         config_pages.append(("Trigger", trigger_page))
 
         pattern_page = QtWidgets.QWidget()
@@ -1762,7 +1826,14 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "tx_filter": self.tx_filter_combo.currentText(),
                 "filter_parameter": self.filter_parameter_spin.value(),
             },
-            "iq_power_trigger": {
+            "acquisition_trigger": {
+                "source": self.acquisition_trigger_source_combo.currentData(),
+                "level_dbm": self.acquisition_trigger_level_spin.value(),
+                "slope": self.acquisition_trigger_slope_combo.currentData(),
+                "offset_symbols": self.acquisition_trigger_offset_spin.value(),
+                "hysteresis_db": self.acquisition_trigger_hysteresis_spin.value(),
+            },
+            "burst_search": {
                 "enabled": self.iq_power_trigger_check.isChecked(),
                 "level_dbm": self.iq_power_trigger_level_spin.value(),
                 "hysteresis_db": self.iq_power_trigger_hysteresis_spin.value(),
@@ -1878,7 +1949,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             source = settings["input_frontend"]
             signal = settings["signal_description"]
             pattern = settings["pattern_search"]
-            iq_power_trigger = settings.get("iq_power_trigger", {})
+            acquisition_trigger = settings.get("acquisition_trigger", {})
+            iq_power_trigger = settings.get(
+                "burst_search", settings.get("iq_power_trigger", {})
+            )
             result_range = settings["result_range"]
             demodulation = settings["demodulation"]
             signal_capture = settings.get("signal_capture", {})
@@ -1888,6 +1962,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 source,
                 signal,
                 pattern,
+                acquisition_trigger,
                 iq_power_trigger,
                 result_range,
                 demodulation,
@@ -1938,6 +2013,38 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.pattern_allow_inverted_fsk_check.setChecked(
                 bool(pattern.get("allow_inverted_fsk_pattern", False))
             )
+            if acquisition_trigger:
+                source_value = str(
+                    acquisition_trigger.get("source", TriggerKind.FREE_RUN.value)
+                )
+                source_index = self.acquisition_trigger_source_combo.findData(
+                    source_value
+                )
+                if source_index < 0:
+                    raise ValueError(
+                        f"unsupported acquisition trigger source: {source_value!r}"
+                    )
+                self.acquisition_trigger_source_combo.setCurrentIndex(source_index)
+                self.acquisition_trigger_level_spin.setValue(
+                    float(acquisition_trigger.get("level_dbm", -20.0))
+                )
+                slope_value = str(
+                    acquisition_trigger.get("slope", TriggerSlope.RISING.value)
+                )
+                slope_index = self.acquisition_trigger_slope_combo.findData(
+                    slope_value
+                )
+                if slope_index < 0:
+                    raise ValueError(
+                        f"unsupported acquisition trigger slope: {slope_value!r}"
+                    )
+                self.acquisition_trigger_slope_combo.setCurrentIndex(slope_index)
+                self.acquisition_trigger_offset_spin.setValue(
+                    float(acquisition_trigger.get("offset_symbols", 0.0))
+                )
+                self.acquisition_trigger_hysteresis_spin.setValue(
+                    float(acquisition_trigger.get("hysteresis_db", 3.0))
+                )
             if iq_power_trigger:
                 self.iq_power_trigger_check.setChecked(
                     bool(iq_power_trigger.get("enabled", False))
@@ -2244,7 +2351,34 @@ class VSAWindow(QtWidgets.QMainWindow):
             sdr_uri=self.pluto_uri_edit.text().strip() or None,
             swap_iq=self.swap_iq_check.isChecked(),
             power_correction=self._input_power_correction(),
+            trigger_source=TriggerKind(
+                self.acquisition_trigger_source_combo.currentData()
+            ),
+            trigger_level_dbm=self.acquisition_trigger_level_spin.value(),
+            trigger_slope=TriggerSlope(
+                self.acquisition_trigger_slope_combo.currentData()
+            ),
+            trigger_offset_s=(
+                self.acquisition_trigger_offset_spin.value()
+                / self.symbol_rate_spin.value()
+            ),
+            trigger_hysteresis_db=self.acquisition_trigger_hysteresis_spin.value(),
         )
+
+    def _sync_acquisition_trigger_controls(self, _value: object = None) -> None:
+        if not hasattr(self, "acquisition_trigger_source_combo"):
+            return
+        enabled = (
+            self.acquisition_trigger_source_combo.currentData()
+            == TriggerKind.POWER_LEVEL.value
+        )
+        for control in (
+            self.acquisition_trigger_level_spin,
+            self.acquisition_trigger_slope_combo,
+            self.acquisition_trigger_offset_spin,
+            self.acquisition_trigger_hysteresis_spin,
+        ):
+            control.setEnabled(enabled)
 
     def _sync_capture_settings(self, _value: object = None) -> None:
         if not hasattr(self, "capture_oversampling_combo"):
@@ -2268,6 +2402,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._pluto_capture_thread is not None
             and self._pluto_capture_thread.isRunning()
         ):
+            self._pluto_capture_thread.cancel()
+            self.run_single_action.setEnabled(False)
+            self.run_single_button.setEnabled(False)
+            self.statusBar().showMessage("Stopping Pluto IQ capture...")
             return
         try:
             settings = self._pluto_capture_settings()
@@ -2275,13 +2413,22 @@ class VSAWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", str(error))
             return
         self.input_source_combo.setCurrentText("Pluto")
-        self.run_single_action.setEnabled(False)
-        self.run_single_button.setEnabled(False)
-        self.statusBar().showMessage(
-            "Capturing Pluto IQ - "
-            f"{settings.requested_sample_rate_hz / 1e6:.3f} MS/s, "
-            f"{settings.capture_samples:,} samples"
-        )
+        self.run_single_action.setText("Stop Single")
+        self.run_single_button.setText("Stop Single (Pluto)")
+        if settings.trigger_source is TriggerKind.POWER_LEVEL:
+            capture_status = (
+                "Waiting for Pluto I/Q Power trigger - "
+                f"{settings.trigger_slope.value}, "
+                f"{settings.trigger_level_dbm:.2f} dBm, "
+                f"offset {self.acquisition_trigger_offset_spin.value():+.3f} sym"
+            )
+        else:
+            capture_status = (
+                "Capturing Pluto IQ - "
+                f"{settings.requested_sample_rate_hz / 1e6:.3f} MS/s, "
+                f"{settings.capture_samples:,} samples"
+            )
+        self.statusBar().showMessage(capture_status)
         thread = _PlutoSingleCaptureThread(
             self._pluto_source,
             settings,
@@ -2289,6 +2436,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         thread.capture_ready.connect(self._pluto_capture_ready)
         thread.capture_failed.connect(self._pluto_capture_failed)
+        thread.capture_cancelled.connect(self._pluto_capture_cancelled)
         thread.finished.connect(self._pluto_capture_stopped)
         thread.finished.connect(thread.deleteLater)
         self._pluto_capture_thread = thread
@@ -2316,9 +2464,15 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Pluto capture failed: {message}")
         QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", message)
 
+    def _pluto_capture_cancelled(self) -> None:
+        self._pluto_capture_started_at = None
+        self.statusBar().showMessage("Pluto IQ capture cancelled")
+
     def _pluto_capture_stopped(self) -> None:
         self._pluto_capture_started_at = None
         self._pluto_capture_thread = None
+        self.run_single_action.setText("Run Single")
+        self.run_single_button.setText("Run Single (Pluto)")
         self.run_single_action.setEnabled(True)
         self.run_single_button.setEnabled(True)
 

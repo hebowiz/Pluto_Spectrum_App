@@ -17,6 +17,8 @@ from pluto_sa.sdr.trigger import (
     TriggerKind,
     TriggerRearmMode,
     TriggerRunMode,
+    TriggerSlope,
+    power_trigger_display_dbm_to_dbfs,
 )
 from pluto_sa.sdr.trigger_acquisition import TriggerAcquisitionController
 from pluto_sa.vsa.model import IQRecording
@@ -35,6 +37,11 @@ class PlutoCaptureSettings:
     sdr_uri: str | None = None
     swap_iq: bool = False
     power_correction: InputPowerCorrection = InputPowerCorrection()
+    trigger_source: TriggerKind = TriggerKind.FREE_RUN
+    trigger_level_dbm: float = -20.0
+    trigger_slope: TriggerSlope = TriggerSlope.RISING
+    trigger_offset_s: float = 0.0
+    trigger_hysteresis_db: float = 3.0
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.center_frequency_hz) or self.center_frequency_hz <= 0.0:
@@ -47,6 +54,16 @@ class PlutoCaptureSettings:
             raise ValueError("capture_length_s must be positive")
         if not np.isfinite(self.rf_bandwidth_hz) or self.rf_bandwidth_hz <= 0.0:
             raise ValueError("rf_bandwidth_hz must be positive")
+        if self.trigger_source not in {TriggerKind.FREE_RUN, TriggerKind.POWER_LEVEL}:
+            raise ValueError("VSA Pluto capture supports Free Run or I/Q Power trigger")
+        if not np.isfinite(self.trigger_level_dbm):
+            raise ValueError("trigger_level_dbm must be finite")
+        if not np.isfinite(self.trigger_offset_s):
+            raise ValueError("trigger_offset_s must be finite")
+        if self.trigger_offset_s < -self.capture_length_s:
+            raise ValueError("negative Trigger Offset cannot exceed Capture Length")
+        if not np.isfinite(self.trigger_hysteresis_db) or self.trigger_hysteresis_db < 0.0:
+            raise ValueError("trigger_hysteresis_db must be finite and non-negative")
 
     @property
     def requested_sample_rate_hz(self) -> int:
@@ -59,6 +76,14 @@ class PlutoCaptureSettings:
     @property
     def nominal_usable_bandwidth_hz(self) -> float:
         return min(0.8 * self.requested_sample_rate_hz, self.rf_bandwidth_hz)
+
+    @property
+    def trigger_offset_samples(self) -> int:
+        return int(round(self.trigger_offset_s * self.requested_sample_rate_hz))
+
+
+class CaptureCancelledError(RuntimeError):
+    """Raised when the operator stops a pending Pluto acquisition."""
 
 
 class PlutoLiveSource:
@@ -79,7 +104,15 @@ class PlutoLiveSource:
         self._receiver: PlutoReceiver | None = None
         self._active_config: SpectrumConfig | None = None
 
-    def capture_single(self, settings: PlutoCaptureSettings) -> IQRecording:
+    def capture_single(
+        self,
+        settings: PlutoCaptureSettings,
+        *,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> IQRecording:
+        cancelled = cancelled or (lambda: False)
+        if cancelled():
+            raise CaptureCancelledError("Pluto capture cancelled")
         config = self._spectrum_config(settings)
         if self._receiver is None:
             self._receiver = self._receiver_factory(config)
@@ -87,39 +120,31 @@ class PlutoLiveSource:
             self._receiver.reconfigure(config)
         self._active_config = config
 
-        block = self._receiver.capture_iq_block(
-            settings.capture_samples,
-            source="VSA Pluto Single",
-            fresh=True,
-        )
         actual_sample_rate_hz = self._receiver.get_current_sample_rate_hz()
         actual_rf_bandwidth_hz = self._receiver.get_current_rf_bandwidth_hz()
         usable_bandwidth_hz = min(
             0.8 * float(actual_sample_rate_hz),
             float(actual_rf_bandwidth_hz),
         )
-        trigger = TriggerConfig(
-            kind=TriggerKind.FREE_RUN,
-            run_mode=TriggerRunMode.SINGLE,
-            rearm_mode=TriggerRearmMode.STOP_ON_TRIGGER,
-            pretrigger_samples=0,
-            posttrigger_samples=block.sample_count - 1,
+        capture_source = (
+            "VSA Pluto I/Q Power Trigger"
+            if settings.trigger_source is TriggerKind.POWER_LEVEL
+            else "VSA Pluto Single"
         )
-        controller = TriggerAcquisitionController(
-            trigger,
-            AcquisitionMetadata(
-                sample_rate_hz=float(actual_sample_rate_hz),
-                center_freq_hz=float(settings.center_frequency_hz),
-                rf_bandwidth_hz=usable_bandwidth_hz,
-                gain_db=float(settings.power_correction.internal_gain_db),
-                source="VSA Pluto Single",
-            ),
+        metadata = AcquisitionMetadata(
+            sample_rate_hz=float(actual_sample_rate_hz),
+            center_freq_hz=float(settings.center_frequency_hz),
+            rf_bandwidth_hz=usable_bandwidth_hz,
+            gain_db=float(settings.power_correction.internal_gain_db),
+            source=capture_source,
         )
-        records = controller.feed(block)
-        if len(records) != 1:
-            raise RuntimeError("Pluto single capture did not produce one complete record")
+        record, output_start_offset = self._capture_record(
+            settings,
+            metadata,
+            cancelled=cancelled,
+        )
         recording = recording_from_acquisition(
-            records[0],
+            record,
             calibration_offset_db=settings.power_correction.calibration_offset_db,
             frequency_dependent_offset_db=(
                 settings.power_correction.frequency_dependent_offset_db
@@ -127,6 +152,25 @@ class PlutoLiveSource:
             input_correction_db=settings.power_correction.input_correction_db,
             amplitude_calibrated=False,
         )
+        trigger_sample_index = recording.trigger_sample_index
+        if output_start_offset or recording.sample_count != settings.capture_samples:
+            output_stop = output_start_offset + settings.capture_samples
+            trigger_sample_index = (
+                recording.trigger_sample_index
+                if (
+                    recording.trigger_sample_index is not None
+                    and recording.start_sample_index + output_start_offset
+                    <= recording.trigger_sample_index
+                    < recording.start_sample_index + output_stop
+                )
+                else None
+            )
+            recording = replace(
+                recording,
+                iq=recording.iq[output_start_offset:output_stop],
+                start_sample_index=recording.start_sample_index + output_start_offset,
+                trigger_sample_index=trigger_sample_index,
+            )
         iq = recording.iq
         if settings.swap_iq:
             iq = (iq.imag + 1j * iq.real).astype(np.complex64)
@@ -149,8 +193,81 @@ class PlutoLiveSource:
                 "external_gain_db": float(settings.power_correction.external_gain_db),
                 "nominal_pluto_amplitude": True,
                 "swap_iq": bool(settings.swap_iq),
+                "acquisition_trigger_source": settings.trigger_source.value,
+                "acquisition_trigger_level_dbm": float(settings.trigger_level_dbm),
+                "acquisition_trigger_slope": settings.trigger_slope.value,
+                "acquisition_trigger_offset_s": float(settings.trigger_offset_s),
+                "acquisition_trigger_sample_index": int(record.trigger_sample_index),
             },
         )
+
+    def _capture_record(
+        self,
+        settings: PlutoCaptureSettings,
+        metadata: AcquisitionMetadata,
+        *,
+        cancelled: Callable[[], bool],
+    ):
+        assert self._receiver is not None
+        if settings.trigger_source is TriggerKind.FREE_RUN:
+            block = self._receiver.capture_iq_block(
+                settings.capture_samples,
+                source="VSA Pluto Single",
+                fresh=True,
+            )
+            if cancelled():
+                raise CaptureCancelledError("Pluto capture cancelled")
+            trigger = TriggerConfig(
+                kind=TriggerKind.FREE_RUN,
+                run_mode=TriggerRunMode.SINGLE,
+                rearm_mode=TriggerRearmMode.STOP_ON_TRIGGER,
+                pretrigger_samples=0,
+                posttrigger_samples=block.sample_count - 1,
+            )
+            records = TriggerAcquisitionController(trigger, metadata).feed(block)
+            if len(records) != 1:
+                raise RuntimeError("Pluto single capture did not produce one complete record")
+            return records[0], 0
+
+        offset_samples = int(round(settings.trigger_offset_s * metadata.sample_rate_hz))
+        pretrigger_samples = max(0, -offset_samples)
+        posttrigger_samples = settings.capture_samples + max(0, offset_samples) - 1
+        correction = settings.power_correction
+        trigger = TriggerConfig(
+            kind=TriggerKind.POWER_LEVEL,
+            run_mode=TriggerRunMode.SINGLE,
+            rearm_mode=TriggerRearmMode.STOP_ON_TRIGGER,
+            slope=settings.trigger_slope,
+            level_dbfs=power_trigger_display_dbm_to_dbfs(
+                settings.trigger_level_dbm,
+                calibration_offset_db=correction.calibration_offset_db,
+                frequency_dependent_offset_db=(
+                    correction.frequency_dependent_offset_db
+                ),
+                input_correction_db=correction.input_correction_db,
+            ),
+            hysteresis_db=settings.trigger_hysteresis_db,
+            pretrigger_samples=pretrigger_samples,
+            posttrigger_samples=posttrigger_samples,
+        )
+        controller = TriggerAcquisitionController(trigger, metadata)
+        block_size = max(4096, trigger.record_samples)
+        fresh = True
+        while True:
+            if cancelled():
+                raise CaptureCancelledError("Pluto capture cancelled")
+            block = self._receiver.capture_iq_block(
+                block_size,
+                source="VSA Pluto I/Q Power Trigger",
+                fresh=fresh,
+            )
+            if cancelled():
+                raise CaptureCancelledError("Pluto capture cancelled")
+            fresh = False
+            records = controller.feed(block)
+            if records:
+                output_start_offset = pretrigger_samples + offset_samples
+                return records[0], output_start_offset
 
     def close(self) -> None:
         if self._receiver is not None:

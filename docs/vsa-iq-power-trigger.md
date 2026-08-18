@@ -1,18 +1,51 @@
-# VSA I/Q Power Trigger and Pattern Search Gate
+# VSA Acquisition Trigger, Burst Search, and Pattern Search
 
 ## Purpose
 
-No-signal intervals can produce high normalized correlation because correlation
-normalization removes absolute amplitude. The VSA therefore supports a
-post-capture I/Q Power Trigger that limits known-pattern search to intervals
-that contain sufficient calibrated I/Q power.
+The VSA separates three operations, following the R&S measurement flow:
 
-This feature applies equally to Pluto captures and loaded I/Q files. It is
-separate from a future acquisition trigger that controls when Pluto starts a
-record. The separation is intentional: a stored capture can contain multiple
-bursts, and every qualifying event must remain navigable.
+1. **Acquisition Trigger** decides where a new Pluto record starts.
+2. **Post-capture Burst Search** finds every active interval in the acquired
+   record (or in a loaded file).
+3. **Pattern Search** aligns a Result Range inside each eligible burst.
 
-## R&S-aligned behavior
+No-signal intervals can produce high normalized pattern correlation because
+normalization removes absolute amplitude. Burst Search prevents those intervals
+from becoming pattern candidates, while Acquisition Trigger reduces unnecessary
+capture data before the first event.
+
+Burst Search and Pattern Search apply equally to Pluto captures and loaded I/Q
+files. Acquisition Trigger applies to Pluto `Run Single` only. The separation is
+intentional: one triggered record can still contain multiple bursts, and every
+qualifying event must remain navigable.
+
+## Acquisition Trigger (Pluto Run Single)
+
+The Trigger page offers `Free Run` and `I/Q Power`. I/Q Power uses calibrated
+display dBm as its input and converts it back to the common raw-IQ dBFS detector
+reference. It uses the same internal gain, external attenuation, external gain,
+base calibration, and frequency-dependent correction as the IQ Power trace.
+
+Implemented controls:
+
+- Level in dBm.
+- Rising, Falling, or Either slope.
+- Hysteresis in dB.
+- Signed Trigger Offset in symbols. A negative value retains pretrigger data;
+  a positive value starts the returned record after the crossing.
+- Operator cancellation. While waiting, invoking `Run Single` again requests
+  cancellation, equivalent to aborting the highlighted R&S Run Single action.
+
+The returned record always has the configured capture length. Trigger Offset
+does not change record length. The first Pluto buffer is acquired with the
+fresh-buffer path so samples queued by a previous acquisition are not reused.
+
+This stage intentionally does not perform Burst Search or Pattern Search. A
+power crossing is not a protocol boundary and does not establish symbol timing.
+Drop-Out and Holdoff remain post-capture Burst Search controls; they become
+acquisition controls only when Continuous acquisition/rearming is implemented.
+
+## R&S-aligned post-capture behavior
 
 The design follows the relevant R&S VSA concepts:
 
@@ -28,9 +61,8 @@ The design follows the relevant R&S VSA concepts:
 - Pattern search returns the first eligible pattern in each detected active
   interval, corresponding to R&S burst-gated pattern search behavior.
 
-Unlike an R&S hardware acquisition trigger, this implementation scans the
-entire already-acquired buffer. This is required to detect all packets in one
-Pluto or file recording.
+Unlike the acquisition trigger, Burst Search scans the entire already-acquired
+buffer. This is required to detect all packets in one Pluto or file recording.
 
 ## Processing
 
@@ -77,11 +109,23 @@ navigation changes between successful triggered matches.
 
 ## Configuration and defaults
 
-The Meas Config `Trigger` page contains:
+The Meas Config `Trigger` page contains two independent sections.
+
+Acquisition Trigger defaults:
 
 | Setting | Default | Unit |
 | --- | ---: | --- |
-| I/Q Power Trigger | Off | — |
+| Trigger Source | Free Run | — |
+| Level | -20.00 | dBm |
+| Slope | Rising | — |
+| Trigger Offset | 0.000 | symbols |
+| Hysteresis | 3.0 | dB |
+
+Post-capture Burst Search defaults:
+
+| Setting | Default | Unit |
+| --- | ---: | --- |
+| Burst Search | Off | — |
 | Level | -20.00 | dBm |
 | Hysteresis | 3.00 | dB |
 | Envelope Average | 1.00 | symbols |
@@ -92,8 +136,9 @@ The Meas Config `Trigger` page contains:
 
 Symbol-based durations scale automatically with Signal Description > Symbol
 Rate. Settings are persisted in both `.vsaconfig.json` and the startup
-configuration. Older configuration files without the `iq_power_trigger`
-section load with the defaults above.
+configuration. The acquisition section is stored as `acquisition_trigger` and
+Burst Search as `burst_search`. Older files using `iq_power_trigger` are
+accepted as a compatibility alias.
 
 For constant-envelope and filtered FSK/PSK, one-symbol envelope averaging plus
 a Drop-Out longer than expected short gaps prevents ordinary modulation ripple
@@ -113,6 +158,7 @@ compatible.
 
 ## Remaining acquisition work
 
-Pluto `Run Single` still acquires a finite Free Run record. A future acquisition
-trigger may align that record to the first event and provide pre-trigger data,
-but it must not replace this post-capture multi-event scan.
+Continuous acquisition, trigger rearming, external hardware trigger, and
+acquisition-stage Drop-Out/Holdoff are not implemented.
+They must reuse the common stream/trigger contracts and must not replace the
+post-capture multi-event Burst Search.

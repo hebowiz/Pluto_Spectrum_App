@@ -21,6 +21,7 @@ from pluto_sa.vsa.ui.main_window import (
     _peak_decimate_xy,
     _prepare_psk_display_waveform,
 )
+from pluto_sa.vsa.pluto_source import CaptureCancelledError
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import prepare_psk_iq
 from pluto_sa.vsa.session import VSASession
@@ -1034,6 +1035,15 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.internal_gain_spin.setValue(12)
         window.external_attenuation_spin.setValue(30.0)
         window.external_gain_spin.setValue(3.0)
+        window.acquisition_trigger_source_combo.setCurrentIndex(
+            window.acquisition_trigger_source_combo.findData("power_level")
+        )
+        window.acquisition_trigger_level_spin.setValue(-25.0)
+        window.acquisition_trigger_slope_combo.setCurrentIndex(
+            window.acquisition_trigger_slope_combo.findData("falling")
+        )
+        window.acquisition_trigger_offset_spin.setValue(-12.5)
+        window.acquisition_trigger_hysteresis_spin.setValue(5.0)
         window.iq_power_trigger_check.setChecked(True)
         window.iq_power_trigger_level_spin.setValue(-18.5)
         window.iq_power_trigger_hysteresis_spin.setValue(4.0)
@@ -1059,6 +1069,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
             window.capture_oversampling_combo.findData(16)
         )
         window.internal_gain_spin.setValue(0)
+        window.acquisition_trigger_source_combo.setCurrentIndex(
+            window.acquisition_trigger_source_combo.findData("free_run")
+        )
         window.iq_power_trigger_check.setChecked(False)
         window.iq_power_trigger_average_spin.setValue(0.0)
         window.iq_power_trigger_limit_result_check.setChecked(True)
@@ -1078,6 +1091,11 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.capture_usable_bandwidth_label.text() == "6.400 MHz"
         assert window.internal_gain_spin.value() == 12
         assert window.capture_correction_label.text().startswith("+15.0 dB")
+        assert window.acquisition_trigger_source_combo.currentData() == "power_level"
+        assert window.acquisition_trigger_level_spin.value() == pytest.approx(-25.0)
+        assert window.acquisition_trigger_slope_combo.currentData() == "falling"
+        assert window.acquisition_trigger_offset_spin.value() == pytest.approx(-12.5)
+        assert window.acquisition_trigger_hysteresis_spin.value() == pytest.approx(5.0)
         assert window.iq_power_trigger_check.isChecked()
         assert window.iq_power_trigger_level_spin.value() == pytest.approx(-18.5)
         assert window.iq_power_trigger_hysteresis_spin.value() == pytest.approx(4.0)
@@ -1347,7 +1365,7 @@ def test_pluto_run_single_uses_async_capture_and_updates_session(tmp_path) -> No
             self.settings = None
             self.closed = False
 
-        def capture_single(self, settings):
+        def capture_single(self, settings, *, cancelled=None):
             self.settings = settings
             recording, _signal = GeneratedIQSource.fsk(
                 symbol_count=64,
@@ -1394,6 +1412,52 @@ def test_pluto_run_single_uses_async_capture_and_updates_session(tmp_path) -> No
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
     assert source.closed
+
+
+def test_run_single_action_stops_pending_power_trigger_wait(tmp_path) -> None:
+    pg.mkQApp("VSA Pluto cancellation test")
+    started = threading.Event()
+
+    class WaitingPlutoSource:
+        def capture_single(self, settings, *, cancelled=None):
+            started.set()
+            while cancelled is None or not cancelled():
+                threading.Event().wait(0.002)
+            raise CaptureCancelledError("Pluto capture cancelled")
+
+        def close(self) -> None:
+            pass
+
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "pluto-cancel-single"),
+        pluto_source=WaitingPlutoSource(),
+    )
+    try:
+        window.acquisition_trigger_source_combo.setCurrentIndex(
+            window.acquisition_trigger_source_combo.findData("power_level")
+        )
+        window._run_pluto_single()
+        assert started.wait(timeout=2.0)
+        assert window.run_single_action.text() == "Stop Single"
+        assert window.run_single_action.isEnabled()
+
+        window._run_pluto_single()
+        for _index in range(200):
+            QtWidgets.QApplication.processEvents()
+            thread = window._pluto_capture_thread
+            if thread is None:
+                break
+            thread.wait(10)
+
+        assert window._pluto_capture_thread is None
+        assert window.run_single_action.text() == "Run Single"
+        assert window.run_single_action.isEnabled()
+        assert "cancelled" in window.statusBar().currentMessage().lower()
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_analysis_runs_outside_gui_thread_and_latest_request_wins(

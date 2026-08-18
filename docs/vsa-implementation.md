@@ -255,11 +255,11 @@ power_dbm = 20 log10(|IQ|)
 
 Internal GainはPluto hardwareへ設定し、External ATT/GainはDUT側reference planeへの表示補正としてのみ適用する。初期値はPluto SAと共通でInternal Gain 30 dB、External ATT 30 dB、External Gain 0 dB。現段階の`-62 dB`は公称換算でありtraceable calibrationではないため、表示単位はdBmだがmetadataの`amplitude_calibrated`はfalseを維持する。
 
-`Swap I/Q`はR&Sと同じ`Q + jI`変換をcapture後に適用する。現在はFree Run / Singleのみ。I/Q Power Trigger、negative Trigger Offset（pretrigger）、Continuous、Stopは次段階で同じ共通streamへ接続する。
+`Swap I/Q`はR&Sと同じ`Q + jI`変換をcapture後に適用する。Free Run / Singleに加えて、Pluto Run SingleのI/Q Power Triggerと符号付きTrigger Offset（negativeはpretrigger、positiveはtrigger後から開始）を共通trigger recorderへ接続した。Continuous、Stop、trigger rearmは次段階で同じ共通streamへ接続する。
 
 ### VSA Power Trigger検討
 
-現行の`PlutoLiveSource.capture_single()`は共通`TriggerAcquisitionController`を経由するが、設定はFree Run固定であり、VSA UIにはPower Trigger設定をまだ公開していない。共通stream/trigger基盤を利用してVSAへPower Triggerを接続することは可能である。
+`PlutoLiveSource.capture_single()`は共通`TriggerAcquisitionController`を経由し、Free RunまたはI/Q Powerを選択できる。Levelは最終表示と同じdBm基準から共通補正を逆算してdBFS detectorへ渡し、Slope、Hysteresis、符号付きTrigger OffsetをVSA UIに公開した。返却record長はTrigger Offsetによらず一定とする。R&S K70と同様にtrigger timeoutは設けず、待機中に同じRun Single操作を再度実行するとoperator cancellationを要求する。
 
 Power TriggerをRising edge、適切なlevel、固定pre-trigger positionで使用すれば、各captureの時間原点をpacket立ち上がりのlevel crossingへ合わせられるため、Free Runよりpacket開始時刻を大幅に揃えられる。ただし同期するのはprotocol上のpacket先頭ではなく、RBW/IQ filter後のpower envelopeがthresholdを横切ったsampleである。送信ramp、packetごとのpower差、noise、interference、filter group delayにより数sample程度以上のjitterは残り得る。正確なsymbol境界とpattern startは引き続きPattern Search/Symbol Synchronizationで決定し、Power Triggerはcapture内のおおまかな位置合わせと必要pre-trigger量の削減に使う設計とする。
 
@@ -292,7 +292,7 @@ Analysis BandwidthのFIR適用後は、FSKの交互patternに対して複数のs
 
 Burst終端制限ではlinear envelope powerを既定1 symbolで平均し、Hysteresis/Drop-Out成立位置をfilter delay補正してfalling edgeとする。`Limit Result Range to Active Interval`がONなら、pattern search用local waveformを復調前にそのedgeで制限し、復調・PSK振幅正規化・EVM/frequency error・Symbol Plot/Tableの母集団を同じactive symbol列へ統一する。そのうえでedgeより後まで続く不完全symbolをResultから除外する。2026-08-18以前は設定Result Lengthで正規化/EVMを計算した後に表示配列だけをburst長へ切り詰めていたため、3500 symbols指定を699 symbolsへtrigger制限した場合などにPSKクラスタが過大表示される不具合があった。OOKはvalid zero runと無信号をpowerだけで一意に区別できないため、最大zero runより長いDrop-Outを設定するか終端制限をOFFにする。
 
-PlutoのADC取得開始を制御するacquisition triggerは引き続き未実装であり、本機能は1キャプチャ内の複数packetを全件評価するpost-capture gateである。
+Plutoのacquisition I/Q Power Triggerは別途実装済みであり、本機能は引き続き1キャプチャ内の複数packetを全件評価するpost-capture Burst Searchである。両者を同じ設定・同じ処理として扱わない。
 
 ### FSK Natural Mapping polarity
 
@@ -348,7 +348,7 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 - FSK error metricsはfrequency error/deviationの基礎のみです。
 - 一般VSA用pattern searchとpost-capture I/Q Power Trigger gateは実装済み。自動thresholdを持つ独立Burst Search、DECT profile、negative Result Range offsetによるpattern前symbol復調は未実装。
 - VSA UIはPluto Free Run / Run Singleとoffline Refreshに対応。Pluto取得とDSP解析はそれぞれ専用threadで実行し、GUI threadは結果の描画だけを行います。
-- Pluto acquisition Power Trigger、Continuous、SCPI sourceは未実装。取得済みIQ内のmulti-event Power Trigger search gateは実装済み。
+- Pluto acquisition Power Trigger（Run Single）は実装済み。Continuous/rearm、SCPI sourceは未実装。取得済みIQ内のmulti-event Burst Searchも実装済み。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
 
 Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出、DH1 Payload/CRC、PRBS-9照合までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。さらに固定2441 MHzのBR test waveformを16 MSPSで取得し、通常Access Code、Header FEC、DH1 27-byte body、PRBS-9 216 bitを0 bit errorで復元しました。このtest waveformはUAP `0x6B`のHECとPayload CRCが一致せず、Whitening OFFかつcheck初期値が別設定の可能性があります。16 MSPS全帯域への直接相関は行わず、ユーザー指定Analysis Center/Bandwidthで1 channelを抽出してから復調します。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
@@ -357,7 +357,7 @@ Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Hea
 
 ## 7. 次の推奨実装順
 
-1. Pluto acquisition I/Q Power Trigger、pre-trigger、Continuous/Stopを接続。
+1. Pluto acquisition I/Q Power TriggerをContinuous/Stopとtrigger rearmへ拡張。
 2. pattern前を含むnegative Result Range offsetを実装。
 3. pulse shaping/matched/measurement filter contractとPSK symbol-rate recoveryを追加。
 4. pattern検索結果からFSK→PSKのsegment boundaryを相対指定し、EDRを汎用Composite解析する。

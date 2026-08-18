@@ -269,8 +269,8 @@ R&Sと同じく役割を分離します（manual pp.71-75、225-226）。
 
 ## 8. Trigger、Burst Search、Pattern Search
 
-実装済みのpost-capture I/Q Power TriggerとPattern Search gateは
-[vsa-iq-power-trigger.md](vsa-iq-power-trigger.md)を参照。取得済みbuffer内の全power eventを列挙し、各active intervalの最初の有効patternをResult Range候補にする。Plutoのcapture開始を決めるacquisition triggerとは別contractとして維持する。
+実装済みのPluto acquisition I/Q Power Trigger、post-capture Burst Search、Pattern Search gateは
+[vsa-iq-power-trigger.md](vsa-iq-power-trigger.md)を参照。取得triggerはRun Single recordの位置を決め、Burst Searchは取得済みbuffer内の全power eventを列挙し、各active intervalの最初の有効patternをResult Range候補にする。両者は別contractとして維持する。
 
 これらを同じ機能として扱いません。
 
