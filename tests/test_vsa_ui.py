@@ -19,6 +19,7 @@ from pluto_sa.vsa.ui.main_window import (
     _constellation_display_symbols,
     _physical_constellation_display_symbols,
     _fsk_phase_difference_symbols,
+    _format_evm,
     _peak_decimate_xy,
     _prepare_psk_display_waveform,
 )
@@ -40,6 +41,13 @@ def test_peak_decimation_keeps_bucket_extrema() -> None:
     assert plotted_x.size <= 102
     assert -20.0 in plotted_y
     assert 30.0 in plotted_y
+
+
+def test_evm_formatter_shows_percent_and_amplitude_ratio_db() -> None:
+    assert _format_evm(5.0) == "5.00 % / -26.0 dB"
+    assert _format_evm(100.0) == "100.00 % / 0.0 dB"
+    assert _format_evm(0.0) == "0.00 % / -inf dB"
+    assert _format_evm(float("nan")) == "—"
 
 
 def test_psk_display_preparation_limits_work_to_result_range() -> None:
@@ -92,6 +100,9 @@ def test_large_symbol_result_limits_table_display_but_not_export(tmp_path) -> No
         window._update_summary()
         window._update_plots(reset_ranges=True)
 
+        assert window.symbol_plot_dock.windowTitle() == "Symbol Plot (Physical)"
+        window.differential_iq_symbol_plot_action.trigger()
+        assert window.symbol_plot_dock.windowTitle() == "Symbol Plot (Differential)"
         assert window.symbol_table.rowCount() == 100
         result_symbol_count = session.result.decoded_symbols.size
         assert f"Showing 1000 of {result_symbol_count}" in window.symbol_table.toolTip()

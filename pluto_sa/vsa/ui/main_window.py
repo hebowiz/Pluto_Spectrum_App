@@ -139,6 +139,15 @@ def _decimation_indices(count: int, maximum: int = _MAX_DISPLAY_POINTS) -> slice
     return slice(None, None, step)
 
 
+def _format_evm(percent: float) -> str:
+    """Format linear EVM percent together with its amplitude-ratio dB value."""
+    value = float(percent)
+    if not np.isfinite(value) or value < 0.0:
+        return "—"
+    db_text = "-inf" if value == 0.0 else f"{20.0 * np.log10(value / 100.0):.1f}"
+    return f"{value:.2f} % / {db_text} dB"
+
+
 def _peak_decimate_xy(
     x_values: np.ndarray,
     y_values: np.ndarray,
@@ -2237,10 +2246,31 @@ class VSAWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Config Load Error", str(error))
 
     def _refresh_display_only(self) -> None:
+        self._update_symbol_plot_dock_title()
         if self.session.result is None:
             return
         self._update_summary()
         self._update_plots(reset_ranges=False)
+
+    def _update_symbol_plot_dock_title(
+        self, modulation: ModulationKind | None = None
+    ) -> None:
+        if not hasattr(self, "symbol_plot_dock"):
+            return
+        resolved = modulation
+        if resolved is None and self.session.signal is not None:
+            resolved = self.session.signal.modulation
+        if resolved is None and hasattr(self, "modulation_combo"):
+            resolved = self._selected_modulation()
+        title = "Symbol Plot"
+        if resolved is not None and resolved.family is ModulationFamily.PSK:
+            mode = (
+                "Differential"
+                if self.differential_iq_symbol_plot_action.isChecked()
+                else "Physical"
+            )
+            title = f"Symbol Plot ({mode})"
+        self.symbol_plot_dock.setWindowTitle(title)
 
     def _plot_widgets(self) -> tuple[tuple[str, pg.PlotWidget], ...]:
         if not hasattr(self, "zero_span_plot"):
@@ -2374,6 +2404,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _sync_signal_controls(self) -> None:
         modulation = self._selected_modulation()
+        self._update_symbol_plot_dock_title(modulation)
         self.deviation_spin.setEnabled(modulation.family is ModulationFamily.FSK)
         mapping_enabled = modulation.family is ModulationFamily.PSK
         self.mapping_combo.setEnabled(mapping_enabled)
@@ -3161,7 +3192,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                     f"Symbol: {symbol_index}\n"
                     f"Amplitude: {abs(vector):.4f}\n"
                     f"Phase: {np.degrees(np.angle(vector)):+.2f} degree\n"
-                    f"EVM: {evm_percent:.2f} %"
+                    f"EVM: {_format_evm(evm_percent)}"
                 ),
             )
 
@@ -3170,6 +3201,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         signal = self.session.signal
         if result is None or signal is None:
             return
+        self._update_symbol_plot_dock_title(signal.modulation)
         self._symbol_marker_items = {}
         if reset_ranges:
             for _name, plot in self._plot_widgets():
@@ -3512,14 +3544,16 @@ class VSAWindow(QtWidgets.QMainWindow):
                     "bluetooth_devm_rms_percent"
                 )
                 if physical_evm is not None:
-                    summary_values["evm_rms"] = f"{float(physical_evm):.2f} %"
+                    summary_values["evm_rms"] = _format_evm(
+                        float(physical_evm)
+                    )
                 if differential_evm is not None:
                     summary_values["differential_symbol_evm_rms"] = (
-                        f"{float(differential_evm):.2f} %"
+                        _format_evm(float(differential_evm))
                     )
                 if bluetooth_devm is not None:
                     summary_values["bluetooth_devm_rms"] = (
-                        f"{float(bluetooth_devm):.2f} %"
+                        _format_evm(float(bluetooth_devm))
                     )
             elif spectrum_result.evm_rms_percent is not None:
                 item_id = (
@@ -3527,8 +3561,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                     if signal.modulation.differential
                     else "evm_rms"
                 )
-                summary_values[item_id] = (
-                    f"{float(spectrum_result.evm_rms_percent):.2f} %"
+                summary_values[item_id] = _format_evm(
+                    float(spectrum_result.evm_rms_percent)
                 )
         if pattern_result is not None:
             display_name = "Carrier Corrected" if show_corrected else "Raw IQ"
@@ -3586,7 +3620,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                     )
                 if sync_evm is not None:
                     summary_values["sync_evm_rms"] = (
-                        f"{float(sync_evm) * 100.0:.2f} %"
+                        _format_evm(float(sync_evm) * 100.0)
                     )
                 summary_values["psk_carrier_drift"] = (
                     f"{reported_drift_hz_per_s / 1e6:+.3f} kHz/ms"
