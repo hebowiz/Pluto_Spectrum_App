@@ -1,0 +1,107 @@
+{
+  "schema": "pluto-vsa-meas-config",
+  "version": 1,
+  "settings": {
+    "input_frontend": {
+      "input_source": "Pluto",
+      "pluto_uri": "",
+      "center_frequency_mhz": 2440.0,
+      "rf_bandwidth_mhz": 16.0,
+      "internal_gain_db": 30,
+      "external_attenuation_db": 30.0,
+      "external_gain_db": 0.0,
+      "analysis_channel_enabled": false,
+      "analysis_center_mhz": 2440.0,
+      "analysis_bandwidth_mhz": 1.5
+    },
+    "signal_capture": {
+      "capture_length": 10000.0,
+      "capture_length_unit": "Symbols",
+      "samples_per_symbol": 8,
+      "swap_iq": false
+    },
+    "signal_description": {
+      "modulation": "pi/4-DQPSK",
+      "symbol_rate_hz": 2000000.0,
+      "frequency_deviation_hz": 250000.0,
+      "symbol_mapping": "Natural",
+      "tx_filter": "Root Raised Cosine",
+      "filter_parameter": 0.4
+    },
+    "acquisition_trigger": {
+      "source": "power_level",
+      "level_dbm": -40.0,
+      "slope": "rising",
+      "offset_symbols": -10.0,
+      "hysteresis_db": 3.0
+    },
+    "burst_search": {
+      "enabled": true,
+      "level_dbm": -15.0,
+      "hysteresis_db": 3.0,
+      "envelope_average_symbols": 1.0,
+      "dropout_symbols": 10.0,
+      "holdoff_symbols": 0.0,
+      "search_start_offset_symbols": 0.0,
+      "limit_result_to_active_interval": true
+    },
+    "pattern_search": {
+      "enabled": true,
+      "name": "2DH1",
+      "symbol_format": "Decimal",
+      "symbols": [
+        1,
+        2,
+        1,
+        2,
+        1,
+        2,
+        2,
+        1,
+        1,
+        1
+      ],
+      "threshold_auto": true,
+      "threshold_percent": 90.0,
+      "meas_only_if_correct": false,
+      "allow_inverted_fsk_pattern": false
+    },
+    "result_range": {
+      "length_symbols": 600,
+      "reference": "Pattern Waveform",
+      "alignment": "Left",
+      "offset_symbols": 0,
+      "symbol_number_at_pattern_start": 0,
+      "exclude_incomplete_result": false
+    },
+    "demodulation": {
+      "coarse_synchronization": "Auto",
+      "fine_synchronization": "Auto",
+      "bit_ordering": "MSB",
+      "compensate_carrier_frequency_drift": true,
+      "compensate_fsk_deviation_error": true
+    },
+    "result_summary": {
+      "visible_items": [
+        "modulation",
+        "power",
+        "carrier_frequency_error",
+        "evm_rms",
+        "symbol_rate_error",
+        "frequency_error_rms",
+        "fsk_deviation_error",
+        "fsk_measured_deviation",
+        "carrier_frequency_drift",
+        "pattern_symbols_correct",
+        "pattern_match_variant",
+        "iq_correlation",
+        "match_selection",
+        "result_symbols",
+        "pattern_error"
+      ]
+    },
+    "display_config": {
+      "constellation_trace_mode": "Density"
+    }
+  }
+}
