@@ -805,3 +805,62 @@ Pluto TXから有線ATTを介して受信し、offline結果との差を確認�
 Backend固有の量子化・level差を分離し、symbol列、spectrum、EVM、deviationが許容範囲内で一致することを確認する。
 
 MVPの完了条件は、2-DH1および3-DH1をPlutoからcyclic送信し、現行VSAで安定してpattern matchとsymbol復調ができることとする。
+
+---
+
+## 35. 将来対応: 高速化BT-like波形とBluetooth HDT
+
+初期MVP完了後、次の2系統へ拡張する。
+
+### 35.1 BT-like Rate-Scaled Profile
+
+Bluetooth BR/EDRのpacket構造、mapping、filter、guardなどを基礎とし、symbol rateだけを任意倍率へ変更できる実験Profileを用意する。
+
+用途:
+
+- 既知Bluetooth波形を高速化した独自信号の生成・解析
+- symbol rate変更に対する帯域、EVM、timing recoveryの評価
+- 受信VSAの高速変調解析試験
+
+注意事項:
+
+- Bluetooth BR/EDRの規格上のsymbol rateは1 MSym/sであり、本ProfileはBluetooth準拠とは表示しない
+- symbol rate変更時はsample rate、SPS、Gaussian / SRRC filter帯域、guard sample数、analysis bandwidthを連動させる
+- 時間で規定する値とsymbol数で規定する値を区別し、倍率変更時の挙動をmetadataへ記録する
+- packet bit列を維持した単純時間圧縮と、filter・guardを再設計した波形を区別できるようにする
+
+### 35.2 Bluetooth High Data Throughput Profile
+
+Bluetooth HDTは、既存BR/EDRを単純に高速再生する機能として扱わず、Bluetooth LEの新しいPHY / protocol拡張として独立実装する。
+
+設計方針:
+
+- `BluetoothHDTProfile`などの独立ProfileとPacket Builderを設ける
+- 公開仕様のrevisionをProfile metadataへ保存する
+- PHY、packet format、coding、modulation、symbol mapping、filter、channel bandwidthを仕様revisionごとに定義する
+- Draft中の値を共通Engineへ固定値として埋め込まない
+- 仕様改訂に備え、versioned parameter setとgolden vectorを用意する
+- HDT対応VSA解析も送信Profileと同じrevision定義を参照する
+
+2026年8月時点でBluetooth SIGが公開しているHDT文書はDraftであり、Core Specification 6.2を基礎とする変更仕様として公開されている。
+正式採用まで仕様変更の可能性があるため、初期実装はExperimental / Draftと明示し、標準準拠判定には使用しない。
+
+### 35.3 共通化する範囲
+
+高速化BT-like波形とHDTで共通利用するもの:
+
+- normalized IQ / WaveformResult
+- sample rate / SPS管理
+- filter基盤
+- impairment
+- Recording Layout
+- preview / analysis表示
+- Pluto / R&S Backend
+
+個別Profileへ隔離するもの:
+
+- packet構造
+- bit order / whitening / CRC / FEC
+- modulationとmapping
+- symbol rateとchannel定義
+- 規格固有の測定条件および合否判定
