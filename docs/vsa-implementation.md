@@ -83,7 +83,7 @@ Meas Configは縦並びのaccordionではなく、`Config Top Menu`にカテゴ�
 
 ### Pattern Search / Result Range / Demodulation
 
-2026-08-03に一般VSA用の既知パターン解析を追加した。Bluetooth Access Code専用処理とは別の`pluto_sa/vsa/pattern.py`で、任意のFSK/GFSK/BPSK/QPSK/pi/4-DQPSK/8DPSK symbol列を検索し、patternを基準に指定範囲をsymbol単位で復調する。
+2026-08-03に一般VSA用の既知パターン解析を追加した。Bluetooth Access Code専用処理とは別の`pluto_sa/vsa/pattern.py`で、任意のFSK/BPSK/QPSK/pi/4-DQPSK/8DPSK symbol列を検索し、patternを基準に指定範囲をsymbol単位で復調する。
 
 設定責務はmanual pp.164-170、208-224に従い、次のように分離した。
 
@@ -123,6 +123,9 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
 - CFO、推定carrier frequency、linear driftをResult Summaryへ表示する。
 - `Display Config > Carrier Display`で`Raw IQ`と`Carrier Corrected`を切り替える。補正表示ではsample単位の位相補正後IQからInstantaneous FrequencyとResult Range Spectrumを再計算する。既定はCarrier Corrected。
 - `Display Config > Show Symbol Points`をONにすると、IQ PowerとModulationのtrace上へ復調symbol中心位置を明るい緑の点で重ねる。FSKではtime/frequency座標、PSKではIQ軌跡座標を使用する。既定はOFF。
+- measurement configの`display_config`には`Show Symbol Points`、`Carrier Display`、Symbol PlotのFlat/Density、PSKのAbsolute/Differential IQを保存し、config読込時と次回起動時に復元する。旧configに項目がない場合は従来の既定値を使う。
+- IQ Power/Modulation上の`Pattern Start`ラベルはtraceとの重なりを抑えるため、縦markerの下端寄りに配置する。
+- Signal DescriptionのFSK系modulation名は`FSK`へ統一する。Gaussian shapingは独立したTransmit FilterとBTで定義し、symbol同期もmodulation名ではなくこのfilter設定を参照する。旧`2-FSK`/`GFSK` configは読込時に`FSK`へ移行する。
 - PSKのIQ軌跡は8 samples/symbolへresampleし、TX FilterがRoot Raised Cosineなら同じalphaのSRRC matched receive filterを通した連続IQを使用する。軌跡とsymbol markerは同一のfilter outputとsymbol時刻RMS正規化を共有する。
 - 解析完了時に全plotの初期X/Y rangeをsnapshotし、`Display Config > Reset Graph Scales`または`Home`で全plotを復元する。各plotの既存右クリックメニュー先頭には、そのplotだけを復元する`Reset`と、有限な表示traceだけを5%余白付きで収める`View All`を置く。後者はPattern/Result Rangeの帯・境界線等のoverlayを範囲計算から除外し、IQ平面の1:1 scaleを維持する。全plotは専用ViewBoxで左drag=`Rect Zoom`、middle button（wheel押込み）drag=`Pan`、right click=context menuへ固定する。Display ConfigのMouse Interaction menuと右クリックmenuの`Mouse Mode`は設けず、外部からPanModeを指定しても左dragはRect Zoomへ戻す。right dragのpyqtgraph軸scaleは維持する。表示のみの更新では現在rangeを維持する。
 - 主traceはIQ Powerと同じyellowへ統一し、Power/Modulation上のsymbol markerは5.5 pxとする。Symbol Plotのsymbolは塗りと輪郭を同じyellowとする。空data時、およびFSK/PSK Symbol PlotはQ軸`-1.25..+1.25`を初期rangeとし、packetごとの振幅percentileでは変更しない。I軸はwidgetの縦横比と1:1単位scaleを維持するため、横長widgetでは±1.25より広く見える。FSK Phase DifferenceとPSK Constellationの双方へ半径1のgray reference circleを表示する。PSK IQ Trajectoryは解析完了時の全有限trace sampleが収まる最大I/Q成分へ5%の余白を加え、最小rangeを±1.25として自動設定する。両IQ平面ともI/Qの単位scaleは1:1に固定する。全plotの縦・横軸labelは実際の軸size中央へ合わせる。plot内titleはdock titleとの重複を避けるため表示しない。各result dockのtitleはboldかつ通常UI fontの130%とし、dock内容のfontは通常size/weightを維持する。`Display Config > Show Symbol Points`は単キー`S`でもON/OFFできる。
@@ -175,7 +178,7 @@ R&S manual pp.116-117、143-145では、Burst Search有効時は各burst内の�
 
 現在定義済みのmodulation kind:
 
-- 2-FSK / GFSK
+- FSK（現時点の復調orderは2。将来の多値FSK拡張を想定して名称にはorderを含めない）
 - BPSK / QPSK / OQPSK
 - pi/4-DQPSK / 8DPSK
 

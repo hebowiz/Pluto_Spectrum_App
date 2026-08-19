@@ -27,6 +27,20 @@ def test_recording_owns_read_only_iq() -> None:
         recording.iq[0] = 0.0
 
 
+def test_fsk_name_is_order_agnostic_and_legacy_names_are_canonicalized() -> None:
+    assert ModulationKind("2-FSK") is ModulationKind.FSK
+    legacy = SignalDescription(
+        ModulationKind.GFSK,
+        symbol_rate_hz=1_000_000.0,
+        tx_filter="Gaussian",
+        filter_parameter=0.5,
+    )
+
+    assert legacy.modulation is ModulationKind.FSK
+    assert legacy.tx_filter == "Gaussian"
+    assert legacy.filter_parameter == pytest.approx(0.5)
+
+
 def test_zero_span_power_uses_common_dbm_correction_convention() -> None:
     recording = IQRecording(
         np.full(32, 256.0 + 0.0j, dtype=np.complex64),
@@ -65,6 +79,8 @@ def test_composite_signal_preserves_order_and_rejects_overlap() -> None:
 
 def test_generated_gfsk_is_decoded_on_symbol_timeline() -> None:
     recording, signal = GeneratedIQSource.fsk(symbol_count=128, seed=42)
+    assert signal.modulation is ModulationKind.FSK
+    assert signal.tx_filter == "Gaussian"
     result = VSAAnalyzer().analyze(recording, signal, VSASettings(remove_dc=False))
 
     expected = recording.metadata["generated_symbols"]

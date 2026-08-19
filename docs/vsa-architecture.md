@@ -16,7 +16,7 @@ R&S FPL VSAの用語、設定順序、result分類をUXの参照モデルとし�
 
 R&S VSAの全機能・全standard presetの再現は目標にしません。初期開発は次へ集中します。
 
-- FSK family: 2-FSK、GFSKおよび連続位相FSKを扱える共通demodulator contract。
+- FSK family: Signal Description上は`FSK`へ統一し、Gaussian等のpulse shapingはTX Filterで表す。現行のbinary FSKに加えて将来の多値FSKへ拡張できる共通demodulator contractとする。
 - PSK family: BPSK、QPSK、OQPSK、差動PSK、pi/4-DQPSK、8DPSK。
 - 想定用途: DECT、Bluetooth BR/EDRの観測、復調、symbol/packet解析。
 - 将来拡張: QAM familyを同じsymbol/result contractへ追加。

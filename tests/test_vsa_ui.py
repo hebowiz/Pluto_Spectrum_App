@@ -1079,6 +1079,8 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_offset_spin.setValue(1.5)
         window.iq_power_trigger_limit_result_check.setChecked(False)
         window._apply_result_summary_preset("diagnostics")
+        window.symbol_display_action.setChecked(True)
+        window.raw_carrier_action.setChecked(True)
         window.constellation_density_action.setChecked(True)
         window.differential_iq_symbol_plot_action.setChecked(True)
         selected_summary_items = set(window._selected_result_summary_ids)
@@ -1103,6 +1105,8 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_average_spin.setValue(0.0)
         window.iq_power_trigger_limit_result_check.setChecked(True)
         window._apply_result_summary_preset("defaults")
+        window.symbol_display_action.setChecked(False)
+        window.corrected_carrier_action.setChecked(True)
         window.constellation_flat_action.setChecked(True)
         window.physical_iq_symbol_plot_action.setChecked(True)
         window._apply_meas_config_values(saved)
@@ -1134,8 +1138,12 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert not window.iq_power_trigger_limit_result_check.isChecked()
         assert window._selected_result_summary_ids == selected_summary_items
         assert set(saved["result_summary"]["visible_items"]) == selected_summary_items
+        assert saved["display_config"]["show_symbol_points"] is True
+        assert saved["display_config"]["carrier_display"] == "Raw IQ"
         assert saved["display_config"]["constellation_trace_mode"] == "Density"
         assert saved["display_config"]["psk_symbol_plot_mode"] == "Differential IQ"
+        assert window.symbol_display_action.isChecked()
+        assert window.raw_carrier_action.isChecked()
         assert window.constellation_density_action.isChecked()
         assert window.differential_iq_symbol_plot_action.isChecked()
         assert window.pattern_symbol_table.item(0, 1).text() == "1"
@@ -1198,7 +1206,7 @@ def test_symbol_table_json_export_document_contains_machine_readable_context(
 
         assert document["schema"] == "pluto-vsa-symbol-table"
         assert document["version"] == 1
-        assert document["metadata"]["modulation"] == "GFSK"
+        assert document["metadata"]["modulation"] == "FSK"
         assert document["metadata"]["symbol_mapping"] == "Natural"
         assert document["metadata"]["pattern"]["match_variant"] == "Normal"
         assert document["columns"] == [

@@ -15,7 +15,7 @@
       "analysis_bandwidth_mhz": 1.5
     },
     "signal_capture": {
-      "capture_length": 10000.0,
+      "capture_length": 3000.0,
       "capture_length_unit": "Symbols",
       "samples_per_symbol": 8,
       "swap_iq": false
@@ -28,13 +28,22 @@
       "tx_filter": "Root Raised Cosine",
       "filter_parameter": 0.4
     },
-    "iq_power_trigger": {
+    "acquisition_trigger": {
+      "source": "power_level",
+      "level_dbm": -40.0,
+      "slope": "rising",
+      "offset_symbols": -10.0,
+      "hysteresis_db": 3.0
+    },
+    "burst_search": {
       "enabled": true,
       "level_dbm": -15.0,
       "hysteresis_db": 3.0,
+      "envelope_average_symbols": 1.0,
       "dropout_symbols": 10.0,
       "holdoff_symbols": 0.0,
-      "search_start_offset_symbols": 0.0
+      "search_start_offset_symbols": 0.0,
+      "limit_result_to_active_interval": true
     },
     "pattern_search": {
       "enabled": true,
@@ -78,6 +87,8 @@
         "power",
         "carrier_frequency_error",
         "evm_rms",
+        "differential_symbol_evm_rms",
+        "bluetooth_devm_rms",
         "symbol_rate_error",
         "frequency_error_rms",
         "fsk_deviation_error",
@@ -92,7 +103,10 @@
       ]
     },
     "display_config": {
-      "constellation_trace_mode": "Density"
+      "show_symbol_points": true,
+      "carrier_display": "Carrier Corrected",
+      "constellation_trace_mode": "Density",
+      "psk_symbol_plot_mode": "Physical IQ"
     }
   }
 }

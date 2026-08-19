@@ -3,26 +3,26 @@
   "version": 1,
   "settings": {
     "input_frontend": {
-      "input_source": "Pluto",
+      "input_source": "IQ File",
       "pluto_uri": "",
-      "center_frequency_mhz": 2441.0,
-      "rf_bandwidth_mhz": 8.0,
+      "center_frequency_mhz": 2440.0,
+      "rf_bandwidth_mhz": 16.0,
       "internal_gain_db": 30,
       "external_attenuation_db": 30.0,
       "external_gain_db": 0.0,
       "analysis_channel_enabled": false,
-      "analysis_center_mhz": 2441.0,
+      "analysis_center_mhz": 2440.0,
       "analysis_bandwidth_mhz": 1.5
     },
     "signal_capture": {
-      "capture_length": 3000.0,
+      "capture_length": 10000.0,
       "capture_length_unit": "Symbols",
       "samples_per_symbol": 8,
       "swap_iq": false
     },
     "signal_description": {
       "modulation": "8DPSK",
-      "symbol_rate_hz": 1000000.0,
+      "symbol_rate_hz": 2000000.0,
       "frequency_deviation_hz": 250000.0,
       "symbol_mapping": "Bluetooth EDR",
       "tx_filter": "Root Raised Cosine",
@@ -67,7 +67,7 @@
       "allow_inverted_fsk_pattern": false
     },
     "result_range": {
-      "length_symbols": 244,
+      "length_symbols": 596,
       "reference": "Pattern Waveform",
       "alignment": "Left",
       "offset_symbols": 0,

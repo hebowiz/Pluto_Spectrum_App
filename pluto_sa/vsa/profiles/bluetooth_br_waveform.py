@@ -133,7 +133,7 @@ def generate_br_dh1(
     return BluetoothBRDH1Waveform(
         recording=recording,
         packet_name="DH1",
-        modulation=ModulationKind.GFSK,
+        modulation=ModulationKind.FSK,
         packet_type=0x4,
         payload_length_bytes=payload_length,
         packet_bits=packet_bits,

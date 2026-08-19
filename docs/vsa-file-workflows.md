@@ -389,6 +389,11 @@ new DSP result, so decoded symbols and EVM are unchanged. The selected mode is
 stored in manual and automatic startup Config. Older Config files without
 `display_config` default to Flat.
 
+Measurement config files also persist the display-only `Show Symbol Points`,
+`Carrier Display`, Symbol Plot trace mode, and PSK absolute/differential IQ
+selection. Older files without these keys remain valid and use the normal
+display defaults.
+
 ## Result Summary item selection
 
 The Result Summary context menu and `Meas Config > Result Summary` use the same

@@ -55,12 +55,11 @@ class GeneratedIQSource:
             samples_per_symbol=int(samples_per_symbol),
             transmit_gaussian_bt=gaussian_bt,
         )
-        modulation = ModulationKind.FSK2
+        modulation = ModulationKind.FSK
         tx_filter = "None"
         if gaussian_bt is not None:
             if float(gaussian_bt) <= 0.0:
                 raise ValueError("gaussian_bt must be positive")
-            modulation = ModulationKind.GFSK
             tx_filter = "Gaussian"
         sample_rate_hz = float(symbol_rate_hz) * int(samples_per_symbol)
         instantaneous_frequency = float(frequency_deviation_hz) * levels

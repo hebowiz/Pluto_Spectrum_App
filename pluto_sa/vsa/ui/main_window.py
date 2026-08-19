@@ -57,8 +57,7 @@ from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
 
 _MODULATIONS = (
-    ModulationKind.GFSK,
-    ModulationKind.FSK2,
+    ModulationKind.FSK,
     ModulationKind.BPSK,
     ModulationKind.QPSK,
     ModulationKind.OQPSK,
@@ -783,11 +782,11 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.input_source_combo.addItems(("Generated", "IQ File", "Pluto"))
         source_layout.addWidget(QtWidgets.QLabel("Input Source"))
         source_layout.addWidget(self.input_source_combo)
-        gfsk_button = QtWidgets.QPushButton("Generate GFSK")
+        gfsk_button = QtWidgets.QPushButton("Generate Gaussian FSK")
         qpsk_button = QtWidgets.QPushButton("Generate QPSK")
         edr_button = QtWidgets.QPushButton("Generate pi/4-DQPSK")
         open_button = QtWidgets.QPushButton("Open IQ File...")
-        gfsk_button.clicked.connect(lambda: self._load_generated(ModulationKind.GFSK))
+        gfsk_button.clicked.connect(lambda: self._load_generated(ModulationKind.FSK))
         qpsk_button.clicked.connect(lambda: self._load_generated(ModulationKind.QPSK))
         edr_button.clicked.connect(lambda: self._load_generated(ModulationKind.PI4_DQPSK))
         open_button.clicked.connect(self._open_iq)
@@ -1910,6 +1909,12 @@ class VSAWindow(QtWidgets.QMainWindow):
                 ],
             },
             "display_config": {
+                "show_symbol_points": self.symbol_display_action.isChecked(),
+                "carrier_display": (
+                    "Raw IQ"
+                    if self.raw_carrier_action.isChecked()
+                    else "Carrier Corrected"
+                ),
                 "constellation_trace_mode": (
                     "Density"
                     if self.constellation_density_action.isChecked()
@@ -1996,7 +2001,12 @@ class VSAWindow(QtWidgets.QMainWindow):
                 display_config,
             )):
                 raise TypeError("configuration sections must be objects")
-            self._set_combo_text(self.modulation_combo, signal["modulation"], "modulation")
+            serialized_modulation = str(signal["modulation"])
+            if serialized_modulation in {"2-FSK", "GFSK"}:
+                serialized_modulation = ModulationKind.FSK.value
+            self._set_combo_text(
+                self.modulation_combo, serialized_modulation, "modulation"
+            )
             self.symbol_rate_spin.setValue(float(signal["symbol_rate_hz"]))
             self.deviation_spin.setValue(float(signal["frequency_deviation_hz"]))
             self._set_combo_text(self.mapping_combo, signal["symbol_mapping"], "symbol mapping")
@@ -2141,6 +2151,20 @@ class VSAWindow(QtWidgets.QMainWindow):
                 )
             self._selected_result_summary_ids = normalize_result_summary_ids(
                 result_summary.get("visible_items")
+            )
+            self.symbol_display_action.setChecked(
+                bool(display_config.get("show_symbol_points", False))
+            )
+            carrier_display = str(
+                display_config.get("carrier_display", "Carrier Corrected")
+            )
+            if carrier_display not in {"Raw IQ", "Carrier Corrected"}:
+                raise ValueError(
+                    "carrier display must be Raw IQ or Carrier Corrected"
+                )
+            self.raw_carrier_action.setChecked(carrier_display == "Raw IQ")
+            self.corrected_carrier_action.setChecked(
+                carrier_display == "Carrier Corrected"
             )
             constellation_trace_mode = str(
                 display_config.get("constellation_trace_mode", "Flat")
@@ -2364,8 +2388,6 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.pattern_allow_inverted_fsk_check.setEnabled(
                 modulation.family is ModulationFamily.FSK
             )
-        if modulation is ModulationKind.GFSK:
-            self.tx_filter_combo.setCurrentText("Gaussian")
         if hasattr(self, "pattern_symbol_table"):
             self._refresh_pattern_table_format()
 
@@ -2650,7 +2672,11 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.input_source_combo.setCurrentText("Generated")
         if modulation.family is ModulationFamily.FSK:
             recording, signal = GeneratedIQSource.fsk(
-                gaussian_bt=0.5 if modulation is ModulationKind.GFSK else None
+                gaussian_bt=(
+                    0.5
+                    if modulation in {ModulationKind.FSK, ModulationKind.GFSK}
+                    else None
+                )
             )
         else:
             recording, signal = GeneratedIQSource.psk(modulation=modulation)
@@ -3861,7 +3887,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             movable=False,
             pen=pg.mkPen(80, 255, 130, 220, width=2),
             label="Pattern Start",
-            labelOpts={"position": 0.92, "color": (120, 255, 160)},
+            labelOpts={"position": 0.08, "color": (120, 255, 160)},
         )
         plot.addItem(marker)
         duration_ms = (

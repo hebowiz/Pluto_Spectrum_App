@@ -17,7 +17,12 @@ class ModulationFamily(str, Enum):
 
 
 class ModulationKind(str, Enum):
-    FSK2 = "2-FSK"
+    FSK = "FSK"
+    # Source compatibility for callers that used the old binary-specific
+    # enum name.  The UI and newly serialized configurations use ``FSK``.
+    FSK2 = "FSK"
+    # Legacy serialized value. SignalDescription canonicalizes it to FSK and
+    # leaves Gaussian shaping to tx_filter/filter_parameter.
     GFSK = "GFSK"
     BPSK = "BPSK"
     QPSK = "QPSK"
@@ -25,16 +30,22 @@ class ModulationKind(str, Enum):
     PI4_DQPSK = "pi/4-DQPSK"
     DPSK8 = "8DPSK"
 
+    @classmethod
+    def _missing_(cls, value: object) -> "ModulationKind | None":
+        if str(value) == "2-FSK":
+            return cls.FSK
+        return None
+
     @property
     def family(self) -> ModulationFamily:
-        if self in {ModulationKind.FSK2, ModulationKind.GFSK}:
+        if self in {ModulationKind.FSK, ModulationKind.GFSK}:
             return ModulationFamily.FSK
         return ModulationFamily.PSK
 
     @property
     def order(self) -> int:
         return {
-            ModulationKind.FSK2: 2,
+            ModulationKind.FSK: 2,
             ModulationKind.GFSK: 2,
             ModulationKind.BPSK: 2,
             ModulationKind.QPSK: 4,
@@ -144,6 +155,8 @@ class SignalDescription:
     name: str = "Manual"
 
     def __post_init__(self) -> None:
+        if self.modulation is ModulationKind.GFSK:
+            object.__setattr__(self, "modulation", ModulationKind.FSK)
         if not np.isfinite(self.symbol_rate_hz) or self.symbol_rate_hz <= 0.0:
             raise ValueError("symbol_rate_hz must be positive")
         if self.modulation.family is ModulationFamily.FSK:

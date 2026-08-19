@@ -1036,8 +1036,7 @@ class PatternAnalyzer:
         bits = np.asarray(pattern.symbols, dtype=np.uint8)
         gaussian_bt = (
             signal.filter_parameter
-            if signal.modulation is ModulationKind.GFSK
-            and signal.tx_filter.lower() == "gaussian"
+            if signal.tx_filter.lower() == "gaussian"
             else None
         )
         if result_range.alignment is ResultRangeAlignment.LEFT:
