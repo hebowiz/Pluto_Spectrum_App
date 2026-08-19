@@ -7,6 +7,7 @@ from dataclasses import replace
 import numpy as np
 
 from pluto_sa.vsa.channel import extract_analysis_channel
+from pluto_sa.vsa.mapping import psk_constellation
 from pluto_sa.vsa.model import (
     CompositeSignalDescription,
     CompositeVSAAnalysisResult,
@@ -21,20 +22,6 @@ from pluto_sa.vsa.model import (
 
 
 _EPSILON = np.finfo(np.float64).tiny
-
-
-def _constellation(kind: ModulationKind) -> np.ndarray:
-    if kind is ModulationKind.BPSK:
-        phases = np.array([0.0, np.pi])
-    elif kind in {ModulationKind.QPSK, ModulationKind.OQPSK}:
-        phases = np.pi / 4.0 + np.arange(4) * np.pi / 2.0
-    elif kind is ModulationKind.PI4_DQPSK:
-        phases = np.pi / 4.0 + np.arange(4) * np.pi / 2.0
-    elif kind is ModulationKind.DPSK8:
-        phases = np.arange(8) * np.pi / 4.0
-    else:
-        raise ValueError(f"{kind.value} is not a PSK modulation")
-    return np.exp(1j * phases)
 
 
 def _symbols_to_bits(symbols: np.ndarray, order: int) -> np.ndarray:
@@ -280,7 +267,7 @@ class VSAAnalyzer:
         sampled = _interpolate_complex(iq, centers)
         rms = float(np.sqrt(np.mean(np.abs(sampled) ** 2))) if sampled.size else 1.0
         normalized = sampled / max(rms, _EPSILON)
-        constellation = _constellation(signal.modulation)
+        constellation = psk_constellation(signal.modulation, signal.symbol_mapping)
         decision_input = normalized
         if signal.modulation.differential and normalized.size > 1:
             decision_input = normalized[1:] * np.conj(normalized[:-1])

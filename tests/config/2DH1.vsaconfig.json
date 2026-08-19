@@ -24,7 +24,7 @@
       "modulation": "pi/4-DQPSK",
       "symbol_rate_hz": 1000000.0,
       "frequency_deviation_hz": 250000.0,
-      "symbol_mapping": "Natural",
+      "symbol_mapping": "Bluetooth EDR",
       "tx_filter": "Root Raised Cosine",
       "filter_parameter": 0.4
     },
@@ -42,12 +42,12 @@
       "symbol_format": "Decimal",
       "symbols": [
         1,
-        2,
+        3,
         1,
-        2,
+        3,
         1,
-        2,
-        2,
+        3,
+        3,
         1,
         1,
         1

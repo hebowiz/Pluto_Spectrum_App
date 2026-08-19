@@ -14,6 +14,11 @@ from scipy.optimize import least_squares
 from scipy.signal import resample_poly
 
 from pluto_sa.vsa.demod.gfsk import demodulate_gfsk
+from pluto_sa.vsa.mapping import (
+    BLUETOOTH_EDR_MAPPING,
+    NATURAL_MAPPING,
+    psk_constellation,
+)
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 
 
@@ -368,16 +373,11 @@ def carrier_correct_recording(
     )
 
 
-def _constellation(kind: ModulationKind) -> np.ndarray:
-    if kind is ModulationKind.BPSK:
-        phases = np.asarray([0.0, np.pi])
-    elif kind in {ModulationKind.QPSK, ModulationKind.OQPSK, ModulationKind.PI4_DQPSK}:
-        phases = np.pi / 4.0 + np.arange(4) * np.pi / 2.0
-    elif kind is ModulationKind.DPSK8:
-        phases = np.arange(8) * np.pi / 4.0
-    else:
-        raise ValueError(f"{kind.value} does not have a PSK constellation")
-    return np.exp(1j * phases)
+def _constellation(
+    kind: ModulationKind, mapping: str = NATURAL_MAPPING
+) -> np.ndarray:
+    """Compatibility wrapper for tests and internal callers."""
+    return psk_constellation(kind, mapping)
 
 
 def _symbols_to_bits(
@@ -1294,7 +1294,7 @@ class PatternAnalyzer:
             "rrc",
             "srrc",
         }
-        alphabet = _constellation(signal.modulation)
+        alphabet = _constellation(signal.modulation, signal.symbol_mapping)
         expected = alphabet[np.asarray(pattern.symbols, dtype=np.int16)]
         candidates: list[
             tuple[float, int, int, np.ndarray, np.ndarray, float]
@@ -1443,6 +1443,8 @@ class PatternAnalyzer:
         fractional_timing_offset_samples = 0.0
         symbol_timing_rate_samples_per_symbol = 0.0
         synchronization_evm_rms: float | None = None
+        physical_evm_rms_percent: float | None = None
+        bluetooth_devm_rms_percent: float | None = None
         if signal.modulation.differential:
             base_centers = np.asarray(centers, dtype=np.float64)
             base_observed = waveform_symbols[1:] * np.conj(waveform_symbols[:-1])
@@ -1729,6 +1731,37 @@ class PatternAnalyzer:
                 if demodulation.compensate_carrier_frequency_drift
                 else 0.0
             )
+            metric_parameters = np.asarray(parameters, dtype=np.float64).copy()
+            if demodulation.compensate_carrier_frequency_drift:
+                metric_parameters[4] = applied_slope
+            else:
+                # carrier_correct_recording() retains the fitted CFO at the
+                # first-symbol reference time when drift correction is off.
+                metric_parameters[3] = intercept + 0.5 * slope
+                metric_parameters[4] = 0.0
+            _, _, metric_absolute = measured_for_parameters(metric_parameters)
+            metric_rms = float(np.sqrt(np.mean(np.abs(metric_absolute) ** 2)))
+            normalized_absolute = metric_absolute / max(metric_rms, _EPSILON)
+            absolute_reference = np.cumprod(reference_decisions)
+            physical_evm_rms_percent = 100.0 * float(
+                np.sqrt(
+                    np.sum(np.abs(normalized_absolute - absolute_reference) ** 2)
+                    / max(np.sum(np.abs(absolute_reference) ** 2), _EPSILON)
+                )
+            )
+            if (
+                signal.symbol_mapping == BLUETOOTH_EDR_MAPPING
+                and normalized_absolute.size > 1
+            ):
+                reference_removed = normalized_absolute * np.conj(
+                    absolute_reference
+                )
+                bluetooth_devm_rms_percent = 100.0 * float(
+                    np.sqrt(
+                        np.sum(np.abs(np.diff(reference_removed)) ** 2)
+                        / max(np.sum(np.abs(reference_removed) ** 2), _EPSILON)
+                    )
+                )
             corrected_available = available * np.exp(
                 -1j * (intercept + applied_slope * all_relative)
             )
@@ -1821,6 +1854,11 @@ class PatternAnalyzer:
             if decision_reference.size
             else None
         )
+        if not signal.modulation.differential:
+            physical_evm_rms_percent = evm_rms_percent
+        differential_symbol_evm_rms_percent = (
+            evm_rms_percent if signal.modulation.differential else None
+        )
         return PatternSearchResult(
             modulation=signal.modulation,
             pattern_start_sample=start_sample,
@@ -1889,6 +1927,11 @@ class PatternAnalyzer:
                     * 1.0e6
                 ),
                 "synchronization_evm_rms": synchronization_evm_rms,
+                "physical_evm_rms_percent": physical_evm_rms_percent,
+                "differential_symbol_evm_rms_percent": (
+                    differential_symbol_evm_rms_percent
+                ),
+                "bluetooth_devm_rms_percent": bluetooth_devm_rms_percent,
                 "absolute_reference_waveform_sync": (
                     signal.modulation.differential
                 ),

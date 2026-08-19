@@ -17,6 +17,7 @@ from pluto_sa.vsa.ui.main_window import (
     _constellation_density_color_levels,
     _constellation_density_extent,
     _constellation_display_symbols,
+    _physical_constellation_display_symbols,
     _fsk_phase_difference_symbols,
     _peak_decimate_xy,
     _prepare_psk_display_waveform,
@@ -151,7 +152,12 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
             window.result_summary.item(row, 0).text()
             for row in range(window.result_summary.rowCount())
         }
-        assert {"EVM RMS", "Symbol Rate Error"}.issubset(summary_labels)
+        assert {
+            "EVM RMS",
+            "Differential Symbol EVM RMS",
+            "Bluetooth DEVM RMS",
+            "Symbol Rate Error",
+        }.issubset(summary_labels)
         assert "FSK Deviation Error" not in summary_labels
         pattern_result = window.session.pattern_result
         reference = np.exp(
@@ -167,9 +173,15 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
             ).text()
             for row in range(window.result_summary.rowCount())
         }
-        assert float(summary_values["EVM RMS"].split()[0]) == pytest.approx(
+        assert float(
+            summary_values["Differential Symbol EVM RMS"].split()[0]
+        ) == pytest.approx(
             plotted_symbol_evm, abs=0.005
         )
+        assert float(summary_values["EVM RMS"].split()[0]) == pytest.approx(
+            float(pattern_result.metadata["physical_evm_rms_percent"]), abs=0.005
+        )
+        assert summary_values["Bluetooth DEVM RMS"] == "—"
         first_start = window.session.pattern_result.pattern_start_sample
         assert first_start == 20 * 8
         assert not window.previous_result_action.isEnabled()
@@ -944,6 +956,20 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
         marker_magnitude = np.hypot(marker_i, marker_q)
         assert np.median(marker_magnitude) == pytest.approx(1.0, abs=0.02)
         assert np.std(marker_magnitude) < 0.08
+        physical_markers = _physical_constellation_display_symbols(
+            ModulationKind.PI4_DQPSK, marker_i + 1j * marker_q
+        )
+        np.testing.assert_allclose(i_values + 1j * q_values, physical_markers)
+
+        window.differential_iq_symbol_plot_action.trigger()
+        differential_i, differential_q = window.symbol_plot.listDataItems()[0].getData()
+        expected_differential = _constellation_display_symbols(
+            ModulationKind.PI4_DQPSK, pattern_result.measured_symbols
+        )
+        np.testing.assert_allclose(
+            differential_i + 1j * differential_q,
+            expected_differential,
+        )
     finally:
         window._meas_config_dialog.close()
         window.close()
@@ -1054,6 +1080,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_limit_result_check.setChecked(False)
         window._apply_result_summary_preset("diagnostics")
         window.constellation_density_action.setChecked(True)
+        window.differential_iq_symbol_plot_action.setChecked(True)
         selected_summary_items = set(window._selected_result_summary_ids)
         saved = window._meas_config_values()
         assert "match_selection" not in saved["pattern_search"]
@@ -1077,6 +1104,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_limit_result_check.setChecked(True)
         window._apply_result_summary_preset("defaults")
         window.constellation_flat_action.setChecked(True)
+        window.physical_iq_symbol_plot_action.setChecked(True)
         window._apply_meas_config_values(saved)
 
         assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
@@ -1107,7 +1135,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window._selected_result_summary_ids == selected_summary_items
         assert set(saved["result_summary"]["visible_items"]) == selected_summary_items
         assert saved["display_config"]["constellation_trace_mode"] == "Density"
+        assert saved["display_config"]["psk_symbol_plot_mode"] == "Differential IQ"
         assert window.constellation_density_action.isChecked()
+        assert window.differential_iq_symbol_plot_action.isChecked()
         assert window.pattern_symbol_table.item(0, 1).text() == "1"
         new_item = QtWidgets.QTableWidgetItem("1")
         window.pattern_symbol_table.setItem(0, 6, new_item)

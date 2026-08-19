@@ -40,6 +40,7 @@ def _save(path: Path, packet_name: str, seed: int) -> None:
         payload_air_bits=waveform.payload_air_bits,
         trailer_bits=waveform.trailer_bits,
         differential_phase_indices=waveform.differential_phase_indices,
+        logical_symbols=waveform.logical_symbols,
         packet_start_sample=np.int64(waveform.packet_start_sample),
         gfsk_stop_sample=np.int64(waveform.gfsk_stop_sample),
         edr_start_sample=np.int64(waveform.edr_start_sample),
@@ -70,4 +71,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

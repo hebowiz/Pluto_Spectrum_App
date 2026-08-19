@@ -13,6 +13,12 @@ from scipy.ndimage import gaussian_filter
 
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
+from pluto_sa.vsa.mapping import (
+    BLUETOOTH_EDR_MAPPING,
+    GRAY_MAPPING,
+    NATURAL_MAPPING,
+    psk_constellation,
+)
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     BitOrdering,
@@ -221,24 +227,17 @@ def _constellation_display_symbols(
     return values
 
 
-def _psk_reference_symbols(
-    modulation: ModulationKind, decoded_symbols: np.ndarray
+def _physical_constellation_display_symbols(
+    modulation: ModulationKind, symbols: np.ndarray
 ) -> np.ndarray:
-    """Return the ideal internal PSK vectors for decoded symbol indices."""
-    symbols = np.asarray(decoded_symbols, dtype=np.int16)
-    if modulation is ModulationKind.BPSK:
-        phases = symbols * np.pi
-    elif modulation in {
-        ModulationKind.QPSK,
-        ModulationKind.OQPSK,
-        ModulationKind.PI4_DQPSK,
-    }:
-        phases = np.pi / 4.0 + symbols * np.pi / 2.0
-    elif modulation is ModulationKind.DPSK8:
-        phases = symbols * np.pi / 4.0
-    else:
-        raise ValueError(f"{modulation.value} is not a PSK modulation")
-    return np.exp(1j * phases)
+    """Apply R&S physical-constellation derotation to absolute IQ symbols."""
+    values = np.asarray(symbols, dtype=np.complex128)
+    if modulation is ModulationKind.PI4_DQPSK:
+        rotation = (np.arange(values.size, dtype=np.float64) + 1.0) * np.pi / 4.0
+        return values * np.exp(-1j * rotation)
+    if modulation in {ModulationKind.QPSK, ModulationKind.OQPSK}:
+        return values * np.exp(-1j * np.pi / 4.0)
+    return values
 
 
 def _constellation_density(
@@ -526,6 +525,25 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._refresh_display_only
         )
         constellation_trace_menu.addActions(constellation_trace_group.actions())
+        psk_symbol_plot_menu = display_menu.addMenu("PSK Symbol Plot")
+        self.physical_iq_symbol_plot_action = QtGui.QAction(
+            "Absolute IQ (Physical)", self, checkable=True
+        )
+        self.differential_iq_symbol_plot_action = QtGui.QAction(
+            "Differential IQ", self, checkable=True
+        )
+        psk_symbol_plot_group = QtGui.QActionGroup(self)
+        psk_symbol_plot_group.setExclusive(True)
+        psk_symbol_plot_group.addAction(self.physical_iq_symbol_plot_action)
+        psk_symbol_plot_group.addAction(self.differential_iq_symbol_plot_action)
+        self.physical_iq_symbol_plot_action.setChecked(True)
+        self.physical_iq_symbol_plot_action.triggered.connect(
+            self._refresh_display_only
+        )
+        self.differential_iq_symbol_plot_action.triggered.connect(
+            self._refresh_display_only
+        )
+        psk_symbol_plot_menu.addActions(psk_symbol_plot_group.actions())
         self.reset_graph_scales_action = QtGui.QAction(
             "Reset Graph Scales", self
         )
@@ -856,7 +874,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.deviation_spin.setValue(250_000.0)
         self.deviation_spin.setSuffix(" Hz")
         self.mapping_combo = QtWidgets.QComboBox()
-        self.mapping_combo.addItem("Natural")
+        self.mapping_combo.addItems(
+            (NATURAL_MAPPING, GRAY_MAPPING, BLUETOOTH_EDR_MAPPING)
+        )
         self.tx_filter_combo = QtWidgets.QComboBox()
         self.tx_filter_combo.addItems(("None", "Gaussian", "Root Raised Cosine"))
         self.filter_parameter_spin = QtWidgets.QDoubleSpinBox()
@@ -1895,6 +1915,11 @@ class VSAWindow(QtWidgets.QMainWindow):
                     if self.constellation_density_action.isChecked()
                     else "Flat"
                 ),
+                "psk_symbol_plot_mode": (
+                    "Differential IQ"
+                    if self.differential_iq_symbol_plot_action.isChecked()
+                    else "Physical IQ"
+                ),
             },
         }
 
@@ -2130,6 +2155,19 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.constellation_density_action.setChecked(
                 constellation_trace_mode == "Density"
             )
+            psk_symbol_plot_mode = str(
+                display_config.get("psk_symbol_plot_mode", "Physical IQ")
+            )
+            if psk_symbol_plot_mode not in {"Physical IQ", "Differential IQ"}:
+                raise ValueError(
+                    "PSK symbol plot mode must be Physical IQ or Differential IQ"
+                )
+            self.physical_iq_symbol_plot_action.setChecked(
+                psk_symbol_plot_mode == "Physical IQ"
+            )
+            self.differential_iq_symbol_plot_action.setChecked(
+                psk_symbol_plot_mode == "Differential IQ"
+            )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"invalid measurement configuration: {error}") from error
         self._sync_signal_controls()
@@ -2313,6 +2351,15 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _sync_signal_controls(self) -> None:
         modulation = self._selected_modulation()
         self.deviation_spin.setEnabled(modulation.family is ModulationFamily.FSK)
+        mapping_enabled = modulation.family is ModulationFamily.PSK
+        self.mapping_combo.setEnabled(mapping_enabled)
+        if not mapping_enabled:
+            self.mapping_combo.setCurrentText(NATURAL_MAPPING)
+        elif (
+            self.mapping_combo.currentText() == BLUETOOTH_EDR_MAPPING
+            and modulation not in {ModulationKind.PI4_DQPSK, ModulationKind.DPSK8}
+        ):
+            self.mapping_combo.setCurrentText(NATURAL_MAPPING)
         if hasattr(self, "pattern_allow_inverted_fsk_check"):
             self.pattern_allow_inverted_fsk_check.setEnabled(
                 modulation.family is ModulationFamily.FSK
@@ -3047,6 +3094,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         raw_symbol_vectors = np.asarray(
             context.get("raw_symbol_vectors", ()), dtype=np.complex128
         )
+        symbol_plot_reference_vectors = np.asarray(
+            context.get("symbol_plot_reference_vectors", ()),
+            dtype=np.complex128,
+        )
         decoded_symbols = np.asarray(
             context.get("decoded_symbols", ()), dtype=np.int16
         )
@@ -3066,18 +3117,13 @@ class VSAWindow(QtWidgets.QMainWindow):
         if (
             symbol_index < symbol_plot_vectors.size
             and symbol_index < raw_symbol_vectors.size
-            and symbol_index < decoded_symbols.size
+            and symbol_index < symbol_plot_reference_vectors.size
         ):
             vector = complex(symbol_plot_vectors[symbol_index])
-            reference = complex(
-                _psk_reference_symbols(
-                    signal.modulation,
-                    decoded_symbols[symbol_index : symbol_index + 1],
-                )[0]
-            )
+            reference = complex(symbol_plot_reference_vectors[symbol_index])
             evm_percent = (
                 100.0
-                * abs(complex(raw_symbol_vectors[symbol_index]) - reference)
+                * abs(vector - reference)
                 / max(abs(reference), np.finfo(np.float64).tiny)
             )
             self._add_selected_symbol_marker(
@@ -3353,24 +3399,47 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.symbol_plot.setLabel("left", "Q")
             self.symbol_plot.setLabel("bottom", "I")
             self.symbol_plot.setAspectLocked(True, ratio=1.0)
-            constellation_symbols = (
-                self.session.pattern_result.measured_symbols
-                if self.session.pattern_result is not None
-                else display_result.measured_symbols
-            )
-            raw_constellation_symbols = np.asarray(
-                constellation_symbols, dtype=np.complex128
-            )
-            constellation_symbols = _constellation_display_symbols(
-                signal.modulation, constellation_symbols
-            )
-            marker_context["raw_symbol_vectors"] = raw_constellation_symbols
-            marker_context["symbol_plot_vectors"] = constellation_symbols
-            marker_context["decoded_symbols"] = (
+            decoded_symbols = np.asarray(
                 self.session.pattern_result.decoded_symbols
                 if self.session.pattern_result is not None
-                else display_result.decoded_symbols
+                else display_result.decoded_symbols,
+                dtype=np.int16,
             )
+            reference_symbols = psk_constellation(
+                signal.modulation, signal.symbol_mapping
+            )[decoded_symbols]
+            use_physical_iq = self.physical_iq_symbol_plot_action.isChecked()
+            if use_physical_iq:
+                raw_constellation_symbols = np.asarray(
+                    symbol_iq, dtype=np.complex128
+                )
+                if signal.modulation.differential:
+                    reference_symbols = np.cumprod(reference_symbols)
+                constellation_symbols = _physical_constellation_display_symbols(
+                    signal.modulation, raw_constellation_symbols
+                )
+                display_reference_symbols = _physical_constellation_display_symbols(
+                    signal.modulation, reference_symbols
+                )
+            else:
+                raw_constellation_symbols = np.asarray(
+                    self.session.pattern_result.measured_symbols
+                    if self.session.pattern_result is not None
+                    else display_result.measured_symbols,
+                    dtype=np.complex128,
+                )
+                constellation_symbols = _constellation_display_symbols(
+                    signal.modulation, raw_constellation_symbols
+                )
+                display_reference_symbols = _constellation_display_symbols(
+                    signal.modulation, reference_symbols
+                )
+            marker_context["raw_symbol_vectors"] = raw_constellation_symbols
+            marker_context["symbol_plot_vectors"] = constellation_symbols
+            marker_context["symbol_plot_reference_vectors"] = (
+                display_reference_symbols
+            )
+            marker_context["decoded_symbols"] = decoded_symbols
             self._plot_symbol_distribution(
                 constellation_symbols,
                 density_limit=_IQ_PLANE_LIMIT,
@@ -3405,16 +3474,36 @@ class VSAWindow(QtWidgets.QMainWindow):
             mean_mw = float(np.mean(10.0 ** (finite_power_dbm / 10.0)))
             if mean_mw > 0.0:
                 summary_values["power"] = f"{10.0 * np.log10(mean_mw):+.2f} dBm"
-        displayed_evm_rms_percent = (
-            pattern_result.evm_rms_percent
-            if pattern_result is not None
-            and signal.modulation.family is ModulationFamily.PSK
-            else spectrum_result.evm_rms_percent
-        )
-        if displayed_evm_rms_percent is not None:
-            summary_values["evm_rms"] = (
-                f"{float(displayed_evm_rms_percent):.2f} %"
-            )
+        if signal.modulation.family is ModulationFamily.PSK:
+            if pattern_result is not None:
+                physical_evm = pattern_result.metadata.get(
+                    "physical_evm_rms_percent"
+                )
+                differential_evm = pattern_result.metadata.get(
+                    "differential_symbol_evm_rms_percent"
+                )
+                bluetooth_devm = pattern_result.metadata.get(
+                    "bluetooth_devm_rms_percent"
+                )
+                if physical_evm is not None:
+                    summary_values["evm_rms"] = f"{float(physical_evm):.2f} %"
+                if differential_evm is not None:
+                    summary_values["differential_symbol_evm_rms"] = (
+                        f"{float(differential_evm):.2f} %"
+                    )
+                if bluetooth_devm is not None:
+                    summary_values["bluetooth_devm_rms"] = (
+                        f"{float(bluetooth_devm):.2f} %"
+                    )
+            elif spectrum_result.evm_rms_percent is not None:
+                item_id = (
+                    "differential_symbol_evm_rms"
+                    if signal.modulation.differential
+                    else "evm_rms"
+                )
+                summary_values[item_id] = (
+                    f"{float(spectrum_result.evm_rms_percent):.2f} %"
+                )
         if pattern_result is not None:
             display_name = "Carrier Corrected" if show_corrected else "Raw IQ"
             recording = self.session.recording

@@ -47,14 +47,36 @@ NPZにはIQだけでなく、`access_bits`、`header_air_bits`、`sync_bits`、p
 python -m tools.generate_bluetooth_edr_iq
 ```
 
-現行の汎用VSA Pattern Searchで、次のSync phase indexをDecimal指定すると両fixtureとも相関98%以上、0 symbol errorで検出できる。
+現行の汎用VSA Pattern Searchで、次のBluetooth EDR論理symbolをDecimal指定すると両fixtureとも相関98%以上、0 symbol errorで検出できる。
 
-- 2-DH1: `1 2 1 2 1 2 2 1 1 1`
-- 3-DH1: `3 5 3 5 3 5 5 3 3 3`
+- 2-DH1: `1 3 1 3 1 3 3 1 1 1`
+- 3-DH1: `2 7 2 7 2 7 7 2 2 2`
 
 Signal DescriptionはSymbol Rate 1 MSym/s、Transmit Filter `Root Raised Cosine`、Alpha 0.4、Result Length 244とする。検出されるPattern Startはsample 34112（2.132 ms）で、EDR reference symbolに続く最初のdifferential symbolを指す。保存fixtureのCFO推定は2-DH1で約+19.5 kHz、3-DH1で約+18.4 kHz。
 
 変調mapping、SRRC、Guard、Sync、TrailerはBluetooth Core SpecificationのBaseband Specification 6.6およびRadio Physical Layer Specification 3.2に従う。合成波形はreceiver開発用であり、Bluetooth RF-PHY conformance test sourceを称するものではない。
+
+### PSK Symbol Mapping（2026-08-19）
+
+`Modulation Mapping`は`Natural`、R&S汎用の`Gray`、Bluetooth規格専用の
+`Bluetooth EDR`を区別する。汎用8DPSK GrayとBluetooth EDR 8DPSKは一部の
+bit-to-phase割当が異なるため、EDRを単なるGrayとして扱わない。
+
+Bluetooth EDRの論理symbol（MSB first）と差動位相は次のとおり。
+
+- pi/4-DQPSK: `00, 01, 11, 10` -> `+pi/4, +3pi/4, -3pi/4, -pi/4`
+- 8DPSK: `000, 001, 011, 010, 110, 111, 101, 100` ->
+  `0, +pi/4, +pi/2, +3pi/4, pi, -3pi/4, -pi/2, -pi/4`
+
+Symbol Table、pattern file、symbol exportは物理位相Indexではなく論理symbol値を
+保持する。既存のEDR sync patternはこの契約へ移行した。
+
+- 2DH系: `1 3 1 3 1 3 3 1 1 1`
+- 3DH系: `2 7 2 7 2 7 7 2 2 2`
+
+生成IQ fixture内の`differential_phase_indices`は波形生成の再現性確認用として
+物理位相Indexのまま保持し、`BluetoothEDRWaveform.logical_symbols`を解析期待値に
+使用する。
 
 ### Constellation表示修正（2026-08-04）
 

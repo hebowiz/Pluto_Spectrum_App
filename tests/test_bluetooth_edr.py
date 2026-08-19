@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.model import SignalDescription
+from pluto_sa.vsa.model import ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     DemodulationSettings,
     KnownPattern,
@@ -15,6 +15,7 @@ from pluto_sa.vsa.pattern import (
 )
 from pluto_sa.vsa.profiles.bluetooth_br import decode_header_air_bits, prbs9_period
 from pluto_sa.vsa.profiles.bluetooth_edr import generate_edr_dh1
+from pluto_sa.vsa.sources import FileIQSource
 
 
 @pytest.mark.parametrize(
@@ -60,19 +61,20 @@ def test_generated_edr_waveform_is_repeatable():
 @pytest.mark.parametrize("packet_name", ("2-DH1", "3-DH1"))
 def test_generic_vsa_recovers_edr_sync_pattern(packet_name):
     waveform = generate_edr_dh1(packet_name)
-    sync_phase_indices = waveform.differential_phase_indices[:10]
+    sync_symbols = waveform.logical_symbols[:10]
     signal = SignalDescription(
         modulation=waveform.modulation,
         symbol_rate_hz=1_000_000.0,
         tx_filter="Root Raised Cosine",
         filter_parameter=0.4,
+        symbol_mapping="Bluetooth EDR",
     )
 
     result = PatternAnalyzer().search(
         waveform.recording,
         signal,
         PatternSearchSettings(
-            pattern=KnownPattern(tuple(map(int, sync_phase_indices))),
+            pattern=KnownPattern(tuple(map(int, sync_symbols))),
             mode=PatternSearchMode.ON,
             match_selection=MatchSelectionPolicy.STRONGEST,
             correlation_threshold_auto=False,
@@ -88,8 +90,13 @@ def test_generic_vsa_recovers_edr_sync_pattern(packet_name):
     )
     assert result.carrier_frequency_offset_hz == pytest.approx(20_000.0, abs=5_000.0)
     np.testing.assert_array_equal(
-        result.decoded_symbols, waveform.differential_phase_indices
+        result.decoded_symbols, waveform.logical_symbols
     )
+    assert result.metadata["physical_evm_rms_percent"] < 5.0
+    assert result.metadata["differential_symbol_evm_rms_percent"] == pytest.approx(
+        result.evm_rms_percent
+    )
+    assert result.metadata["bluetooth_devm_rms_percent"] < 5.0
     assert np.median(np.abs(result.measured_symbols)) == pytest.approx(1.0, abs=0.02)
     assert np.max(np.abs(result.measured_symbols)) < 1.05
 
@@ -107,10 +114,11 @@ def test_psk_carrier_is_centered_before_matched_filter(packet_name):
         symbol_rate_hz=1_000_000.0,
         tx_filter="Root Raised Cosine",
         filter_parameter=0.4,
+        symbol_mapping="Bluetooth EDR",
     )
     search = PatternSearchSettings(
         pattern=KnownPattern(
-            tuple(map(int, waveform.differential_phase_indices[:10]))
+            tuple(map(int, waveform.logical_symbols[:10]))
         ),
         mode=PatternSearchMode.ON,
         correlation_threshold_auto=False,
@@ -150,7 +158,7 @@ def test_psk_carrier_is_centered_before_matched_filter(packet_name):
     assert centered_first.evm_rms_percent < filter_first.evm_rms_percent / 5.0
     np.testing.assert_array_equal(
         centered_first.decoded_symbols,
-        waveform.differential_phase_indices,
+        waveform.logical_symbols,
     )
 
 
@@ -175,3 +183,37 @@ def test_checked_in_edr_fixture_matches_generator(filename, packet_name):
             expected.differential_phase_indices,
         )
         assert int(fixture["payload_length_bytes"]) == expected.payload_length_bytes
+
+
+def test_high_rate_edr_iqtar_reports_three_distinct_evm_definitions():
+    recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "bt_6DH1_capture.iq.tar"
+    )
+    signal = SignalDescription(
+        modulation=ModulationKind.DPSK8,
+        symbol_rate_hz=2_000_000.0,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        symbol_mapping="Bluetooth EDR",
+    )
+    result = PatternAnalyzer().search(
+        recording,
+        signal,
+        PatternSearchSettings(
+            pattern=KnownPattern((2, 7, 2, 7, 2, 7, 7, 2, 2, 2)),
+            mode=PatternSearchMode.ON,
+            correlation_threshold_auto=False,
+            iq_correlation_threshold=0.9,
+        ),
+        ResultRangeSettings(result_length=600),
+    )
+
+    assert result.metadata["physical_evm_rms_percent"] == pytest.approx(
+        9.06, abs=0.1
+    )
+    assert result.metadata["differential_symbol_evm_rms_percent"] == pytest.approx(
+        5.95, abs=0.1
+    )
+    assert result.metadata["bluetooth_devm_rms_percent"] == pytest.approx(
+        4.94, abs=0.1
+    )

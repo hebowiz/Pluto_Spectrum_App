@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from pluto_sa.vsa.mapping import BLUETOOTH_EDR_MAPPING, phase_indices_to_logical_symbols
 from pluto_sa.vsa.model import IQRecording, ModulationKind
 from pluto_sa.vsa.profiles.bluetooth_br import (
     access_code_bits,
@@ -45,6 +46,7 @@ class BluetoothEDRWaveform:
     payload_air_bits: np.ndarray
     trailer_bits: np.ndarray
     differential_phase_indices: np.ndarray
+    logical_symbols: np.ndarray
     packet_start_sample: int
     gfsk_stop_sample: int
     edr_start_sample: int
@@ -274,6 +276,9 @@ def generate_edr_dh1(
         payload_air_bits=payload_air,
         trailer_bits=trailer,
         differential_phase_indices=phase_indices,
+        logical_symbols=phase_indices_to_logical_symbols(
+            modulation, BLUETOOTH_EDR_MAPPING, phase_indices
+        ),
         packet_start_sample=packet_start,
         gfsk_stop_sample=gfsk_stop,
         edr_start_sample=edr_start,

@@ -151,6 +151,26 @@ class SignalDescription:
                 raise ValueError("frequency_deviation_hz must be positive")
         normalized_filter = str(self.tx_filter).strip() or "None"
         object.__setattr__(self, "tx_filter", normalized_filter)
+        from pluto_sa.vsa.mapping import (
+            BLUETOOTH_EDR_MAPPING,
+            NATURAL_MAPPING,
+            normalize_symbol_mapping,
+        )
+
+        normalized_mapping = normalize_symbol_mapping(self.symbol_mapping)
+        if (
+            self.modulation.family is ModulationFamily.FSK
+            and normalized_mapping != NATURAL_MAPPING
+        ):
+            raise ValueError("FSK modulation mapping must be Natural")
+        if normalized_mapping == BLUETOOTH_EDR_MAPPING and self.modulation not in {
+            ModulationKind.PI4_DQPSK,
+            ModulationKind.DPSK8,
+        }:
+            raise ValueError(
+                "Bluetooth EDR mapping requires pi/4-DQPSK or 8DPSK"
+            )
+        object.__setattr__(self, "symbol_mapping", normalized_mapping)
 
 
 @dataclass(frozen=True)

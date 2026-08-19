@@ -221,6 +221,65 @@ while the constellation contains differential products between adjacent
 symbols. Their amplitude distributions can therefore still differ slightly,
 but the earlier pre-filter/post-filter mismatch has been removed.
 
+### R&S physical DPSK constellation discrepancy (2026-08-19)
+
+The remaining difference is not merely a small normalization effect. The R&S
+FPL1-K70 manual rev.12 pp.86-88 states that its DPSK constellation display uses
+the physical complex decision points after ISI-free demodulation. Differential
+phase shifts carry the information and are used for decisions, but the displayed
+measurement points are not adjacent-symbol complex products. For rotating
+pi/4-DQPSK, the standard-specific pi/4 rotation is compensated before display.
+
+The current Pluto VSA instead displays
+`d[k] = y[k] * conj(y[k-1])`, normalized over the Result Range. Consequently its
+radius is proportional to `r[k] * r[k-1]`, and its phase error is
+`epsilon[k] - epsilon[k-1]`. This mathematically broadens clusters relative to
+the absolute symbol markers drawn over the Vector I/Q trajectory.
+
+Direct analysis of `tests/fixtures/bt_6DH1_capture.iq.tar` at 16 MS/s, 2 MSym/s,
+8DPSK, RRC alpha 0.4 and Bluetooth EDR mapping measured:
+
+- physical absolute decision points: 3.11% radial RMS, 1.92 degree phase RMS,
+  4.57% nearest-point complex error;
+- current differential-product points: 4.57% radial RMS, 2.19 degree phase RMS,
+  5.95% nearest-point complex error.
+
+Thus mapping and symbol timing are not the primary cause of this screenshot.
+The R&S-compatible correction is now implemented: differential vectors remain
+available internally for symbol decisions and diagnostics, while `Display
+Config > PSK Symbol Plot` switches the Symbol Plot between `Absolute IQ
+(Physical)` and `Differential IQ`. Absolute mode uses the same carrier-corrected,
+matched-filtered decision samples as the Vector I/Q markers. It applies
+symbol-index-dependent pi/4 derotation for pi/4-DQPSK; 8DPSK requires no
+deterministic derotation. Absolute mode is the default.
+
+The same manual's Bluetooth DEVM FAQ (pp.304-305) confirms that DEVM is not the
+ordinary VSA EVM/constellation result. It instructs the user to export measured
+and reference complex traces `Z[k]` and `S[k]`, form
+`Q[k] = Z[k] * conj(S[k])`, and calculate Bluetooth DEVM from adjacent error
+changes:
+
+`RMS_DEVM = sqrt(sum(abs(diff(Q))**2) / sum(abs(Q)**2))`.
+
+Therefore three quantities must remain distinct in Pluto VSA: the physical
+absolute constellation (`Z[k]`), ordinary reference-waveform EVM (`Z[k]-S[k]`
+after the selected normalization), and Bluetooth-style DEVM calculated from
+`diff(Q[k])`. The current differential-product constellation/EVM is DEVM-like
+but is not exactly the Bluetooth Appendix C formula.
+
+All three RMS measurements are implemented as independent Result Summary items
+and can be enabled or disabled from the existing Result Summary context menu or
+Meas Config tree:
+
+- `EVM RMS`: absolute decision points versus the reconstructed absolute reference;
+- `Differential Symbol EVM RMS`: the former Pluto VSA differential-product EVM;
+- `Bluetooth DEVM RMS`: the Appendix C `diff(Q[k])` result, available when the
+  configured mapping is `Bluetooth EDR`.
+
+The legacy `PatternSearchResult.evm_rms_percent` field remains the differential
+symbol EVM for compatibility. The two additional values are recorded in result
+metadata as `physical_evm_rms_percent` and `bluetooth_devm_rms_percent`.
+
 When Root Raised Cosine is selected, PSK pattern analysis uses two carrier
 recovery passes. The first pass estimates coarse CFO. The resampled IQ is then
 frequency-centered before the SRRC matched/measurement filter, and the second

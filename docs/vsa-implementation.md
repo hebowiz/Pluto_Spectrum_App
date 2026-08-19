@@ -66,6 +66,19 @@ power_dbm  = power_dbfs
 
 設定名と区分は投入済みのR&S FPL1-K70 VSA User Manual rev.12に準拠する。現在のUIでは`Modulation Type / Order`、`Symbol Rate`、`FSK Ref Deviation`、`Modulation Mapping`、`Transmit Filter Type`、`Alpha / BT`を同じページに配置した。内部の`SignalDescription`はsourceやBluetooth profileに依存しない。
 
+2026-08-19にPSKの`Modulation Mapping`へ`Gray`と`Bluetooth EDR`を追加した。
+`Gray`はR&Sの汎用QPSK/D8PSK Gray table、`Bluetooth EDR`はBluetooth Coreの
+pi/4-DQPSK/8DPSK bit-to-differential-phase tableを使う。両者は8DPSKの上半分が
+一致しないため別設定とする。constellation alphabetを論理symbol順に並べることで、
+pattern search、symbol decision、Symbol Table、bit conversionが同じmappingを共有する。
+FSKは従来どおり`Natural`固定で、`Bluetooth EDR`はpi/4-DQPSK/8DPSK以外では無効。
+
+同日にPSK Symbol Plotへ`Absolute IQ (Physical)`と`Differential IQ`の切替を
+追加した。前者を既定とし、R&S同様にmatched-filter後の絶対IQ決定点を表示する。
+pi/4-DQPSKはsymbolごとのpi/4回転を表示時に補償し、8DPSKは絶対点をそのまま使う。
+Result Summaryは通常の絶対IQ `EVM RMS`、従来の`Differential Symbol EVM RMS`、
+Bluetooth Appendix C式の`Bluetooth DEVM RMS`を独立項目として選択可能にした。
+
 Meas Configは縦並びのaccordionではなく、`Config Top Menu`にカテゴリボタンを2列で配置する。ボタンから個別設定ページへ移動し、`< Config Top`でトップへ戻る2階層構造とする。トップのカテゴリボタンは18 pt以上の太字・高さ84 px以上とし、タイトルも個別設定画面より大きく表示する。ダイアログを開くたびにトップを表示し、Window Modalによるメイン画面の操作抑止は維持する。
 
 ### Pattern Search / Result Range / Demodulation
