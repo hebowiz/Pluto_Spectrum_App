@@ -160,22 +160,28 @@ GFSKも最終的には複素ベースバンドIQとして生成する。
 
 - π/4-DQPSK
 - Differential phase mapping
-- RRC / SRRC pulse shaping
+- 送信側SRRC pulse shaping
 
 ### 3 Mbps
 
 - 8DPSK
 - Differential phase mapping
-- RRC / SRRC pulse shaping
+- 送信側SRRC pulse shaping
 
 代表パラメータ:
 
-- RRC roll-off
+- SRRC roll-off
   - 初期値: 0.4
 - Filter span
   - 可変
 - DPSK Power
   - GFSK部に対する相対dBで設定可能
+
+用語は次のように統一する。
+
+- 送信波形に適用するパルス整形フィルタはSRRC（Square Root Raised Cosine）
+- 送信側SRRCと受信側SRRCを合成した総合特性がRC（Raised Cosine）
+- GUIで単に「RRC」と表示して実装上の意味を曖昧にしない
 
 ---
 
@@ -200,7 +206,7 @@ Guardは単純に「RF OFF」と固定せず、振幅エンベロープとして
 GUI上では Guard Power / Guard Depth などを調整可能にする。
 
 注意:
-Gaussian filterおよびRRC filterの過渡応答を考慮し、各区間を単純なぶつ切り連結にしない。
+Gaussian filterおよびSRRC filterの過渡応答を考慮し、各区間を単純なぶつ切り連結にしない。
 
 ---
 
@@ -537,7 +543,7 @@ params = WaveformParameters(
     guard_duration_s=5e-6,
     gfsk_power_db=0.0,
     dpsk_power_db=-2.0,
-    rrc_rolloff=0.4,
+    srrc_rolloff=0.4,
 )
 
 result = generate_waveform(params)
@@ -560,7 +566,7 @@ GUI、Pluto、R&S、ファイル保存はすべてこの結果を利用する。
 - 3-DH1生成
 - Gaussian filter
 - Guard
-- RRC filter
+- SRRC filter
 - GFSK / DPSK power差
 - 8 SPS default
 - complex64 IQ出力
@@ -598,3 +604,204 @@ R&S SMCV100B BackendはMVP後に追加してもよい。
 6. Bluetooth専用ロジックを過度にGUIへ埋め込まない。
 7. 将来的にBluetooth以外の任意デジタル変調へ拡張可能な設計にする。
 8. 最終的な色・テーマ・細かなUIデザインは後で決定する。
+
+---
+
+## 26. 既存VSA資産の再利用方針
+
+現行VSAには、Bluetooth BRおよび2-DH1 / 3-DH1の解析試験用IQ生成処理が存在する。
+パケット構築、GFSK、DPSK mapping、SRRC、whitening、CRCなどはWaveform Engineの初期実装へ再利用できる。
+
+ただし、既存処理は解析テスト用fixtureとして以下を含むため、そのまま送信Backendへ接続しない。
+
+- 固定長・固定PRBS-9 payload
+- 記録区間内のpacket start位置
+- CFO
+- AWGN
+- 固定振幅
+- 解析用metadata
+
+再利用時は次のレイヤーへ分離する。
+
+1. Packet Builder
+2. Ideal Modulator
+3. Filter / Guard / Power Transition
+4. Impairment
+5. Recording Layout（packet前後のidleや反復間隔）
+6. Hardware Backend
+
+理想波形生成時の既定値はCFO、AWGN、IQ imbalanceなどを無効とし、Impairmentを明示的に有効化した場合だけ付加する。
+
+---
+
+## 27. IQ振幅・スケーリング契約
+
+Waveform Engineが返すIQは、機器固有のDAC codeではなく、正規化された複素ベースバンド波形とする。
+
+基本契約:
+
+- dtype: `complex64`
+- 無次元のnormalized IQ
+- `max(abs(iq)) <= 1.0`
+- 推奨既定peak: -3 dBFS程度
+- clippingは暗黙に行わず、生成エラーまたは警告として扱う
+- peak、RMS、PAPR、適用backoffをmetadataに保存する
+
+「PlutoとR&Sで同一IQを使用する」とは、同じ正規化IQ配列とsample rateを入力に使うことを意味する。
+実際の転送時には各Backendが必要な量子化、整数化、byte order、container化を行うため、機器へ送るbyte列まで同一である必要はない。
+
+絶対RF出力レベルはIQ振幅だけから保証しない。
+PlutoではTX hardware gain、周波数依存損失、外部ATT/Gain、個体差を含む校正が必要であり、設定値と実測dBmを区別する。
+
+---
+
+## 28. Bluetooth準拠Profileと実験Profile
+
+規格相当の波形と、研究・デバッグ用に任意変更した波形を混同しない。
+
+- Standard Profile
+  - packet構造、symbol rate、guard、mapping、filter、power transitionなどを規定値へ固定または制約する
+- Experimental Profile
+  - symbol rate、SPS、filter、guard、power差、独自packet typeなどを変更可能にする
+
+GUIとmetadataには、どちらのProfileで生成したかを必ず表示・記録する。
+規定値から変更された波形をBluetooth準拠波形として表示しない。
+
+---
+
+## 29. 送信シーケンスとcyclic境界
+
+送信対象はpacket本体だけでなく、次の構造を持つRecording Layoutとして生成する。
+
+```text
+Pre Idle -> Packet -> Post Idle / Inter-Packet Gap
+```
+
+Plutoのcyclic送信では配列末尾から先頭へ連続して反復されるため、境界で以下を満たすこと。
+
+- packet同士が意図せず直結しない
+- 設定したinter-packet gapが含まれる
+- 境界で不必要な振幅・位相ジャンプを発生させない
+- RF OFF相当区間はゼロIQまたは定義済みenvelopeで表現する
+
+PCからのAPI呼び出し時刻を基準にした単発バースト開始は厳密なリアルタイムタイミングを保証しない。
+初期MVPでは「idleを含む完成波形のcyclic再生」を優先し、厳密なsingle-shot timingは別機能として扱う。
+
+---
+
+## 30. Backend capabilityと設定検証
+
+Backendは共通APIを持つが、すべての機器が同じ能力を持つとは仮定しない。
+
+各Backendは少なくとも次を公開する。
+
+- 対応sample rate範囲
+- 対応RF frequency範囲
+- 最大waveform sample数またはARB memory
+- IQ量子化形式
+- waveform長・alignment制約
+- cyclic / single-shot対応可否
+- RF levelまたはhardware gainの設定範囲
+- 接続状態と現在設定のreadback可否
+
+生成前または送信前にcapability validationを行い、暗黙の丸めを避ける。
+丸めやresamplingが必要な場合は、実際に適用された値をWaveformResultまたは送信結果へ記録する。
+
+---
+
+## 31. 送信状態管理とRF安全設計
+
+GUIとBackendの間に、少なくとも次の状態を持つ送信state machineを設ける。
+
+```text
+Disconnected -> Connected -> Ready -> Transmitting
+                                  -> Error
+```
+
+安全上の要件:
+
+- 起動時はRF出力OFF
+- 接続直後は十分低いTX gain / levelを初期値とする
+- Transmit開始前にcenter frequency、sample rate、gain / level、cyclic設定を確認表示する
+- Stop、ウィンドウ終了、例外、接続断でbuffer破棄とRF停止を試みる
+- 出力中の波形更新は、一旦停止してbufferを破棄してから再転送する
+- 現在送信中であることをGUI上で明確に表示する
+
+外部ATT/Gainは送信設定metadataへ保存するが、Backendのhardware gainとは別項目として扱う。
+
+---
+
+## 32. Pluto Backend補足
+
+Pluto MVPはpyadi-iioのTX bufferを使用する。
+
+- 反復パケットはcyclic bufferを基本とする
+- 更新時は既存TX bufferを明示的にdestroyしてから再送する
+- Backendでnormalized IQをPluto向けDAC scaleへ変換する
+- peak超過、NaN、Inf、空波形を送信前に拒否する
+- 実際に設定されたsample rate、RF bandwidth、LO、hardware gainをreadbackして記録する
+
+cyclic bufferでは初回転送後の反復に継続的なUSB転送を必要としないため、反復波形ではUSB throughputを主制約としない。
+一方、異なるpacketを連続してリアルタイム供給する用途はUSB転送、host scheduling、buffer underrunの影響を受けるため、MVP後の別課題とする。
+
+---
+
+## 33. R&S SMCV100B Backend補足
+
+SMCV100B Backendは、共通のnormalized IQを機器対応ARB形式へ変換し、転送と再生設定を担当する。
+
+実装前に対象実機について次を確認する。
+
+- ARB機能および必要option / license
+- 対応waveform file形式とtag / header仕様
+- I/Qのbit depth、byte order、full-scale定義
+- ARB sample clock範囲
+- waveform memoryとminimum / alignment制約
+- SCPIによるupload、select、play、stop、RF ON/OFF手順
+
+機器内蔵Bluetooth generatorの再現を前提にせず、ARBへ自前IQを入力する方式とする。
+SCPI error queueを各主要操作後に確認し、転送成功と再生開始を分けて報告する。
+
+---
+
+## 34. 検証方針と完了条件
+
+送信機能は、見た目だけでなく段階的に検証する。
+
+### 34.1 Unit Test
+
+- packet bit列、air order、CRC、whitening
+- GFSK modulation indexと周波数偏移
+- DPSK differential mapping
+- SRRC impulse responseとgroup delay
+- guard長、region境界、sample数
+- peak / RMS / PAPRとclipping検出
+
+### 34.2 Offline Round Trip
+
+生成したWaveformResultを現行Pluto VSAへ直接入力し、次を確認する。
+
+- pattern match
+- symbol countとsymbol列
+- mapping
+- CFOが無効ならほぼ0 Hz
+- constellation / EVM / deviation
+- packet regionと解析Result Rangeの整合
+
+### 34.3 Pluto実機Loopback
+
+Pluto TXから有線ATTを介して受信し、offline結果との差を確認する。
+
+- spectrum
+- power
+- CFO / drift
+- symbol rate error
+- deviationまたはEVM
+- cyclic境界とinter-packet gap
+
+### 34.4 R&S比較
+
+同一のnormalized IQをPlutoとSMCV100Bから送信し、同一受信系で比較する。
+Backend固有の量子化・level差を分離し、symbol列、spectrum、EVM、deviationが許容範囲内で一致することを確認する。
+
+MVPの完了条件は、2-DH1および3-DH1をPlutoからcyclic送信し、現行VSAで安定してpattern matchとsymbol復調ができることとする。
