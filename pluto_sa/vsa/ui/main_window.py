@@ -19,6 +19,7 @@ from pluto_sa.vsa.mapping import (
     NATURAL_MAPPING,
     psk_constellation,
 )
+from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     BitOrdering,
@@ -268,6 +269,44 @@ def _prepare_psk_display_waveform(
         prepared_rate_hz
     )
     return prepared, time_s
+
+
+def _prepare_fsk_display_frequency(
+    iq: np.ndarray,
+    *,
+    sample_rate_hz: float,
+    symbol_rate_hz: float,
+    gaussian_bt: float | None,
+    result_start_time_s: float | None = None,
+    result_stop_time_s: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Prepare visible FSK frequency using the demodulator's Measured path."""
+    values = np.asarray(iq)
+    start_sample = 0
+    stop_sample = values.size
+    if result_start_time_s is not None and result_stop_time_s is not None:
+        # Gaussian filtering is effectively short, while this guard also
+        # covers polyphase-resampler settling for normal capture-rate ratios.
+        guard_s = 16.0 / float(symbol_rate_hz)
+        start_sample = max(
+            0,
+            int(np.floor((float(result_start_time_s) - guard_s) * sample_rate_hz)),
+        )
+        stop_sample = min(
+            values.size,
+            int(np.ceil((float(result_stop_time_s) + guard_s) * sample_rate_hz)),
+        )
+    frequency_hz, prepared_rate_hz = prepare_fsk_frequency(
+        values[start_sample:stop_sample],
+        sample_rate_hz=sample_rate_hz,
+        symbol_rate_hz=symbol_rate_hz,
+        gaussian_bt=gaussian_bt,
+    )
+    time_offset_s = start_sample / float(sample_rate_hz)
+    time_s = time_offset_s + np.arange(
+        frequency_hz.size, dtype=np.float64
+    ) / float(prepared_rate_hz)
+    return frequency_hz, time_s
 
 
 def _constellation_display_symbols(
@@ -598,6 +637,25 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_display_action.setChecked(False)
         self.symbol_display_action.triggered.connect(self._refresh_display_only)
         display_menu.addAction(self.symbol_display_action)
+        modulation_signal_menu = display_menu.addMenu("Modulation Signal")
+        self.raw_modulation_signal_action = QtGui.QAction(
+            "Raw IQ", self, checkable=True
+        )
+        self.measured_modulation_signal_action = QtGui.QAction(
+            "Measured", self, checkable=True
+        )
+        modulation_signal_group = QtGui.QActionGroup(self)
+        modulation_signal_group.setExclusive(True)
+        modulation_signal_group.addAction(self.raw_modulation_signal_action)
+        modulation_signal_group.addAction(self.measured_modulation_signal_action)
+        self.measured_modulation_signal_action.setChecked(True)
+        self.raw_modulation_signal_action.triggered.connect(
+            self._refresh_display_only
+        )
+        self.measured_modulation_signal_action.triggered.connect(
+            self._refresh_display_only
+        )
+        modulation_signal_menu.addActions(modulation_signal_group.actions())
         constellation_trace_menu = display_menu.addMenu("Symbol Plot Trace")
         self.constellation_flat_action = QtGui.QAction(
             "Flat", self, checkable=True
@@ -663,20 +721,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.reset_graph_scales_action.setShortcut("Home")
         self.reset_graph_scales_action.triggered.connect(self._reset_graph_scales)
         display_menu.addAction(self.reset_graph_scales_action)
-        display_menu.addSeparator()
-        carrier_menu = display_menu.addMenu("Carrier Display")
-        self.raw_carrier_action = QtGui.QAction("Raw IQ", self, checkable=True)
-        self.corrected_carrier_action = QtGui.QAction(
-            "Carrier Corrected", self, checkable=True
-        )
-        carrier_group = QtGui.QActionGroup(self)
-        carrier_group.setExclusive(True)
-        carrier_group.addAction(self.raw_carrier_action)
-        carrier_group.addAction(self.corrected_carrier_action)
-        self.corrected_carrier_action.setChecked(True)
-        self.raw_carrier_action.triggered.connect(self._refresh_display_only)
-        self.corrected_carrier_action.triggered.connect(self._refresh_display_only)
-        carrier_menu.addActions(carrier_group.actions())
 
         meas_config_menu = self.menuBar().addMenu("Meas Config")
         open_config_action = QtGui.QAction("Open Meas Config...", self)
@@ -2024,10 +2068,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             },
             "display_config": {
                 "show_symbol_points": self.symbol_display_action.isChecked(),
-                "carrier_display": (
+                "modulation_signal": (
                     "Raw IQ"
-                    if self.raw_carrier_action.isChecked()
-                    else "Carrier Corrected"
+                    if self.raw_modulation_signal_action.isChecked()
+                    else "Measured"
                 ),
                 "constellation_trace_mode": (
                     "Density"
@@ -2274,16 +2318,30 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.symbol_display_action.setChecked(
                 bool(display_config.get("show_symbol_points", False))
             )
-            carrier_display = str(
+            # Legacy configurations controlled carrier correction separately.
+            # Fold that choice into the common Raw IQ / Measured selection.
+            legacy_carrier_display = str(
                 display_config.get("carrier_display", "Carrier Corrected")
             )
-            if carrier_display not in {"Raw IQ", "Carrier Corrected"}:
-                raise ValueError(
-                    "carrier display must be Raw IQ or Carrier Corrected"
+            modulation_signal = str(
+                display_config.get(
+                    "modulation_signal",
+                    (
+                        "Raw IQ"
+                        if legacy_carrier_display == "Raw IQ"
+                        else "Measured"
+                    ),
                 )
-            self.raw_carrier_action.setChecked(carrier_display == "Raw IQ")
-            self.corrected_carrier_action.setChecked(
-                carrier_display == "Carrier Corrected"
+            )
+            if modulation_signal not in {"Raw IQ", "Measured"}:
+                raise ValueError(
+                    "modulation signal must be Raw IQ or Measured"
+                )
+            self.raw_modulation_signal_action.setChecked(
+                modulation_signal == "Raw IQ"
+            )
+            self.measured_modulation_signal_action.setChecked(
+                modulation_signal == "Measured"
             )
             constellation_trace_mode = str(
                 display_config.get("constellation_trace_mode", "Flat")
@@ -3422,16 +3480,20 @@ class VSAWindow(QtWidgets.QMainWindow):
         if reset_ranges:
             for _name, plot in self._plot_widgets():
                 plot.enableAutoRange(enable=True)
-        show_corrected = (
-            self.corrected_carrier_action.isChecked()
+        measured_selected = self.measured_modulation_signal_action.isChecked()
+        use_carrier_corrected = (
+            measured_selected
             and self.session.carrier_corrected_result is not None
         )
         display_result = (
-            self.session.carrier_corrected_result if show_corrected else result
+            self.session.carrier_corrected_result
+            if use_carrier_corrected
+            else result
         )
+        pattern_result = self.session.pattern_result
         symbol_times_s = (
-            self.session.pattern_result.symbol_time_s
-            if self.session.pattern_result is not None
+            pattern_result.symbol_time_s
+            if pattern_result is not None
             else result.symbol_time_s
         )
         symbol_power_dbm = (
@@ -3469,11 +3531,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.zero_span_plot, fit_range=reset_ranges
         )
         self.spectrum_plot.clear()
-        spectrum_result = (
-            self.session.carrier_corrected_pattern_range_result
-            if show_corrected
-            else self.session.pattern_range_result
-        ) or display_result
+        # Spectrum intentionally remains on the uncorrected measurement. CFO
+        # correction is a demodulation-display concern, not a spectrum shift.
+        spectrum_result = self.session.pattern_range_result or result
         analysis_center_hz = float(
             spectrum_result.metadata.get("analysis_center_frequency_hz", 0.0) or 0.0
         )
@@ -3501,9 +3561,44 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.setLabel("left", "Frequency (kHz)")
             self.modulation_plot.setLabel("bottom", "Time (ms)")
             self.modulation_plot.setAspectLocked(False)
+            if self.measured_modulation_signal_action.isChecked():
+                analysis_sample_rate_hz = float(
+                    display_result.metadata.get(
+                        "analysis_sample_rate_hz",
+                        self.session.recording.sample_rate_hz,
+                    )
+                )
+                gaussian_bt = (
+                    signal.filter_parameter
+                    if signal.tx_filter.lower() == "gaussian"
+                    else None
+                )
+                modulation_frequency_trace_hz, modulation_time_s = (
+                    _prepare_fsk_display_frequency(
+                        display_result.iq,
+                        sample_rate_hz=analysis_sample_rate_hz,
+                        symbol_rate_hz=signal.symbol_rate_hz,
+                        gaussian_bt=gaussian_bt,
+                        result_start_time_s=(
+                            pattern_result.result_start_time_s
+                            if pattern_result is not None
+                            else None
+                        ),
+                        result_stop_time_s=(
+                            pattern_result.result_stop_time_s
+                            if pattern_result is not None
+                            else None
+                        ),
+                    )
+                )
+            else:
+                modulation_frequency_trace_hz = (
+                    display_result.instantaneous_frequency_hz
+                )
+                modulation_time_s = display_result.time_s
             frequency_time_ms, display_frequency_khz = _peak_decimate_xy(
-                display_result.time_s * 1e3,
-                display_result.instantaneous_frequency_hz / 1e3,
+                modulation_time_s * 1e3,
+                modulation_frequency_trace_hz / 1e3,
                 required_x_values=required_symbol_times_ms,
             )
             self.modulation_plot.plot(
@@ -3514,8 +3609,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             modulation_frequency_hz = (
                 np.interp(
                     symbol_times_s,
-                    display_result.time_s,
-                    display_result.instantaneous_frequency_hz,
+                    modulation_time_s,
+                    modulation_frequency_trace_hz,
                 )
                 if symbol_times_s.size
                 else np.empty(0, dtype=np.float64)
@@ -3619,30 +3714,37 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.setLabel("left", "Q")
             self.modulation_plot.setLabel("bottom", "I")
             self.modulation_plot.setAspectLocked(True, ratio=1.0)
-            pattern_result = self.session.pattern_result
             analysis_sample_rate_hz = float(
                 display_result.metadata.get(
                     "analysis_sample_rate_hz",
                     self.session.recording.sample_rate_hz,
                 )
             )
-            processed_iq, processed_time_s = _prepare_psk_display_waveform(
-                display_result.iq,
-                sample_rate_hz=analysis_sample_rate_hz,
-                symbol_rate_hz=signal.symbol_rate_hz,
-                tx_filter=signal.tx_filter,
-                filter_parameter=signal.filter_parameter,
-                result_start_time_s=(
-                    pattern_result.result_start_time_s
-                    if pattern_result is not None
-                    else None
-                ),
-                result_stop_time_s=(
-                    pattern_result.result_stop_time_s
-                    if pattern_result is not None
-                    else None
-                ),
-            )
+            if self.measured_modulation_signal_action.isChecked():
+                processed_iq, processed_time_s = _prepare_psk_display_waveform(
+                    display_result.iq,
+                    sample_rate_hz=analysis_sample_rate_hz,
+                    symbol_rate_hz=signal.symbol_rate_hz,
+                    tx_filter=signal.tx_filter,
+                    filter_parameter=signal.filter_parameter,
+                    result_start_time_s=(
+                        pattern_result.result_start_time_s
+                        if pattern_result is not None
+                        else None
+                    ),
+                    result_stop_time_s=(
+                        pattern_result.result_stop_time_s
+                        if pattern_result is not None
+                        else None
+                    ),
+                )
+            else:
+                processed_iq = np.asarray(
+                    display_result.iq, dtype=np.complex128
+                )
+                processed_time_s = np.asarray(
+                    display_result.time_s, dtype=np.float64
+                )
             symbol_iq = np.interp(
                 symbol_times_s,
                 processed_time_s,
@@ -3829,7 +3931,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                     float(spectrum_result.evm_rms_percent)
                 )
         if pattern_result is not None:
-            display_name = "Carrier Corrected" if show_corrected else "Raw IQ"
+            display_name = "Measured" if measured_selected else "Raw IQ"
             recording = self.session.recording
             analysis_center_hz = (
                 self.session.settings.analysis_center_frequency_hz

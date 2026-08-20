@@ -100,6 +100,36 @@ def _instantaneous_frequency(iq: np.ndarray, sample_rate_hz: float) -> np.ndarra
     return np.concatenate(([result[0]], result))
 
 
+def prepare_fsk_frequency(
+    iq: np.ndarray,
+    *,
+    sample_rate_hz: float,
+    symbol_rate_hz: float,
+    gaussian_bt: float | None,
+    samples_per_symbol: int = 8,
+) -> tuple[np.ndarray, float]:
+    """Resample FSK IQ and return the measured instantaneous frequency.
+
+    With ``gaussian_bt`` set, the instantaneous-frequency waveform passes
+    through the same Gaussian Auto measurement filter used by the FSK
+    demodulator.  ``None`` keeps only the analysis-rate resampling.
+    """
+    waveform, analysis_rate_hz = _resample_for_symbols(
+        np.asarray(iq),
+        float(sample_rate_hz),
+        float(symbol_rate_hz),
+        int(samples_per_symbol),
+    )
+    frequency_hz = _instantaneous_frequency(waveform, analysis_rate_hz)
+    if gaussian_bt is not None:
+        frequency_hz = apply_gaussian_frequency_filter(
+            frequency_hz,
+            samples_per_symbol=int(samples_per_symbol),
+            bt=float(gaussian_bt),
+        )
+    return np.asarray(frequency_hz, dtype=np.float64), analysis_rate_hz
+
+
 def _detect_bursts(
     iq: np.ndarray,
     *,

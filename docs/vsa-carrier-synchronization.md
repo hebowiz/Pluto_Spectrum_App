@@ -110,16 +110,16 @@ x_corrected(t) = x(t) * exp(-j * phase_correction(t))
 
 Non-differential PSKでは推定したconstant phase rotationも`phase_correction`へ加える。FSKの`t_ref`はpattern中央、non-differential PSKはpattern先頭symbol center、differential PSKは最初のphase-increment区間のcenterとする。
 
-UIの`Display Config > Carrier Display`で次を切り替える。
+UIの`Display Config > Modulation Signal`で次を切り替える。
 
-- `Raw IQ`: Result Rangeの取得IQからSpectrumとInstantaneous Frequencyを生成。
-- `Carrier Corrected`: sample単位でCFOを除去したIQから再生成。既定値。
+- `Raw IQ`: carrier補正もMeasurement Filterも適用せず、取得IQからModulation表示を生成。
+- `Measured`: sample単位でCFOを除去し、その後にmodulationごとのMeasurement Filterを適用してModulation表示を生成。既定値。
 
-Powerは位相回転で変化しないためRaw IQを使用する。CFO、推定carrier frequency、driftはResult Summaryへ表示する。FSKでは`Carrier Drift`がjoint fitの推定候補値、`Applied Drift`が品質gate通過後に補正へ使用する値である。
+Powerは位相回転で変化しないためRaw IQを使用する。Spectrumもcarrier未補正IQへ固定する。CFO、推定carrier frequency、driftはResult Summaryへ表示する。FSKでは`Carrier Drift`がjoint fitの推定候補値、`Applied Drift`が品質gate通過後に補正へ使用する値である。
 
 ## 5. Drift補正の扱い
 
-`Demodulation > Compensate for > Carrier Frequency Drift`でsample単位補正へlinear driftを含める。CFO補正はCarrier Corrected表示で常に適用する。
+`Demodulation > Compensate for > Carrier Frequency Drift`でsample単位補正へlinear driftを含める。CFO補正はModulation SignalのMeasured表示で常に適用する。
 
 現行drift推定はdecision-directedな一次modelであり、測定確度のcross-validationが未完了である。2026-08-04の固定BR fixture（Analysis BW 2 MHz）では、known pattern単独のCFOは約+20.0 kHzだった一方、旧実装のpacket-wide fitはCFOを-5.37 kHzへ移動させ、Carrier Corrected瞬時周波数に約25 kHzの中心ずれを残していた。現在はCFOをknown patternへ固定し、packet-wide fitからはcoarse driftだけを採用する。長いResult Rangeへのdrift外挿はなお過補正の可能性があるため、drift補正の既定値はOFFとする。推定値はOFFでも表示し、検証可能にする。
 

@@ -118,8 +118,9 @@ Version 1 stores all currently exposed measurement controls:
   restore the current default selection; unknown future IDs are ignored.
 
 Loading a configuration applies the controls and immediately reruns analysis
-against the currently loaded IQ capture. Display-only window layout and
-Carrier Display selection are intentionally not measurement configuration.
+against the currently loaded IQ capture. Display-only window layout is not
+measurement configuration; display trace selections are persisted separately
+inside the configuration's `display_config` section.
 
 Serialization and schema validation live in `pluto_sa/vsa/persistence.py`.
 
@@ -205,21 +206,31 @@ dock is named `Symbol Plot`. Their contents depend on the modulation family:
 | PSK | connected IQ trajectory | constellation decision points |
 | FSK | instantaneous frequency vs time | per-symbol phase difference |
 
-For PSK, the IQ trajectory uses the selected Result Range when Pattern Search
-succeeds. It follows `Display Config > Carrier Display`, choosing raw or
-carrier-corrected IQ. The IQ is resampled to 8 samples/symbol and, when the TX
-filter is Root Raised Cosine, passed through the same-beta SRRC matched receive
-filter before plotting. The continuous waveform is then cropped to Result
-Range; without a pattern result the full filtered waveform is used. Its scale
-is normalized by the RMS amplitude of the filtered IQ at recovered symbol
-times. Display samples are capped at 20,000 plot vertices; this affects only
-rendering and never modifies stored IQ or DSP results. The I/Q axes use equal
-scale and a symmetric range based on the 99.5th amplitude percentile.
+Both families follow the common `Display Config > Modulation Signal` setting.
+`Raw IQ` bypasses carrier correction and the demodulation measurement filter:
+PSK draws the acquired IQ trajectory and FSK derives instantaneous frequency
+directly from it. `Measured` is the default and first applies sample-level CFO
+(and enabled drift) correction. PSK then resamples to 8 samples/symbol and, for
+a Root Raised Cosine TX filter, applies the same-beta SRRC matched receive
+filter. FSK resamples to the same analysis grid and, for a Gaussian TX filter,
+applies the same-BT Gaussian Auto Measurement Filter to instantaneous
+frequency. This display-only selection does not rerun decisions or change EVM.
+Spectrum always uses the carrier-uncorrected Result Range IQ.
 
-For differential PSK, the trajectory markers are absolute filtered IQ samples,
-while the constellation contains differential products between adjacent
-symbols. Their amplitude distributions can therefore still differ slightly,
-but the earlier pre-filter/post-filter mismatch has been removed.
+For PSK, the IQ trajectory uses the selected Result Range when Pattern Search
+succeeds. The continuous waveform is cropped to Result Range; without a
+pattern result the full waveform is used. Its scale is normalized by the RMS
+amplitude at recovered symbol times. Display samples are capped at 10,000 plot
+vertices; this affects only rendering and never modifies stored IQ or DSP
+results. The I/Q axes use equal scale and a symmetric range that contains all
+finite displayed samples with 5% padding.
+
+For differential PSK, the trajectory markers are absolute IQ samples from the
+selected Raw IQ or Measured waveform, while the constellation contains
+differential products between adjacent symbols. Their amplitude distributions
+can therefore still differ slightly. With Measured selected, both use the
+measurement-filtered decision path and the earlier pre-filter/post-filter
+mismatch remains removed.
 
 ### R&S physical DPSK constellation discrepancy (2026-08-19)
 
@@ -331,12 +342,13 @@ default +/-1.25 range.
 
 `Display Config > Show Symbol Points` is an independent display-only toggle and
 defaults to off. When enabled, bright green circular markers distinguish symbol
-centres from the yellow Power/IQ traces and the magenta FSK trace.
+centres from the yellow traces.
 
 - IQ Power: interpolate dBm at each decoded symbol-centre time.
-- FSK Modulation: interpolate instantaneous frequency at each symbol centre.
-- PSK Modulation: interpolate matched-filter output at each symbol centre and
-  apply the same RMS normalization as the displayed IQ trajectory.
+- FSK Modulation: interpolate the selected Raw IQ or Measured frequency trace
+  at each symbol centre.
+- PSK Modulation: interpolate the selected Raw IQ or Measured IQ waveform at
+  each symbol centre and apply the same RMS normalization as the trajectory.
 
 With a successful Pattern Search, the markers cover the current Result Range;
 otherwise they cover the symbol decisions from the normal analysis result.
@@ -416,9 +428,10 @@ The selected FSK result type is saved as
 old configurations default to `Phase Difference`.
 
 Measurement config files also persist the display-only `Show Symbol Points`,
-`Carrier Display`, Symbol Plot trace mode, and PSK absolute/differential IQ
-selection. Older files without these keys remain valid and use the normal
-display defaults.
+common `Modulation Signal`, Symbol Plot trace mode, and PSK
+absolute/differential IQ selection. Older files without `modulation_signal`
+remain valid: legacy `carrier_display=Raw IQ` maps to Raw IQ and all other
+legacy values map to Measured.
 
 ## Result Summary item selection
 

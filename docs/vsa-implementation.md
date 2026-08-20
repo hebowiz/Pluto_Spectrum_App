@@ -121,9 +121,9 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
   `postfilter_residual_cfo_hz`を保存する。
 - これらはPattern Searchを基準にしたcoarse synchronizationである。
 - CFO、推定carrier frequency、linear driftをResult Summaryへ表示する。
-- `Display Config > Carrier Display`で`Raw IQ`と`Carrier Corrected`を切り替える。補正表示ではsample単位の位相補正後IQからInstantaneous FrequencyとResult Range Spectrumを再計算する。既定はCarrier Corrected。
+- `Display Config > Modulation Signal`はFSK/PSK共通で`Raw IQ`と`Measured`を切り替える。既定は`Measured`。Raw IQはcarrier補正とMeasurement Filterの双方を適用せず、PSKは取得IQ軌跡、FSKは取得IQ由来の瞬時周波数を表示する。Measuredはsample単位のCFO（設定時はdriftも）を補正したIQを入力とし、PSKでは8 samples/symbolへresample後、TX FilterがRRCなら同じalphaのSRRC matched/measurement filterを適用する。FSKでは同じく8 samples/symbolへresampleした瞬時周波数へ、TX FilterがGaussianなら同じBTのGaussian Auto Measurement Filterを適用する。切替は解析結果、symbol decision、EVMを変更しない。Spectrumは常にcarrier未補正のResult Range IQを表示する。
 - `Display Config > Show Symbol Points`をONにすると、IQ PowerとModulationのtrace上へ復調symbol中心位置を明るい緑の点で重ねる。FSKではtime/frequency座標、PSKではIQ軌跡座標を使用する。既定はOFF。
-- measurement configの`display_config`には`Show Symbol Points`、`Carrier Display`、Symbol PlotのFlat/Density、PSKのAbsolute/Differential IQ、FSKのPhase Difference/Constellation Frequencyを保存し、config読込時と次回起動時に復元する。旧configに項目がない場合は従来の既定値を使う。
+- measurement configの`display_config`には`Show Symbol Points`、共通`Modulation Signal`、Symbol PlotのFlat/Density、PSKのAbsolute/Differential IQ、FSKのPhase Difference/Constellation Frequencyを保存し、config読込時と次回起動時に復元する。旧configに`modulation_signal`がない場合は旧`carrier_display`が`Raw IQ`ならRaw IQ、それ以外はMeasuredへ移行する。
 - IQ Power/Modulation上の`Pattern Start`ラベルはtraceとの重なりを抑えるため、縦markerの下端寄りに配置する。
 - Signal DescriptionのFSK系modulation名は`FSK`へ統一する。Gaussian shapingは独立したTransmit FilterとBTで定義し、symbol同期もmodulation名ではなくこのfilter設定を参照する。旧`2-FSK`/`GFSK` configは読込時に`FSK`へ移行する。
 - EVM系Result SummaryとSymbol Plotの単一symbol EVM markerは、linear percentageと振幅比`20 log10(EVM/100)`を`x.xx % / y.y dB`形式で併記する。
@@ -144,7 +144,7 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
   EVMを変更せず、manual Configと終了時Configへ保存する。R&S FPL K70 pp.31-34の
   density traceと同じ「出現頻度を色で示す」表示契約だが、bin数・log scale・color
   map・Gaussian kernelはPluto VSA固有とする。
-- Carrier Frequency Drift補正はDemodulation設定から切り替えられるが、実測cross-validation未完了のため既定OFF。CFO補正はCarrier Corrected表示で常に適用する。
+- Carrier Frequency Drift補正はDemodulation設定から切り替えられるが、実測cross-validation未完了のため既定OFF。CFO補正はModulation SignalのMeasured表示で常に適用する。
 - R&S相当のFine Synchronization、残留CFO評価、estimator confidenceは未実装。
 
 ### Meas Config window

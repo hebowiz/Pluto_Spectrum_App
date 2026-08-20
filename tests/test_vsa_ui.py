@@ -23,8 +23,10 @@ from pluto_sa.vsa.ui.main_window import (
     _fsk_phase_difference_symbols,
     _format_evm,
     _peak_decimate_xy,
+    _prepare_fsk_display_frequency,
     _prepare_psk_display_waveform,
 )
+from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
 from pluto_sa.vsa.pluto_source import CaptureCancelledError
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import prepare_psk_iq
@@ -136,6 +138,35 @@ def test_psk_display_preparation_limits_work_to_result_range() -> None:
     visible = (time_s >= 0.050) & (time_s < 0.051)
     full_index = np.rint(time_s[visible] * full_rate_hz).astype(np.int64)
     assert prepared[visible] == pytest.approx(full[full_index], abs=1e-10)
+
+
+def test_fsk_display_preparation_uses_demodulator_measurement_filter() -> None:
+    sample_rate_hz = 8e6
+    symbol_rate_hz = 1e6
+    levels = np.repeat(np.tile([-160_000.0, 160_000.0], 200), 8)
+    phase = np.cumsum(2.0 * np.pi * levels / sample_rate_hz)
+    iq = np.exp(1j * phase)
+
+    measured_hz, time_s = _prepare_fsk_display_frequency(
+        iq,
+        sample_rate_hz=sample_rate_hz,
+        symbol_rate_hz=symbol_rate_hz,
+        gaussian_bt=0.5,
+        result_start_time_s=100e-6,
+        result_stop_time_s=200e-6,
+    )
+
+    full_hz, full_rate_hz = prepare_fsk_frequency(
+        iq,
+        sample_rate_hz=sample_rate_hz,
+        symbol_rate_hz=symbol_rate_hz,
+        gaussian_bt=0.5,
+    )
+    visible = (time_s >= 100e-6) & (time_s < 200e-6)
+    full_index = np.rint(time_s[visible] * full_rate_hz).astype(np.int64)
+    assert measured_hz[visible] == pytest.approx(full_hz[full_index], abs=1e-8)
+    assert time_s[0] < 100e-6
+    assert time_s[-1] > 200e-6
 
 
 def test_large_symbol_result_limits_table_display_but_not_export(tmp_path) -> None:
@@ -360,7 +391,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         _spectrum_x, spectrum_y = window.spectrum_plot.listDataItems()[0].getData()
         np.testing.assert_allclose(
             spectrum_y,
-            window.session.carrier_corrected_pattern_range_result.spectrum_dbm,
+            window.session.pattern_range_result.spectrum_dbm,
         )
         window.symbol_display_action.trigger()
         assert window.symbol_display_action.isChecked()
@@ -600,7 +631,9 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         QtCore.QTimer.singleShot(0, inspect_modality)
         window._open_meas_config()
         assert active_modal_widgets == [window._meas_config_dialog]
-        assert window.corrected_carrier_action.isChecked()
+        assert window.measured_modulation_signal_action.isChecked()
+        assert not hasattr(window, "raw_carrier_action")
+        assert not hasattr(window, "corrected_carrier_action")
         default_summary = {
             window.result_summary.item(row, 0).text(): window.result_summary.item(
                 row, 1
@@ -666,9 +699,9 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         assert "Deviation Error (%)" in summary
         assert summary["Drift Model"].startswith(("Accepted", "Rejected"))
         assert "Applied Drift" in summary
-        assert summary["Display"] == "Carrier Corrected"
+        assert summary["Display"] == "Measured"
 
-        window.raw_carrier_action.trigger()
+        window.raw_modulation_signal_action.trigger()
 
         summary = {
             window.result_summary.item(row, 0).text(): window.result_summary.item(
@@ -754,12 +787,36 @@ def test_symbol_table_click_places_and_toggles_fsk_plot_markers(tmp_path) -> Non
             / (2.0 * np.pi)
         )
         display_result = window.session.carrier_corrected_result
+        measured_trace_hz, measured_time_s = _prepare_fsk_display_frequency(
+            display_result.iq,
+            sample_rate_hz=float(
+                display_result.metadata["analysis_sample_rate_hz"]
+            ),
+            symbol_rate_hz=window.session.signal.symbol_rate_hz,
+            gaussian_bt=window.session.signal.filter_parameter,
+            result_start_time_s=pattern_result.result_start_time_s,
+            result_stop_time_s=pattern_result.result_stop_time_s,
+        )
         assert modulation_y[0] * 1e3 == pytest.approx(
             float(
                 np.interp(
                     expected_time_s,
-                    display_result.time_s,
-                    display_result.instantaneous_frequency_hz,
+                    measured_time_s,
+                    measured_trace_hz,
+                )
+            )
+        )
+        window.raw_modulation_signal_action.trigger()
+        raw_modulation_point, _raw_modulation_label = (
+            window._symbol_marker_items["modulation"]
+        )
+        _raw_modulation_x, raw_modulation_y = raw_modulation_point.getData()
+        assert raw_modulation_y[0] * 1e3 == pytest.approx(
+            float(
+                np.interp(
+                    expected_time_s,
+                    result.time_s,
+                    result.instantaneous_frequency_hz,
                 )
             )
         )
@@ -1187,7 +1244,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_limit_result_check.setChecked(False)
         window._apply_result_summary_preset("diagnostics")
         window.symbol_display_action.setChecked(True)
-        window.raw_carrier_action.setChecked(True)
+        window.raw_modulation_signal_action.setChecked(True)
         window.constellation_density_action.setChecked(True)
         window.differential_iq_symbol_plot_action.setChecked(True)
         window.fsk_constellation_frequency_action.setChecked(True)
@@ -1214,7 +1271,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_limit_result_check.setChecked(True)
         window._apply_result_summary_preset("defaults")
         window.symbol_display_action.setChecked(False)
-        window.corrected_carrier_action.setChecked(True)
+        window.measured_modulation_signal_action.setChecked(True)
         window.constellation_flat_action.setChecked(True)
         window.physical_iq_symbol_plot_action.setChecked(True)
         window.fsk_phase_difference_action.setChecked(True)
@@ -1248,14 +1305,15 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window._selected_result_summary_ids == selected_summary_items
         assert set(saved["result_summary"]["visible_items"]) == selected_summary_items
         assert saved["display_config"]["show_symbol_points"] is True
-        assert saved["display_config"]["carrier_display"] == "Raw IQ"
+        assert saved["display_config"]["modulation_signal"] == "Raw IQ"
+        assert "carrier_display" not in saved["display_config"]
         assert saved["display_config"]["constellation_trace_mode"] == "Density"
         assert saved["display_config"]["psk_symbol_plot_mode"] == "Differential IQ"
         assert saved["display_config"]["fsk_symbol_plot_mode"] == (
             "Constellation Frequency"
         )
         assert window.symbol_display_action.isChecked()
-        assert window.raw_carrier_action.isChecked()
+        assert window.raw_modulation_signal_action.isChecked()
         assert window.constellation_density_action.isChecked()
         assert window.differential_iq_symbol_plot_action.isChecked()
         assert window.fsk_constellation_frequency_action.isChecked()
@@ -1265,6 +1323,15 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert new_item.textAlignment() == int(
             QtCore.Qt.AlignmentFlag.AlignCenter
         )
+
+        legacy = json.loads(json.dumps(saved))
+        legacy["display_config"].pop("modulation_signal")
+        legacy["display_config"]["carrier_display"] = "Carrier Corrected"
+        window._apply_meas_config_values(legacy)
+        assert window.measured_modulation_signal_action.isChecked()
+        legacy["display_config"]["carrier_display"] = "Raw IQ"
+        window._apply_meas_config_values(legacy)
+        assert window.raw_modulation_signal_action.isChecked()
 
         iq_path = tmp_path / "captures" / "sample.npz"
         pattern_path = tmp_path / "patterns" / "access.vsapattern.json"
