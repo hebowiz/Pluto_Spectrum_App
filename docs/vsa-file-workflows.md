@@ -389,6 +389,32 @@ new DSP result, so decoded symbols and EVM are unchanged. The selected mode is
 stored in manual and automatic startup Config. Older Config files without
 `display_config` default to Flat.
 
+### FSK Constellation Frequency (2026-08-20)
+
+`Display Config > FSK Symbol Plot` switches the FSK Symbol Plot between the
+existing `Phase Difference` plane and R&S-style `Constellation Frequency`.
+Constellation Frequency draws the demodulator's result-range
+`measured_symbols` as unconnected points on one vertical frequency axis. It does
+not reuse the Modulation trace markers: those markers are instantaneous
+frequency interpolated at recovered symbol centers, whereas Constellation
+Frequency represents the symbol-frequency statistic used by the demodulator.
+
+The vertical unit is kHz and its Y axis is linked to the Modulation plot. Their
+analysis-complete range is the same configured `+/-150 %` of FSK reference
+deviation, and frequency zoom/pan is shared while this result type is active.
+The horizontal axis carries no measurement value and is hidden. `Flat` draws
+every symbol at horizontal position zero. `Density` forms a one-dimensional frequency
+histogram, applies the common small Gaussian display kernel and Turbo color
+scale, and renders it as a narrow vertical density strip. Symbol-table marker
+selection identifies the corresponding point by symbol number and frequency.
+Because this horizontal coordinate carries no measurement information, its
+range is fixed to `-1..+1`; horizontal pan and zoom are disabled. Vertical
+interaction remains enabled and follows the linked Modulation frequency axis.
+
+The selected FSK result type is saved as
+`display_config.fsk_symbol_plot_mode` in measurement and startup configuration;
+old configurations default to `Phase Difference`.
+
 Measurement config files also persist the display-only `Show Symbol Points`,
 `Carrier Display`, Symbol Plot trace mode, and PSK absolute/differential IQ
 selection. Older files without these keys remain valid and use the normal

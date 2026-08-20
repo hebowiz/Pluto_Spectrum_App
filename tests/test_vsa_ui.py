@@ -17,6 +17,7 @@ from pluto_sa.vsa.ui.main_window import (
     _constellation_density_color_levels,
     _constellation_density_extent,
     _constellation_display_symbols,
+    _frequency_constellation_density,
     _physical_constellation_display_symbols,
     _decimation_indices_with_required_times,
     _fsk_phase_difference_symbols,
@@ -42,6 +43,16 @@ def test_peak_decimation_keeps_bucket_extrema() -> None:
     assert plotted_x.size <= 102
     assert -20.0 in plotted_y
     assert 30.0 in plotted_y
+
+
+def test_frequency_constellation_density_is_vertical_and_count_weighted() -> None:
+    values = np.asarray([-160.0] * 4 + [160.0] * 12)
+
+    density = _frequency_constellation_density(values, limit_khz=240.0)
+
+    assert density.shape == (96, 16)
+    assert np.count_nonzero(density) > 0
+    assert float(np.max(density[48:])) > float(np.max(density[:48]))
 
 
 def test_peak_decimation_includes_required_symbol_coordinates() -> None:
@@ -508,7 +519,9 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             for _name, plot in window._plot_widgets()
         )
         assert window.spectrum_plot.getAxis("left").labelText == "Magnitude (dBm)"
-        assert window.symbol_plot_dock.windowTitle() == "Symbol Plot"
+        assert window.symbol_plot_dock.windowTitle() == (
+            "Symbol Plot (Phase Difference)"
+        )
         phase_items = window.symbol_plot.listDataItems()
         assert len(phase_items) == 2
         assert phase_items[0].opts["symbolPen"].color().getRgb()[:3] == (
@@ -526,6 +539,43 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         decoded = window.session.pattern_result.decoded_symbols
         assert np.mean(phase_q[decoded == 1]) > 0.25
         assert np.mean(phase_q[decoded == 0]) < -0.25
+
+        window.fsk_constellation_frequency_action.trigger()
+        assert window.symbol_plot_dock.windowTitle() == (
+            "Symbol Plot (Constellation Frequency)"
+        )
+        assert not window.symbol_plot.getAxis("bottom").isVisible()
+        assert window.symbol_plot.getAxis("left").labelText == "Frequency (kHz)"
+        assert window.symbol_plot.getViewBox().state["aspectLocked"] is False
+        frequency_view_box = window.symbol_plot.getViewBox()
+        assert frequency_view_box.state["mouseEnabled"] == [False, True]
+        assert frequency_view_box.state["limits"]["xLimits"] == [-1.0, 1.0]
+        assert frequency_view_box.state["limits"]["xRange"] == [2.0, 2.0]
+        window.symbol_plot.setXRange(-0.25, 0.25, padding=0.0)
+        assert window.symbol_plot.viewRange()[0] == pytest.approx([-1.0, 1.0])
+        assert window.symbol_plot.viewRange()[1] == pytest.approx(
+            window.modulation_plot.viewRange()[1]
+        )
+        frequency_items = window.symbol_plot.listDataItems()
+        assert len(frequency_items) == 1
+        frequency_x, frequency_y = frequency_items[0].getData()
+        np.testing.assert_allclose(frequency_x, 0.0)
+        np.testing.assert_allclose(
+            frequency_y,
+            np.real(window.session.pattern_result.measured_symbols) / 1e3,
+        )
+        window.constellation_density_action.trigger()
+        assert window._constellation_density_item is not None
+        assert window._constellation_density_item.image.shape == (96, 16)
+        window.constellation_flat_action.trigger()
+        window.fsk_phase_difference_action.trigger()
+        assert window.symbol_plot.getAxis("bottom").isVisible()
+        assert window.symbol_plot.getViewBox().state["mouseEnabled"] == [True, True]
+        assert window.symbol_plot.getViewBox().state["limits"]["xLimits"] == [
+            None,
+            None,
+        ]
+        assert window.symbol_plot.viewRange()[1] == pytest.approx([-1.25, 1.25])
         assert window.centralWidget() is None
         assert not (
             window.dockOptions()
@@ -1140,6 +1190,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.raw_carrier_action.setChecked(True)
         window.constellation_density_action.setChecked(True)
         window.differential_iq_symbol_plot_action.setChecked(True)
+        window.fsk_constellation_frequency_action.setChecked(True)
         selected_summary_items = set(window._selected_result_summary_ids)
         saved = window._meas_config_values()
         assert "match_selection" not in saved["pattern_search"]
@@ -1166,6 +1217,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.corrected_carrier_action.setChecked(True)
         window.constellation_flat_action.setChecked(True)
         window.physical_iq_symbol_plot_action.setChecked(True)
+        window.fsk_phase_difference_action.setChecked(True)
         window._apply_meas_config_values(saved)
 
         assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
@@ -1199,10 +1251,14 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert saved["display_config"]["carrier_display"] == "Raw IQ"
         assert saved["display_config"]["constellation_trace_mode"] == "Density"
         assert saved["display_config"]["psk_symbol_plot_mode"] == "Differential IQ"
+        assert saved["display_config"]["fsk_symbol_plot_mode"] == (
+            "Constellation Frequency"
+        )
         assert window.symbol_display_action.isChecked()
         assert window.raw_carrier_action.isChecked()
         assert window.constellation_density_action.isChecked()
         assert window.differential_iq_symbol_plot_action.isChecked()
+        assert window.fsk_constellation_frequency_action.isChecked()
         assert window.pattern_symbol_table.item(0, 1).text() == "1"
         new_item = QtWidgets.QTableWidgetItem("1")
         window.pattern_symbol_table.setItem(0, 6, new_item)

@@ -103,7 +103,7 @@ R&SのResult Range表示に合わせ、Pattern Search成立時は次の表示規
 - FSK Instantaneous Frequencyの初期Y軸は`FSK Ref Deviation`の±150%とする。
 - Symbol Tableは`QTableWidget`を使い、Result Rangeの復調symbolを中央揃えの10列へ配置する。列headerは0～9、行headerはその行の先頭symbol indexとする。pattern範囲内でも、設定patternと実測decisionが一致したsymbolだけを緑背景にし、不一致symbolは通常背景のまま表示する。
 - Symbol Tableは`File > Export Symbol Table...`または右クリックから、schema/version付きUTF-8 JSON（`.vsasymbols.json`）へ全Result Rangeをexportできる。source、signal/mapping/bit-ordering、pattern variant、列定義、symbol/time/pattern statusを保持し、UIの2048 symbol表示上限には切り詰めない。
-- Symbol Tableの入力済みcellをクリックすると、同じResult Range symbolをIQ Power、Modulation、Symbol Plotへcyan diamondで連動表示する。選択は1 symbolのみで、同じcellの再クリックにより解除する。IQ Powerはsymbol番号/dBm、FSK Modulationはsymbol番号/frequency、PSK Modulationはsymbol番号/normalized amplitude/phase、FSK Symbol Plotはsymbol番号/normalized amplitude/phase、PSK Symbol Plotはsymbol番号/normalized amplitude/phase/point EVMをplot内labelへ表示する。FSK Modulationはtraceを復元symbol中心で補間した瞬時周波数を使用する一方、FSK Symbol Plotは復調用symbol区間平均から実際の位相差vectorを生成する。両測定を混同しないようSymbol Plot markerへFrequencyは表示しない。選択markerは通常のFlat Symbol Plot point（6 px）とは独立した18 pxとし、黒輪郭付きで強調する。新規解析開始時には選択をclearする。
+- Symbol Tableの入力済みcellをクリックすると、同じResult Range symbolをIQ Power、Modulation、Symbol Plotへcyan diamondで連動表示する。選択は1 symbolのみで、同じcellの再クリックにより解除する。IQ Powerはsymbol番号/dBm、FSK Modulationはsymbol番号/frequency、PSK Modulationはsymbol番号/normalized amplitude/phase、PSK Symbol Plotはsymbol番号/normalized amplitude/phase/point EVMをplot内labelへ表示する。FSK Modulationはtraceを復元symbol中心で補間した瞬時周波数を使用する。FSK Symbol PlotのPhase Differenceは復調用symbol区間平均から位相差vectorを生成し、瞬時値と混同しないようFrequencyを表示しない。Constellation Frequencyでは同じ復調symbol周波数を縦軸へ描き、markerにもFrequencyを表示する。選択markerは通常のFlat Symbol Plot point（6 px）とは独立した18 pxとし、黒輪郭付きで強調する。新規解析開始時には選択をclearする。
 
 Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK、PSK、QAMを想定し、Binary/Hexadecimal/Decimal表示切替を追加する。表示formatはdecision結果を変更せず、R&Sの`Symbol Format`と同様にview設定として扱う。
 
@@ -123,7 +123,7 @@ Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK
 - CFO、推定carrier frequency、linear driftをResult Summaryへ表示する。
 - `Display Config > Carrier Display`で`Raw IQ`と`Carrier Corrected`を切り替える。補正表示ではsample単位の位相補正後IQからInstantaneous FrequencyとResult Range Spectrumを再計算する。既定はCarrier Corrected。
 - `Display Config > Show Symbol Points`をONにすると、IQ PowerとModulationのtrace上へ復調symbol中心位置を明るい緑の点で重ねる。FSKではtime/frequency座標、PSKではIQ軌跡座標を使用する。既定はOFF。
-- measurement configの`display_config`には`Show Symbol Points`、`Carrier Display`、Symbol PlotのFlat/Density、PSKのAbsolute/Differential IQを保存し、config読込時と次回起動時に復元する。旧configに項目がない場合は従来の既定値を使う。
+- measurement configの`display_config`には`Show Symbol Points`、`Carrier Display`、Symbol PlotのFlat/Density、PSKのAbsolute/Differential IQ、FSKのPhase Difference/Constellation Frequencyを保存し、config読込時と次回起動時に復元する。旧configに項目がない場合は従来の既定値を使う。
 - IQ Power/Modulation上の`Pattern Start`ラベルはtraceとの重なりを抑えるため、縦markerの下端寄りに配置する。
 - Signal DescriptionのFSK系modulation名は`FSK`へ統一する。Gaussian shapingは独立したTransmit FilterとBTで定義し、symbol同期もmodulation名ではなくこのfilter設定を参照する。旧`2-FSK`/`GFSK` configは読込時に`FSK`へ移行する。
 - EVM系Result SummaryとSymbol Plotの単一symbol EVM markerは、linear percentageと振幅比`20 log10(EVM/100)`を`x.xx % / y.y dB`形式で併記する。
@@ -165,7 +165,7 @@ Modulation  | Symbol Plot | Symbol Table
 - Result SummaryとSymbol Tableのdata cell背景は交互色を使わず、単一色で統一する。
 - Result Summary項目は`pluto_sa/vsa/result_summary.py`の安定した内部ID、表示名、Common/PSK/FSK/Diagnostics分類、対応modulation family、実装状態、既定表示を唯一の定義元とする。Result Summary右クリックの階層check menuと`Meas Config > Result Summary`のcheck treeは同じ選択setを共有する。`Show All`、`Measurement Results Only`、`Diagnostics Only`、`Restore Defaults`を備え、選択IDは手動Configと終了時Configへ保存する。旧Configのsection欠落時は既定へ戻し、未知の将来IDは無視する。R&S項目の未実装分は`Not implemented`として表示するが選択不可とし、同期用`Sync EVM RMS`/`Frequency Fit RMS`を正式な`EVM RMS`/`Frequency Error RMS`と混同しない。
 - 既定表示はCommonのModulation/Power/Carrier Frequency Error、PSKのEVM RMS/Symbol Rate Error、FSKのFrequency Error RMS/FSK Meas Deviation/FSK Deviation Error/Carrier Frequency Drift、DiagnosticsのPattern Symbols Correct/IQ Correlation/Selected Result/Result Symbols/Pattern Errorとする。PowerはResult Range解析dataのdBmをlinear powerへ戻して平均する。FSK Deviation Errorは`measured-reference`をHz、Carrier Frequency DriftはHz/Symで表示する。Frequency Error RMSは現行FSK frequency-model residualをmeasured deviationで正規化した開発値であり、規格適合値ではない。
-- Symbol PlotはPSK時にConstellation、FSK時に1 symbol期間の位相差分をI/Q平面へ表示するDock Widget。
+- Symbol PlotはPSK時にConstellationを表示する。FSK時は1 symbol期間の位相差分をI/Q平面へ表示する既存方式と、復調器のsymbol-frequencyをR&S `Constellation Frequency`同様に縦一列へ表示する方式を切り替えるDock Widget。後者の縦軸はModulationと同じReference Deviationの±150%としFlat/Densityの両traceに対応する。
 - 初期geometryは各列幅と各行高を均等化する。ユーザーが移動・resizeした後はQt dock layoutに従う。
 
 ### Capture内の複数pattern

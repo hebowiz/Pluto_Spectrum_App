@@ -81,6 +81,8 @@ _SELECTED_MARKER_COLOR = (0, 255, 255)
 _CONSTELLATION_DENSITY_BINS = 96
 _CONSTELLATION_DENSITY_SIGMA_BINS = 0.7
 _CONSTELLATION_DENSITY_RED_LEVEL = 0.75
+_FREQUENCY_CONSTELLATION_X_LIMIT = 1.0
+_FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH = 0.22
 
 
 class _CenteredLabelAxisItem(pg.AxisItem):
@@ -367,6 +369,41 @@ def _constellation_density_extent(
     return max(float(minimum), component_peak * 1.02, np.finfo(np.float64).eps)
 
 
+def _frequency_constellation_density(
+    frequency_khz: np.ndarray,
+    *,
+    limit_khz: float,
+    frequency_bins: int = _CONSTELLATION_DENSITY_BINS,
+    horizontal_bins: int = 16,
+    smoothing_sigma_bins: float = _CONSTELLATION_DENSITY_SIGMA_BINS,
+) -> np.ndarray:
+    """Return an R&S-style vertical density image of symbol frequencies."""
+    values = np.asarray(frequency_khz, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    vertical_bins = max(1, int(frequency_bins))
+    width_bins = max(3, int(horizontal_bins))
+    density = np.zeros((vertical_bins, width_bins), dtype=np.float64)
+    if values.size == 0:
+        return density
+    limit = max(float(limit_khz), np.finfo(np.float64).eps)
+    histogram, _edges = np.histogram(
+        values,
+        bins=vertical_bins,
+        range=(-limit, limit),
+    )
+    density[:, width_bins // 2] = histogram
+    sigma = max(0.0, float(smoothing_sigma_bins))
+    if sigma > 0.0:
+        density = gaussian_filter(
+            density,
+            sigma=(sigma, sigma),
+            mode="constant",
+            cval=0.0,
+            truncate=3.0,
+        )
+    return np.log1p(density)
+
+
 def _fsk_phase_difference_symbols(
     iq: np.ndarray,
     time_s: np.ndarray,
@@ -599,6 +636,27 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._refresh_display_only
         )
         psk_symbol_plot_menu.addActions(psk_symbol_plot_group.actions())
+        fsk_symbol_plot_menu = display_menu.addMenu("FSK Symbol Plot")
+        self.fsk_phase_difference_action = QtGui.QAction(
+            "Phase Difference", self, checkable=True
+        )
+        self.fsk_constellation_frequency_action = QtGui.QAction(
+            "Constellation Frequency", self, checkable=True
+        )
+        fsk_symbol_plot_group = QtGui.QActionGroup(self)
+        fsk_symbol_plot_group.setExclusive(True)
+        fsk_symbol_plot_group.addAction(self.fsk_phase_difference_action)
+        fsk_symbol_plot_group.addAction(
+            self.fsk_constellation_frequency_action
+        )
+        self.fsk_phase_difference_action.setChecked(True)
+        self.fsk_phase_difference_action.triggered.connect(
+            self._refresh_fsk_symbol_plot_mode
+        )
+        self.fsk_constellation_frequency_action.triggered.connect(
+            self._refresh_fsk_symbol_plot_mode
+        )
+        fsk_symbol_plot_menu.addActions(fsk_symbol_plot_group.actions())
         self.reset_graph_scales_action = QtGui.QAction(
             "Reset Graph Scales", self
         )
@@ -1981,6 +2039,11 @@ class VSAWindow(QtWidgets.QMainWindow):
                     if self.differential_iq_symbol_plot_action.isChecked()
                     else "Physical IQ"
                 ),
+                "fsk_symbol_plot_mode": (
+                    "Constellation Frequency"
+                    if self.fsk_constellation_frequency_action.isChecked()
+                    else "Phase Difference"
+                ),
             },
         }
 
@@ -2248,6 +2311,23 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.differential_iq_symbol_plot_action.setChecked(
                 psk_symbol_plot_mode == "Differential IQ"
             )
+            fsk_symbol_plot_mode = str(
+                display_config.get("fsk_symbol_plot_mode", "Phase Difference")
+            )
+            if fsk_symbol_plot_mode not in {
+                "Phase Difference",
+                "Constellation Frequency",
+            }:
+                raise ValueError(
+                    "FSK symbol plot mode must be Phase Difference or "
+                    "Constellation Frequency"
+                )
+            self.fsk_phase_difference_action.setChecked(
+                fsk_symbol_plot_mode == "Phase Difference"
+            )
+            self.fsk_constellation_frequency_action.setChecked(
+                fsk_symbol_plot_mode == "Constellation Frequency"
+            )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"invalid measurement configuration: {error}") from error
         self._sync_signal_controls()
@@ -2299,6 +2379,28 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._update_summary()
         self._update_plots(reset_ranges=False)
 
+    def _refresh_fsk_symbol_plot_mode(self) -> None:
+        """Switch FSK result type and establish its result-specific scale."""
+        self._refresh_display_only()
+        signal = self.session.signal
+        if signal is None or signal.modulation.family is not ModulationFamily.FSK:
+            return
+        if self.fsk_constellation_frequency_action.isChecked():
+            # The linked Y axis already adopted the current Modulation range;
+            # changing result type must not discard a user's frequency zoom.
+            self.symbol_plot.setXRange(
+                -_FREQUENCY_CONSTELLATION_X_LIMIT,
+                _FREQUENCY_CONSTELLATION_X_LIMIT,
+                padding=0.0,
+            )
+        else:
+            self._set_fsk_symbol_plot_default_range(signal)
+        x_range, y_range = self.symbol_plot.viewRange()
+        self._analysis_plot_ranges["symbol_plot"] = (
+            list(x_range),
+            list(y_range),
+        )
+
     def _update_symbol_plot_dock_title(
         self, modulation: ModulationKind | None = None
     ) -> None:
@@ -2317,7 +2419,61 @@ class VSAWindow(QtWidgets.QMainWindow):
                 else "Physical"
             )
             title = f"Symbol Plot ({mode})"
+        elif resolved is not None and resolved.family is ModulationFamily.FSK:
+            mode = (
+                "Constellation Frequency"
+                if self.fsk_constellation_frequency_action.isChecked()
+                else "Phase Difference"
+            )
+            title = f"Symbol Plot ({mode})"
         self.symbol_plot_dock.setWindowTitle(title)
+
+    def _set_fsk_symbol_plot_default_range(
+        self, signal: SignalDescription
+    ) -> None:
+        if self.fsk_constellation_frequency_action.isChecked():
+            y_limit_khz = (
+                1.5 * float(signal.frequency_deviation_hz or 0.0) / 1e3
+            )
+            if y_limit_khz <= 0.0:
+                y_limit_khz = 1.0
+            self.symbol_plot.setXRange(
+                -_FREQUENCY_CONSTELLATION_X_LIMIT,
+                _FREQUENCY_CONSTELLATION_X_LIMIT,
+                padding=0.0,
+            )
+            self.symbol_plot.setYRange(
+                -y_limit_khz, y_limit_khz, padding=0.0
+            )
+            return
+        self.symbol_plot.setXRange(
+            -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+        )
+        self.symbol_plot.setYRange(
+            -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
+        )
+
+    def _set_frequency_constellation_x_lock(self, locked: bool) -> None:
+        """Keep the display-only horizontal coordinate fixed when requested."""
+        view_box = self.symbol_plot.getViewBox()
+        if locked:
+            x_limit = _FREQUENCY_CONSTELLATION_X_LIMIT
+            view_box.setMouseEnabled(x=False, y=True)
+            view_box.setLimits(
+                xMin=-x_limit,
+                xMax=x_limit,
+                minXRange=2.0 * x_limit,
+                maxXRange=2.0 * x_limit,
+            )
+            self.symbol_plot.setXRange(-x_limit, x_limit, padding=0.0)
+            return
+        view_box.setLimits(
+            xMin=None,
+            xMax=None,
+            minXRange=None,
+            maxXRange=None,
+        )
+        view_box.setMouseEnabled(x=True, y=True)
 
     def _plot_widgets(self) -> tuple[tuple[str, pg.PlotWidget], ...]:
         if not hasattr(self, "zero_span_plot"):
@@ -3170,9 +3326,22 @@ class VSAWindow(QtWidgets.QMainWindow):
                     f"Symbol: {symbol_index}\nFrequency: {frequency_khz:+.3f} kHz",
                 )
             if (
-                symbol_index < phase_difference.size
+                self.fsk_constellation_frequency_action.isChecked()
                 and symbol_index < symbol_frequency_hz.size
             ):
+                frequency_khz = float(symbol_frequency_hz[symbol_index]) / 1e3
+                self._add_selected_symbol_marker(
+                    "symbol_plot",
+                    self.symbol_plot,
+                    0.0,
+                    frequency_khz,
+                    (
+                        f"Symbol: {symbol_index}\n"
+                        f"Frequency: {frequency_khz:+.3f} kHz"
+                    ),
+                )
+                return
+            if symbol_index < phase_difference.size:
                 vector = complex(phase_difference[symbol_index])
                 amplitude = abs(vector)
                 phase_degree = float(np.degrees(np.angle(vector)))
@@ -3376,41 +3545,73 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.modulation_plot, fit_range=reset_ranges
             )
 
-            self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
-            self.symbol_plot.getAxis("bottom").enableAutoSIPrefix(False)
-            self.symbol_plot.setLabel("left", "Q")
-            self.symbol_plot.setLabel("bottom", "I")
-            self.symbol_plot.setAspectLocked(True, ratio=1.0)
             measured_frequency_hz = np.real(
                 self.session.pattern_result.measured_symbols
                 if self.session.pattern_result is not None
                 else display_result.measured_symbols
             )
-            phase_difference = _fsk_phase_difference_symbols(
-                display_result.iq,
-                display_result.time_s,
-                symbol_times_s,
-                measured_frequency_hz,
-                signal.symbol_rate_hz,
-            )
             marker_context["symbol_frequency_hz"] = measured_frequency_hz
-            marker_context["symbol_plot_vectors"] = phase_difference
-            phase_slice = _decimation_indices(
-                phase_difference.size, maximum=20_000
-            )
-            self._plot_symbol_distribution(
-                phase_difference[phase_slice],
-                density_limit=_IQ_PLANE_LIMIT,
-            )
-            self._plot_unit_circle(self.symbol_plot)
+            if self.fsk_constellation_frequency_action.isChecked():
+                self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
+                self.symbol_plot.setLabel("left", "Frequency (kHz)")
+                self.symbol_plot.setLabel("bottom", "")
+                self.symbol_plot.showAxis("bottom", False)
+                self.symbol_plot.setAspectLocked(False)
+                self.symbol_plot.setYLink(self.modulation_plot)
+                self._set_frequency_constellation_x_lock(True)
+                marker_context["symbol_plot_vectors"] = np.empty(
+                    0, dtype=np.complex128
+                )
+                y_limit_khz = (
+                    1.5 * float(signal.frequency_deviation_hz or 0.0) / 1e3
+                )
+                if y_limit_khz <= 0.0:
+                    finite_frequency = measured_frequency_hz[
+                        np.isfinite(measured_frequency_hz)
+                    ]
+                    y_limit_khz = max(
+                        1.0,
+                        1.05
+                        * (
+                            float(np.max(np.abs(finite_frequency))) / 1e3
+                            if finite_frequency.size
+                            else 0.0
+                        ),
+                    )
+                self._plot_frequency_constellation(
+                    measured_frequency_hz / 1e3,
+                    y_limit_khz=y_limit_khz,
+                )
+            else:
+                self.symbol_plot.setYLink(None)
+                self._set_frequency_constellation_x_lock(False)
+                self.symbol_plot.showAxis("bottom", True)
+                self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
+                self.symbol_plot.getAxis("bottom").enableAutoSIPrefix(False)
+                self.symbol_plot.setLabel("left", "Q")
+                self.symbol_plot.setLabel("bottom", "I")
+                self.symbol_plot.setAspectLocked(True, ratio=1.0)
+                phase_difference = _fsk_phase_difference_symbols(
+                    display_result.iq,
+                    display_result.time_s,
+                    symbol_times_s,
+                    measured_frequency_hz,
+                    signal.symbol_rate_hz,
+                )
+                marker_context["symbol_plot_vectors"] = phase_difference
+                phase_slice = _decimation_indices(
+                    phase_difference.size, maximum=20_000
+                )
+                self._plot_symbol_distribution(
+                    phase_difference[phase_slice],
+                    density_limit=_IQ_PLANE_LIMIT,
+                )
+                self._plot_unit_circle(self.symbol_plot)
             if reset_ranges:
-                self.symbol_plot.setXRange(
-                    -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
-                )
-                self.symbol_plot.setYRange(
-                    -_IQ_PLANE_LIMIT, _IQ_PLANE_LIMIT, padding=0.0
-                )
+                self._set_fsk_symbol_plot_default_range(signal)
         else:
+            self.symbol_plot.setYLink(None)
+            self._set_frequency_constellation_x_lock(False)
             self.modulation_plot.setDownsampling(auto=False)
             self.modulation_plot.setClipToView(False)
             self.modulation_plot.getAxis("left").enableAutoSIPrefix(False)
@@ -3516,6 +3717,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
             self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)
             self.symbol_plot.getAxis("bottom").enableAutoSIPrefix(False)
+            self.symbol_plot.showAxis("bottom", True)
             self.symbol_plot.setLabel("left", "Q")
             self.symbol_plot.setLabel("bottom", "I")
             self.symbol_plot.setAspectLocked(True, ratio=1.0)
@@ -3865,6 +4067,55 @@ class VSAWindow(QtWidgets.QMainWindow):
             np.sin(unit_angle),
             pen=pg.mkPen((120, 120, 120, 110), width=1),
         )
+
+    def _plot_frequency_constellation(
+        self,
+        frequency_khz: np.ndarray,
+        *,
+        y_limit_khz: float,
+    ) -> None:
+        """Draw symbol-decision frequencies on a single vertical axis."""
+        values = np.asarray(frequency_khz, dtype=np.float64)
+        values = values[np.isfinite(values)]
+        horizontal = np.zeros(values.size, dtype=np.float64)
+        if not self.constellation_density_action.isChecked():
+            self.symbol_plot.plot(
+                horizontal,
+                values,
+                pen=None,
+                symbol="o",
+                symbolSize=_SYMBOL_PLOT_FLAT_SIZE,
+                symbolBrush=pg.mkBrush(_TRACE_COLOR),
+                symbolPen=pg.mkPen(_TRACE_COLOR),
+            )
+            return
+
+        density = _frequency_constellation_density(
+            values,
+            limit_khz=y_limit_khz,
+        )
+        density_item = pg.ImageItem(axisOrder="row-major")
+        lookup_table = np.array(
+            pg.colormap.get("turbo").getLookupTable(nPts=256, alpha=True),
+            copy=True,
+        )
+        lookup_table[0, 3] = 0
+        density_item.setLookupTable(lookup_table)
+        density_item.setImage(
+            density,
+            levels=_constellation_density_color_levels(density),
+        )
+        density_item.setRect(
+            QtCore.QRectF(
+                -_FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH,
+                -float(y_limit_khz),
+                2.0 * _FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH,
+                2.0 * float(y_limit_khz),
+            )
+        )
+        self.symbol_plot.addItem(density_item)
+        self._constellation_density_item = density_item
+        self.symbol_plot.plot(horizontal, values, pen=None, symbol=None)
 
     def _plot_symbol_distribution(
         self,
