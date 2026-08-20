@@ -65,7 +65,6 @@ _MODULATIONS = (
     ModulationKind.DPSK8,
 )
 _MAX_DISPLAY_POINTS = 30_000
-_MAX_TRACE_SYMBOL_POINTS = 2_000
 _MAX_IQ_TRAJECTORY_POINTS = 10_000
 _MAX_SYMBOL_TABLE_DISPLAY_SYMBOLS = 1_000
 _STARTUP_CONFIG_KEY = "startup/measurement_config"
@@ -153,8 +152,9 @@ def _peak_decimate_xy(
     y_values: np.ndarray,
     *,
     maximum: int = _MAX_DISPLAY_POINTS,
+    required_x_values: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Bound plot data while retaining each time bucket's min/max excursion."""
+    """Bound plot data while retaining extrema and requested X coordinates."""
     x = np.asarray(x_values)
     y = np.asarray(y_values)
     count = min(x.size, y.size)
@@ -177,7 +177,54 @@ def _peak_decimate_xy(
             dtype=np.int64,
         )
         indices = np.concatenate((indices, np.sort(tail_indices)))
-    return x[indices], y[indices]
+    plotted_x = x[indices]
+    plotted_y = y[indices]
+    if required_x_values is None or count == 0:
+        return plotted_x, plotted_y
+
+    required_x = np.asarray(required_x_values, dtype=np.float64)
+    required_x = required_x[np.isfinite(required_x)]
+    if required_x.size == 0:
+        return plotted_x, plotted_y
+    lower = min(float(x[0]), float(x[count - 1]))
+    upper = max(float(x[0]), float(x[count - 1]))
+    required_x = required_x[(required_x >= lower) & (required_x <= upper)]
+    if required_x.size == 0:
+        return plotted_x, plotted_y
+    required_y = np.interp(required_x, x[:count], y[:count])
+    combined_x = np.concatenate((plotted_x, required_x))
+    combined_y = np.concatenate((plotted_y, required_y))
+    order = np.argsort(combined_x, kind="stable")
+    return combined_x[order], combined_y[order]
+
+
+def _decimation_indices_with_required_times(
+    time_s: np.ndarray,
+    required_time_s: np.ndarray,
+    *,
+    maximum: int,
+) -> np.ndarray:
+    """Decimate a trajectory while retaining both samples around each symbol."""
+    times = np.asarray(time_s, dtype=np.float64)
+    count = times.size
+    if count == 0:
+        return np.empty(0, dtype=np.int64)
+    step = max(1, int(np.ceil(count / int(maximum))))
+    base = np.arange(0, count, step, dtype=np.int64)
+    if base[-1] != count - 1:
+        base = np.append(base, count - 1)
+
+    required = np.asarray(required_time_s, dtype=np.float64)
+    required = required[np.isfinite(required)]
+    if required.size == 0:
+        return base
+    required = required[(required >= times[0]) & (required <= times[-1])]
+    if required.size == 0:
+        return base
+    upper = np.searchsorted(times, required, side="left")
+    upper = np.clip(upper, 0, count - 1)
+    lower = np.clip(upper - 1, 0, count - 1)
+    return np.unique(np.concatenate((base, lower, upper)))
 
 
 def _prepare_psk_display_waveform(
@@ -3213,16 +3260,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         display_result = (
             self.session.carrier_corrected_result if show_corrected else result
         )
-        capture_time_ms, capture_power_dbm = _peak_decimate_xy(
-            result.time_s * 1e3,
-            result.power_dbm,
-        )
-        self.zero_span_plot.clear()
-        self.zero_span_plot.plot(
-            capture_time_ms,
-            capture_power_dbm,
-            pen=pg.mkPen(_TRACE_COLOR, width=1),
-        )
         symbol_times_s = (
             self.session.pattern_result.symbol_time_s
             if self.session.pattern_result is not None
@@ -3232,6 +3269,22 @@ class VSAWindow(QtWidgets.QMainWindow):
             np.interp(symbol_times_s, result.time_s, result.power_dbm)
             if symbol_times_s.size
             else np.empty(0, dtype=np.float64)
+        )
+        required_symbol_times_ms = (
+            symbol_times_s * 1e3
+            if self.symbol_display_action.isChecked()
+            else None
+        )
+        capture_time_ms, capture_power_dbm = _peak_decimate_xy(
+            result.time_s * 1e3,
+            result.power_dbm,
+            required_x_values=required_symbol_times_ms,
+        )
+        self.zero_span_plot.clear()
+        self.zero_span_plot.plot(
+            capture_time_ms,
+            capture_power_dbm,
+            pen=pg.mkPen(_TRACE_COLOR, width=1),
         )
         marker_context: dict[str, object] = {
             "symbol_times_s": symbol_times_s,
@@ -3282,6 +3335,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             frequency_time_ms, display_frequency_khz = _peak_decimate_xy(
                 display_result.time_s * 1e3,
                 display_result.instantaneous_frequency_hz / 1e3,
+                required_x_values=required_symbol_times_ms,
             )
             self.modulation_plot.plot(
                 frequency_time_ms,
@@ -3412,12 +3466,20 @@ class VSAWindow(QtWidgets.QMainWindow):
                     & (processed_time_s < pattern_result.result_stop_time_s)
                 )
                 trajectory_iq = processed_iq[in_result_range]
+                trajectory_time_s = processed_time_s[in_result_range]
             else:
                 trajectory_iq = processed_iq
-            trajectory_slice = _decimation_indices(
-                trajectory_iq.size, maximum=_MAX_IQ_TRAJECTORY_POINTS
+                trajectory_time_s = processed_time_s
+            trajectory_indices = _decimation_indices_with_required_times(
+                trajectory_time_s,
+                (
+                    symbol_times_s
+                    if self.symbol_display_action.isChecked()
+                    else np.empty(0, dtype=np.float64)
+                ),
+                maximum=_MAX_IQ_TRAJECTORY_POINTS,
             )
-            trajectory_iq = trajectory_iq[trajectory_slice]
+            trajectory_iq = trajectory_iq[trajectory_indices]
             self.modulation_plot.plot(
                 trajectory_iq.real,
                 trajectory_iq.imag,
@@ -3785,12 +3847,9 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _plot_symbol_points(
         plot: pg.PlotWidget, x_values: np.ndarray, y_values: np.ndarray
     ) -> None:
-        selection = _decimation_indices(
-            len(x_values), maximum=_MAX_TRACE_SYMBOL_POINTS
-        )
         plot.plot(
-            np.asarray(x_values)[selection],
-            np.asarray(y_values)[selection],
+            np.asarray(x_values),
+            np.asarray(y_values),
             pen=None,
             symbol="o",
             symbolSize=_TRACE_SYMBOL_SIZE,

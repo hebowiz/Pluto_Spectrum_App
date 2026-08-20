@@ -18,6 +18,7 @@ from pluto_sa.vsa.ui.main_window import (
     _constellation_density_extent,
     _constellation_display_symbols,
     _physical_constellation_display_symbols,
+    _decimation_indices_with_required_times,
     _fsk_phase_difference_symbols,
     _format_evm,
     _peak_decimate_xy,
@@ -41,6 +42,51 @@ def test_peak_decimation_keeps_bucket_extrema() -> None:
     assert plotted_x.size <= 102
     assert -20.0 in plotted_y
     assert 30.0 in plotted_y
+
+
+def test_peak_decimation_includes_required_symbol_coordinates() -> None:
+    x = np.arange(1000, dtype=np.float64)
+    y = np.sin(x / 13.0)
+    required_x = np.asarray([123.25, 456.75, 789.5])
+
+    plotted_x, plotted_y = _peak_decimate_xy(
+        x,
+        y,
+        maximum=100,
+        required_x_values=required_x,
+    )
+
+    for value in required_x:
+        matches = np.flatnonzero(plotted_x == value)
+        assert matches.size == 1
+        assert plotted_y[matches[0]] == pytest.approx(np.interp(value, x, y))
+
+
+def test_trajectory_decimation_brackets_every_required_symbol_time() -> None:
+    time_s = np.arange(100, dtype=np.float64)
+    required_time_s = np.asarray([12.25, 55.75])
+
+    indices = _decimation_indices_with_required_times(
+        time_s,
+        required_time_s,
+        maximum=10,
+    )
+
+    assert {12, 13, 55, 56}.issubset(set(indices))
+
+
+def test_trace_symbol_plot_keeps_all_symbols_above_previous_limit() -> None:
+    pg.mkQApp("VSA symbol point decimation test")
+    plot = pg.PlotWidget()
+    x = np.arange(2747, dtype=np.float64)
+    y = np.sin(x)
+    try:
+        VSAWindow._plot_symbol_points(plot, x, y)
+        plotted_x, plotted_y = plot.listDataItems()[-1].getData()
+        assert np.asarray(plotted_x) == pytest.approx(x)
+        assert np.asarray(plotted_y) == pytest.approx(y)
+    finally:
+        plot.close()
 
 
 def test_evm_formatter_shows_percent_and_amplitude_ratio_db() -> None:
