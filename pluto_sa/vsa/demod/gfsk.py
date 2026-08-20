@@ -270,14 +270,20 @@ def _expected_fsk_symbol_levels(
 
 
 def _expected_fsk_sample_levels(
-    bits: np.ndarray, samples_per_symbol: int, gaussian_bt: float | None
+    bits: np.ndarray,
+    samples_per_symbol: int,
+    gaussian_bt: float | None,
+    *,
+    apply_measurement_filter: bool,
 ) -> np.ndarray:
     """Reconstruct the reference instantaneous-frequency waveform."""
     return fsk_reference_frequency_levels(
         bits,
         samples_per_symbol=int(samples_per_symbol),
         transmit_gaussian_bt=gaussian_bt,
-        measurement_gaussian_bt=gaussian_bt,
+        measurement_gaussian_bt=(
+            gaussian_bt if apply_measurement_filter else None
+        ),
     )
 
 
@@ -317,6 +323,7 @@ def _fit_frequency_distortion_model(
     samples_per_symbol: int,
     pattern_symbols: int,
     gaussian_bt: float | None,
+    apply_measurement_filter: bool,
     anchored_cfo_hz: float | None = None,
 ) -> _FrequencyModelFit:
     """Jointly fit deviation, CFO, linear drift, and fractional timing.
@@ -328,7 +335,10 @@ def _fit_frequency_distortion_model(
     """
     measured = np.asarray(measured_frequency_hz, dtype=np.float64)
     reference = _expected_fsk_sample_levels(
-        bits, int(samples_per_symbol), gaussian_bt
+        bits,
+        int(samples_per_symbol),
+        gaussian_bt,
+        apply_measurement_filter=apply_measurement_filter,
     )
     count = min(measured.size, reference.size)
     if count < max(16, 4 * int(samples_per_symbol)):
@@ -489,6 +499,7 @@ def demodulate_gfsk(
     analysis_samples_per_symbol: int = 8,
     minimum_correlation: float = 0.65,
     gaussian_bt: float | None = 0.5,
+    apply_measurement_filter: bool = True,
     maximum_symbols: int | None = None,
     match_selection: str = "First",
     match_index: int = 1,
@@ -537,7 +548,7 @@ def demodulate_gfsk(
     )
     raw_frequency_hz = _instantaneous_frequency(resampled, analysis_rate_hz)
     frequency_hz = raw_frequency_hz
-    if gaussian_bt is not None:
+    if apply_measurement_filter and gaussian_bt is not None:
         frequency_hz = apply_gaussian_frequency_filter(
             frequency_hz,
             samples_per_symbol=int(analysis_samples_per_symbol),
@@ -804,6 +815,7 @@ def demodulate_gfsk(
             samples_per_symbol=int(analysis_samples_per_symbol),
             pattern_symbols=pattern.size,
             gaussian_bt=gaussian_bt,
+            apply_measurement_filter=apply_measurement_filter,
             anchored_cfo_hz=None,
         )
         if _timing_fit_is_credible(
@@ -876,6 +888,7 @@ def demodulate_gfsk(
             samples_per_symbol=int(analysis_samples_per_symbol),
             pattern_symbols=pattern.size,
             gaussian_bt=gaussian_bt,
+            apply_measurement_filter=apply_measurement_filter,
             anchored_cfo_hz=pattern_cfo_hz,
         )
         signed_deviation = model_fit.signed_deviation_hz

@@ -217,6 +217,15 @@ applies the same-BT Gaussian Auto Measurement Filter to instantaneous
 frequency. This display-only selection does not rerun decisions or change EVM.
 Spectrum always uses the carrier-uncorrected Result Range IQ.
 
+Demodulation `Measurement Filter` currently provides `Auto` and `None`.
+`Auto` selects the modulation-specific filter from the Transmit Filter
+definition: same-BT Gaussian filtering of FSK instantaneous frequency, or the
+same-alpha SRRC filter for PSK IQ. `None` bypasses this additional filter in
+both DSP analysis and the `Measured` modulation trace. Carrier correction
+remains active in the `Measured` display path, and Analysis Center/Bandwidth
+remains a separate pre-demodulation IQ channel filter. Configurations saved
+before this field was introduced load as `Auto`.
+
 For PSK, the IQ trajectory uses the selected Result Range when Pattern Search
 succeeds. The continuous waveform is cropped to Result Range; without a
 pattern result the full waveform is used. Its scale is normalized by the RMS

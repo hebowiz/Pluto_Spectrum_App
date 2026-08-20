@@ -260,12 +260,18 @@ class BitOrdering(str, Enum):
     LSB = "LSB"
 
 
+class MeasurementFilterMode(str, Enum):
+    NONE = "None"
+    AUTO = "Auto"
+
+
 @dataclass(frozen=True)
 class DemodulationSettings:
     """Implemented subset of R&S VSA ``Demodulation`` settings."""
 
     coarse_synchronization: SynchronizationSource = SynchronizationSource.AUTO
     fine_synchronization: SynchronizationSource = SynchronizationSource.AUTO
+    measurement_filter: MeasurementFilterMode = MeasurementFilterMode.AUTO
     bit_ordering: BitOrdering = BitOrdering.MSB
     compensate_carrier_frequency_drift: bool = False
     compensate_fsk_deviation_error: bool = True
@@ -529,6 +535,7 @@ def prepare_psk_iq(
     filter_parameter: float | None,
     samples_per_symbol: int = 8,
     prefilter_carrier_frequency_offset_hz: float = 0.0,
+    apply_measurement_filter: bool = True,
 ) -> tuple[np.ndarray, float]:
     """Resample PSK IQ and apply carrier centering before the receive filter."""
     waveform, analysis_rate_hz = _resample_for_symbols(
@@ -543,7 +550,7 @@ def prepare_psk_iq(
     if coarse_cfo_hz != 0.0:
         time_s = np.arange(waveform.size, dtype=np.float64) / analysis_rate_hz
         waveform = waveform * np.exp(-2j * np.pi * coarse_cfo_hz * time_s)
-    if tx_filter.lower() in {
+    if apply_measurement_filter and tx_filter.lower() in {
         "root raised cosine",
         "root-raised-cosine",
         "rrc",
@@ -1058,6 +1065,10 @@ class PatternAnalyzer:
             symbol_rate_hz=signal.symbol_rate_hz,
             minimum_correlation=search.effective_correlation_threshold,
             gaussian_bt=gaussian_bt,
+            apply_measurement_filter=(
+                demodulation_settings.measurement_filter
+                is MeasurementFilterMode.AUTO
+            ),
             maximum_symbols=maximum_symbols,
             match_selection=search.match_selection.value,
             match_index=search.match_index,
@@ -1183,7 +1194,11 @@ class PatternAnalyzer:
                     demodulation.estimation_sample_count
                 ),
                 "fsk_measurement_filter": (
-                    "Gaussian Auto" if gaussian_bt is not None else "None"
+                    "Gaussian Auto"
+                    if gaussian_bt is not None
+                    and demodulation_settings.measurement_filter
+                    is MeasurementFilterMode.AUTO
+                    else "None"
                 ),
                 "frequency_deviation_error_percent": (
                     100.0
@@ -1286,13 +1301,19 @@ class PatternAnalyzer:
             prefilter_carrier_frequency_offset_hz=(
                 prefilter_carrier_frequency_offset_hz
             ),
+            apply_measurement_filter=(
+                demodulation.measurement_filter is MeasurementFilterMode.AUTO
+            ),
         )
-        matched_filter_applied = signal.tx_filter.lower() in {
-            "root raised cosine",
-            "root-raised-cosine",
-            "rrc",
-            "srrc",
-        }
+        matched_filter_applied = (
+            demodulation.measurement_filter is MeasurementFilterMode.AUTO
+            and signal.tx_filter.lower() in {
+                "root raised cosine",
+                "root-raised-cosine",
+                "rrc",
+                "srrc",
+            }
+        )
         alphabet = _constellation(signal.modulation, signal.symbol_mapping)
         expected = alphabet[np.asarray(pattern.symbols, dtype=np.int16)]
         candidates: list[
@@ -1898,6 +1919,7 @@ class PatternAnalyzer:
                 "result_offset_symbols": result_range.offset_symbols,
                 "differential": signal.modulation.differential,
                 "matched_filter_applied": matched_filter_applied,
+                "measurement_filter": demodulation.measurement_filter.value,
                 "prefilter_carrier_frequency_offset_hz": (
                     prefilter_carrier_frequency_offset_hz
                 ),

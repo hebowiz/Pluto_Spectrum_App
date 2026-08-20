@@ -12,6 +12,7 @@ from pluto_sa.vsa.pattern import (
     IQPowerTriggerSettings,
     KnownPattern,
     MatchSelectionPolicy,
+    MeasurementFilterMode,
     PatternAnalyzer,
     PatternSearchMode,
     PatternSearchSettings,
@@ -34,6 +35,16 @@ from pluto_sa.vsa.demod.gfsk import fsk_reference_frequency_levels
 def _pattern_from_generated(recording, start: int, length: int) -> KnownPattern:
     symbols = np.asarray(recording.metadata["generated_symbols"])
     return KnownPattern(tuple(int(value) for value in symbols[start : start + length]))
+
+
+def test_measurement_filter_defaults_to_auto_and_accepts_none() -> None:
+    assert DemodulationSettings().measurement_filter is MeasurementFilterMode.AUTO
+    assert (
+        DemodulationSettings(
+            measurement_filter=MeasurementFilterMode.NONE
+        ).measurement_filter
+        is MeasurementFilterMode.NONE
+    )
 
 
 def test_iq_power_trigger_detects_all_bursts_with_dropout_and_holdoff():
@@ -290,6 +301,31 @@ def test_fsk_multiple_matches_use_one_physical_candidate_per_packet():
     assert result.metadata["selected_match_index"] == 2
     assert result.metadata["eligible_match_count"] == 2
     assert result.metadata["detected_match_count"] == 2
+
+
+def test_fsk_measurement_filter_none_preserves_tx_reference_shaping() -> None:
+    recording, signal = GeneratedIQSource.fsk(
+        symbol_count=180,
+        gaussian_bt=0.5,
+        seed=322,
+    )
+    expected = np.asarray(recording.metadata["generated_symbols"])
+    pattern = _pattern_from_generated(recording, 30, 32)
+
+    result = PatternAnalyzer().search(
+        recording,
+        signal,
+        PatternSearchSettings(pattern=pattern, mode=PatternSearchMode.ON),
+        ResultRangeSettings(result_length=100),
+        DemodulationSettings(
+            measurement_filter=MeasurementFilterMode.NONE
+        ),
+    )
+
+    assert result.metadata["gaussian_bt"] == pytest.approx(0.5)
+    assert result.metadata["fsk_measurement_filter"] == "None"
+    assert result.pattern_symbol_errors == 0
+    np.testing.assert_array_equal(result.decoded_symbols, expected[30:130])
 
 
 def test_fsk_natural_mapping_rejects_frequency_inverted_pattern():
@@ -565,6 +601,29 @@ def test_qpsk_pattern_search_handles_carrier_phase_and_frequency_offset():
         frequency_offset_hz, abs=150.0
     )
     np.testing.assert_array_equal(result.decoded_symbols, expected[35:125])
+
+
+def test_psk_measurement_filter_none_bypasses_srrc() -> None:
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.QPSK,
+        symbol_count=180,
+        seed=20,
+    )
+    pattern = _pattern_from_generated(recording, 35, 24)
+
+    result = PatternAnalyzer().search(
+        recording,
+        signal,
+        PatternSearchSettings(pattern=pattern, mode=PatternSearchMode.ON),
+        ResultRangeSettings(result_length=80),
+        DemodulationSettings(
+            measurement_filter=MeasurementFilterMode.NONE
+        ),
+    )
+
+    assert result.metadata["measurement_filter"] == "None"
+    assert result.metadata["matched_filter_applied"] is False
+    assert result.pattern_symbol_errors == 0
 
 
 def test_pi4_dqpsk_pattern_search_and_lsb_symbol_bits():

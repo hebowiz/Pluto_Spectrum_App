@@ -1248,6 +1248,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.constellation_density_action.setChecked(True)
         window.differential_iq_symbol_plot_action.setChecked(True)
         window.fsk_constellation_frequency_action.setChecked(True)
+        window.measurement_filter_combo.setCurrentText("None")
         selected_summary_items = set(window._selected_result_summary_ids)
         saved = window._meas_config_values()
         assert "match_selection" not in saved["pattern_search"]
@@ -1275,6 +1276,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.constellation_flat_action.setChecked(True)
         window.physical_iq_symbol_plot_action.setChecked(True)
         window.fsk_phase_difference_action.setChecked(True)
+        window.measurement_filter_combo.setCurrentText("Auto")
         window._apply_meas_config_values(saved)
 
         assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
@@ -1283,6 +1285,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.result_length_spin.value() == 73
         assert window.exclude_incomplete_result_check.isChecked()
         assert window.bit_order_combo.currentText() == "LSB"
+        assert window.measurement_filter_combo.currentText() == "None"
         assert window.capture_oversampling_combo.currentData() == 8
         assert window.capture_sample_rate_label.text() == "8.000 MS/s"
         assert window.capture_samples_label.text() == "24,000 samples"
@@ -1325,6 +1328,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         )
 
         legacy = json.loads(json.dumps(saved))
+        legacy["demodulation"].pop("measurement_filter")
+        window._apply_meas_config_values(legacy)
+        assert window.measurement_filter_combo.currentText() == "Auto"
         legacy["display_config"].pop("modulation_signal")
         legacy["display_config"]["carrier_display"] = "Carrier Corrected"
         window._apply_meas_config_values(legacy)

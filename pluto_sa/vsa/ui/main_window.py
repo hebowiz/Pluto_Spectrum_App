@@ -27,6 +27,7 @@ from pluto_sa.vsa.pattern import (
     IQPowerTriggerSettings,
     KnownPattern,
     MatchSelectionPolicy,
+    MeasurementFilterMode,
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeAlignment,
@@ -237,6 +238,7 @@ def _prepare_psk_display_waveform(
     symbol_rate_hz: float,
     tx_filter: str,
     filter_parameter: float | None,
+    apply_measurement_filter: bool = True,
     result_start_time_s: float | None = None,
     result_stop_time_s: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -263,6 +265,7 @@ def _prepare_psk_display_waveform(
         symbol_rate_hz=symbol_rate_hz,
         tx_filter=tx_filter,
         filter_parameter=filter_parameter,
+        apply_measurement_filter=apply_measurement_filter,
     )
     time_offset_s = start_sample / float(sample_rate_hz)
     time_s = time_offset_s + np.arange(prepared.size, dtype=np.float64) / float(
@@ -1332,6 +1335,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.coarse_sync_combo.addItems(("Auto", "Detected Data", "Pattern"))
         self.fine_sync_combo = QtWidgets.QComboBox()
         self.fine_sync_combo.addItems(("Auto", "Detected Data", "Pattern"))
+        self.measurement_filter_combo = QtWidgets.QComboBox()
+        self.measurement_filter_combo.addItems(("Auto", "None"))
         self.bit_order_combo = QtWidgets.QComboBox()
         self.bit_order_combo.addItems(("MSB", "LSB"))
         self.compensate_drift_check = QtWidgets.QCheckBox("Carrier Frequency Drift")
@@ -1350,6 +1355,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             control.setToolTip("R&S-compatible setting contract; DSP connection is planned.")
         demod_form.addRow("Coarse Synchronization", self.coarse_sync_combo)
         demod_form.addRow("Fine Synchronization", self.fine_sync_combo)
+        demod_form.addRow("Measurement Filter", self.measurement_filter_combo)
         demod_form.addRow("Bit Ordering", self.bit_order_combo)
         demod_form.addRow("Compensate for", self.compensate_drift_check)
         demod_form.addRow("", self.compensate_deviation_check)
@@ -2055,6 +2061,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             "demodulation": {
                 "coarse_synchronization": self.coarse_sync_combo.currentText(),
                 "fine_synchronization": self.fine_sync_combo.currentText(),
+                "measurement_filter": self.measurement_filter_combo.currentText(),
                 "bit_ordering": self.bit_order_combo.currentText(),
                 "compensate_carrier_frequency_drift": self.compensate_drift_check.isChecked(),
                 "compensate_fsk_deviation_error": self.compensate_deviation_check.isChecked(),
@@ -2286,6 +2293,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             self._set_combo_text(self.coarse_sync_combo, demodulation["coarse_synchronization"], "coarse synchronization")
             self._set_combo_text(self.fine_sync_combo, demodulation["fine_synchronization"], "fine synchronization")
+            self._set_combo_text(
+                self.measurement_filter_combo,
+                demodulation.get("measurement_filter", "Auto"),
+                "measurement filter",
+            )
             self._set_combo_text(self.bit_order_combo, demodulation["bit_ordering"], "bit ordering")
             self.compensate_drift_check.setChecked(bool(demodulation["compensate_carrier_frequency_drift"]))
             self.compensate_deviation_check.setChecked(bool(demodulation["compensate_fsk_deviation_error"]))
@@ -2938,6 +2950,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             fine_synchronization=SynchronizationSource(
                 self.fine_sync_combo.currentText()
             ),
+            measurement_filter=MeasurementFilterMode(
+                self.measurement_filter_combo.currentText()
+            ),
             bit_ordering=BitOrdering(self.bit_order_combo.currentText()),
             compensate_carrier_frequency_drift=(
                 self.compensate_drift_check.isChecked()
@@ -3570,7 +3585,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                 )
                 gaussian_bt = (
                     signal.filter_parameter
-                    if signal.tx_filter.lower() == "gaussian"
+                    if self.session.demodulation.measurement_filter
+                    is MeasurementFilterMode.AUTO
+                    and signal.tx_filter.lower() == "gaussian"
                     else None
                 )
                 modulation_frequency_trace_hz, modulation_time_s = (
@@ -3727,6 +3744,10 @@ class VSAWindow(QtWidgets.QMainWindow):
                     symbol_rate_hz=signal.symbol_rate_hz,
                     tx_filter=signal.tx_filter,
                     filter_parameter=signal.filter_parameter,
+                    apply_measurement_filter=(
+                        self.session.demodulation.measurement_filter
+                        is MeasurementFilterMode.AUTO
+                    ),
                     result_start_time_s=(
                         pattern_result.result_start_time_s
                         if pattern_result is not None
