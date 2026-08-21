@@ -819,7 +819,11 @@ def test_symbol_table_click_places_and_toggles_fsk_plot_markers(tmp_path) -> Non
         pattern_result = window.session.pattern_result
         expected_time_s = float(pattern_result.symbol_time_s[symbol_index])
         expected_power = float(
-            np.interp(expected_time_s, result.time_s, result.power_dbm)
+            np.interp(
+                expected_time_s,
+                window.session.capture_time_s,
+                window.session.capture_power_dbm,
+            )
         )
         assert marker_x[0] == pytest.approx(expected_time_s * 1e3)
         assert marker_y[0] == pytest.approx(expected_power)

@@ -86,7 +86,12 @@ def test_load_iq_tar_complex_float32_and_metadata(tmp_path: Path) -> None:
     assert recording.center_frequency_hz == 2_441_000_000.0
     assert recording.usable_bandwidth_hz == recording.sample_rate_hz
     assert recording.source == "R&S iq-tar: capture.iq.tar"
-    assert recording.amplitude_calibrated is False
+    assert recording.amplitude_calibrated is True
+    assert recording.calibration_offset_db == pytest.approx(
+        10.0 * np.log10(1000.0 / 50.0)
+    )
+    assert recording.metadata["power_impedance_ohm"] == 50.0
+    assert recording.metadata["dc_removal_recommended"] is False
     assert recording.metadata["iq_tar_scaling_factor_v"] == 0.5
     assert recording.metadata["iq_tar_selected_channel_name"] == "IQ Analyzer"
 

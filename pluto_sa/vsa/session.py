@@ -7,7 +7,7 @@ from time import perf_counter
 
 import numpy as np
 
-from pluto_sa.vsa.analysis import VSAAnalyzer
+from pluto_sa.vsa.analysis import VSAAnalyzer, capture_power_traces
 from pluto_sa.vsa.channel import extract_analysis_channel
 from pluto_sa.vsa.model import (
     IQRecording,
@@ -47,6 +47,15 @@ class VSASession:
     carrier_corrected_pattern_range_result: VSAAnalysisResult | None = None
     pattern_error: str | None = None
     analysis_timings_ms: dict[str, float] = field(default_factory=dict)
+    capture_time_s: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64)
+    )
+    capture_power_dbfs: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64)
+    )
+    capture_power_dbm: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.float64)
+    )
     revision: int = 0
     _analyzer: VSAAnalyzer = field(default_factory=VSAAnalyzer, repr=False)
     _pattern_analyzer: PatternAnalyzer = field(default_factory=PatternAnalyzer, repr=False)
@@ -78,6 +87,9 @@ class VSASession:
         )
         self.pattern_error = completed.pattern_error
         self.analysis_timings_ms = dict(completed.analysis_timings_ms)
+        self.capture_time_s = completed.capture_time_s
+        self.capture_power_dbfs = completed.capture_power_dbfs
+        self.capture_power_dbm = completed.capture_power_dbm
 
     def _invalidate_results(self) -> None:
         self.result = None
@@ -87,6 +99,9 @@ class VSASession:
         self.carrier_corrected_pattern_range_result = None
         self.pattern_error = None
         self.analysis_timings_ms = {}
+        self.capture_time_s = np.empty(0, dtype=np.float64)
+        self.capture_power_dbfs = np.empty(0, dtype=np.float64)
+        self.capture_power_dbm = np.empty(0, dtype=np.float64)
 
     def set_recording(self, recording: IQRecording) -> None:
         self.recording = recording
@@ -137,7 +152,10 @@ class VSASession:
                 ),
                 bandwidth_hz=self.settings.analysis_bandwidth_hz,
             )
-        if self.settings.remove_dc:
+        remove_dc = self.settings.remove_dc and bool(
+            prepared.metadata.get("dc_removal_recommended", True)
+        )
+        if remove_dc:
             prepared = replace(
                 prepared,
                 iq=np.asarray(prepared.iq) - np.mean(prepared.iq),
@@ -213,6 +231,11 @@ class VSASession:
         if self.signal is None:
             raise RuntimeError("no signal description is configured")
         total_started = perf_counter()
+        (
+            self.capture_time_s,
+            self.capture_power_dbfs,
+            self.capture_power_dbm,
+        ) = capture_power_traces(self.recording)
         stage_started = perf_counter()
         analysis_recording, prepared_settings = self._prepare_analysis_recording()
         self.analysis_timings_ms = {

@@ -14,6 +14,9 @@ from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
 
 
+_FIFTY_OHM_VOLTAGE_TO_DBM = 10.0 * np.log10(1000.0 / 50.0)
+
+
 @dataclass(frozen=True)
 class IQSourceCapabilities:
     finite_capture: bool
@@ -161,11 +164,21 @@ class FileIQSource:
             if center_frequency_hz == 0.0:
                 center_frequency_hz = decoded.center_frequency_hz
             usable_bandwidth_hz = decoded.sample_rate_hz
-            calibration_offset_db = 0.0
+            # R&S iq-tar stores the complex-envelope voltage at the RF input.
+            # Treat |I+jQ| as RMS voltage into the instrument's 50-ohm input,
+            # matching the Capture Buffer magnitude display in dBm.
+            calibration_offset_db = float(_FIFTY_OHM_VOLTAGE_TO_DBM)
             frequency_dependent_offset_db = 0.0
             input_correction_db = 0.0
-            amplitude_calibrated = False
+            amplitude_calibrated = True
             metadata.update(decoded.metadata)
+            metadata.update(
+                {
+                    "amplitude_reference": "RMS voltage into 50 ohm",
+                    "power_impedance_ohm": 50.0,
+                    "dc_removal_recommended": False,
+                }
+            )
         elif suffix == ".npy":
             iq = np.load(resolved, allow_pickle=False)
         elif suffix == ".npz":
@@ -330,5 +343,6 @@ def recording_from_acquisition(
             "gain_db": record.metadata.gain_db,
             "trigger_kind": record.trigger.kind.value,
             "trigger_forced": record.trigger.forced,
+            "dc_removal_recommended": True,
         },
     )

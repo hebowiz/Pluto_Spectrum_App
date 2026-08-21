@@ -133,6 +133,59 @@ def test_session_invalidates_result_when_signal_changes() -> None:
     assert session.revision == 1
 
 
+def test_session_capture_power_stays_before_analysis_filter_and_dc_removal() -> None:
+    sample_rate_hz = 8_000_000.0
+    sample = np.arange(512, dtype=np.float64)
+    iq = 0.4 + np.exp(2j * np.pi * 500_000.0 * sample / sample_rate_hz)
+    recording = IQRecording(
+        iq,
+        sample_rate_hz=sample_rate_hz,
+        center_frequency_hz=2_441_000_000.0,
+    )
+    signal = SignalDescription(ModulationKind.FSK, symbol_rate_hz=1_000_000.0)
+    session = VSASession(
+        recording=recording,
+        signal=signal,
+        settings=VSASettings(
+            remove_dc=True,
+            analysis_center_frequency_hz=2_441_000_000.0,
+            analysis_bandwidth_hz=1_500_000.0,
+        ),
+    )
+
+    result = session.analyze()
+
+    expected = 20.0 * np.log10(np.abs(recording.iq))
+    np.testing.assert_allclose(session.capture_power_dbm, expected, atol=2e-6)
+    assert session.capture_time_s.size == recording.sample_count
+    assert not np.allclose(
+        result.power_dbm,
+        session.capture_power_dbm[: result.power_dbm.size],
+    )
+
+
+def test_rs_iq_tar_capture_power_matches_50_ohm_voltage_conversion() -> None:
+    recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "bt_2dh1_capture_2.iq.tar"
+    )
+    signal = SignalDescription(ModulationKind.FSK, symbol_rate_hz=1_000_000.0)
+    session = VSASession(recording=recording, signal=signal)
+
+    result = session.analyze()
+
+    expected = 10.0 * np.log10(
+        np.maximum(np.abs(recording.iq) ** 2, np.finfo(float).tiny)
+        / (50.0 * 1e-3)
+    )
+    np.testing.assert_allclose(session.capture_power_dbm, expected, atol=2e-6)
+    np.testing.assert_allclose(result.power_dbm, expected, atol=2e-6)
+    assert float(np.median(session.capture_power_dbm[200:700])) == pytest.approx(
+        float(np.median(expected[200:700])), abs=1e-6
+    )
+    steady_fsk = session.capture_power_dbm[400:1_000]
+    assert float(np.percentile(steady_fsk, 95) - np.percentile(steady_fsk, 5)) < 0.2
+
+
 def test_npz_file_source_round_trip_preserves_capture_metadata(tmp_path) -> None:
     generated, _ = GeneratedIQSource.fsk(symbol_count=16)
     recording = IQRecording(

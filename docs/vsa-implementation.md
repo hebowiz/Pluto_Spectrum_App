@@ -449,3 +449,29 @@ carrier phase、constellation rotation、bit mapping、差動列の先頭symbol�
 FSKではmark/space polarityが不定になり得る。したがって未知信号でも波形品質評価と
 相対symbol列の復調は可能だが、絶対bit値やpacket field解釈にはpreamble、codingまたは
 protocol情報が別途必要。
+
+## 9. Capture Buffer振幅表示とDC除去の分離（2026-08-22）
+
+R&S VSAの`Magnitude Absolute / Capture Buffer`に合わせ、`IQ Power`は元の
+`IQRecording`から直接生成する。Analysis Center/Bandwidth、Measurement Filter、
+carrier/drift補正、復調用DC除去は適用しない。symbol markerのPowerも同じ未処理
+Capture Buffer traceから補間する。これにより、復調条件を変更してもcaptureされた
+振幅波形そのものは変化しない。
+
+R&S `.iq.tar`の`ScalingFactor`適用後の複素振幅はVoltとして読み、R&S RF入力の
+50 ohmを明示して次式でdBmへ換算する。
+
+```text
+P[dBm] = 10 log10(|I + jQ|^2 / (50 ohm * 1 mW))
+        = 20 log10(|I + jQ|[V]) + 13.0103 dB
+```
+
+iq-tar内のinternal/mechanical attenuationは取得済みVoltへ再加算しない。loaderは
+`power_impedance_ohm=50`、`amplitude_reference=RMS voltage into 50 ohm`をmetadataへ
+記録する。
+
+DC除去は表示経路から完全に分離する。R&S iq-tarは計測器側で取得された電圧波形のため
+追加の全区間平均DC除去を無効とする。Pluto入力ではAD936xのDC/LO leakage対策として
+復調経路のみ従来のDC除去を維持する。ただし、有限packetを含むcapture全体の複素平均は
+data-dependent meanをDCと誤認し得るため暫定方式である。今後はBurst Searchで得た
+off-burst区間からDCを推定し、信頼できる無信号区間がない場合は除去しない方式へ置換する。

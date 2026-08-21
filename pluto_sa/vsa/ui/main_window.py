@@ -3553,8 +3553,16 @@ class VSAWindow(QtWidgets.QMainWindow):
             if pattern_result is not None
             else result.symbol_time_s
         )
+        capture_time_s = self.session.capture_time_s
+        capture_power_source_dbm = self.session.capture_power_dbm
+        if (
+            capture_time_s.size != capture_power_source_dbm.size
+            or not capture_time_s.size
+        ):
+            capture_time_s = result.time_s
+            capture_power_source_dbm = result.power_dbm
         symbol_power_dbm = (
-            np.interp(symbol_times_s, result.time_s, result.power_dbm)
+            np.interp(symbol_times_s, capture_time_s, capture_power_source_dbm)
             if symbol_times_s.size
             else np.empty(0, dtype=np.float64)
         )
@@ -3564,8 +3572,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             else None
         )
         capture_time_ms, capture_power_dbm = _peak_decimate_xy(
-            result.time_s * 1e3,
-            result.power_dbm,
+            capture_time_s * 1e3,
+            capture_power_source_dbm,
             required_x_values=required_symbol_times_ms,
         )
         self.zero_span_plot.clear()

@@ -24,6 +24,26 @@ from pluto_sa.vsa.model import (
 _EPSILON = np.finfo(np.float64).tiny
 
 
+def capture_power_traces(
+    recording: IQRecording,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the unprocessed capture timeline and calibrated sample power.
+
+    This is the VSA Capture Buffer plane.  Analysis-channel filtering, carrier
+    correction, measurement filtering, and DC removal deliberately do not
+    belong here.
+    """
+    iq = np.asarray(recording.iq, dtype=np.complex128)
+    time_s = np.arange(iq.size, dtype=np.float64) / float(recording.sample_rate_hz)
+    power_dbfs = 20.0 * np.log10(
+        np.maximum(np.abs(iq) / float(recording.full_scale), _EPSILON)
+    )
+    power_dbm = power_dbfs + recording.dbfs_to_dbm_offset_db
+    for values in (time_s, power_dbfs, power_dbm):
+        values.setflags(write=False)
+    return time_s, power_dbfs, power_dbm
+
+
 def _symbols_to_bits(symbols: np.ndarray, order: int) -> np.ndarray:
     bits_per_symbol = int(round(np.log2(order)))
     shifts = np.arange(bits_per_symbol - 1, -1, -1, dtype=np.int16)
