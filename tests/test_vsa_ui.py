@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+from types import SimpleNamespace
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -18,6 +19,7 @@ from pluto_sa.vsa.ui.main_window import (
     _constellation_density_extent,
     _constellation_display_symbols,
     _frequency_constellation_density,
+    _initial_result_time_range_ms,
     _physical_constellation_display_symbols,
     _decimation_indices_with_required_times,
     _fsk_phase_difference_symbols,
@@ -49,6 +51,37 @@ def test_peak_decimation_keeps_bucket_extrema() -> None:
     assert plotted_x.size <= 102
     assert -20.0 in plotted_y
     assert 30.0 in plotted_y
+
+
+def test_burst_search_initial_time_range_starts_before_trigger() -> None:
+    pattern = SimpleNamespace(
+        result_start_time_s=200e-6,
+        result_stop_time_s=500e-6,
+        recording_sample_rate_hz=8_000_000.0,
+        metadata={
+            "power_trigger_enabled": True,
+            "power_trigger_sample": 800,
+        },
+    )
+
+    start_ms, stop_ms = _initial_result_time_range_ms(pattern)
+
+    assert start_ms == pytest.approx(0.07)
+    assert stop_ms == pytest.approx(0.53)
+
+
+def test_non_burst_initial_time_range_remains_result_centered() -> None:
+    pattern = SimpleNamespace(
+        result_start_time_s=200e-6,
+        result_stop_time_s=500e-6,
+        recording_sample_rate_hz=8_000_000.0,
+        metadata={"power_trigger_enabled": False},
+    )
+
+    start_ms, stop_ms = _initial_result_time_range_ms(pattern)
+
+    assert start_ms == pytest.approx(0.17)
+    assert stop_ms == pytest.approx(0.53)
 
 
 def test_frequency_constellation_density_is_vertical_and_count_weighted() -> None:

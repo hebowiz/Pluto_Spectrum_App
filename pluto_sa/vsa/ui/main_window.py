@@ -29,6 +29,7 @@ from pluto_sa.vsa.pattern import (
     MatchSelectionPolicy,
     MeasurementFilterMode,
     PatternSearchMode,
+    PatternSearchResult,
     PatternSearchSettings,
     ResultRangeAlignment,
     ResultRangeReference,
@@ -272,6 +273,37 @@ def _prepare_psk_display_waveform(
         prepared_rate_hz
     )
     return prepared, time_s
+
+
+def _initial_result_time_range_ms(
+    pattern: PatternSearchResult,
+) -> tuple[float, float]:
+    """Return the reset range for time-domain result plots.
+
+    With Burst Search, retain the pre-result interval by anchoring the left
+    edge to the selected power-trigger event.  The existing 10% Result Range
+    margin provides a small amount of pre-trigger context.
+    """
+    result_start_ms = pattern.result_start_time_s * 1e3
+    result_stop_ms = pattern.result_stop_time_s * 1e3
+    duration_ms = result_stop_ms - result_start_ms
+    margin_ms = max(duration_ms * 0.1, 1e-9)
+    range_start_ms = result_start_ms - margin_ms
+    metadata = pattern.metadata
+    trigger_sample = metadata.get("power_trigger_sample")
+    if (
+        metadata.get("power_trigger_enabled", False)
+        and trigger_sample is not None
+        and pattern.recording_sample_rate_hz > 0.0
+    ):
+        trigger_time_ms = (
+            float(trigger_sample) / pattern.recording_sample_rate_hz * 1e3
+        )
+        range_start_ms = max(
+            0.0,
+            min(result_start_ms, trigger_time_ms) - margin_ms,
+        )
+    return range_start_ms, result_stop_ms + margin_ms
 
 
 def _prepare_fsk_display_frequency(
@@ -4387,13 +4419,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             labelOpts={"position": 0.08, "color": (120, 255, 160)},
         )
         plot.addItem(marker)
-        duration_ms = (
-            pattern.result_stop_time_s - pattern.result_start_time_s
-        ) * 1e3
-        margin_ms = max(duration_ms * 0.1, 1e-9)
         if fit_range:
+            range_start_ms, range_stop_ms = _initial_result_time_range_ms(pattern)
             plot.setXRange(
-                pattern.result_start_time_s * 1e3 - margin_ms,
-                pattern.result_stop_time_s * 1e3 + margin_ms,
+                range_start_ms,
+                range_stop_ms,
                 padding=0.0,
             )

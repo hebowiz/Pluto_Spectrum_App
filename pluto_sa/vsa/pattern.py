@@ -949,6 +949,8 @@ class PatternAnalyzer:
         stop_sample = recording.sample_count
         trigger_event_index: int | None = None
         trigger_event_count = 0
+        trigger_sample: int | None = None
+        trigger_active_stop_sample: int | None = None
         if iq_power_trigger.enabled:
             events = detect_iq_power_trigger_events(
                 recording,
@@ -962,6 +964,8 @@ class PatternAnalyzer:
             trigger_event_count = len(events)
             event = events[0]
             trigger_event_index = 1
+            trigger_sample = int(event.trigger_sample)
+            trigger_active_stop_sample = int(event.active_stop_sample)
             offset = int(
                 round(
                     iq_power_trigger.search_start_offset_symbols
@@ -1205,6 +1209,21 @@ class PatternAnalyzer:
                 "eligible_match_count": 1,
                 "detected_match_count": 0,
                 "power_trigger_enabled": iq_power_trigger.enabled,
+                "power_trigger_level_dbm": iq_power_trigger.level_dbm,
+                "power_trigger_sample": trigger_sample,
+                "power_trigger_active_stop_sample": trigger_active_stop_sample,
+                "power_trigger_search_start_sample": (
+                    start_sample if iq_power_trigger.enabled else None
+                ),
+                "power_trigger_search_offset_symbols": (
+                    iq_power_trigger.search_start_offset_symbols
+                ),
+                "power_trigger_envelope_average_symbols": (
+                    iq_power_trigger.envelope_average_symbols
+                ),
+                "power_trigger_limit_result_to_active_interval": (
+                    iq_power_trigger.limit_result_to_active_interval
+                ),
                 "selected_power_trigger_event_index": trigger_event_index,
                 "power_trigger_event_count": trigger_event_count,
                 "source": recording.source,

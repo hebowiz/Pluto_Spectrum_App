@@ -107,6 +107,13 @@ New IQ acquisition or file load selects the first triggered match. Refresh
 Analysis retains the current one-based match index. The existing Left/Right
 navigation changes between successful triggered matches.
 
+When a triggered Pattern or Detected Data result is selected, reset/default
+time-domain plot ranges begin one existing display margin before that result's
+power-trigger sample. The margin remains 10% of the selected Result Range
+duration, matching the non-triggered layout. The right edge remains one 10%
+margin after Result Range end. This changes only the initial view; the capture
+trace is retained and remains available through zoom/pan.
+
 ## Configuration and defaults
 
 The Meas Config `Trigger` page contains two independent sections.
