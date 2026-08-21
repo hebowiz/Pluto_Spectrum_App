@@ -296,6 +296,44 @@ Rohde & Schwarzの公式[iq-tar File Format Specification](https://scdn.rohde-sc
 
 振幅値は仕様上Voltへ変換されるが、iq-tar core metadataだけでは測定系のimpedance、peak/RMS定義、外部補正を一意に決められない。そのため`amplitude_calibrated=False`を維持し、Volt値をdBm校正済みとは扱わない。必要な補正は取得条件またはinstrument固有`UserData`の仕様が判明した段階で追加する。
 
+#### R&S Capture Buffer振幅との比較調査（2026-08-22）
+
+`tests/fixtures/bt_2dh1_capture_2.iq.tar`（8 MS/s、4577 samples、ScalingFactor
+1 V）を用いて、R&S `Mag(Capture Buffer)`とPluto VSA `IQ Power`の差を調査した。
+XMLのR&S固有UserDataはMeasurement Bandwidth 6.4 MHz、Ref Level +20 dBm、
+mechanical attenuation 40 dBを記録している。attenuationは取得器内部の校正条件であり、
+保存済みVolt値へ外部ATTのように再加算してはならない。
+
+生IQのFSK定常区間はmedian magnitude約0.435 Vで、sample powerの5～95 percentile幅は
+約0.10 dBしかなく、元データ自体はほぼconstant envelopeである。現行の既定処理は
+Analysis Channel処理後にcapture全体の複素平均を引く。生IQのoff-burst平均は約0.0004 V
+以下で実質的なDC offsetがない一方、有限長FSK区間のdata-dependent平均は約0.122 V、
+capture全体平均は約0.0308 Vである。この全体平均をDCとみなして引くと、位相に応じて
+複素vectorの長さが変わり、FSKの5～95 percentile幅が約1.2 dBへ増える。1.5 MHz Analysis
+Bandwidthを併用した場合は約1.26 dBであり、このcaptureのFSK rippleはchannel filterより
+global-mean DC removalが主因である。
+
+PSK区間はSRRC pulse shapingにより生IQ自体に振幅変動があり、同じpercentile幅は約9.26 dB
+である。1.5 MHz Analysis Channelとglobal-mean DC removal後は約10.75 dBとなるため、
+PSKでも約1.5 dB分の分布差を前処理が追加している。R&S manualの`Magnitude Absolute / Capture
+Buffer`はcaptured signalのactual amplitudeを1 captured sampleにつき1点表示する仕様であり、
+現在のPluto VSAのようにdemodulation用Analysis Channelとglobal-mean DC removalを通した値を
+`IQ Power`へ表示する設計とは比較対象が一致していない。
+
+絶対振幅にも別問題がある。現行ローダーはVoltへ変換した`|I+jQ|`をそのまま`20log10`し、
+1 Vを0 dBm相当としている。50 ohm換算が抜けるため、このfixtureのFSK medianは約-7.23 dBm
+と表示される。複素magnitudeをRMS voltageとして50 ohmへ換算する場合は
+`10log10(|IQ|^2 / (50 * 1 mW))`、すなわち現在値へ+13.0103 dBで約+5.78 dBmとなり、R&S画面
+のCapture Buffer levelと整合する方向である。ただしiq-tar core specificationはScalingFactor
+によるVolt化までしか規定しないため、R&Sとの完全な校正contractはexact captureのSCPI
+trace/marker値で最終確認する。
+
+修正方針は、(1) Capture Buffer相当のIQ Powerを元recordingから生成してdemodulation前処理と
+分離する、(2) global-mean DC removalを既定で使用せず、必要時はoff-burst区間など信号に
+依存しないDC estimatorへ置換する、(3) iq-tarのVolt値に50 ohm inputの明示的なpower conversion
+contractを設ける、の3点とする。Analysis Channel後のmagnitudeが必要ならCapture Powerとは別の
+Measured Magnitude表示として扱う。
+
 安全性と誤読防止のため、tarをfilesystemへextractせず、parameter XMLの個数、`DataFilename`、regular file属性、path traversal、XML DTD/entity、binary byte数を検証する。現在のR&S/Windows出力に合わせてmulti-byte binaryはlittle-endianとして読む。公式仕様はbyte orderを明記していないため、異なるendianのproducerが必要になった場合は明示的な選択肢を追加する。
 
 手動確認用fixtureは`tests/fixtures/rs_sample_gfsk_8msps.iq.tar`。中心周波数2441 MHz、sample rate 8 MS/s、symbol rate 1 Msym/s、deviation 250 kHz、BT 0.5のdeterministic GFSKで、先頭16 symbolsは`1010...`、以降240 symbolsはPRBS9とする。`tools/generate_rs_iqtar_fixture.py`で同一内容を再生成できる。
