@@ -13,6 +13,26 @@ BLUETOOTH_EDR_MAPPING = "Bluetooth EDR"
 PSK_SYMBOL_MAPPINGS = (NATURAL_MAPPING, GRAY_MAPPING, BLUETOOTH_EDR_MAPPING)
 
 
+def reverse_symbol_bits(symbols: np.ndarray, order: int) -> np.ndarray:
+    """Reverse the bits within each symbol value.
+
+    DSP internals use one canonical (MSB-numbered) symbol index.  R&S-style
+    LSB symbol displays and pattern files use the bit-reversed index instead.
+    The operation is its own inverse, so the same helper converts in either
+    direction.
+    """
+    bit_count = int(round(np.log2(order)))
+    if order != 1 << bit_count:
+        raise ValueError("modulation order must be a power of two")
+    values = np.asarray(symbols, dtype=np.int16)
+    if np.any(values < 0) or np.any(values >= order):
+        raise ValueError("symbol value is outside the modulation order")
+    reversed_values = np.zeros(values.shape, dtype=np.int16)
+    for bit in range(bit_count):
+        reversed_values |= ((values >> bit) & 1) << (bit_count - 1 - bit)
+    return reversed_values
+
+
 def normalize_symbol_mapping(value: str) -> str:
     normalized = str(value).strip() or NATURAL_MAPPING
     aliases = {name.casefold(): name for name in PSK_SYMBOL_MAPPINGS}

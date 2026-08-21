@@ -18,6 +18,7 @@ from pluto_sa.vsa.mapping import (
     GRAY_MAPPING,
     NATURAL_MAPPING,
     psk_constellation,
+    reverse_symbol_bits,
 )
 from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
@@ -1371,6 +1372,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.measurement_filter_combo.addItems(("Auto", "None"))
         self.bit_order_combo = QtWidgets.QComboBox()
         self.bit_order_combo.addItems(("MSB", "LSB"))
+        self.bit_order_combo.setCurrentText(BitOrdering.LSB.value)
         self.compensate_drift_check = QtWidgets.QCheckBox("Carrier Frequency Drift")
         self.compensate_drift_check.setChecked(False)
         self.compensate_drift_check.setToolTip(
@@ -1898,6 +1900,11 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         bit_width = int(round(np.log2(signal.modulation.order)))
         lsb_first = self.bit_order_combo.currentText() == BitOrdering.LSB.value
+        displayed_symbols = (
+            reverse_symbol_bits(symbols, signal.modulation.order)
+            if lsb_first
+            else symbols
+        )
         matched_pattern_symbols: tuple[int, ...] = ()
         pattern_metadata: dict[str, object] | None = None
         if pattern_result is not None and pattern_result.metadata.get(
@@ -1927,15 +1934,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             }
 
         rows: list[list[object]] = []
-        for index, symbol_value in enumerate(symbols):
+        for index, symbol_value in enumerate(displayed_symbols):
             symbol = int(symbol_value)
             ordered_bits = [
                 (symbol >> shift) & 1
-                for shift in (
-                    range(bit_width)
-                    if lsb_first
-                    else range(bit_width - 1, -1, -1)
-                )
+                for shift in range(bit_width - 1, -1, -1)
             ]
             time_s = (
                 float(symbol_times[index])
@@ -1975,7 +1978,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "symbol_rate_hz": float(signal.symbol_rate_hz),
                 "symbol_mapping": signal.symbol_mapping,
                 "bit_ordering": self.bit_order_combo.currentText(),
-                "result_symbol_count": int(symbols.size),
+                "result_symbol_count": int(displayed_symbols.size),
                 "pattern": pattern_metadata,
             },
             "columns": [
@@ -2337,7 +2340,11 @@ class VSAWindow(QtWidgets.QMainWindow):
                 demodulation.get("measurement_filter", "Auto"),
                 "measurement filter",
             )
-            self._set_combo_text(self.bit_order_combo, demodulation["bit_ordering"], "bit ordering")
+            self._set_combo_text(
+                self.bit_order_combo,
+                demodulation.get("bit_ordering", BitOrdering.LSB.value),
+                "bit ordering",
+            )
             self.compensate_drift_check.setChecked(bool(demodulation["compensate_carrier_frequency_drift"]))
             self.compensate_deviation_check.setChecked(bool(demodulation["compensate_fsk_deviation_error"]))
             if signal_capture:
@@ -3957,6 +3964,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             if pattern_result is not None
             else result.decoded_symbols
         )
+        table_symbols = (
+            reverse_symbol_bits(symbols, signal.modulation.order)
+            if self.bit_order_combo.currentText() == BitOrdering.LSB.value
+            else symbols
+        )
         summary_values: dict[str, str] = {
             "modulation": signal.modulation.value,
             "result_symbols": str(symbols.size),
@@ -4178,7 +4190,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                     f"{float(result.frequency_error_hz) / 1e3:+.3f} kHz"
                 )
         self._set_result_summary(summary_values)
-        shown = symbols[:_MAX_SYMBOL_TABLE_DISPLAY_SYMBOLS]
+        shown = table_symbols[:_MAX_SYMBOL_TABLE_DISPLAY_SYMBOLS]
         row_count = int(np.ceil(shown.size / 10.0))
         self.symbol_table.setUpdatesEnabled(False)
         try:
@@ -4229,7 +4241,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         else:
             self.symbol_table.clearSelection()
         self.symbol_table.setToolTip(
-            f"Showing {shown.size} of {symbols.size} result-range symbols"
+            f"Showing {shown.size} of {table_symbols.size} result-range symbols"
         )
         if reset_ranges:
             self._capture_analysis_plot_ranges()

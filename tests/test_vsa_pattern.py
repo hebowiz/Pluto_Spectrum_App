@@ -6,6 +6,7 @@ from scipy.ndimage import shift as fractional_shift
 
 import pluto_sa.vsa.session as session_module
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_sa.vsa.mapping import reverse_symbol_bits
 from pluto_sa.vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
@@ -35,11 +36,15 @@ from pluto_sa.vsa.demod.gfsk import fsk_reference_frequency_levels
 
 def _pattern_from_generated(recording, start: int, length: int) -> KnownPattern:
     symbols = np.asarray(recording.metadata["generated_symbols"])
-    return KnownPattern(tuple(int(value) for value in symbols[start : start + length]))
+    maximum = int(np.max(symbols))
+    order = 2 if maximum < 2 else (4 if maximum < 4 else 8)
+    displayed = reverse_symbol_bits(symbols[start : start + length], order)
+    return KnownPattern(tuple(int(value) for value in displayed))
 
 
 def test_measurement_filter_defaults_to_auto_and_accepts_none() -> None:
     assert DemodulationSettings().measurement_filter is MeasurementFilterMode.AUTO
+    assert DemodulationSettings().bit_ordering is BitOrdering.LSB
     assert (
         DemodulationSettings(
             measurement_filter=MeasurementFilterMode.NONE
@@ -759,7 +764,14 @@ def test_differential_psk_short_pattern_uses_joint_result_range_synchronization(
     )
     pattern_start = 50
     pattern = KnownPattern(
-        tuple(map(int, expected[pattern_start : pattern_start + 10]))
+        tuple(
+            map(
+                int,
+                reverse_symbol_bits(
+                    expected[pattern_start : pattern_start + 10], modulation.order
+                ),
+            )
+        )
     )
 
     result = PatternAnalyzer().search(

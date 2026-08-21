@@ -50,16 +50,16 @@
       "name": "2DH1",
       "symbol_format": "Decimal",
       "symbols": [
-        1,
+        2,
         3,
-        1,
+        2,
         3,
-        1,
+        2,
         3,
         3,
-        1,
-        1,
-        1
+        2,
+        2,
+        2
       ],
       "threshold_auto": true,
       "threshold_percent": 90.0,
@@ -77,7 +77,7 @@
     "demodulation": {
       "coarse_synchronization": "Auto",
       "fine_synchronization": "Auto",
-      "bit_ordering": "MSB",
+      "bit_ordering": "LSB",
       "compensate_carrier_frequency_drift": true,
       "compensate_fsk_deviation_error": true
     },

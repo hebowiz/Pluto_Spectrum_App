@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from pluto_sa.vsa.model import ModulationKind, SignalDescription
+from pluto_sa.vsa.mapping import reverse_symbol_bits
 from pluto_sa.vsa.pattern import (
     DemodulationSettings,
     KnownPattern,
@@ -61,7 +62,9 @@ def test_generated_edr_waveform_is_repeatable():
 @pytest.mark.parametrize("packet_name", ("2-DH1", "3-DH1"))
 def test_generic_vsa_recovers_edr_sync_pattern(packet_name):
     waveform = generate_edr_dh1(packet_name)
-    sync_symbols = waveform.logical_symbols[:10]
+    sync_symbols = reverse_symbol_bits(
+        waveform.logical_symbols[:10], waveform.modulation.order
+    )
     signal = SignalDescription(
         modulation=waveform.modulation,
         symbol_rate_hz=1_000_000.0,
@@ -118,7 +121,14 @@ def test_psk_carrier_is_centered_before_matched_filter(packet_name):
     )
     search = PatternSearchSettings(
         pattern=KnownPattern(
-            tuple(map(int, waveform.logical_symbols[:10]))
+            tuple(
+                map(
+                    int,
+                    reverse_symbol_bits(
+                        waveform.logical_symbols[:10], waveform.modulation.order
+                    ),
+                )
+            )
         ),
         mode=PatternSearchMode.ON,
         correlation_threshold_auto=False,

@@ -382,6 +382,8 @@ python -m pytest tests/test_vsa_core.py -q
 - 任意FSK/GFSK patternの検索とResult Range復調。
 - QPSKの任意phase/CFO下でのpattern検索、carrier補正、symbol復調。
 - pi/4-DQPSKの差動pattern検索とLSB/MSB Bit Ordering。
+- 2026-08-22: R&SのBit Orderingはbit streamだけでなく全symbol表示へ適用される。内部DSPのsymbol番号はMSB canonicalのまま保持し、LSB選択時はPattern入力をcanonical番号へ変換して探索し、Symbol TableとJSON exportはbit-reversed表示番号へ戻す。2 bit symbolでは`1`と`2`だけが交換される。Bluetooth EDR保存ConfigはLSBへ移行し、2DH sync patternの表示値を`2 3 2 3 2 3 3 2 2 2`とした。3DH syncは3 bit反転に対して`2`と`7`が不変なため値列は変わらない。
+- 新規起動および`bit_ordering`を持たない旧Configの既定値は、主用途であるBluetoothとR&S表示に合わせて`LSB`とする。Configまたは終了時保存Configに`MSB`/`LSB`が明示されている場合は保存値を優先する。
 - 16 MSPS Pluto実測BR captureを汎用Pattern Searchへ通し、手動Analysis Center/Bandwidth後に任意72-symbol patternを相関99%以上、0 symbol errorで検出。
 - 実測DH1 body 216 bitとPRBS-9を0 bit errorで照合。
 - Bluetooth SIG公式vectorに対するPayload CRCとcomplete DH1 payload decode。

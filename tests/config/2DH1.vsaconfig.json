@@ -3,7 +3,7 @@
   "version": 1,
   "settings": {
     "input_frontend": {
-      "input_source": "Pluto",
+      "input_source": "IQ File",
       "pluto_uri": "",
       "center_frequency_mhz": 2440.0,
       "rf_bandwidth_mhz": 8.0,
@@ -30,7 +30,7 @@
     },
     "acquisition_trigger": {
       "source": "power_level",
-      "level_dbm": -40.0,
+      "level_dbm": -15.0,
       "slope": "rising",
       "offset_symbols": -10.0,
       "hysteresis_db": 3.0
@@ -50,16 +50,16 @@
       "name": "2DH1",
       "symbol_format": "Decimal",
       "symbols": [
-        1,
+        2,
         3,
-        1,
+        2,
         3,
-        1,
+        2,
         3,
         3,
-        1,
-        1,
-        1
+        2,
+        2,
+        2
       ],
       "threshold_auto": true,
       "threshold_percent": 90.0,
@@ -78,8 +78,8 @@
       "coarse_synchronization": "Auto",
       "fine_synchronization": "Auto",
       "measurement_filter": "Auto",
-      "bit_ordering": "MSB",
-      "compensate_carrier_frequency_drift": false,
+      "bit_ordering": "LSB",
+      "compensate_carrier_frequency_drift": true,
       "compensate_fsk_deviation_error": true
     },
     "result_summary": {

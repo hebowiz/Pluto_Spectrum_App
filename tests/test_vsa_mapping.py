@@ -6,6 +6,7 @@ from pluto_sa.vsa.mapping import (
     GRAY_MAPPING,
     logical_to_phase_indices,
     phase_indices_to_logical_symbols,
+    reverse_symbol_bits,
 )
 from pluto_sa.vsa.model import ModulationKind, SignalDescription
 
@@ -47,3 +48,16 @@ def test_bluetooth_mapping_is_rejected_for_non_edr_modulation():
             symbol_rate_hz=1_000_000.0,
             symbol_mapping=BLUETOOTH_EDR_MAPPING,
         )
+
+
+def test_symbol_bit_reversal_matches_rs_lsb_display_numbering():
+    np.testing.assert_array_equal(
+        reverse_symbol_bits(np.arange(4), 4), [0, 2, 1, 3]
+    )
+    np.testing.assert_array_equal(
+        reverse_symbol_bits(np.arange(8), 8), [0, 4, 2, 6, 1, 5, 3, 7]
+    )
+    values = np.asarray([0, 1, 2, 3, 4, 5, 6, 7])
+    np.testing.assert_array_equal(
+        reverse_symbol_bits(reverse_symbol_bits(values, 8), 8), values
+    )

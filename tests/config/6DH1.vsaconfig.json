@@ -77,7 +77,7 @@
     "demodulation": {
       "coarse_synchronization": "Auto",
       "fine_synchronization": "Auto",
-      "bit_ordering": "MSB",
+      "bit_ordering": "LSB",
       "compensate_carrier_frequency_drift": true,
       "compensate_fsk_deviation_error": true
     },

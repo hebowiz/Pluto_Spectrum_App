@@ -78,7 +78,7 @@
       "coarse_synchronization": "Auto",
       "fine_synchronization": "Auto",
       "measurement_filter": "Auto",
-      "bit_ordering": "MSB",
+      "bit_ordering": "LSB",
       "compensate_carrier_frequency_drift": false,
       "compensate_fsk_deviation_error": true
     },

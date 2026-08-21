@@ -31,6 +31,7 @@ from pluto_sa.vsa.ui.main_window import (
 from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
 from pluto_sa.vsa.pluto_source import CaptureCancelledError
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_sa.vsa.mapping import reverse_symbol_bits
 from pluto_sa.vsa.pattern import (
     DemodulationSettings,
     SynchronizationSource,
@@ -287,7 +288,9 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
         window.load_recording(combined, signal)
         _wait_for_background_analysis(window)
         window.pattern_search_check.setChecked(True)
-        window._set_pattern_symbols(generated[20:36])
+        window._set_pattern_symbols(
+            reverse_symbol_bits(generated[20:36], signal.modulation.order)
+        )
         window.result_length_spin.setValue(100)
 
         assert window._selected_match_index == 1
@@ -1066,7 +1069,9 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
         with np.load(fixture, allow_pickle=False) as values:
             pattern = " ".join(
                 str(int(value))
-                for value in values["differential_phase_indices"][:32]
+                for value in reverse_symbol_bits(
+                    values["differential_phase_indices"][:32], 4
+                )
             )
         window.load_recording(
             FileIQSource.load(fixture),
@@ -1421,6 +1426,27 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         QtWidgets.QApplication.processEvents()
 
 
+def test_bit_ordering_defaults_and_missing_config_migrate_to_lsb(tmp_path) -> None:
+    pg.mkQApp("VSA LSB default test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "lsb-default")
+    )
+    try:
+        assert window.bit_order_combo.currentText() == "LSB"
+        saved = window._meas_config_values()
+        saved["demodulation"].pop("bit_ordering")
+        window.bit_order_combo.setCurrentText("MSB")
+
+        window._apply_meas_config_values(saved)
+
+        assert window.bit_order_combo.currentText() == "LSB"
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_symbol_table_json_export_document_contains_machine_readable_context(
     tmp_path, monkeypatch,
 ) -> None:
@@ -1471,6 +1497,54 @@ def test_symbol_table_json_export_document_contains_machine_readable_context(
         assert window._last_directory("symbol_table") == str(
             export_stem.parent.resolve()
         )
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_lsb_bit_ordering_applies_to_psk_pattern_table_and_export(tmp_path) -> None:
+    pg.mkQApp("VSA LSB Symbol Table test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "lsb-symbol-table")
+    )
+    try:
+        recording, signal = GeneratedIQSource.psk(
+            modulation=ModulationKind.PI4_DQPSK,
+            symbol_count=180,
+            seed=822,
+        )
+        expected = np.asarray(
+            recording.metadata["generated_symbols"], dtype=np.int16
+        )
+        displayed = np.asarray([0, 2, 1, 3], dtype=np.int16)[expected]
+        window.load_recording(recording, signal)
+        _wait_for_background_analysis(window)
+        window.pattern_search_check.setChecked(True)
+        window.bit_order_combo.setCurrentText("LSB")
+        window._set_pattern_symbols(displayed[30:54])
+        window.result_length_spin.setValue(64)
+        assert window._analyze()
+
+        result = window.session.pattern_result
+        assert result is not None
+        np.testing.assert_array_equal(result.decoded_symbols, expected[30:94])
+        table_values = np.asarray(
+            [
+                int(window.symbol_table.item(index // 10, index % 10).text())
+                for index in range(result.decoded_symbols.size)
+            ]
+        )
+        np.testing.assert_array_equal(table_values, displayed[30:94])
+        document = window._symbol_table_export_document()
+        assert document["metadata"]["bit_ordering"] == "LSB"
+        assert document["rows"][0][1] == int(displayed[30])
+        assert document["rows"][0][2] == [
+            (int(displayed[30]) >> 1) & 1,
+            int(displayed[30]) & 1,
+        ]
+        assert all(row[5] == "matched" for row in document["rows"][:24])
     finally:
         window._meas_config_dialog.close()
         window.close()

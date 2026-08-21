@@ -18,6 +18,7 @@ from pluto_sa.vsa.mapping import (
     BLUETOOTH_EDR_MAPPING,
     NATURAL_MAPPING,
     psk_constellation,
+    reverse_symbol_bits,
 )
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 
@@ -272,7 +273,7 @@ class DemodulationSettings:
     coarse_synchronization: SynchronizationSource = SynchronizationSource.AUTO
     fine_synchronization: SynchronizationSource = SynchronizationSource.AUTO
     measurement_filter: MeasurementFilterMode = MeasurementFilterMode.AUTO
-    bit_ordering: BitOrdering = BitOrdering.MSB
+    bit_ordering: BitOrdering = BitOrdering.LSB
     compensate_carrier_frequency_drift: bool = False
     compensate_fsk_deviation_error: bool = True
 
@@ -1711,7 +1712,13 @@ class PatternAnalyzer:
             }
         )
         alphabet = _constellation(signal.modulation, signal.symbol_mapping)
-        expected = alphabet[np.asarray(pattern.symbols, dtype=np.int16)]
+        configured_pattern_symbols = np.asarray(pattern.symbols, dtype=np.int16)
+        canonical_pattern_symbols = (
+            reverse_symbol_bits(configured_pattern_symbols, signal.modulation.order)
+            if demodulation.bit_ordering is BitOrdering.LSB
+            else configured_pattern_symbols
+        )
+        expected = alphabet[canonical_pattern_symbols]
         candidates: list[
             tuple[float, int, int, np.ndarray, np.ndarray, float]
         ] = []
@@ -1818,7 +1825,7 @@ class PatternAnalyzer:
             ).astype(np.int16)
             return int(
                 np.count_nonzero(
-                    decisions != np.asarray(pattern.symbols, dtype=np.int16)
+                    decisions != canonical_pattern_symbols
                 )
             )
 
@@ -2225,8 +2232,7 @@ class PatternAnalyzer:
         )
         pattern_errors = int(
             np.count_nonzero(
-                training_decoded
-                != np.asarray(pattern.symbols, dtype=np.int16)
+                training_decoded != canonical_pattern_symbols
             )
         )
         start_boundary_resampled = start_center - samples_per_symbol / 2.0 + 0.5
