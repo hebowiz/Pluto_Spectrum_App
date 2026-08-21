@@ -1,0 +1,18 @@
+{
+  "schema": "pluto-vsa-pattern",
+  "version": 1,
+  "name": "mHDT4_temp",
+  "symbol_format": "Hexadecimal",
+  "symbols": [
+    1,
+    2,
+    1,
+    4,
+    1,
+    7,
+    4,
+    7,
+    2,
+    7
+  ]
+}
