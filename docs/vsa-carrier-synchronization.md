@@ -125,8 +125,79 @@ Powerは位相回転で変化しないためRaw IQを使用する。Spectrumもc
 
 ## 6. 制約と次段階
 
-- Pattern Searchが成立しないcaptureではpattern-derived CFO補正を生成しない。
+- Pattern Searchが成立しないPSK captureでは、Auto設定時にDetected Data同期から
+  decision-directed CFO補正を生成する。FSKはまだknown patternを必要とする。
 - 短いpattern、同一symbolの連続、低SNR、TX filter不一致ではCFOとDeviationの分離が不安定になる。
 - FSKのfractional timing、measurement/reference filterの対称処理、offset探索costに基づくconfidenceは実装済み。Measurement Filterの手動Type/BT設定と設定可能なEstimation Rangeは未実装。R&S仕様ではFSKにsymbol-rate error補償とequalizerは存在しないため、これらをPSKから機械的に移植しない。
 - 複数packet時は現在選択されたResult RangeのCFO modelだけを表示へ適用する。
 - CFO/drift estimatorの不確かさ、timing confidence、残留CFOをResult Summaryへ追加する必要がある。
+
+## 7. PSK Detected Data synchronization (2026-08-21)
+
+PSK波形ではPattern Searchの有効/無効とDetected Data同期を独立させる。
+Pattern Searchが有効で既知パターン検索に失敗した場合、
+`Coarse Synchronization = Auto`ではDetected Data同期へフォールバックする。
+Pattern Searchが無効でも`Auto`または`Detected Data`なら、最初から既知パターンを
+使用せずDetected Data同期を実行する。`Pattern`を選ぶと既知パターン以外へ
+フォールバックしない。FSKは今回の対象外で、従来経路を維持する。
+
+Result Range、Demodulation、I/Q Power TriggerはPattern Searchを無効にしても保持する。
+したがってPower Triggerで候補burstを絞ったうえで、既知symbolなしのPSK同期を行える。
+
+処理順は次のとおり。
+
+1. I/Q Power Triggerが有効なら、最初のtrigger active intervalだけを候補区間にする。
+2. 8 samples/symbolへresampleし、Measurement FilterがAutoならSignal Descriptionの
+   SRRC（既定roll-off 0.4）を適用する。
+3. 各timing候補で差動判定点をM乗し、data phaseを除去した円周上のconcentrationを
+   32-symbol窓で測る。Power Trigger区間内にFSKなどが混在する場合は、concentrationが
+   継続して高い最長区間だけをPSK segmentとして選ぶ。十分な区間がなければcapture
+   全体へ戻し、低品質なPSKを一律に切り捨てない。
+4. 1 symbol内の8 timing phaseを走査し、選択PSK segmentにおける80% trimmed decision
+   errorが最小となる位相を選ぶ。その近傍はfractional sampleで再探索する。
+5. Physical IQの回転対称性からdecision-independent carrier stepを推定し、CFOへ換算する。
+6. Result Rangeは検出PSK segmentと設定Result Lengthの短い方に制限する。
+
+2026-08-21の追加修正で、blind carrier/timing同期は仮定した差動decision alphabetから
+分離した。π/4-DQPSKは差動symbolが4種類でも、絶対IQは2つのQPSK集合を交互に使うため
+8-fold symmetryを持つ。8DPSKも同じ8-fold symmetryである。このため両仮定では絶対IQを
+8乗してdata phaseを除き、その位相直線からtiming、constant phase、CFOを推定する。
+その後にだけ仮定modulationの差動alphabetでsymbol decisionとEVMを計算する。
+
+この分離により、実信号が8DPSKなのにπ/4-DQPSKを仮定した場合でもPhysical IQの8点は
+収束し、同じPSK segmentとCFOを得る。一方、π/4-DQPSKの4 decisionに存在しない8DPSK
+位相差があるためDifferential Symbol EVMは大きくなり、変調仮定の不一致を判別できる。
+同期が崩れることと、仮定modulationの復調品質が悪いことを混同しない設計である。
+
+差動積`d[k] = r[k] conj(r[k-1])`の振幅は`|r[k]||r[k-1]|`となる。AM rippleや
+burst rampをtiming評価へ混入させないため、Detected Dataのtiming costと差動Symbol
+Plotは位相単位円へ正規化する。既知データがないため絶対PSK位相にはM-fold ambiguity
+が残る。この経路ではPattern Symbols Correctを`No`、I/Q Correlationを未定義として
+表示し、blind resultをpattern matchとして扱わない。絶対IQ EVMも誤解を避けて報告せず、
+decision-directed differential EVMを使用する。
+
+回帰fixture `tests/fixtures/bt_mHDT4_capture.iq.tar`（R&S取得、8DPSK 2 Msym/s）は、
+Power Trigger後の先頭約246 symbolsがFSKで、その後に約448 symbolsの8DPSKが続く。
+segment分離前はFSKにCFO推定を引かれて+16.4 kHzだったが、分離後は+9.23 kHzとなり、
+比較画像のR&S結果+8.821 kHzに近づく。選択PSK区間のdecision-directed differential
+EVMは約7.64%である。R&S画面のEVM 17.31%とは評価区間が異なるため直接比較せず、
+R&S内部のequalizer・EVM定義との完全同一性も保証しない。
+
+### mHDT4 capture内のPSK方式切替
+
+同fixtureのDetected Data 448 symbolsを差動位相で再評価すると、単一方式ではなく
+途中でπ/4-DQPSKから8DPSKへ切り替わる構造が観測された。Detected Data symbol 32～250
+付近は差動位相がπ/4-DQPSKの4点（±45°、±135°）へ収束する。symbol 251
+（capture時刻約267.2 us）以降では0°、±90°、180°付近の8DPSK固有点が継続して現れる。
+
+この構造では8DPSK仮定が区間全体に対して一見良好になる。π/4-DQPSKの4位相差は
+8DPSK alphabetの部分集合なので、8DPSK decoderは前半も低いdecision errorで受理できる。
+逆にπ/4-DQPSK decoderは後半の8DPSK固有位相を表現できず、fixtureではDifferential
+Symbol EVMが約35.8%となる。Physical IQはπ/4-DQPSKでも8状態を取り得るため、Physical
+Symbol Plotだけでは方式切替を識別できない。識別には差動位相の時間推移、窓単位EVM、
+またはDifferential Symbol Plotを用いる必要がある。
+
+将来のmixed-modulation解析では、Detected Data区間を短い窓で各candidate alphabetへ
+当てはめ、方式ごとのdecision errorに持続時間とhysteresisを加えてsegment境界を決める。
+各segmentは共通のcarrier/timing modelを引き継ぎつつ、個別のmapping、symbol decision、
+EVMを持つ設計が適する。

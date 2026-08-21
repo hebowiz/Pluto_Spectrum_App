@@ -1346,13 +1346,18 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         self.compensate_deviation_check = QtWidgets.QCheckBox("FSK Deviation Error")
         self.compensate_deviation_check.setChecked(True)
-        for control in (
-            self.coarse_sync_combo,
-            self.fine_sync_combo,
-            self.compensate_deviation_check,
-        ):
-            control.setEnabled(False)
-            control.setToolTip("R&S-compatible setting contract; DSP connection is planned.")
+        self.coarse_sync_combo.setToolTip(
+            "Auto uses the known pattern first and falls back to detected-data PSK "
+            "synchronization. Pattern disables the fallback."
+        )
+        self.fine_sync_combo.setEnabled(False)
+        self.fine_sync_combo.setToolTip(
+            "Fine synchronization currently follows the selected coarse source."
+        )
+        self.compensate_deviation_check.setEnabled(False)
+        self.compensate_deviation_check.setToolTip(
+            "R&S-compatible setting contract; DSP connection is planned."
+        )
         demod_form.addRow("Coarse Synchronization", self.coarse_sync_combo)
         demod_form.addRow("Fine Synchronization", self.fine_sync_combo)
         demod_form.addRow("Measurement Filter", self.measurement_filter_combo)
@@ -1863,7 +1868,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         lsb_first = self.bit_order_combo.currentText() == BitOrdering.LSB.value
         matched_pattern_symbols: tuple[int, ...] = ()
         pattern_metadata: dict[str, object] | None = None
-        if pattern_result is not None:
+        if pattern_result is not None and pattern_result.metadata.get(
+            "pattern_match_valid", True
+        ):
             matched_pattern_symbols = tuple(
                 int(value)
                 for value in pattern_result.metadata.get(
@@ -2894,43 +2901,41 @@ class VSAWindow(QtWidgets.QMainWindow):
         return self._pattern_symbols_from_table(order)
 
     def _configure_pattern_analysis(self, signal: SignalDescription) -> None:
-        if not self.pattern_search_check.isChecked():
-            self.session.configure_pattern_analysis(None)
-            return
-        search = PatternSearchSettings(
-            pattern=KnownPattern(
-                symbols=self._parse_pattern_symbols(signal.modulation.order),
-                name=self.pattern_name_edit.text(),
-            ),
-            mode=PatternSearchMode.ON,
-            iq_correlation_threshold=self.pattern_threshold_spin.value() / 100.0,
-            correlation_threshold_auto=self.pattern_threshold_auto.isChecked(),
-            meas_only_if_pattern_symbols_correct=(
-                self.pattern_meas_only_check.isChecked()
-            ),
-            allow_inverted_fsk_pattern=(
-                self.pattern_allow_inverted_fsk_check.isChecked()
-                and signal.modulation.family is ModulationFamily.FSK
-            ),
-            match_selection=MatchSelectionPolicy.INDEX,
-            match_index=self._selected_match_index,
-            iq_power_trigger=IQPowerTriggerSettings(
-                enabled=self.iq_power_trigger_check.isChecked(),
-                level_dbm=self.iq_power_trigger_level_spin.value(),
-                hysteresis_db=self.iq_power_trigger_hysteresis_spin.value(),
-                envelope_average_symbols=(
-                    self.iq_power_trigger_average_spin.value()
-                ),
-                dropout_symbols=self.iq_power_trigger_dropout_spin.value(),
-                holdoff_symbols=self.iq_power_trigger_holdoff_spin.value(),
-                search_start_offset_symbols=(
-                    self.iq_power_trigger_offset_spin.value()
-                ),
-                limit_result_to_active_interval=(
-                    self.iq_power_trigger_limit_result_check.isChecked()
-                ),
+        iq_power_trigger = IQPowerTriggerSettings(
+            enabled=self.iq_power_trigger_check.isChecked(),
+            level_dbm=self.iq_power_trigger_level_spin.value(),
+            hysteresis_db=self.iq_power_trigger_hysteresis_spin.value(),
+            envelope_average_symbols=self.iq_power_trigger_average_spin.value(),
+            dropout_symbols=self.iq_power_trigger_dropout_spin.value(),
+            holdoff_symbols=self.iq_power_trigger_holdoff_spin.value(),
+            search_start_offset_symbols=self.iq_power_trigger_offset_spin.value(),
+            limit_result_to_active_interval=(
+                self.iq_power_trigger_limit_result_check.isChecked()
             ),
         )
+        search = None
+        if self.pattern_search_check.isChecked():
+            search = PatternSearchSettings(
+                pattern=KnownPattern(
+                    symbols=self._parse_pattern_symbols(signal.modulation.order),
+                    name=self.pattern_name_edit.text(),
+                ),
+                mode=PatternSearchMode.ON,
+                iq_correlation_threshold=(
+                    self.pattern_threshold_spin.value() / 100.0
+                ),
+                correlation_threshold_auto=self.pattern_threshold_auto.isChecked(),
+                meas_only_if_pattern_symbols_correct=(
+                    self.pattern_meas_only_check.isChecked()
+                ),
+                allow_inverted_fsk_pattern=(
+                    self.pattern_allow_inverted_fsk_check.isChecked()
+                    and signal.modulation.family is ModulationFamily.FSK
+                ),
+                match_selection=MatchSelectionPolicy.INDEX,
+                match_index=self._selected_match_index,
+                iq_power_trigger=iq_power_trigger,
+            )
         result_range = ResultRangeSettings(
             result_length=self.result_length_spin.value(),
             reference=ResultRangeReference(self.result_reference_combo.currentData()),
@@ -2961,7 +2966,12 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.compensate_deviation_check.isChecked()
             ),
         )
-        self.session.configure_pattern_analysis(search, result_range, demodulation)
+        self.session.configure_pattern_analysis(
+            search,
+            result_range,
+            demodulation,
+            iq_power_trigger,
+        )
 
     def _set_controls_from_signal(self, signal: SignalDescription) -> None:
         index = self.modulation_combo.findData(signal.modulation.value)
@@ -3969,9 +3979,14 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if signal.modulation.family is ModulationFamily.FSK
                 else pattern_result.carrier_frequency_drift_hz_per_s
             )
+            pattern_match_valid = bool(
+                pattern_result.metadata.get("pattern_match_valid", True)
+            )
             selected_result_text = (
                 f"{pattern_result.metadata.get('selected_match_index', 1)} / "
                 f"{pattern_result.metadata.get('eligible_match_count', 1)}"
+                if pattern_match_valid
+                else "Detected Data"
             )
             if pattern_result.metadata.get("power_trigger_enabled", False):
                 selected_result_text += (
@@ -3982,12 +3997,19 @@ class VSAWindow(QtWidgets.QMainWindow):
             summary_values.update(
                 {
                     "pattern_symbols_correct": (
-                        "Yes" if pattern_result.pattern_symbol_errors == 0 else "No"
+                        "Yes"
+                        if pattern_match_valid
+                        and pattern_result.pattern_symbol_errors == 0
+                        else "No"
                     ),
                     "pattern_match_variant": str(
                         pattern_result.metadata.get("pattern_match_variant", "Normal")
                     ),
-                    "iq_correlation": f"{pattern_result.correlation * 100.0:.2f} %",
+                    "iq_correlation": (
+                        f"{pattern_result.correlation * 100.0:.2f} %"
+                        if pattern_match_valid
+                        else "—"
+                    ),
                     "carrier_frequency_error": (
                         f"{pattern_result.carrier_frequency_offset_hz / 1e3:+.3f} kHz"
                     ),
@@ -3998,6 +4020,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                     "match_selection": selected_result_text,
                 }
             )
+            if not pattern_match_valid and self.session.pattern_error:
+                summary_values["pattern_error"] = self.session.pattern_error
             if signal.modulation.family is ModulationFamily.PSK:
                 rate_error_ppm = pattern_result.metadata.get("symbol_rate_error_ppm")
                 sync_evm = pattern_result.metadata.get("synchronization_evm_rms")
@@ -4124,7 +4148,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                 [str(row * 10) for row in range(row_count)]
             )
             matched_pattern_symbols = ()
-            if pattern_result is not None:
+            if pattern_result is not None and pattern_result.metadata.get(
+                "pattern_match_valid", True
+            ):
                 configured_symbols = self._parse_pattern_symbols(
                     pattern_result.modulation.order
                 )
@@ -4337,23 +4363,27 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         result_region.setZValue(-5)
         plot.addItem(result_region)
-        pattern_region = pg.LinearRegionItem(
-            values=(
-                pattern.pattern_start_time_s * 1e3,
-                pattern.pattern_stop_time_s * 1e3,
-            ),
-            movable=False,
-            brush=pg.mkBrush(40, 220, 100, 65),
-            pen=pg.mkPen(40, 240, 120, 190),
+        pattern_match_valid = bool(
+            pattern.metadata.get("pattern_match_valid", True)
         )
-        pattern_region.setZValue(-4)
-        plot.addItem(pattern_region)
+        if pattern_match_valid:
+            pattern_region = pg.LinearRegionItem(
+                values=(
+                    pattern.pattern_start_time_s * 1e3,
+                    pattern.pattern_stop_time_s * 1e3,
+                ),
+                movable=False,
+                brush=pg.mkBrush(40, 220, 100, 65),
+                pen=pg.mkPen(40, 240, 120, 190),
+            )
+            pattern_region.setZValue(-4)
+            plot.addItem(pattern_region)
         marker = pg.InfiniteLine(
             pos=pattern.pattern_start_time_s * 1e3,
             angle=90,
             movable=False,
             pen=pg.mkPen(80, 255, 130, 220, width=2),
-            label="Pattern Start",
+            label=("Pattern Start" if pattern_match_valid else "Detected Data Start"),
             labelOpts={"position": 0.08, "color": (120, 255, 160)},
         )
         plot.addItem(marker)

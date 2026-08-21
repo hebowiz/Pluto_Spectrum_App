@@ -9,10 +9,13 @@ import pytest
 
 from pluto_sa.vsa.model import ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
+    DemodulationSettings,
+    IQPowerTriggerSettings,
     KnownPattern,
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeSettings,
+    SynchronizationSource,
 )
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource
@@ -170,6 +173,109 @@ def test_committed_rs_iq_tar_sample_is_loadable() -> None:
     assert recording.metadata["iq_tar_format"] == "complex"
     assert recording.metadata["iq_tar_data_type"] == "float32"
     np.testing.assert_allclose(np.abs(recording.iq), 0.1, atol=1e-6)
+
+
+def test_mhdt4_pattern_failure_falls_back_to_detected_data_psk_sync() -> None:
+    recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "bt_mHDT4_capture.iq.tar"
+    )
+    session = VSASession(
+        recording=recording,
+        signal=SignalDescription(
+            modulation=ModulationKind.DPSK8,
+            symbol_rate_hz=2_000_000.0,
+            tx_filter="Root Raised Cosine",
+            filter_parameter=0.4,
+        ),
+    )
+    session.configure_pattern_analysis(
+        PatternSearchSettings(
+            pattern=KnownPattern((0,) * 8, name="Intentionally absent"),
+            mode=PatternSearchMode.ON,
+            meas_only_if_pattern_symbols_correct=True,
+            iq_power_trigger=IQPowerTriggerSettings(
+                enabled=True,
+                level_dbm=-20.0,
+                dropout_symbols=8.0,
+                limit_result_to_active_interval=True,
+            ),
+        ),
+        ResultRangeSettings(result_length=999),
+        DemodulationSettings(
+            coarse_synchronization=SynchronizationSource.AUTO,
+        ),
+    )
+
+    session.analyze()
+
+    detected = session.pattern_result
+    assert detected is not None
+    assert detected.metadata["synchronization_source"] == "Detected Data"
+    assert detected.metadata["pattern_match_valid"] is False
+    assert session.pattern_error is not None
+    # The trigger interval contains an FSK header followed by 8DPSK.  Blind
+    # synchronization must reject the header instead of biasing the PSK CFO.
+    assert 430 <= detected.decoded_symbols.size <= 470
+    assert detected.evm_rms_percent < 10.0
+    assert detected.carrier_frequency_offset_hz == pytest.approx(8_821.0, abs=1_500.0)
+    assert detected.metadata["detected_psk_interval_start_symbol"] >= 230
+    assert detected.metadata["detected_psk_interval_concentration"] > 0.75
+    assert detected.result_start_sample >= 2_100
+    assert detected.result_stop_sample <= 5_900
+
+    # Disabling Pattern Search must not disable the independent Detected Data
+    # synchronizer or its post-capture I/Q power gate.
+    blind_session = VSASession(recording=recording, signal=session.signal)
+    blind_session.configure_pattern_analysis(
+        None,
+        session.result_range,
+        session.demodulation,
+        session.pattern_search.iq_power_trigger,
+    )
+    blind_session.analyze()
+    blind = blind_session.pattern_result
+    assert blind is not None
+    assert blind.metadata["pattern_name"] == "Detected Data"
+    assert blind.metadata["power_trigger_enabled"]
+    assert blind.result_start_sample == detected.result_start_sample
+    assert blind.result_stop_sample == detected.result_stop_sample
+    assert blind.carrier_frequency_offset_hz == pytest.approx(
+        detected.carrier_frequency_offset_hz, abs=1.0
+    )
+
+    # A wrong pi/4-DQPSK decision hypothesis must not destroy carrier/timing
+    # synchronization.  Both formats have eightfold physical IQ symmetry, so
+    # their physical plots should use the same segment, timing and CFO; the
+    # high decision EVM remains the honest indication that pi/4 is a bad fit.
+    pi4_session = VSASession(
+        recording=recording,
+        signal=SignalDescription(
+            modulation=ModulationKind.PI4_DQPSK,
+            symbol_rate_hz=2_000_000.0,
+            tx_filter="Root Raised Cosine",
+            filter_parameter=0.4,
+        ),
+    )
+    pi4_session.configure_pattern_analysis(
+        session.pattern_search,
+        session.result_range,
+        session.demodulation,
+    )
+    pi4_session.analyze()
+    pi4 = pi4_session.pattern_result
+    assert pi4 is not None
+    assert pi4.decoded_symbols.size == detected.decoded_symbols.size
+    assert pi4.result_start_sample == detected.result_start_sample
+    assert pi4.result_stop_sample == detected.result_stop_sample
+    assert pi4.symbol_time_s == pytest.approx(detected.symbol_time_s, abs=1e-12)
+    assert pi4.carrier_frequency_offset_hz == pytest.approx(
+        detected.carrier_frequency_offset_hz, abs=1.0
+    )
+    assert pi4.phase_rotation_rad == pytest.approx(
+        detected.phase_rotation_rad, abs=1e-6
+    )
+    assert pi4.metadata["carrier_symmetry_order"] == 8
+    assert pi4.evm_rms_percent > 25.0
 
 
 def test_analysis_bandwidth_preserves_gfsk_symbol_timing() -> None:

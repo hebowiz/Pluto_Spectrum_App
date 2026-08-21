@@ -29,7 +29,11 @@ from pluto_sa.vsa.ui.main_window import (
 from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
 from pluto_sa.vsa.pluto_source import CaptureCancelledError
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
-from pluto_sa.vsa.pattern import prepare_psk_iq
+from pluto_sa.vsa.pattern import (
+    DemodulationSettings,
+    SynchronizationSource,
+    prepare_psk_iq,
+)
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 
@@ -179,6 +183,14 @@ def test_large_symbol_result_limits_table_display_but_not_export(tmp_path) -> No
     session = VSASession()
     session.set_recording(recording)
     session.set_signal(signal)
+    # This test exercises bounded rendering of the unsynchronized/base result,
+    # rather than the detected-data Result Range.
+    session.configure_pattern_analysis(
+        None,
+        demodulation=DemodulationSettings(
+            coarse_synchronization=SynchronizationSource.PATTERN,
+        ),
+    )
     session.analyze()
     window = VSAWindow(
         preferences=_isolated_preferences(tmp_path, "bounded-symbol-table")

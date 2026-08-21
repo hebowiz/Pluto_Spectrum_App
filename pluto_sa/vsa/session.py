@@ -9,14 +9,22 @@ import numpy as np
 
 from pluto_sa.vsa.analysis import VSAAnalyzer
 from pluto_sa.vsa.channel import extract_analysis_channel
-from pluto_sa.vsa.model import IQRecording, SignalDescription, VSAAnalysisResult, VSASettings
+from pluto_sa.vsa.model import (
+    IQRecording,
+    ModulationFamily,
+    SignalDescription,
+    VSAAnalysisResult,
+    VSASettings,
+)
 from pluto_sa.vsa.pattern import (
     carrier_correct_recording,
     DemodulationSettings,
+    IQPowerTriggerSettings,
     PatternAnalyzer,
     PatternSearchResult,
     PatternSearchSettings,
     ResultRangeSettings,
+    SynchronizationSource,
 )
 
 
@@ -28,6 +36,9 @@ class VSASession:
     settings: VSASettings = field(default_factory=VSASettings)
     result: VSAAnalysisResult | None = None
     pattern_search: PatternSearchSettings | None = None
+    iq_power_trigger: IQPowerTriggerSettings = field(
+        default_factory=IQPowerTriggerSettings
+    )
     result_range: ResultRangeSettings = field(default_factory=ResultRangeSettings)
     demodulation: DemodulationSettings = field(default_factory=DemodulationSettings)
     pattern_result: PatternSearchResult | None = None
@@ -48,6 +59,7 @@ class VSASession:
             signal=self.signal,
             settings=self.settings,
             pattern_search=self.pattern_search,
+            iq_power_trigger=self.iq_power_trigger,
             result_range=self.result_range,
             demodulation=self.demodulation,
             revision=self.revision,
@@ -96,8 +108,13 @@ class VSASession:
         search: PatternSearchSettings | None,
         result_range: ResultRangeSettings | None = None,
         demodulation: DemodulationSettings | None = None,
+        iq_power_trigger: IQPowerTriggerSettings | None = None,
     ) -> None:
         self.pattern_search = search
+        if iq_power_trigger is not None:
+            self.iq_power_trigger = iq_power_trigger
+        elif search is not None:
+            self.iq_power_trigger = search.iq_power_trigger
         if result_range is not None:
             self.result_range = result_range
         if demodulation is not None:
@@ -133,6 +150,63 @@ class VSASession:
         )
         return prepared, prepared_settings
 
+    def _publish_demodulation_result(
+        self,
+        pattern_recording: IQRecording,
+        prepared_settings: VSASettings,
+    ) -> None:
+        """Build the common corrected/full/range products for one sync result."""
+        if self.pattern_result is None:
+            return
+        stage_started = perf_counter()
+        corrected_recording = carrier_correct_recording(
+            pattern_recording,
+            self.pattern_result,
+            compensate_drift=self.demodulation.compensate_carrier_frequency_drift,
+        )
+        selected = pattern_recording.iq[
+            self.pattern_result.result_start_sample : self.pattern_result.result_stop_sample
+        ]
+        range_recording = replace(
+            pattern_recording,
+            iq=selected,
+            start_sample_index=(
+                pattern_recording.start_sample_index
+                + self.pattern_result.result_start_sample
+            ),
+            trigger_sample_index=None,
+            source=f"{pattern_recording.source} | Result Range",
+        )
+        corrected_selected = corrected_recording.iq[
+            self.pattern_result.result_start_sample : self.pattern_result.result_stop_sample
+        ]
+        corrected_range_recording = replace(
+            corrected_recording,
+            iq=corrected_selected,
+            start_sample_index=(
+                corrected_recording.start_sample_index
+                + self.pattern_result.result_start_sample
+            ),
+            trigger_sample_index=None,
+            source=f"{corrected_recording.source} | Result Range",
+        )
+        self.analysis_timings_ms["post_prepare"] = (
+            perf_counter() - stage_started
+        ) * 1e3
+        stage_started = perf_counter()
+        self.carrier_corrected_result = self._analyzer.analyze(
+            corrected_recording, self.signal, prepared_settings
+        )
+        self.pattern_range_result = self._analyzer.analyze(
+            range_recording, self.signal, prepared_settings
+        )
+        self.carrier_corrected_pattern_range_result = self._analyzer.analyze(
+            corrected_range_recording, self.signal, prepared_settings
+        )
+        self.analysis_timings_ms["post_analysis"] = (
+            perf_counter() - stage_started
+        ) * 1e3
+
     def analyze(self) -> VSAAnalysisResult:
         if self.recording is None:
             raise RuntimeError("no IQ recording is loaded")
@@ -158,88 +232,83 @@ class VSASession:
         self.carrier_corrected_result = None
         self.carrier_corrected_pattern_range_result = None
         self.pattern_error = None
-        if self.pattern_search is not None:
+        detected_data_without_pattern = (
+            self.pattern_search is None
+            and self.signal.modulation.family is ModulationFamily.PSK
+            and self.demodulation.coarse_synchronization
+            in {SynchronizationSource.AUTO, SynchronizationSource.DETECTED_DATA}
+        )
+        if self.pattern_search is not None or detected_data_without_pattern:
             pattern_recording = analysis_recording
             try:
                 stage_started = perf_counter()
-                self.pattern_result = self._pattern_analyzer.search(
-                    pattern_recording,
-                    self.signal,
-                    self.pattern_search,
-                    self.result_range,
-                    self.demodulation,
-                )
+                if (
+                    self.demodulation.coarse_synchronization
+                    is SynchronizationSource.DETECTED_DATA
+                    or self.pattern_search is None
+                ):
+                    self.pattern_result = self._pattern_analyzer.detect_data(
+                        pattern_recording,
+                        self.signal,
+                        self.pattern_search,
+                        self.result_range,
+                        self.demodulation,
+                        self.iq_power_trigger,
+                    )
+                else:
+                    self.pattern_result = self._pattern_analyzer.search(
+                        pattern_recording,
+                        self.signal,
+                        self.pattern_search,
+                        self.result_range,
+                        self.demodulation,
+                    )
                 self.analysis_timings_ms["pattern_search"] = (
                     perf_counter() - stage_started
                 ) * 1e3
                 if (
-                    self.pattern_search.meas_only_if_pattern_symbols_correct
+                    self.pattern_search is not None
+                    and self.pattern_search.meas_only_if_pattern_symbols_correct
                     and self.pattern_result.pattern_symbol_errors > 0
+                    and self.pattern_result.metadata.get("pattern_match_valid", True)
                 ):
                     raise ValueError(
                         "pattern waveform matched but Pattern Symbols Correct is false"
                     )
-                stage_started = perf_counter()
-                corrected_recording = carrier_correct_recording(
-                    pattern_recording,
-                    self.pattern_result,
-                    compensate_drift=(
-                        self.demodulation.compensate_carrier_frequency_drift
-                    ),
-                )
-                selected = pattern_recording.iq[
-                    self.pattern_result.result_start_sample :
-                    self.pattern_result.result_stop_sample
-                ]
-                range_recording = replace(
-                    pattern_recording,
-                    iq=selected,
-                    start_sample_index=(
-                        pattern_recording.start_sample_index
-                        + self.pattern_result.result_start_sample
-                    ),
-                    trigger_sample_index=None,
-                    source=f"{pattern_recording.source} | Result Range",
-                )
-                corrected_selected = corrected_recording.iq[
-                    self.pattern_result.result_start_sample :
-                    self.pattern_result.result_stop_sample
-                ]
-                corrected_range_recording = replace(
-                    corrected_recording,
-                    iq=corrected_selected,
-                    start_sample_index=(
-                        corrected_recording.start_sample_index
-                        + self.pattern_result.result_start_sample
-                    ),
-                    trigger_sample_index=None,
-                    source=f"{corrected_recording.source} | Result Range",
-                )
-                self.analysis_timings_ms["post_prepare"] = (
-                    perf_counter() - stage_started
-                ) * 1e3
-                stage_started = perf_counter()
-                self.carrier_corrected_result = self._analyzer.analyze(
-                    corrected_recording,
-                    self.signal,
-                    prepared_settings,
-                )
-                self.pattern_range_result = self._analyzer.analyze(
-                    range_recording,
-                    self.signal,
-                    prepared_settings,
-                )
-                self.carrier_corrected_pattern_range_result = self._analyzer.analyze(
-                    corrected_range_recording,
-                    self.signal,
-                    prepared_settings,
-                )
-                self.analysis_timings_ms["post_analysis"] = (
-                    perf_counter() - stage_started
-                ) * 1e3
+                self._publish_demodulation_result(pattern_recording, prepared_settings)
             except ValueError as error:
                 self.pattern_error = str(error)
-                if self.pattern_search.meas_only_if_pattern_symbols_correct:
+                allow_detected_fallback = (
+                    self.pattern_search is not None
+                    and self.signal.modulation.family is ModulationFamily.PSK
+                    and self.demodulation.coarse_synchronization
+                    is SynchronizationSource.AUTO
+                )
+                if allow_detected_fallback:
+                    try:
+                        stage_started = perf_counter()
+                        self.pattern_result = self._pattern_analyzer.detect_data(
+                            pattern_recording,
+                            self.signal,
+                            self.pattern_search,
+                            self.result_range,
+                            self.demodulation,
+                            self.iq_power_trigger,
+                        )
+                        self.analysis_timings_ms["detected_data_sync"] = (
+                            perf_counter() - stage_started
+                        ) * 1e3
+                        self._publish_demodulation_result(
+                            pattern_recording, prepared_settings
+                        )
+                    except ValueError as fallback_error:
+                        self.pattern_error = f"{error}; {fallback_error}"
+                        self.pattern_result = None
+                if (
+                    self.pattern_result is None
+                    and self.pattern_search is not None
+                    and self.pattern_search.meas_only_if_pattern_symbols_correct
+                ):
                     self.pattern_result = None
                     self.pattern_range_result = None
                     self.carrier_corrected_result = None

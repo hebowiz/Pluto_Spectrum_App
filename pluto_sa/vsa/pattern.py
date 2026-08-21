@@ -10,7 +10,7 @@ from typing import Mapping
 
 import numpy as np
 from scipy.ndimage import uniform_filter1d
-from scipy.optimize import least_squares
+from scipy.optimize import least_squares, minimize_scalar
 from scipy.signal import resample_poly
 
 from pluto_sa.vsa.demod.gfsk import demodulate_gfsk
@@ -808,6 +808,62 @@ def _wrap_phase(value: float) -> float:
     return float((float(value) + np.pi) % (2.0 * np.pi) - np.pi)
 
 
+def _detected_psk_decision_interval(
+    normalized_symbols: np.ndarray,
+    order: int,
+) -> tuple[int, int, float]:
+    """Return the longest interval with stable M-PSK decision geometry.
+
+    Raising unit phasors to the Mth power removes the transmitted M-PSK data,
+    leaving a concentration measure that is invariant to the unknown carrier
+    rotation.  This lets a mixed FSK/PSK burst select its PSK portion without
+    protocol knowledge or a known symbol pattern.
+    """
+    values = np.asarray(normalized_symbols, dtype=np.complex128)
+    count = int(values.size)
+    if count < 32:
+        return 0, count, 0.0
+    window = min(32, max(16, count // 8))
+    mth_power = np.exp(1j * float(order) * np.angle(values))
+    concentration = np.abs(
+        np.convolve(mth_power, np.ones(window) / float(window), mode="valid")
+    )
+    # 0.65 tolerates roughly 15-degree RMS phase scatter for 8PSK while
+    # rejecting the broad modulo-M distribution produced by the FSK header in
+    # the mHDT capture.  Fall back to the complete interval when no sustained
+    # PSK-like run exists, preserving generic noisy-signal behavior.
+    good = concentration >= 0.65
+    runs: list[tuple[int, int]] = []
+    run_start: int | None = None
+    for index, is_good in enumerate(good):
+        if is_good and run_start is None:
+            run_start = index
+        if run_start is not None and (not is_good or index == good.size - 1):
+            run_stop = index if not is_good else index + 1
+            runs.append((run_start, min(count, run_stop + window)))
+            run_start = None
+    if not runs:
+        return 0, count, float(np.max(concentration, initial=0.0))
+    start, stop = max(runs, key=lambda item: item[1] - item[0])
+    minimum_sustained = max(32, int(np.ceil(0.2 * count)))
+    if stop - start < minimum_sustained:
+        return 0, count, float(np.max(concentration, initial=0.0))
+    interval_concentration = float(
+        np.mean(concentration[start : max(start + 1, stop - window + 1)])
+    )
+    return int(start), int(stop), interval_concentration
+
+
+def _psk_carrier_symmetry_order(modulation: ModulationKind) -> int:
+    """Return physical carrier-recovery symmetry, independent of decisions."""
+    if modulation in {ModulationKind.PI4_DQPSK, ModulationKind.DPSK8}:
+        # pi/4-DQPSK has four differential decisions but alternates between
+        # two QPSK constellations; its physical IQ therefore has eightfold
+        # rotational symmetry, just like 8DPSK.
+        return 8
+    return int(modulation.order)
+
+
 class PatternAnalyzer:
     """Search one known symbol pattern and decode a result range from its start."""
 
@@ -832,6 +888,327 @@ class PatternAnalyzer:
             )
         return self._search_ungated(
             recording, signal, search, result_range, demodulation
+        )
+
+    def detect_data(
+        self,
+        recording: IQRecording,
+        signal: SignalDescription,
+        search: PatternSearchSettings | None = None,
+        result_range: ResultRangeSettings | None = None,
+        demodulation: DemodulationSettings | None = None,
+        iq_power_trigger: IQPowerTriggerSettings | None = None,
+    ) -> PatternSearchResult:
+        """Synchronize PSK from detected decisions without known symbols.
+
+        This is the R&S-style fallback used when a configured pattern is not
+        present.  It deliberately remains separate from ``search`` so a blind
+        synchronization result can never be counted as a pattern match.
+        """
+        if signal.modulation.family is not ModulationFamily.PSK:
+            raise ValueError("detected-data synchronization currently supports PSK")
+        return self._detect_psk_data(
+            recording,
+            signal,
+            search,
+            result_range or ResultRangeSettings(),
+            demodulation or DemodulationSettings(),
+            iq_power_trigger=(
+                iq_power_trigger
+                if iq_power_trigger is not None
+                else (
+                    search.iq_power_trigger
+                    if search is not None
+                    else IQPowerTriggerSettings()
+                )
+            ),
+        )
+
+    def _detect_psk_data(
+        self,
+        recording: IQRecording,
+        signal: SignalDescription,
+        search: PatternSearchSettings | None,
+        result_range: ResultRangeSettings,
+        demodulation: DemodulationSettings,
+        iq_power_trigger: IQPowerTriggerSettings,
+    ) -> PatternSearchResult:
+        samples_per_symbol = 8
+        resampled, analysis_rate_hz = prepare_psk_iq(
+            recording.iq,
+            sample_rate_hz=recording.sample_rate_hz,
+            symbol_rate_hz=signal.symbol_rate_hz,
+            tx_filter=signal.tx_filter,
+            filter_parameter=signal.filter_parameter,
+            samples_per_symbol=samples_per_symbol,
+            apply_measurement_filter=(
+                demodulation.measurement_filter is MeasurementFilterMode.AUTO
+            ),
+        )
+        start_sample = 0
+        stop_sample = recording.sample_count
+        trigger_event_index: int | None = None
+        trigger_event_count = 0
+        if iq_power_trigger.enabled:
+            events = detect_iq_power_trigger_events(
+                recording,
+                symbol_rate_hz=signal.symbol_rate_hz,
+                settings=iq_power_trigger,
+            )
+            if not events:
+                raise ValueError(
+                    "detected-data synchronization found no I/Q power trigger event"
+                )
+            trigger_event_count = len(events)
+            event = events[0]
+            trigger_event_index = 1
+            offset = int(
+                round(
+                    iq_power_trigger.search_start_offset_symbols
+                    * recording.sample_rate_hz
+                    / signal.symbol_rate_hz
+                )
+            )
+            start_sample = int(np.clip(event.trigger_sample + offset, 0, stop_sample))
+            if iq_power_trigger.limit_result_to_active_interval:
+                stop_sample = min(stop_sample, int(event.active_stop_sample))
+
+        scale = analysis_rate_hz / recording.sample_rate_hz
+        start_resampled = float(start_sample) * scale
+        stop_resampled = float(stop_sample) * scale
+        alphabet = _constellation(signal.modulation, signal.symbol_mapping)
+        order = int(alphabet.size)
+        carrier_symmetry_order = _psk_carrier_symmetry_order(signal.modulation)
+
+        def evaluate(offset: float, *, return_values: bool = False):
+            centers = np.arange(
+                offset + samples_per_symbol / 2.0 - 0.5,
+                resampled.size,
+                samples_per_symbol,
+                dtype=np.float64,
+            )
+            centers = centers[
+                (centers >= start_resampled + samples_per_symbol / 2.0 - 0.5)
+                & (centers < stop_resampled - samples_per_symbol / 2.0 + 0.5)
+                & (centers <= resampled.size - 1)
+            ]
+            absolute = _interpolate_complex(resampled, centers)
+            if absolute.size < 9:
+                return (np.inf, None) if return_values else np.inf
+            if signal.modulation.differential:
+                observed = absolute[1:] * np.conj(absolute[:-1])
+                result_centers = centers[1:]
+                decision_absolute = absolute[1:]
+            else:
+                observed = absolute
+                result_centers = centers
+                decision_absolute = absolute
+            # Timing recovery is phase-directed.  A differential product has
+            # magnitude |s[n]||s[n-1]|, so using that magnitude in the timing
+            # cost overweights ripple and burst ramps and can select an eye
+            # crossing.  R&S detected-data synchronization likewise derives
+            # timing from the decision geometry, not AM ripple.
+            normalized = observed / np.maximum(np.abs(observed), _EPSILON)
+            interval_start, interval_stop, interval_concentration = (
+                _detected_psk_decision_interval(
+                    normalized, carrier_symmetry_order
+                )
+            )
+            normalized = normalized[interval_start:interval_stop]
+            result_centers = result_centers[interval_start:interval_stop]
+            decision_absolute = decision_absolute[interval_start:interval_stop]
+            if normalized.size < 9:
+                return (np.inf, None) if return_values else np.inf
+
+            # Synchronize from the physical IQ symmetry, not from the assumed
+            # differential decision alphabet.  In particular pi/4-DQPSK has
+            # four phase increments but an eight-state physical constellation.
+            # Keeping this fit decision-independent lets a deliberately wrong
+            # modulation hypothesis still produce a stable physical plot; its
+            # poor decision EVM then exposes the mismatch honestly.
+            absolute_unit = decision_absolute / np.maximum(
+                np.abs(decision_absolute), _EPSILON
+            )
+            powered = absolute_unit ** carrier_symmetry_order
+            symbol_axis = np.arange(powered.size, dtype=np.float64)
+            unwrapped = np.unwrap(np.angle(powered))
+            initial_slope, initial_intercept = np.polyfit(
+                symbol_axis, unwrapped, 1
+            )
+
+            def carrier_residual(parameters: np.ndarray) -> np.ndarray:
+                intercept, slope = parameters
+                return np.angle(
+                    powered
+                    * np.exp(-1j * (intercept + slope * symbol_axis))
+                )
+
+            fitted = least_squares(
+                carrier_residual,
+                np.asarray([initial_intercept, initial_slope]),
+                loss="soft_l1",
+                f_scale=0.25,
+                max_nfev=80,
+            )
+            powered_intercept, powered_slope = map(float, fitted.x)
+            residual = carrier_residual(fitted.x)
+            physical_phase = powered_intercept / float(carrier_symmetry_order)
+            carrier_step = powered_slope / float(carrier_symmetry_order)
+            cost = float(
+                np.sqrt(np.mean(residual**2))
+                / float(carrier_symmetry_order)
+            )
+            if return_values:
+                return cost, (
+                    decision_absolute,
+                    normalized,
+                    result_centers,
+                    physical_phase,
+                    carrier_step,
+                    interval_start,
+                    interval_stop,
+                    interval_concentration,
+                )
+            return cost
+
+        integer_costs = np.asarray(
+            [evaluate(float(phase)) for phase in range(samples_per_symbol)]
+        )
+        best_phase = int(np.argmin(integer_costs))
+        if not np.isfinite(integer_costs[best_phase]):
+            raise ValueError("not enough active PSK symbols for detected-data synchronization")
+        fractional_phase = float(best_phase)
+        if demodulation.measurement_filter is MeasurementFilterMode.AUTO:
+            refined = minimize_scalar(
+                lambda value: evaluate(float(value % samples_per_symbol)),
+                bounds=(best_phase - 1.0, best_phase + 1.0),
+                method="bounded",
+                options={"xatol": 1e-4},
+            )
+            if float(refined.fun) < float(integer_costs[best_phase]):
+                fractional_phase = float(refined.x % samples_per_symbol)
+        physical_sync_rms_rad, values = evaluate(
+            fractional_phase, return_values=True
+        )
+        assert values is not None
+        (
+            decision_absolute,
+            normalized,
+            result_centers,
+            physical_phase,
+            carrier_step,
+            detected_interval_start,
+            detected_interval_stop,
+            detected_interval_concentration,
+        ) = values
+        if signal.modulation.differential:
+            corrected = normalized * np.exp(-1j * carrier_step)
+        else:
+            decision_axis = np.arange(normalized.size, dtype=np.float64)
+            corrected = normalized * np.exp(
+                -1j * (physical_phase + carrier_step * decision_axis)
+            )
+        decoded_all = np.argmin(
+            np.abs(corrected[:, None] - alphabet[None, :]), axis=1
+        ).astype(np.int16)
+
+        offset_symbols = max(0, int(result_range.offset_symbols))
+        stop_symbols = min(
+            decoded_all.size,
+            offset_symbols + int(result_range.result_length),
+        )
+        selection = slice(offset_symbols, stop_symbols)
+        corrected = corrected[selection]
+        decoded = decoded_all[selection]
+        result_centers = result_centers[selection]
+        if corrected.size == 0:
+            raise ValueError("detected-data Result Range contains no symbols")
+        reference = alphabet[decoded]
+        evm_rms_percent = 100.0 * float(
+            np.sqrt(np.sum(np.abs(corrected - reference) ** 2) / np.sum(np.abs(reference) ** 2))
+        )
+
+        carrier_phase = _wrap_phase(
+            physical_phase + carrier_step * float(offset_symbols)
+        )
+        half_symbol_s = 0.5 / signal.symbol_rate_hz
+        result_start_sample = max(
+            0,
+            int(round((result_centers[0] / analysis_rate_hz - half_symbol_s) * recording.sample_rate_hz)),
+        )
+        result_stop_sample = min(
+            recording.sample_count,
+            int(round((result_centers[-1] / analysis_rate_hz + half_symbol_s) * recording.sample_rate_hz)),
+        )
+        cfo_hz = carrier_step * signal.symbol_rate_hz / (2.0 * np.pi)
+        return PatternSearchResult(
+            modulation=signal.modulation,
+            pattern_start_sample=result_start_sample,
+            pattern_start_time_s=result_start_sample / recording.sample_rate_hz,
+            pattern_start_symbol=0,
+            result_start_sample=result_start_sample,
+            result_stop_sample=result_stop_sample,
+            correlation=0.0,
+            pattern_symbol_errors=1,
+            decoded_symbols=decoded,
+            decoded_bits=_symbols_to_bits(decoded, order, demodulation.bit_ordering),
+            measured_symbols=np.asarray(corrected, dtype=np.complex64),
+            symbol_time_s=result_centers / analysis_rate_hz,
+            carrier_frequency_offset_hz=cfo_hz,
+            carrier_frequency_drift_hz_per_s=0.0,
+            frequency_deviation_hz=None,
+            evm_rms_percent=evm_rms_percent,
+            polarity_inverted=False,
+            phase_rotation_rad=_wrap_phase(carrier_phase),
+            timing_phase_samples=best_phase,
+            analysis_sample_rate_hz=analysis_rate_hz,
+            recording_sample_rate_hz=recording.sample_rate_hz,
+            carrier_reference_time_s=float(result_centers[0]) / analysis_rate_hz,
+            metadata={
+                "pattern_name": (
+                    search.pattern.name if search is not None else "Detected Data"
+                ),
+                "pattern_symbol_count": 0,
+                "symbol_rate_hz": signal.symbol_rate_hz,
+                "synchronization_source": SynchronizationSource.DETECTED_DATA.value,
+                "pattern_match_valid": False,
+                "measurement_filter": demodulation.measurement_filter.value,
+                "matched_filter_applied": (
+                    demodulation.measurement_filter is MeasurementFilterMode.AUTO
+                    and signal.tx_filter.lower() in {
+                        "root raised cosine", "root-raised-cosine", "rrc", "srrc"
+                    }
+                ),
+                "fractional_timing_offset_samples": fractional_phase - best_phase,
+                "symbol_rate_error_ppm": 0.0,
+                "synchronization_evm_rms": evm_rms_percent / 100.0,
+                # Absolute IQ has an M-fold phase ambiguity without known
+                # symbols.  Do not report a misleading physical EVM; the
+                # decision-directed differential EVM remains well-defined.
+                "physical_evm_rms_percent": None,
+                "differential_symbol_evm_rms_percent": (
+                    evm_rms_percent if signal.modulation.differential else None
+                ),
+                "bluetooth_devm_rms_percent": None,
+                "carrier_drift_compensated": False,
+                "phase_estimation_method": (
+                    "blind physical-symmetry carrier and timing synchronization"
+                ),
+                "carrier_symmetry_order": carrier_symmetry_order,
+                "physical_sync_rms_rad": physical_sync_rms_rad,
+                "detected_psk_interval_start_symbol": detected_interval_start,
+                "detected_psk_interval_stop_symbol": detected_interval_stop,
+                "detected_psk_interval_concentration": (
+                    detected_interval_concentration
+                ),
+                "selected_match_index": 1,
+                "eligible_match_count": 1,
+                "detected_match_count": 0,
+                "power_trigger_enabled": iq_power_trigger.enabled,
+                "selected_power_trigger_event_index": trigger_event_index,
+                "power_trigger_event_count": trigger_event_count,
+                "source": recording.source,
+            },
         )
 
     def _search_ungated(
