@@ -5,13 +5,13 @@
     "input_frontend": {
       "input_source": "Pluto",
       "pluto_uri": "",
-      "center_frequency_mhz": 2441.0,
+      "center_frequency_mhz": 2440.0,
       "rf_bandwidth_mhz": 8.0,
-      "internal_gain_db": 30,
+      "internal_gain_db": 0,
       "external_attenuation_db": 30.0,
       "external_gain_db": 0.0,
       "analysis_channel_enabled": false,
-      "analysis_center_mhz": 2441.0,
+      "analysis_center_mhz": 2440.0,
       "analysis_bandwidth_mhz": 1.5
     },
     "signal_capture": {
@@ -77,6 +77,7 @@
     "demodulation": {
       "coarse_synchronization": "Auto",
       "fine_synchronization": "Auto",
+      "measurement_filter": "Auto",
       "bit_ordering": "MSB",
       "compensate_carrier_frequency_drift": false,
       "compensate_fsk_deviation_error": true
@@ -104,9 +105,10 @@
     },
     "display_config": {
       "show_symbol_points": true,
-      "carrier_display": "Carrier Corrected",
+      "modulation_signal": "Measured",
       "constellation_trace_mode": "Density",
-      "psk_symbol_plot_mode": "Physical IQ"
+      "psk_symbol_plot_mode": "Physical IQ",
+      "fsk_symbol_plot_mode": "Phase Difference"
     }
   }
 }
