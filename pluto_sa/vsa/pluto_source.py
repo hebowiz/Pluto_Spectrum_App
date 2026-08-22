@@ -122,6 +122,7 @@ class PlutoLiveSource:
         settings: PlutoCaptureSettings,
         *,
         cancelled: Callable[[], bool] | None = None,
+        fresh: bool = True,
     ) -> IQRecording:
         cancelled = cancelled or (lambda: False)
         if cancelled():
@@ -155,6 +156,7 @@ class PlutoLiveSource:
             settings,
             metadata,
             cancelled=cancelled,
+            fresh=bool(fresh),
         )
         recording = recording_from_acquisition(
             record,
@@ -233,13 +235,14 @@ class PlutoLiveSource:
         metadata: AcquisitionMetadata,
         *,
         cancelled: Callable[[], bool],
+        fresh: bool,
     ):
         assert self._receiver is not None
         if settings.trigger_source is TriggerKind.FREE_RUN:
             block = self._receiver.capture_iq_block(
                 settings.capture_samples,
                 source="VSA Pluto Single",
-                fresh=True,
+                fresh=fresh,
             )
             if cancelled():
                 raise CaptureCancelledError("Pluto capture cancelled")

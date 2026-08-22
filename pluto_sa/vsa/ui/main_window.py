@@ -59,6 +59,16 @@ from pluto_sa.vsa.pluto_source import (
     PlutoLiveSource,
 )
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
+from pluto_sa.vsa.ui.measurement_chrome import (
+    CenteredLabelAxisItem as _CenteredLabelAxisItem,
+    FixedInteractionViewBox as _FixedInteractionViewBox,
+    install_measurement_plot_menu,
+    make_measurement_dock,
+    make_measurement_plot,
+    padded_range,
+    trace_bounds,
+    view_all_traces,
+)
 
 
 _MODULATIONS = (
@@ -88,56 +98,6 @@ _CONSTELLATION_DENSITY_SIGMA_BINS = 0.7
 _CONSTELLATION_DENSITY_RED_LEVEL = 0.75
 _FREQUENCY_CONSTELLATION_X_LIMIT = 1.0
 _FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH = 0.22
-
-
-class _CenteredLabelAxisItem(pg.AxisItem):
-    """Keep horizontal and rotated vertical labels visually centered."""
-
-    def resizeEvent(self, event=None) -> None:
-        super().resizeEvent(event)
-        if (
-            not hasattr(self, "_linkedView")
-            or self.label is None
-        ):
-            return
-        label_bounds = self.label.mapRectToParent(self.label.boundingRect())
-        axis_center = QtCore.QPointF(
-            self.size().width() / 2.0,
-            self.size().height() / 2.0,
-        )
-        if self.orientation in {"left", "right"}:
-            self.label.setY(
-                self.label.y() + axis_center.y() - label_bounds.center().y()
-            )
-        else:
-            self.label.setX(
-                self.label.x() + axis_center.x() - label_bounds.center().x()
-            )
-
-
-class _FixedInteractionViewBox(pg.ViewBox):
-    """Left-drag rectangle zoom with middle-drag pan, without mode switching."""
-
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        super().__init__(*args, **kwargs)
-        super().setMouseMode(pg.ViewBox.RectMode)
-
-    def setMouseMode(self, _mode: int) -> None:
-        """Keep left-button interaction fixed to rectangular zoom."""
-        super().setMouseMode(pg.ViewBox.RectMode)
-
-    def mouseDragEvent(self, event: object, axis: int | None = None) -> None:
-        if event.button() != QtCore.Qt.MouseButton.MiddleButton:
-            super().mouseDragEvent(event, axis=axis)
-            return
-        # pyqtgraph implements middle-button panning in its three-button
-        # PanMode. Use that path for this event only, while keeping left drag
-        # permanently assigned to RectMode.
-        self.state["mouseMode"] = pg.ViewBox.PanMode
-        try:
-            super().mouseDragEvent(event, axis=axis)
-        finally:
-            self.state["mouseMode"] = pg.ViewBox.RectMode
 
 
 def _decimation_indices(count: int, maximum: int = _MAX_DISPLAY_POINTS) -> slice:
@@ -587,16 +547,21 @@ class _AnalysisThread(QtCore.QThread):
 class VSAWindow(QtWidgets.QMainWindow):
     """One VSA measurement session with detachable result windows."""
 
+    analysis_mode_requested = QtCore.Signal(str)
+    application_close_requested = QtCore.Signal()
+
     def __init__(
         self,
         session: VSASession | None = None,
         preferences: QtCore.QSettings | None = None,
         pluto_source: PlutoLiveSource | None = None,
+        owns_pluto_source: bool = True,
     ) -> None:
         super().__init__()
         self.session = session or VSASession()
         self._preferences = preferences or QtCore.QSettings("PlutoSA", "PlutoVSA")
         self._pluto_source = pluto_source or PlutoLiveSource()
+        self._owns_pluto_source = bool(owns_pluto_source)
         self._pluto_capture_thread: _PlutoSingleCaptureThread | None = None
         self._analysis_thread: _AnalysisThread | None = None
         self._analysis_generation = 0
@@ -656,7 +621,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         file_menu.addAction(self.export_symbol_table_action)
         file_menu.addSeparator()
         close_action = QtGui.QAction("Close", self)
-        close_action.triggered.connect(self.close)
+        close_action.triggered.connect(self.application_close_requested.emit)
         file_menu.addAction(close_action)
 
         run_menu = self.menuBar().addMenu("Sweep / Run")
@@ -810,6 +775,17 @@ class VSAWindow(QtWidgets.QMainWindow):
         save_config_action.triggered.connect(self._save_meas_config_file)
         meas_config_menu.addAction(save_config_action)
 
+        mode_menu = self.menuBar().addMenu("Analysis Mode")
+        generic_action = mode_menu.addAction("Generic FSK / PSK VSA")
+        generic_action.setCheckable(True)
+        generic_action.setChecked(True)
+        generic_action.setEnabled(False)
+        mode_menu.addSeparator()
+        adsb_action = mode_menu.addAction("ADS-B 1090ES...")
+        adsb_action.triggered.connect(
+            lambda: self.analysis_mode_requested.emit("adsb1090")
+        )
+
     def _build_summary_bar(self) -> None:
         toolbar = QtWidgets.QToolBar("Session Summary", self)
         toolbar.setMovable(False)
@@ -824,49 +800,15 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _make_plot(self, title: str, left: str, bottom: str) -> pg.PlotWidget:
         # The surrounding dock already owns the visible title. Keeping a
         # second title inside the plot wastes vertical graph area.
-        plot = pg.PlotWidget(
-            viewBox=_FixedInteractionViewBox(),
-            axisItems={
-                "left": _CenteredLabelAxisItem(orientation="left"),
-                "bottom": _CenteredLabelAxisItem(orientation="bottom"),
-            }
-        )
-        plot.showGrid(x=True, y=True, alpha=0.25)
-        plot.setLabel("left", left)
-        plot.setLabel("bottom", bottom)
-        # Long IQ traces are expensive to repaint while Windows is moving or
-        # exposing the top-level window. Let pyqtgraph retain extrema while
-        # reducing the curve to the available horizontal pixels, and avoid
-        # painting samples outside the current result-range view.
-        plot.setDownsampling(auto=True, mode="peak")
-        plot.setClipToView(True)
-        return plot
+        return make_measurement_plot(left, bottom)
 
     def _dock(self, title: str, widget: QtWidgets.QWidget) -> QtWidgets.QDockWidget:
-        dock = QtWidgets.QDockWidget(title, self)
-        dock.setObjectName(f"vsa-{title.lower().replace(' ', '-')}")
-        content_font = QtGui.QFont(widget.font())
-        content_point_size = content_font.pointSizeF()
-        content_font.setBold(False)
-        if content_point_size > 0.0:
-            # Explicitly resolve the original point size so the enlarged dock
-            # title font is not inherited by the dock contents.
-            content_font.setPointSizeF(content_point_size)
-        title_font = QtGui.QFont(dock.font())
-        title_font.setBold(True)
-        if title_font.pointSizeF() > 0.0:
-            title_font.setPointSizeF(title_font.pointSizeF() * 1.3)
-        elif title_font.pixelSize() > 0:
-            title_font.setPixelSize(max(1, round(title_font.pixelSize() * 1.3)))
-        dock.setFont(title_font)
-        dock.setWidget(widget)
-        # QDockWidget's native Windows title renderer uses the dock font.
-        # Keep that bold font from propagating into plots and result tables.
-        widget.setFont(content_font)
-        dock.setFeatures(
-            QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        dock = make_measurement_dock(
+            title,
+            widget,
+            self,
+            object_prefix="vsa",
+            closable=True,
         )
         action = dock.toggleViewAction()
         self._display_menu.addAction(action)
@@ -2733,81 +2675,28 @@ class VSAWindow(QtWidgets.QMainWindow):
 
         self._plot_context_actions.clear()
         for name, plot in self._plot_widgets():
-            menu = plot.getViewBox().getMenu(None)
-            if menu is None:
-                continue
-            reset_action = QtGui.QAction("Reset", menu)
-            reset_action.setToolTip("Restore this plot's analysis-complete scale")
-            reset_action.triggered.connect(
-                lambda _checked=False, plot_name=name, target=plot: (
-                    self._reset_plot_scale(plot_name, target)
+            actions = install_measurement_plot_menu(
+                plot,
+                reset=lambda plot_name=name, target=plot: self._reset_plot_scale(
+                    plot_name, target
+                ),
+                view_all=lambda target=plot: self._view_all_plot(target),
+            )
+            if actions:
+                actions["reset"].setToolTip(
+                    "Restore this plot's analysis-complete scale"
                 )
-            )
-            menu.insertAction(menu.viewAll, reset_action)
-            menu.insertSeparator(menu.viewAll)
-
-            # ViewBox.autoRange also considers overlay graphics such as result
-            # regions and infinite boundary lines.  Those items can dominate
-            # the bounds and make the actual traces appear tiny.  Reuse the
-            # standard action label/location but give it trace-only semantics.
-            menu.viewAll.triggered.disconnect(menu.autoRange)
-            menu.viewAll.triggered.connect(
-                lambda _checked=False, target=plot: self._view_all_plot(target)
-            )
-            for action in tuple(menu.actions()):
-                if action.text() == "Mouse Mode":
-                    menu.removeAction(action)
-            self._plot_context_actions[name] = {
-                "reset": reset_action,
-                "view_all": menu.viewAll,
-            }
+                self._plot_context_actions[name] = actions
 
     @staticmethod
     def _trace_bounds(
         plot: pg.PlotWidget,
     ) -> tuple[float, float, float, float] | None:
-        """Return finite bounds of visible data traces, excluding overlays."""
-
-        x_min = y_min = np.inf
-        x_max = y_max = -np.inf
-        found = False
-        for item in plot.listDataItems():
-            if not item.isVisible():
-                continue
-            # getData() returns the transformed display dataset and therefore
-            # may contain only the current ViewBox when clipToView is enabled.
-            # View All must inspect the complete source trace instead.
-            x_values, y_values = item.getOriginalDataset()
-            if x_values is None or y_values is None:
-                continue
-            x_values = np.asarray(x_values)
-            y_values = np.asarray(y_values)
-            count = min(x_values.size, y_values.size)
-            if count == 0:
-                continue
-            x_values = x_values[:count]
-            y_values = y_values[:count]
-            finite = np.isfinite(x_values) & np.isfinite(y_values)
-            if not np.any(finite):
-                continue
-            x_finite = x_values[finite]
-            y_finite = y_values[finite]
-            x_min = min(x_min, float(np.min(x_finite)))
-            x_max = max(x_max, float(np.max(x_finite)))
-            y_min = min(y_min, float(np.min(y_finite)))
-            y_max = max(y_max, float(np.max(y_finite)))
-            found = True
-        if not found:
-            return None
-        return x_min, x_max, y_min, y_max
+        return trace_bounds(plot)
 
     @staticmethod
     def _padded_range(lower: float, upper: float) -> list[float]:
-        span = upper - lower
-        if span <= np.finfo(float).eps:
-            span = max(abs(lower), abs(upper), 1.0) * 0.1
-        margin = 0.05 * span
-        return [lower - margin, upper + margin]
+        return padded_range(lower, upper)
 
     def _view_all_plot(self, plot: pg.PlotWidget) -> None:
         bounds = self._trace_bounds(plot)
@@ -2822,8 +2711,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             x_range = y_range = [-limit, limit]
         else:
-            x_range = self._padded_range(x_min, x_max)
-            y_range = self._padded_range(y_min, y_max)
+            view_all_traces(plot)
+            return
         plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
 
     def _reset_plot_scale(self, name: str, plot: pg.PlotWidget) -> None:
@@ -3302,7 +3191,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         self._save_startup_meas_config()
-        self._pluto_source.close()
+        if self._owns_pluto_source:
+            self._pluto_source.close()
         super().closeEvent(event)
 
     def _request_analysis(

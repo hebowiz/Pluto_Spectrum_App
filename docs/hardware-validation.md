@@ -530,3 +530,13 @@ also retained the expected sequence-dependent Gaussian-filter transition arcs;
 the matching normalized phase geometry at 1 and 2 Msym/s is consistent with the
 doubled LE 2M deviation. This is a functional real-IQ validation, not a Bluetooth
 RF-PHY conformance result.
+# 2026-08-22 ADS-B 1090ES取得経路smoke test
+
+- Center: 1090 MHz
+- Requested Fs: 8 MSPS
+- Actual Fs: 7,999,999 S/s
+- RF BW: 4 MHz
+- Capture: 20 ms / 160,000 complex samples
+- Internal Gain: 50 dB
+- 結果: Pluto finite captureからADS-B専用解析器まで例外なく完走
+- 検出: 0 message。antenna条件と短い観測時間のため感度評価には使用しない

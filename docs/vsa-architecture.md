@@ -10,6 +10,11 @@
 
 VSAは現行Spectrum Analyzerの単純な追加モードではなく、同じrepository内の別application shellとして実装します。取得、IQ record、trigger、calibration、共通plot部品は共有し、VSA session、demodulation、result model、multi-window UIはVSA側で所有します。
 
+2026-08-22追記: 通信規格専用解析を追加する段階では複数top-level windowを同時起動せず、
+単一`PlutoAnalysisWindow`内でworkspace全体を切り替える。Generic FSK/PSK VSA、ADS-B
+1090ES、将来のBluetooth/Wi-Fi専用解析は個別のmenu/dock/result modelを持つが、Plutoへの
+接続・所有権はapplication shellに1つだけ置く。Capture/DSP実行中はmode切替を禁止する。
+
 R&S FPL VSAの用語、設定順序、result分類をUXの参照モデルとします。ただしPluto、SCPI instrument、保存IQという異なるsourceを同じ解析器へ接続できるよう、hardware固有設定は`IQSource` adapterへ分離します。
 
 ### 1.1 当面の対象信号

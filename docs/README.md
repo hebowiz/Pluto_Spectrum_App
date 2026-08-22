@@ -4,7 +4,7 @@
 
 - 現在の作業ブランチ: `main`
 - 基準コミット: `701865e`
-- 最終更新日: 2026-08-06
+- 最終更新日: 2026-08-22
 - 対象ハードウェア: ADALM-Pluto（PlutoSDR）
 
 ## ドキュメント一覧
@@ -23,6 +23,7 @@
 - [VSA FSKシンボル同期監査](vsa-fsk-synchronization-audit.md)
 - [RBW演算監査と改善方針](rbw-processing.md)
 - [PlutoSDR実機検証記録](hardware-validation.md)
+- [ADS-B 1090ES専用解析モード](adsb1090.md)
 
 ## モード一覧
 

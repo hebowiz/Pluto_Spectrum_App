@@ -134,6 +134,17 @@ def test_pluto_single_capture_reuses_unchanged_receiver_configuration() -> None:
     assert receiver.reconfigured[0].center_freq_hz == 2_402_000_000
 
 
+def test_pluto_capture_can_preserve_rx_buffer_between_continuous_blocks() -> None:
+    _FakeReceiver.instances.clear()
+    source = PlutoLiveSource(receiver_factory=_FakeReceiver)
+    settings = PlutoCaptureSettings(capture_length_s=0.010)
+
+    source.capture_single(settings, fresh=True)
+    source.capture_single(settings, fresh=False)
+
+    assert _FakeReceiver.instances[0].capture_fresh == [True, False]
+
+
 def test_pluto_experimental_lo_offset_preserves_requested_analysis_center() -> None:
     _FakeReceiver.instances.clear()
     source = PlutoLiveSource(receiver_factory=_FakeReceiver)

@@ -1,0 +1,85 @@
+{
+  "schema": "pluto-vsa-adsb1090-fixture",
+  "version": 1,
+  "iq_file": "adsb1090_multi_8msps.npz",
+  "sample_rate_hz": 8000000.0,
+  "center_frequency_hz": 1090000000.0,
+  "duration_s": 0.002,
+  "expected_messages": [
+    {
+      "raw_hex": "8D4840D6202CC371C32CE0576098",
+      "start_time_us": 180.0,
+      "downlink_format": 17,
+      "icao_address": "4840D6",
+      "type_code": 4,
+      "crc_ok": true,
+      "fields": {
+        "type_code": 4,
+        "icao_address": "4840D6",
+        "emitter_category": 0,
+        "callsign": "KLM1023",
+        "mean_bit_confidence": 0.9330158883913755,
+        "minimum_bit_confidence": 0.899182225101028
+      }
+    },
+    {
+      "raw_hex": "8D40621D58C382D690C8AC2863A7",
+      "start_time_us": 570.0,
+      "downlink_format": 17,
+      "icao_address": "40621D",
+      "type_code": 11,
+      "crc_ok": true,
+      "fields": {
+        "type_code": 11,
+        "icao_address": "40621D",
+        "position_type": "airborne",
+        "altitude_ft": 38000,
+        "time_flag": 0,
+        "cpr_format": "even",
+        "cpr_latitude": 93000,
+        "cpr_longitude": 51372,
+        "mean_bit_confidence": 0.9359266747459453,
+        "minimum_bit_confidence": 0.9001590663163911
+      }
+    },
+    {
+      "raw_hex": "8D40621D58C386435CC412692AD6",
+      "start_time_us": 960.0,
+      "downlink_format": 17,
+      "icao_address": "40621D",
+      "type_code": 11,
+      "crc_ok": true,
+      "fields": {
+        "type_code": 11,
+        "icao_address": "40621D",
+        "position_type": "airborne",
+        "altitude_ft": 38000,
+        "time_flag": 0,
+        "cpr_format": "odd",
+        "cpr_latitude": 74158,
+        "cpr_longitude": 50194,
+        "mean_bit_confidence": 0.93684966857353,
+        "minimum_bit_confidence": 0.8998048587908845
+      }
+    },
+    {
+      "raw_hex": "8D485020994409940838175B284F",
+      "start_time_us": 1350.0,
+      "downlink_format": 17,
+      "icao_address": "485020",
+      "type_code": 19,
+      "crc_ok": true,
+      "fields": {
+        "type_code": 19,
+        "icao_address": "485020",
+        "velocity_subtype": 1,
+        "east_west_velocity_kt": -8,
+        "north_south_velocity_kt": -159,
+        "ground_speed_kt": 159.20113064925135,
+        "track_deg": 182.8803775528476,
+        "mean_bit_confidence": 0.9346498744598358,
+        "minimum_bit_confidence": 0.8997239107489761
+      }
+    }
+  ]
+}
