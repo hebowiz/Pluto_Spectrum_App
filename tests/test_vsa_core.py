@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from pluto_sa.vsa.analysis import VSAAnalyzer
+from pluto_sa.vsa.dc import apply_robust_dc_removal, estimate_robust_dc_offset
 from pluto_sa.vsa.model import (
     CompositeSignalDescription,
     IQRecording,
@@ -164,6 +165,118 @@ def test_session_capture_power_stays_before_analysis_filter_and_dc_removal() -> 
     )
 
 
+def test_robust_dc_estimator_uses_noise_cluster_instead_of_burst_mean() -> None:
+    rng = np.random.default_rng(811)
+    expected_dc = 0.18 - 0.09j
+    noise = expected_dc + 0.01 * (
+        rng.normal(size=8_000) + 1j * rng.normal(size=8_000)
+    )
+    burst = expected_dc + 1.2 + 0.4j + 0.03 * (
+        rng.normal(size=2_000) + 1j * rng.normal(size=2_000)
+    )
+    iq = np.concatenate((noise[:4_000], burst, noise[4_000:]))
+
+    estimate = estimate_robust_dc_offset(iq)
+
+    assert estimate.real == pytest.approx(expected_dc.real, abs=0.003)
+    assert estimate.imag == pytest.approx(expected_dc.imag, abs=0.003)
+    assert abs(np.mean(iq) - expected_dc) > 0.2
+
+
+def test_robust_dc_removal_marks_recording_and_is_idempotent() -> None:
+    rng = np.random.default_rng(194)
+    expected_dc = 0.31 - 0.17j
+    noise = expected_dc + 0.01 * (
+        rng.standard_normal(4_000) + 1j * rng.standard_normal(4_000)
+    )
+    burst = expected_dc + np.exp(1j * np.linspace(0.0, 8.0 * np.pi, 1_000))
+    recording = IQRecording(
+        np.concatenate((noise, burst)).astype(np.complex64),
+        sample_rate_hz=8e6,
+        metadata={"dc_removal_recommended": True},
+    )
+
+    corrected = apply_robust_dc_removal(recording)
+
+    assert corrected.sample_rate_hz == recording.sample_rate_hz
+    assert corrected.sample_count == recording.sample_count
+    assert corrected.metadata["dc_removal_recommended"] is False
+    assert corrected.metadata["software_dc_removal_applied"] is True
+    assert corrected.metadata["software_dc_offset_real"] == pytest.approx(
+        expected_dc.real, abs=0.01
+    )
+    assert corrected.metadata["software_dc_offset_imag"] == pytest.approx(
+        expected_dc.imag, abs=0.01
+    )
+    assert apply_robust_dc_removal(corrected) is corrected
+
+
+def test_session_records_robust_software_dc_correction_metadata() -> None:
+    rng = np.random.default_rng(812)
+    expected_dc = 0.12 + 0.07j
+    iq = expected_dc + 0.01 * (
+        rng.normal(size=4096) + 1j * rng.normal(size=4096)
+    )
+    recording = IQRecording(
+        iq,
+        sample_rate_hz=8_000_000.0,
+        metadata={"dc_removal_recommended": True},
+    )
+    session = VSASession(recording=recording, settings=VSASettings(remove_dc=True))
+
+    prepared, _settings = session._prepare_analysis_recording()
+
+    assert prepared.metadata["software_dc_removal_applied"] is True
+    assert prepared.metadata["software_dc_estimator"] == (
+        "low-cluster robust location"
+    )
+    assert prepared.metadata["software_dc_offset_real"] == pytest.approx(
+        expected_dc.real, abs=0.003
+    )
+    assert prepared.metadata["software_dc_offset_imag"] == pytest.approx(
+        expected_dc.imag, abs=0.003
+    )
+    assert abs(np.mean(prepared.iq)) < 0.003
+
+
+def test_lo_offset_capture_does_not_apply_software_dc_twice() -> None:
+    iq = np.asarray([0.25 + 0.1j, 0.30 + 0.2j], dtype=np.complex64)
+    recording = IQRecording(
+        iq,
+        sample_rate_hz=8_000_000.0,
+        metadata={
+            "dc_removal_recommended": True,
+            "experimental_lo_offset": True,
+            "lo_offset_hz": 1_500_000.0,
+        },
+    )
+    session = VSASession(recording=recording, settings=VSASettings(remove_dc=True))
+
+    prepared, _settings = session._prepare_analysis_recording()
+
+    np.testing.assert_array_equal(prepared.iq, recording.iq)
+    assert "software_dc_removal_applied" not in prepared.metadata
+
+
+def test_capture_power_marks_exact_zero_samples_invalid_for_display_range() -> None:
+    recording = IQRecording(
+        np.asarray([1.0 + 0.0j, 0.0 + 0.0j, 0.5 + 0.0j]),
+        sample_rate_hz=8_000_000.0,
+    )
+    session = VSASession(
+        recording=recording,
+        signal=SignalDescription(ModulationKind.FSK, symbol_rate_hz=1_000_000.0),
+    )
+
+    session.analyze()
+
+    assert session.capture_power_dbm[0] == pytest.approx(0.0)
+    assert np.isnan(session.capture_power_dbm[1])
+    assert session.capture_power_dbm[2] == pytest.approx(
+        20.0 * np.log10(0.5)
+    )
+
+
 def test_rs_iq_tar_capture_power_matches_50_ohm_voltage_conversion() -> None:
     recording = FileIQSource.load(
         Path(__file__).with_name("fixtures") / "bt_2dh1_capture_2.iq.tar"
@@ -191,12 +304,21 @@ def test_npz_file_source_round_trip_preserves_capture_metadata(tmp_path) -> None
     recording = IQRecording(
         generated.iq,
         sample_rate_hz=generated.sample_rate_hz,
+        center_frequency_hz=2_442_500_000.0,
         usable_bandwidth_hz=generated.usable_bandwidth_hz,
         full_scale=2048.0,
         calibration_offset_db=-62.0,
         frequency_dependent_offset_db=1.5,
         input_correction_db=30.0,
         amplitude_calibrated=True,
+        metadata={
+            "dc_removal_recommended": True,
+            "requested_center_frequency_hz": 2_441_000_000.0,
+            "hardware_lo_frequency_hz": 2_442_500_000.0,
+            "lo_offset_hz": 1_500_000.0,
+            "experimental_lo_offset": True,
+            "requested_analysis_bandwidth_hz": 1_250_000.0,
+        },
     )
     path = tmp_path / "capture.npz"
 
@@ -215,6 +337,18 @@ def test_npz_file_source_round_trip_preserves_capture_metadata(tmp_path) -> None
     )
     assert loaded.input_correction_db == recording.input_correction_db
     assert loaded.amplitude_calibrated is True
+    assert loaded.metadata["dc_removal_recommended"] is True
+    assert loaded.metadata["requested_center_frequency_hz"] == pytest.approx(
+        2_441_000_000.0
+    )
+    assert loaded.metadata["hardware_lo_frequency_hz"] == pytest.approx(
+        2_442_500_000.0
+    )
+    assert loaded.metadata["lo_offset_hz"] == pytest.approx(1_500_000.0)
+    assert loaded.metadata["experimental_lo_offset"] is True
+    assert loaded.metadata["requested_analysis_bandwidth_hz"] == pytest.approx(
+        1_250_000.0
+    )
 
 
 def test_pluto_fixture_sidecar_restores_source_plane_power() -> None:

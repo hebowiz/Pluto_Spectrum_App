@@ -74,7 +74,11 @@ class GeneratedIQSource:
             usable_bandwidth_hz=0.8 * sample_rate_hz,
             source="Generated FSK",
             amplitude_calibrated=True,
-            metadata={"generated_symbols": symbols, "seed": int(seed)},
+            metadata={
+                "generated_symbols": symbols,
+                "seed": int(seed),
+                "dc_removal_recommended": False,
+            },
         )
         signal = SignalDescription(
             modulation=modulation,
@@ -121,7 +125,11 @@ class GeneratedIQSource:
             usable_bandwidth_hz=0.8 * sample_rate_hz,
             source="Generated PSK",
             amplitude_calibrated=True,
-            metadata={"generated_symbols": symbols, "seed": int(seed)},
+            metadata={
+                "generated_symbols": symbols,
+                "seed": int(seed),
+                "dc_removal_recommended": False,
+            },
         )
         signal = SignalDescription(
             modulation=modulation,
@@ -216,6 +224,40 @@ class FileIQSource:
                     if "amplitude_calibrated" in container.files
                     else False
                 )
+                for metadata_key in (
+                    "dc_removal_recommended",
+                    "software_dc_removal_applied",
+                    "software_dc_estimator",
+                    "software_dc_offset_real",
+                    "software_dc_offset_imag",
+                    "requested_center_frequency_hz",
+                    "hardware_lo_frequency_hz",
+                    "lo_offset_hz",
+                    "experimental_lo_offset",
+                    "requested_analysis_bandwidth_hz",
+                ):
+                    if metadata_key in container.files:
+                        metadata_value = np.asarray(container[metadata_key]).item()
+                        if (
+                            metadata_key == "requested_analysis_bandwidth_hz"
+                            and not np.isfinite(metadata_value)
+                        ):
+                            continue
+                        if (
+                            metadata_key
+                            in {
+                                "software_dc_offset_real",
+                                "software_dc_offset_imag",
+                            }
+                            and not np.isfinite(metadata_value)
+                        ):
+                            continue
+                        if (
+                            metadata_key == "software_dc_estimator"
+                            and not str(metadata_value)
+                        ):
+                            continue
+                        metadata[metadata_key] = metadata_value
                 metadata["container_key"] = key
         else:
             dtype = np.dtype(raw_dtype)
@@ -269,6 +311,7 @@ class FileIQSource:
             if calibration_offset_db == 0.0 and not amplitude_calibrated:
                 calibration_offset_db = -62.0
                 metadata["nominal_pluto_amplitude_inferred"] = True
+                metadata["dc_removal_recommended"] = True
         if sample_rate_hz is None:
             raise ValueError("sample_rate_hz is required when the file has no metadata")
         return IQRecording(
@@ -312,6 +355,40 @@ class FileIQSource:
             ),
             input_correction_db=np.float64(recording.input_correction_db),
             amplitude_calibrated=np.bool_(recording.amplitude_calibrated),
+            dc_removal_recommended=np.bool_(
+                recording.metadata.get("dc_removal_recommended", False)
+            ),
+            software_dc_removal_applied=np.bool_(
+                recording.metadata.get("software_dc_removal_applied", False)
+            ),
+            software_dc_estimator=np.str_(
+                recording.metadata.get("software_dc_estimator", "")
+            ),
+            software_dc_offset_real=np.float64(
+                recording.metadata.get("software_dc_offset_real", np.nan)
+            ),
+            software_dc_offset_imag=np.float64(
+                recording.metadata.get("software_dc_offset_imag", np.nan)
+            ),
+            requested_center_frequency_hz=np.float64(
+                recording.metadata.get(
+                    "requested_center_frequency_hz", recording.center_frequency_hz
+                )
+            ),
+            hardware_lo_frequency_hz=np.float64(
+                recording.metadata.get(
+                    "hardware_lo_frequency_hz", recording.center_frequency_hz
+                )
+            ),
+            lo_offset_hz=np.float64(recording.metadata.get("lo_offset_hz", 0.0)),
+            experimental_lo_offset=np.bool_(
+                recording.metadata.get("experimental_lo_offset", False)
+            ),
+            requested_analysis_bandwidth_hz=np.float64(
+                np.nan
+                if recording.metadata.get("requested_analysis_bandwidth_hz") is None
+                else recording.metadata["requested_analysis_bandwidth_hz"]
+            ),
         )
 
 

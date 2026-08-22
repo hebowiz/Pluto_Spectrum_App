@@ -7,6 +7,8 @@
       "pluto_uri": "",
       "center_frequency_mhz": 2440.0,
       "rf_bandwidth_mhz": 8.0,
+      "lo_offset_enabled": false,
+      "lo_offset_mhz": 1.5,
       "internal_gain_db": 0,
       "external_attenuation_db": 30.0,
       "external_gain_db": 0.0,
@@ -15,7 +17,7 @@
       "analysis_bandwidth_mhz": 1.5
     },
     "signal_capture": {
-      "capture_length": 3000.0,
+      "capture_length": 5000.0,
       "capture_length_unit": "Symbols",
       "samples_per_symbol": 8,
       "swap_iq": false
@@ -30,7 +32,7 @@
     },
     "acquisition_trigger": {
       "source": "power_level",
-      "level_dbm": -40.0,
+      "level_dbm": -15.0,
       "slope": "rising",
       "offset_symbols": -10.0,
       "hysteresis_db": 3.0
@@ -63,7 +65,7 @@
       ],
       "threshold_auto": true,
       "threshold_percent": 90.0,
-      "meas_only_if_correct": false,
+      "meas_only_if_correct": true,
       "allow_inverted_fsk_pattern": false
     },
     "result_range": {
@@ -79,7 +81,7 @@
       "fine_synchronization": "Auto",
       "measurement_filter": "Auto",
       "bit_ordering": "LSB",
-      "compensate_carrier_frequency_drift": false,
+      "compensate_carrier_frequency_drift": true,
       "compensate_fsk_deviation_error": true
     },
     "result_summary": {
@@ -105,6 +107,7 @@
     },
     "display_config": {
       "show_symbol_points": true,
+      "iq_power_signal": "Measured",
       "modulation_signal": "Measured",
       "constellation_trace_mode": "Density",
       "psk_symbol_plot_mode": "Physical IQ",

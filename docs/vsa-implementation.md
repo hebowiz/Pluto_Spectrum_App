@@ -236,6 +236,16 @@ PSK:
 
 `.npz`は`iq`、`sample_rate_hz`、`center_frequency_hz`、`usable_bandwidth_hz`、振幅補正条件を保存/復元できます。旧NPZにusable bandwidthがない場合は`0.8 * sample rate`をfallbackにします。`.npy`とraw IQはUIでsample rateを指定します。SigMFとSCPI instrumentは未実装です。
 
+2026-08-22: `File > Export IQ Recording...`から、Plutoで取得した現在のIQを
+metadata付きNPZとして保存できる。保存時に`Raw capture`または
+`Software DC removed (full-rate capture)`を選択する。どちらも元captureのsample rate、
+sample count、center/LO、usable bandwidth、振幅補正条件を維持し、Analysis Channelの
+DDC/FIR/decimationやMeasurement Filter、carrier/drift補正は適用しない。DC除去版だけは
+Measured解析と共通のlow-cluster robust DC推定を元IQへ適用し、推定vectorと方式をNPZへ
+保存する。再読込時の二重除去を防ぐため`software_dc_removal_applied=true`および
+`dc_removal_recommended=false`として保存する。IQ Open/Exportの開始folderは共通のIQ folder
+履歴を使う。
+
 ### Pluto live Run Single
 
 R&S VSAの`Input / Frontend`、`Signal Capture > Data Acquisition`、`Sweep / Run`の区分に合わせ、Pluto finite captureを追加した。`Run Single`（F6）はGUI threadとは別のcapture threadでPluto接続、設定、IQ取得を行い、完了したimmutable `IQRecording`だけをmain threadへ返す。`Refresh Analysis`（F5）は従来どおり現在のcaptureを再解析し、再取得しない。
@@ -384,6 +394,7 @@ python -m pytest tests/test_vsa_core.py -q
 - pi/4-DQPSKの差動pattern検索とLSB/MSB Bit Ordering。
 - 2026-08-22: R&SのBit Orderingはbit streamだけでなく全symbol表示へ適用される。内部DSPのsymbol番号はMSB canonicalのまま保持し、LSB選択時はPattern入力をcanonical番号へ変換して探索し、Symbol TableとJSON exportはbit-reversed表示番号へ戻す。2 bit symbolでは`1`と`2`だけが交換される。Bluetooth EDR保存ConfigはLSBへ移行し、2DH sync patternの表示値を`2 3 2 3 2 3 3 2 2 2`とした。3DH syncは3 bit反転に対して`2`と`7`が不変なため値列は変わらない。
 - 新規起動および`bit_ordering`を持たない旧Configの既定値は、主用途であるBluetoothとR&S表示に合わせて`LSB`とする。Configまたは終了時保存Configに`MSB`/`LSB`が明示されている場合は保存値を優先する。
+- 2026-08-22: 未処理Capture Power表示でPlutoのexact-zero IQ sampleを浮動小数点epsilonへ置換すると約-6150 dBとなり、peak-preserving間引きとauto rangeがこれを必ず拾って正常トレースを潰す問題を修正した。exact-zero/non-finite sampleは欠損表示値（NaN）として保持し、表示間引きのmin/maxおよびSymbol marker補間から除外する。非zero sampleのdBm換算、Power Trigger、復調DSPには影響させない。
 - 16 MSPS Pluto実測BR captureを汎用Pattern Searchへ通し、手動Analysis Center/Bandwidth後に任意72-symbol patternを相関99%以上、0 symbol errorで検出。
 - 実測DH1 body 216 bitとPRBS-9を0 bit errorで照合。
 - Bluetooth SIG公式vectorに対するPayload CRCとcomplete DH1 payload decode。
@@ -460,6 +471,13 @@ carrier/drift補正、復調用DC除去は適用しない。symbol markerのPowe
 Capture Buffer traceから補間する。これにより、復調条件を変更してもcaptureされた
 振幅波形そのものは変化しない。
 
+`Display Config > IQ Power Signal`で`Raw Capture`（既定）と`Measured`を切り替える。
+`Raw Capture`は上記の未処理Capture Buffer、`Measured`はAnalysis ChannelのDDC/FIR/
+decimationと、適用対象ならsoftware DC removalを終えた解析IQから振幅を算出する。
+Measurement Filterおよびcarrier/drift補正は振幅表示へ追加適用しない。Power trace上の
+symbol pointとSymbol Table連動marker値も選択中のPower経路へ合わせる。設定は
+Meas Configおよび終了時Configへ`display_config.iq_power_signal`として保存する。
+
 R&S `.iq.tar`の`ScalingFactor`適用後の複素振幅はVoltとして読み、R&S RF入力の
 50 ohmを明示して次式でdBmへ換算する。
 
@@ -474,6 +492,24 @@ iq-tar内のinternal/mechanical attenuationは取得済みVoltへ再加算しな
 
 DC除去は表示経路から完全に分離する。R&S iq-tarは計測器側で取得された電圧波形のため
 追加の全区間平均DC除去を無効とする。Pluto入力ではAD936xのDC/LO leakage対策として
-復調経路のみ従来のDC除去を維持する。ただし、有限packetを含むcapture全体の複素平均は
-data-dependent meanをDCと誤認し得るため暫定方式である。今後はBurst Searchで得た
-off-burst区間からDCを推定し、信頼できる無信号区間がない場合は除去しない方式へ置換する。
+復調経路のみにDC除去を適用する。2026-08-22に、有限packetを含むcapture全体の複素平均を
+引く方式を廃止した。新方式はI/Q平面の2次元histogramから最密位置を求め、その位置に
+最も近い低振幅cluster（既定20%）の複素平均をDC vectorとして推定する。短いburstや周囲信号のsampleが
+混入しても、receiver noise/off-burst clusterが残っていればdata-dependent signal meanを
+DCと誤認しにくい。推定値と方式は`software_dc_offset_real/imag`および
+`software_dc_estimator` metadataへ記録する。連続wanted carrierがLO直上にある場合はDCと
+信号を原理的に分離できないため、この推定器の対象外とする。自動適用は
+`dc_removal_recommended=true`を明示するPluto acquisition recordに限定し、生成波形、R&S
+iq-tar、出所不明のIQへは適用しない。
+
+同日、Pluto Input / Frontendへ既定OFFの`LO Offset (Experimental)`を追加した。有効時は
+入力したCenter Frequencyを論理的な解析中心として保持し、Pluto hardware LOだけを指定量
+ずらして取得する。取得後は既存Analysis ChannelのDDC/FIRにより解析中心へ戻す。DC spurを
+通過帯域外へ除去することが目的なのでAnalysis Channelは必須とし、OffsetがAnalysis
+Bandwidthの半幅以下、またはOffsetを含む解析帯域がnominal usable bandwidthを超える設定は
+Run Single開始前に拒否する。Configにはenable/offsetを保存するが既定はOFFであり、通常の
+Pluto capture挙動は変更しない。recording centerは実hardware LO、metadataの
+`requested_center_frequency_hz`は論理中心、`lo_offset_hz`は意図的なoffsetを表す。Raw IQと
+Capture PowerにはDDC/DC除去を適用しない。LO Offset有効時はAnalysis FilterでDC spurを
+除去するため、後段のsoftware DC estimatorは重ねて適用しない。取得前のAnalysis Bandwidthは
+`requested_analysis_bandwidth_hz`として保持し、取得完了後の解析にも同じ値を復元する。

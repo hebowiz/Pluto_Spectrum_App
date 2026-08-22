@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -52,6 +53,19 @@ def test_peak_decimation_keeps_bucket_extrema() -> None:
     assert plotted_x.size <= 102
     assert -20.0 in plotted_y
     assert 30.0 in plotted_y
+
+
+def test_peak_decimation_ignores_invalid_power_samples_for_extrema() -> None:
+    x = np.arange(1_000, dtype=np.float64)
+    y = np.linspace(-70.0, -20.0, x.size)
+    y[::7] = np.nan
+
+    _, plotted_y = _peak_decimate_xy(x, y, maximum=100)
+
+    finite = plotted_y[np.isfinite(plotted_y)]
+    assert finite.size > 0
+    assert float(np.min(finite)) >= -70.0
+    assert float(np.max(finite)) <= -20.0
 
 
 def test_burst_search_initial_time_range_starts_before_trigger() -> None:
@@ -264,6 +278,42 @@ def _wait_for_background_analysis(window: VSAWindow) -> None:
         if thread is not None:
             thread.wait(10)
     raise AssertionError("background VSA analysis did not finish")
+
+
+def test_iq_power_signal_switch_selects_raw_or_measured_trace(tmp_path) -> None:
+    pg.mkQApp("VSA IQ power signal selection test")
+    recording, signal = GeneratedIQSource.fsk(symbol_count=96, seed=442)
+    session = VSASession()
+    session.set_recording(recording)
+    session.set_signal(signal)
+    session.analyze()
+    session.capture_power_dbm = np.full(
+        session.capture_time_s.shape, -11.0, dtype=np.float64
+    )
+    session.result = replace(
+        session.result,
+        power_dbm=np.full(session.result.time_s.shape, -22.0, dtype=np.float64),
+    )
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "iq-power-signal")
+    )
+    try:
+        window.session = session
+        window._update_summary()
+        window._update_plots(reset_ranges=True)
+
+        assert window.raw_iq_power_action.isChecked()
+        _, raw_y = window.zero_span_plot.listDataItems()[0].getData()
+        np.testing.assert_allclose(raw_y, -11.0)
+
+        window.measured_iq_power_action.setChecked(True)
+        window._refresh_display_only()
+        _, measured_y = window.zero_span_plot.listDataItems()[0].getData()
+        np.testing.assert_allclose(measured_y, -22.0)
+    finally:
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
@@ -1276,6 +1326,11 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         )
         window.capture_center_spin.setValue(2441.0)
         window.capture_rf_bandwidth_spin.setValue(8.0)
+        window.channel_filter_check.setChecked(True)
+        window.analysis_center_spin.setValue(2441.0)
+        window.analysis_bandwidth_spin.setValue(1.5)
+        window.lo_offset_check.setChecked(True)
+        window.lo_offset_spin.setValue(1.25)
         window.internal_gain_spin.setValue(12)
         window.external_attenuation_spin.setValue(30.0)
         window.external_gain_spin.setValue(3.0)
@@ -1298,6 +1353,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_limit_result_check.setChecked(False)
         window._apply_result_summary_preset("diagnostics")
         window.symbol_display_action.setChecked(True)
+        window.measured_iq_power_action.setChecked(True)
         window.raw_modulation_signal_action.setChecked(True)
         window.constellation_density_action.setChecked(True)
         window.differential_iq_symbol_plot_action.setChecked(True)
@@ -1326,6 +1382,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_limit_result_check.setChecked(True)
         window._apply_result_summary_preset("defaults")
         window.symbol_display_action.setChecked(False)
+        window.raw_iq_power_action.setChecked(True)
         window.measured_modulation_signal_action.setChecked(True)
         window.constellation_flat_action.setChecked(True)
         window.physical_iq_symbol_plot_action.setChecked(True)
@@ -1344,6 +1401,11 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.capture_sample_rate_label.text() == "8.000 MS/s"
         assert window.capture_samples_label.text() == "24,000 samples"
         assert window.capture_usable_bandwidth_label.text() == "6.400 MHz"
+        assert window.lo_offset_check.isChecked()
+        assert window.lo_offset_spin.value() == pytest.approx(1.25)
+        assert window.lo_offset_status_label.text().startswith("2442.250000 MHz")
+        assert saved["input_frontend"]["lo_offset_enabled"] is True
+        assert saved["input_frontend"]["lo_offset_mhz"] == pytest.approx(1.25)
         assert window.internal_gain_spin.value() == 12
         assert window.capture_correction_label.text().startswith("+15.0 dB")
         assert window.acquisition_trigger_source_combo.currentData() == "power_level"
@@ -1362,6 +1424,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window._selected_result_summary_ids == selected_summary_items
         assert set(saved["result_summary"]["visible_items"]) == selected_summary_items
         assert saved["display_config"]["show_symbol_points"] is True
+        assert saved["display_config"]["iq_power_signal"] == "Measured"
         assert saved["display_config"]["modulation_signal"] == "Raw IQ"
         assert "carrier_display" not in saved["display_config"]
         assert saved["display_config"]["constellation_trace_mode"] == "Density"
@@ -1370,6 +1433,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
             "Constellation Frequency"
         )
         assert window.symbol_display_action.isChecked()
+        assert window.measured_iq_power_action.isChecked()
         assert window.raw_modulation_signal_action.isChecked()
         assert window.constellation_density_action.isChecked()
         assert window.differential_iq_symbol_plot_action.isChecked()
@@ -1392,6 +1456,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         legacy["display_config"]["carrier_display"] = "Raw IQ"
         window._apply_meas_config_values(legacy)
         assert window.raw_modulation_signal_action.isChecked()
+        legacy["display_config"].pop("iq_power_signal")
+        window._apply_meas_config_values(legacy)
+        assert window.raw_iq_power_action.isChecked()
 
         iq_path = tmp_path / "captures" / "sample.npz"
         pattern_path = tmp_path / "patterns" / "access.vsapattern.json"
@@ -1497,6 +1564,83 @@ def test_symbol_table_json_export_document_contains_machine_readable_context(
         assert window._last_directory("symbol_table") == str(
             export_stem.parent.resolve()
         )
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_iq_export_can_save_raw_or_software_dc_removed_capture(
+    tmp_path, monkeypatch,
+) -> None:
+    pg.mkQApp("VSA IQ export test")
+    generated, signal = GeneratedIQSource.fsk(symbol_count=96, seed=908)
+    recording = replace(
+        generated,
+        iq=(np.asarray(generated.iq) + (0.27 - 0.14j)).astype(np.complex64),
+        source="VSA Pluto Single",
+        metadata={
+            **dict(generated.metadata),
+            "dc_removal_recommended": True,
+        },
+    )
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "iq-export")
+    )
+    try:
+        window.load_recording(recording, signal)
+        _wait_for_background_analysis(window)
+        assert window.export_iq_action.isEnabled()
+
+        export_dir = tmp_path / "iq-exports"
+        export_dir.mkdir()
+        raw_stem = export_dir / "raw-capture"
+        monkeypatch.setattr(
+            QtWidgets.QInputDialog,
+            "getItem",
+            lambda *args, **kwargs: ("Raw capture", True),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            lambda *args, **kwargs: (str(raw_stem), ""),
+        )
+        window._export_iq_recording()
+        raw = FileIQSource.load(raw_stem.with_suffix(".npz"))
+        np.testing.assert_array_equal(raw.iq, recording.iq)
+        assert raw.metadata["dc_removal_recommended"] is True
+
+        corrected_stem = export_dir / "dc-removed"
+        monkeypatch.setattr(
+            QtWidgets.QInputDialog,
+            "getItem",
+            lambda *args, **kwargs: (
+                "Software DC removed (full-rate capture)",
+                True,
+            ),
+        )
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            lambda *args, **kwargs: (str(corrected_stem), ""),
+        )
+        window._export_iq_recording()
+        corrected = FileIQSource.load(corrected_stem.with_suffix(".npz"))
+        offset = complex(
+            corrected.metadata["software_dc_offset_real"],
+            corrected.metadata["software_dc_offset_imag"],
+        )
+        np.testing.assert_allclose(
+            corrected.iq,
+            np.asarray(recording.iq) - offset,
+            atol=2e-7,
+        )
+        assert corrected.sample_count == recording.sample_count
+        assert corrected.sample_rate_hz == recording.sample_rate_hz
+        assert corrected.metadata["software_dc_removal_applied"] is True
+        assert corrected.metadata["dc_removal_recommended"] is False
+        assert window._last_directory("iq") == str(export_dir.resolve())
     finally:
         window._meas_config_dialog.close()
         window.close()

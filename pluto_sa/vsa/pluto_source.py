@@ -34,6 +34,8 @@ class PlutoCaptureSettings:
     samples_per_symbol: int = 8
     capture_length_s: float = 0.003
     rf_bandwidth_hz: float = 8_000_000.0
+    lo_offset_hz: float = 0.0
+    analysis_bandwidth_hz: float | None = None
     sdr_uri: str | None = None
     swap_iq: bool = False
     power_correction: InputPowerCorrection = InputPowerCorrection()
@@ -54,6 +56,13 @@ class PlutoCaptureSettings:
             raise ValueError("capture_length_s must be positive")
         if not np.isfinite(self.rf_bandwidth_hz) or self.rf_bandwidth_hz <= 0.0:
             raise ValueError("rf_bandwidth_hz must be positive")
+        if not np.isfinite(self.lo_offset_hz):
+            raise ValueError("lo_offset_hz must be finite")
+        if self.analysis_bandwidth_hz is not None and (
+            not np.isfinite(self.analysis_bandwidth_hz)
+            or self.analysis_bandwidth_hz <= 0.0
+        ):
+            raise ValueError("analysis_bandwidth_hz must be positive when set")
         if self.trigger_source not in {TriggerKind.FREE_RUN, TriggerKind.POWER_LEVEL}:
             raise ValueError("VSA Pluto capture supports Free Run or I/Q Power trigger")
         if not np.isfinite(self.trigger_level_dbm):
@@ -76,6 +85,10 @@ class PlutoCaptureSettings:
     @property
     def nominal_usable_bandwidth_hz(self) -> float:
         return min(0.8 * self.requested_sample_rate_hz, self.rf_bandwidth_hz)
+
+    @property
+    def hardware_lo_frequency_hz(self) -> float:
+        return float(self.center_frequency_hz) + float(self.lo_offset_hz)
 
     @property
     def trigger_offset_samples(self) -> int:
@@ -133,7 +146,7 @@ class PlutoLiveSource:
         )
         metadata = AcquisitionMetadata(
             sample_rate_hz=float(actual_sample_rate_hz),
-            center_freq_hz=float(settings.center_frequency_hz),
+            center_freq_hz=float(settings.hardware_lo_frequency_hz),
             rf_bandwidth_hz=usable_bandwidth_hz,
             gain_db=float(settings.power_correction.internal_gain_db),
             source=capture_source,
@@ -184,6 +197,19 @@ class PlutoLiveSource:
                 "capture_oversampling": int(settings.samples_per_symbol),
                 "capture_length_s": float(settings.capture_length_s),
                 "requested_sample_rate_hz": settings.requested_sample_rate_hz,
+                "requested_center_frequency_hz": float(
+                    settings.center_frequency_hz
+                ),
+                "hardware_lo_frequency_hz": float(
+                    settings.hardware_lo_frequency_hz
+                ),
+                "lo_offset_hz": float(settings.lo_offset_hz),
+                "experimental_lo_offset": bool(settings.lo_offset_hz),
+                "requested_analysis_bandwidth_hz": (
+                    None
+                    if settings.analysis_bandwidth_hz is None
+                    else float(settings.analysis_bandwidth_hz)
+                ),
                 "actual_sample_rate_hz": int(actual_sample_rate_hz),
                 "actual_rf_bandwidth_hz": int(actual_rf_bandwidth_hz),
                 "internal_gain_db": float(settings.power_correction.internal_gain_db),
@@ -280,7 +306,7 @@ class PlutoLiveSource:
         correction = settings.power_correction
         return SpectrumConfig(
             analyzer_mode=AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
-            center_freq_hz=int(round(settings.center_frequency_hz)),
+            center_freq_hz=int(round(settings.hardware_lo_frequency_hz)),
             calibration_offset_db=float(correction.calibration_offset_db),
             rx_gain_db=int(round(correction.internal_gain_db)),
             ext_att_db=float(correction.external_attenuation_db),

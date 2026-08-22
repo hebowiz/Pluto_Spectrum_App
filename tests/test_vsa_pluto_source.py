@@ -134,6 +134,34 @@ def test_pluto_single_capture_reuses_unchanged_receiver_configuration() -> None:
     assert receiver.reconfigured[0].center_freq_hz == 2_402_000_000
 
 
+def test_pluto_experimental_lo_offset_preserves_requested_analysis_center() -> None:
+    _FakeReceiver.instances.clear()
+    source = PlutoLiveSource(receiver_factory=_FakeReceiver)
+    settings = PlutoCaptureSettings(
+        center_frequency_hz=2_441_000_000.0,
+        lo_offset_hz=1_500_000.0,
+        analysis_bandwidth_hz=1_250_000.0,
+    )
+
+    recording = source.capture_single(settings)
+
+    receiver = _FakeReceiver.instances[0]
+    assert settings.hardware_lo_frequency_hz == 2_442_500_000.0
+    assert receiver.config.center_freq_hz == 2_442_500_000
+    assert recording.center_frequency_hz == 2_442_500_000.0
+    assert recording.metadata["requested_center_frequency_hz"] == pytest.approx(
+        2_441_000_000.0
+    )
+    assert recording.metadata["hardware_lo_frequency_hz"] == pytest.approx(
+        2_442_500_000.0
+    )
+    assert recording.metadata["lo_offset_hz"] == pytest.approx(1_500_000.0)
+    assert recording.metadata["experimental_lo_offset"] is True
+    assert recording.metadata["requested_analysis_bandwidth_hz"] == pytest.approx(
+        1_250_000.0
+    )
+
+
 def test_pluto_capture_applies_external_path_and_swap_iq() -> None:
     _FakeReceiver.instances.clear()
     source = PlutoLiveSource(receiver_factory=_FakeReceiver)

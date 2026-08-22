@@ -21,6 +21,7 @@ from pluto_sa.vsa.mapping import (
     reverse_symbol_bits,
 )
 from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
+from pluto_sa.vsa.dc import apply_robust_dc_removal
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     BitOrdering,
@@ -171,15 +172,24 @@ def _peak_decimate_xy(
     full_count = (count // step) * step
     grouped = y[:full_count].reshape(-1, step)
     group_offset = np.arange(grouped.shape[0], dtype=np.int64) * step
-    minimum = group_offset + np.argmin(grouped, axis=1)
-    maximum_index = group_offset + np.argmax(grouped, axis=1)
+    finite_grouped = np.isfinite(grouped)
+    minimum = group_offset + np.argmin(
+        np.where(finite_grouped, grouped, np.inf), axis=1
+    )
+    maximum_index = group_offset + np.argmax(
+        np.where(finite_grouped, grouped, -np.inf), axis=1
+    )
     paired = np.column_stack((minimum, maximum_index))
     paired.sort(axis=1)
     indices = paired.reshape(-1)
     if full_count < count:
         tail = y[full_count:count]
+        finite_tail = np.isfinite(tail)
         tail_indices = np.asarray(
-            [full_count + int(np.argmin(tail)), full_count + int(np.argmax(tail))],
+            [
+                full_count + int(np.argmin(np.where(finite_tail, tail, np.inf))),
+                full_count + int(np.argmax(np.where(finite_tail, tail, -np.inf))),
+            ],
             dtype=np.int64,
         )
         indices = np.concatenate((indices, np.sort(tail_indices)))
@@ -197,7 +207,15 @@ def _peak_decimate_xy(
     required_x = required_x[(required_x >= lower) & (required_x <= upper)]
     if required_x.size == 0:
         return plotted_x, plotted_y
-    required_y = np.interp(required_x, x[:count], y[:count])
+    interpolation_valid = np.isfinite(x[:count]) & np.isfinite(y[:count])
+    if not np.any(interpolation_valid):
+        required_y = np.full(required_x.shape, np.nan, dtype=np.float64)
+    else:
+        required_y = np.interp(
+            required_x,
+            x[:count][interpolation_valid],
+            y[:count][interpolation_valid],
+        )
     combined_x = np.concatenate((plotted_x, required_x))
     combined_y = np.concatenate((plotted_y, required_y))
     order = np.argsort(combined_x, kind="stable")
@@ -624,6 +642,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._open_iq)
         file_menu.addAction(open_action)
+        self.export_iq_action = QtGui.QAction("Export IQ Recording...", self)
+        self.export_iq_action.triggered.connect(self._export_iq_recording)
+        self.export_iq_action.setEnabled(self.session.recording is not None)
+        file_menu.addAction(self.export_iq_action)
         self.export_symbol_table_action = QtGui.QAction(
             "Export Symbol Table...", self
         )
@@ -673,6 +695,23 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_display_action.setChecked(False)
         self.symbol_display_action.triggered.connect(self._refresh_display_only)
         display_menu.addAction(self.symbol_display_action)
+        iq_power_signal_menu = display_menu.addMenu("IQ Power Signal")
+        self.raw_iq_power_action = QtGui.QAction(
+            "Raw Capture", self, checkable=True
+        )
+        self.measured_iq_power_action = QtGui.QAction(
+            "Measured", self, checkable=True
+        )
+        iq_power_signal_group = QtGui.QActionGroup(self)
+        iq_power_signal_group.setExclusive(True)
+        iq_power_signal_group.addAction(self.raw_iq_power_action)
+        iq_power_signal_group.addAction(self.measured_iq_power_action)
+        self.raw_iq_power_action.setChecked(True)
+        self.raw_iq_power_action.triggered.connect(self._refresh_display_only)
+        self.measured_iq_power_action.triggered.connect(
+            self._refresh_display_only
+        )
+        iq_power_signal_menu.addActions(iq_power_signal_group.actions())
         modulation_signal_menu = display_menu.addMenu("Modulation Signal")
         self.raw_modulation_signal_action = QtGui.QAction(
             "Raw IQ", self, checkable=True
@@ -1002,6 +1041,17 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.capture_rf_bandwidth_spin.setDecimals(3)
         self.capture_rf_bandwidth_spin.setValue(8.0)
         self.capture_rf_bandwidth_spin.setSuffix(" MHz")
+        self.lo_offset_check = QtWidgets.QCheckBox("Enable (Experimental)")
+        self.lo_offset_check.setToolTip(
+            "Tune the Pluto LO away from the requested center. "
+            "Requires the Analysis Channel filter."
+        )
+        self.lo_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.lo_offset_spin.setRange(-50.0, 50.0)
+        self.lo_offset_spin.setDecimals(6)
+        self.lo_offset_spin.setValue(1.5)
+        self.lo_offset_spin.setSuffix(" MHz")
+        self.lo_offset_status_label = QtWidgets.QLabel()
         self.internal_gain_spin = QtWidgets.QSpinBox()
         self.internal_gain_spin.setRange(0, 40)
         self.internal_gain_spin.setValue(30)
@@ -1020,17 +1070,24 @@ class VSAWindow(QtWidgets.QMainWindow):
         pluto_form.addRow("Pluto URI", self.pluto_uri_edit)
         pluto_form.addRow("Center Frequency", self.capture_center_spin)
         pluto_form.addRow("RF Bandwidth", self.capture_rf_bandwidth_spin)
+        pluto_form.addRow("LO Offset", self.lo_offset_check)
+        pluto_form.addRow("Offset Frequency", self.lo_offset_spin)
+        pluto_form.addRow("Resolved LO", self.lo_offset_status_label)
         pluto_form.addRow("Internal Gain", self.internal_gain_spin)
         pluto_form.addRow("External ATT", self.external_attenuation_spin)
         pluto_form.addRow("External Gain", self.external_gain_spin)
         pluto_form.addRow("Input Correction", self.capture_correction_label)
         source_layout.addLayout(pluto_form)
         for control in (
+            self.capture_center_spin,
+            self.capture_rf_bandwidth_spin,
             self.internal_gain_spin,
             self.external_attenuation_spin,
             self.external_gain_spin,
+            self.lo_offset_spin,
         ):
             control.valueChanged.connect(self._sync_capture_settings)
+        self.lo_offset_check.toggled.connect(self._sync_lo_offset_controls)
         self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
         self.analysis_center_spin = QtWidgets.QDoubleSpinBox()
         self.analysis_center_spin.setRange(-100_000.0, 100_000.0)
@@ -1047,6 +1104,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         channel_form.addRow("Analysis Bandwidth", self.analysis_bandwidth_spin)
         source_layout.addLayout(channel_form)
         self.channel_filter_check.toggled.connect(self._sync_analysis_controls)
+        self.analysis_bandwidth_spin.valueChanged.connect(
+            self._sync_capture_settings
+        )
         self._sync_analysis_controls()
         source_layout.addStretch(1)
         config_pages.append(("Input / Frontend", source_page))
@@ -2021,6 +2081,49 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self, "Symbol Table Export Error", str(error)
             )
 
+    def _export_iq_recording(self) -> None:
+        recording = self.session.recording
+        if recording is None:
+            self.statusBar().showMessage("No IQ recording is available to export")
+            return
+        processing, accepted = QtWidgets.QInputDialog.getItem(
+            self,
+            "Export IQ Recording",
+            "IQ processing:",
+            (
+                "Raw capture",
+                "Software DC removed (full-rate capture)",
+            ),
+            0,
+            False,
+        )
+        if not accepted:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export IQ Recording",
+            self._last_directory("iq"),
+            "NumPy IQ recording (*.npz)",
+        )
+        if not path:
+            return
+        path = self._with_suffix(path, ".npz")
+        self._remember_directory("iq", path)
+        try:
+            remove_dc = processing.startswith("Software DC removed")
+            exported = (
+                apply_robust_dc_removal(recording)
+                if remove_dc
+                else recording
+            )
+            FileIQSource.save_npz(path, exported)
+            mode = "software DC removed" if remove_dc else "raw"
+            self.statusBar().showMessage(
+                f"IQ recording exported ({mode}) - {Path(path).name}"
+            )
+        except (OSError, ValueError) as error:
+            QtWidgets.QMessageBox.critical(self, "IQ Export Error", str(error))
+
     def _meas_config_values(self) -> dict[str, object]:
         return {
             "input_frontend": {
@@ -2028,6 +2131,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "pluto_uri": self.pluto_uri_edit.text().strip(),
                 "center_frequency_mhz": self.capture_center_spin.value(),
                 "rf_bandwidth_mhz": self.capture_rf_bandwidth_spin.value(),
+                "lo_offset_enabled": self.lo_offset_check.isChecked(),
+                "lo_offset_mhz": self.lo_offset_spin.value(),
                 "internal_gain_db": self.internal_gain_spin.value(),
                 "external_attenuation_db": self.external_attenuation_spin.value(),
                 "external_gain_db": self.external_gain_spin.value(),
@@ -2117,6 +2222,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             },
             "display_config": {
                 "show_symbol_points": self.symbol_display_action.isChecked(),
+                "iq_power_signal": (
+                    "Measured"
+                    if self.measured_iq_power_action.isChecked()
+                    else "Raw Capture"
+                ),
                 "modulation_signal": (
                     "Raw IQ"
                     if self.raw_modulation_signal_action.isChecked()
@@ -2235,6 +2345,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.capture_rf_bandwidth_spin.setValue(
                 float(source.get("rf_bandwidth_mhz", 8.0))
             )
+            self.lo_offset_spin.setValue(float(source.get("lo_offset_mhz", 1.5)))
             self.internal_gain_spin.setValue(
                 int(round(float(source.get("internal_gain_db", 30.0))))
             )
@@ -2245,6 +2356,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                 float(source.get("external_gain_db", 0.0))
             )
             self.channel_filter_check.setChecked(bool(source["analysis_channel_enabled"]))
+            self.lo_offset_check.setChecked(
+                bool(source.get("lo_offset_enabled", False))
+            )
             self.analysis_center_spin.setValue(float(source["analysis_center_mhz"]))
             self.analysis_bandwidth_spin.setValue(float(source["analysis_bandwidth_mhz"]))
             self.pattern_search_check.setChecked(bool(pattern["enabled"]))
@@ -2375,6 +2489,19 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             self.symbol_display_action.setChecked(
                 bool(display_config.get("show_symbol_points", False))
+            )
+            iq_power_signal = str(
+                display_config.get("iq_power_signal", "Raw Capture")
+            )
+            if iq_power_signal not in {"Raw Capture", "Measured"}:
+                raise ValueError(
+                    "IQ Power signal must be Raw Capture or Measured"
+                )
+            self.raw_iq_power_action.setChecked(
+                iq_power_signal == "Raw Capture"
+            )
+            self.measured_iq_power_action.setChecked(
+                iq_power_signal == "Measured"
             )
             # Legacy configurations controlled carrier correction separately.
             # Fold that choice into the common Raw IQ / Measured selection.
@@ -2745,6 +2872,23 @@ class VSAWindow(QtWidgets.QMainWindow):
         enabled = self.channel_filter_check.isChecked()
         self.analysis_center_spin.setEnabled(enabled)
         self.analysis_bandwidth_spin.setEnabled(enabled)
+        if not enabled and self.lo_offset_check.isChecked():
+            self.lo_offset_check.setChecked(False)
+        self._sync_lo_offset_controls()
+
+    def _sync_lo_offset_controls(self, _value: object = None) -> None:
+        if not hasattr(self, "lo_offset_check"):
+            return
+        enabled = self.lo_offset_check.isChecked()
+        if enabled and not self.channel_filter_check.isChecked():
+            self.channel_filter_check.setChecked(True)
+        self.lo_offset_spin.setEnabled(enabled)
+        offset_mhz = self.lo_offset_spin.value() if enabled else 0.0
+        hardware_lo_mhz = self.capture_center_spin.value() + offset_mhz
+        self.lo_offset_status_label.setText(
+            f"{hardware_lo_mhz:.6f} MHz"
+            + (" (experimental)" if enabled else " (offset off)")
+        )
 
     def _capture_length_s(self) -> float:
         value = float(self.capture_length_spin.value())
@@ -2767,6 +2911,16 @@ class VSAWindow(QtWidgets.QMainWindow):
             samples_per_symbol=int(self.capture_oversampling_combo.currentData()),
             capture_length_s=self._capture_length_s(),
             rf_bandwidth_hz=self.capture_rf_bandwidth_spin.value() * 1e6,
+            lo_offset_hz=(
+                self.lo_offset_spin.value() * 1e6
+                if self.lo_offset_check.isChecked()
+                else 0.0
+            ),
+            analysis_bandwidth_hz=(
+                self.analysis_bandwidth_spin.value() * 1e6
+                if self.channel_filter_check.isChecked()
+                else None
+            ),
             sdr_uri=self.pluto_uri_edit.text().strip() or None,
             swap_iq=self.swap_iq_check.isChecked(),
             power_correction=self._input_power_correction(),
@@ -2815,6 +2969,29 @@ class VSAWindow(QtWidgets.QMainWindow):
             f"{correction.input_correction_db:+.1f} dB "
             "(Ext ATT - Internal Gain - Ext Gain)"
         )
+        self._sync_lo_offset_controls()
+
+    def _validate_experimental_lo_offset(
+        self, settings: PlutoCaptureSettings
+    ) -> None:
+        if settings.lo_offset_hz == 0.0:
+            return
+        if not self.channel_filter_check.isChecked():
+            raise ValueError("LO Offset requires Enable Analysis Channel")
+        analysis_bandwidth_hz = self.analysis_bandwidth_spin.value() * 1e6
+        if abs(settings.lo_offset_hz) <= 0.5 * analysis_bandwidth_hz:
+            raise ValueError(
+                "LO Offset must exceed half the Analysis Bandwidth so the "
+                "Analysis Filter can reject the Pluto DC spur"
+            )
+        if (
+            abs(settings.lo_offset_hz) + 0.5 * analysis_bandwidth_hz
+            > 0.5 * settings.nominal_usable_bandwidth_hz
+        ):
+            raise ValueError(
+                "LO Offset and Analysis Bandwidth exceed the usable Pluto "
+                "capture bandwidth"
+            )
 
     def _run_pluto_single(self) -> None:
         if (
@@ -2828,6 +3005,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             return
         try:
             settings = self._pluto_capture_settings()
+            self._validate_experimental_lo_offset(settings)
         except ValueError as error:
             QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", str(error))
             return
@@ -2896,7 +3074,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.run_single_button.setEnabled(True)
 
     def _set_analysis_controls_from_recording(self, recording: IQRecording) -> None:
-        self.analysis_center_spin.setValue(recording.center_frequency_hz / 1e6)
+        requested_center_hz = float(
+            recording.metadata.get(
+                "requested_center_frequency_hz", recording.center_frequency_hz
+            )
+        )
+        self.analysis_center_spin.setValue(requested_center_hz / 1e6)
         usable_hz = min(
             recording.sample_rate_hz,
             recording.usable_bandwidth_hz or recording.sample_rate_hz,
@@ -2904,7 +3087,17 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.analysis_bandwidth_spin.setMaximum(
             max(0.000001, usable_hz / 1e6 * 0.999)
         )
-        self.analysis_bandwidth_spin.setValue(min(1.5, usable_hz / 1e6 * 0.8))
+        requested_bandwidth_hz = recording.metadata.get(
+            "requested_analysis_bandwidth_hz"
+        )
+        requested_bandwidth_mhz = (
+            min(1.5, usable_hz / 1e6 * 0.8)
+            if requested_bandwidth_hz is None
+            else float(requested_bandwidth_hz) / 1e6
+        )
+        self.analysis_bandwidth_spin.setValue(
+            min(self.analysis_bandwidth_spin.maximum(), requested_bandwidth_mhz)
+        )
 
     def _update_analysis_settings(self) -> None:
         enabled = self.channel_filter_check.isChecked()
@@ -3052,6 +3245,7 @@ class VSAWindow(QtWidgets.QMainWindow):
     ) -> None:
         self._selected_match_index = 1
         self.session.set_recording(recording)
+        self.export_iq_action.setEnabled(True)
         self._set_analysis_controls_from_recording(recording)
         if signal is not None:
             self.session.set_signal(signal)
@@ -3307,6 +3501,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         if recording is None or signal is None:
             self.summary_label.setText("No capture")
             return
+        requested_center_hz = float(
+            recording.metadata.get(
+                "requested_center_frequency_hz", recording.center_frequency_hz
+            )
+        )
+        lo_offset_hz = float(recording.metadata.get("lo_offset_hz", 0.0))
         self.summary_label.setText(
             "  |  ".join(
                 (
@@ -3314,9 +3514,14 @@ class VSAWindow(QtWidgets.QMainWindow):
                     f"Capture: {recording.duration_s * 1e3:.3f} ms",
                     f"Fs: {recording.sample_rate_hz / 1e6:.3f} MS/s",
                     (
-                        f"Center: {recording.center_frequency_hz / 1e6:.6f} MHz"
-                        if recording.center_frequency_hz
+                        f"Center: {requested_center_hz / 1e6:.6f} MHz"
+                        if requested_center_hz
                         else "Center: Baseband"
+                    ),
+                    *(
+                        (f"Pluto LO: {recording.center_frequency_hz / 1e6:.6f} MHz",)
+                        if lo_offset_hz
+                        else ()
                     ),
                     f"Mod: {signal.modulation.value}",
                     f"Symbol Rate: {signal.symbol_rate_hz / 1e6:.3f} MSym/s",
@@ -3560,8 +3765,12 @@ class VSAWindow(QtWidgets.QMainWindow):
             if pattern_result is not None
             else result.symbol_time_s
         )
-        capture_time_s = self.session.capture_time_s
-        capture_power_source_dbm = self.session.capture_power_dbm
+        if self.measured_iq_power_action.isChecked():
+            capture_time_s = result.time_s
+            capture_power_source_dbm = result.power_dbm
+        else:
+            capture_time_s = self.session.capture_time_s
+            capture_power_source_dbm = self.session.capture_power_dbm
         if (
             capture_time_s.size != capture_power_source_dbm.size
             or not capture_time_s.size

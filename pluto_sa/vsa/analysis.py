@@ -35,9 +35,14 @@ def capture_power_traces(
     """
     iq = np.asarray(recording.iq, dtype=np.complex128)
     time_s = np.arange(iq.size, dtype=np.float64) / float(recording.sample_rate_hz)
-    power_dbfs = 20.0 * np.log10(
-        np.maximum(np.abs(iq) / float(recording.full_scale), _EPSILON)
-    )
+    normalized_magnitude = np.abs(iq) / float(recording.full_scale)
+    # An exact complex zero in a Pluto capture is not a physical -infinity dBm
+    # measurement.  It can occur at buffer boundaries or as a missing/cleared
+    # sample.  Keep it invalid so plot auto-ranging is not expanded to roughly
+    # -6150 dB by the floating-point epsilon used in DSP calculations.
+    power_dbfs = np.full(normalized_magnitude.shape, np.nan, dtype=np.float64)
+    valid = np.isfinite(normalized_magnitude) & (normalized_magnitude > 0.0)
+    power_dbfs[valid] = 20.0 * np.log10(normalized_magnitude[valid])
     power_dbm = power_dbfs + recording.dbfs_to_dbm_offset_db
     for values in (time_s, power_dbfs, power_dbm):
         values.setflags(write=False)

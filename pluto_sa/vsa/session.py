@@ -9,6 +9,7 @@ import numpy as np
 
 from pluto_sa.vsa.analysis import VSAAnalyzer, capture_power_traces
 from pluto_sa.vsa.channel import extract_analysis_channel
+from pluto_sa.vsa.dc import apply_robust_dc_removal
 from pluto_sa.vsa.model import (
     IQRecording,
     ModulationFamily,
@@ -153,13 +154,10 @@ class VSASession:
                 bandwidth_hz=self.settings.analysis_bandwidth_hz,
             )
         remove_dc = self.settings.remove_dc and bool(
-            prepared.metadata.get("dc_removal_recommended", True)
-        )
+            prepared.metadata.get("dc_removal_recommended", False)
+        ) and not bool(prepared.metadata.get("experimental_lo_offset", False))
         if remove_dc:
-            prepared = replace(
-                prepared,
-                iq=np.asarray(prepared.iq) - np.mean(prepared.iq),
-            )
+            prepared = apply_robust_dc_removal(prepared)
         prepared_settings = replace(
             self.settings,
             remove_dc=False,
