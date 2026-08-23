@@ -196,6 +196,60 @@ def decode_global_airborne_cpr(
     return float(latitude), float(longitude)
 
 
+def decode_local_airborne_cpr(
+    encoded_latitude: int,
+    encoded_longitude: int,
+    *,
+    is_odd: bool,
+    reference_latitude_deg: float,
+    reference_longitude_deg: float,
+) -> tuple[float, float] | None:
+    """Decode one airborne CPR frame relative to a nearby known position.
+
+    The caller must ensure that the reference is within 180 NM of the aircraft.
+    This function resolves the locally unambiguous CPR zone but deliberately
+    does not decide whether the supplied reference is operationally suitable.
+    """
+
+    latitude_reference = float(reference_latitude_deg)
+    longitude_reference = float(reference_longitude_deg)
+    if not (
+        -90.0 <= latitude_reference <= 90.0
+        and -180.0 <= longitude_reference <= 180.0
+        and 0 <= int(encoded_latitude) < 131_072
+        and 0 <= int(encoded_longitude) < 131_072
+    ):
+        return None
+    scale = 131_072.0
+    yz = float(encoded_latitude) / scale
+    xz = float(encoded_longitude) / scale
+    latitude_spacing = 360.0 / (59.0 if is_odd else 60.0)
+    latitude_index = int(np.floor(latitude_reference / latitude_spacing)) + int(
+        np.floor(
+            0.5
+            + (latitude_reference % latitude_spacing) / latitude_spacing
+            - yz
+        )
+    )
+    latitude = latitude_spacing * (latitude_index + yz)
+    if latitude >= 270.0:
+        latitude -= 360.0
+    if not -90.0 <= latitude <= 90.0:
+        return None
+    longitude_zones = max(_cpr_nl(latitude) - int(is_odd), 1)
+    longitude_spacing = 360.0 / longitude_zones
+    longitude_index = int(np.floor(longitude_reference / longitude_spacing)) + int(
+        np.floor(
+            0.5
+            + (longitude_reference % longitude_spacing) / longitude_spacing
+            - xz
+        )
+    )
+    longitude = longitude_spacing * (longitude_index + xz)
+    longitude = (longitude + 180.0) % 360.0 - 180.0
+    return float(latitude), float(longitude)
+
+
 def decode_adsb_fields(bits: np.ndarray) -> dict[str, object]:
     """Decode stable DF17/18 fields without maintaining cross-frame state."""
     values = np.asarray(bits, dtype=np.uint8).reshape(-1)

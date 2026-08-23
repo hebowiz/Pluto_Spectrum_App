@@ -17,6 +17,7 @@ _LEAFLET_HTML = """<!doctype html>
         integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
           integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <style>
     html, body, #map { width: 100%; height: 100%; margin: 0; background: #101214; }
     .leaflet-container { background: #101214; font-family: sans-serif; }
@@ -26,6 +27,14 @@ _LEAFLET_HTML = """<!doctype html>
       transform-origin: 18px 21px;
       filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.9));
     }
+    .receiver-div-icon { background: transparent; border: 0; }
+    .receiver-symbol {
+      width: 30px; height: 24px; line-height: 22px; box-sizing: border-box;
+      color: white; background: #10232b; border: 2px solid #00d9ff;
+      border-radius: 5px; text-align: center; font: bold 12px sans-serif;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+    }
+    .receiver-pick { cursor: crosshair !important; }
   </style>
 </head>
 <body>
@@ -76,7 +85,32 @@ _LEAFLET_HTML = """<!doctype html>
   }
 
   const current = L.marker([0, 0], {icon: aircraftIcon(0), zIndexOffset: 1000});
+  const receiver = L.marker([0, 0], {
+    icon: L.divIcon({
+      className: 'receiver-div-icon', iconSize: [30, 24], iconAnchor: [15, 12],
+      html: '<div class="receiver-symbol">RX</div>'
+    }),
+    zIndexOffset: 900
+  });
   let currentIcao = null;
+  let receiverLocation = null;
+  let receiverSelectionMode = false;
+  let receiverBridge = null;
+
+  if (typeof QWebChannel !== 'undefined' && typeof qt !== 'undefined') {
+    new QWebChannel(qt.webChannelTransport, channel => {
+      receiverBridge = channel.objects.receiverBridge;
+    });
+  }
+
+  map.on('click', event => {
+    if (!receiverSelectionMode) return;
+    receiver.setLatLng(event.latlng);
+    if (!map.hasLayer(receiver)) receiver.addTo(map);
+    if (receiverBridge) {
+      receiverBridge.receiverLocationSelected(event.latlng.lat, event.latlng.lng);
+    }
+  });
 
   // A QWebEngineView can be resized when its dock or tab becomes visible.
   // Leaflet otherwise keeps the tile viewport size from initial construction.
@@ -99,7 +133,11 @@ _LEAFLET_HTML = """<!doctype html>
     if (!points.length) {
       if (map.hasLayer(current)) map.removeLayer(current);
       currentIcao = payload.icao || null;
-      map.setView([20, 0], 2);
+      if (receiverLocation) {
+        map.setView(receiverLocation, 10);
+      } else {
+        map.setView([20, 0], 2);
+      }
       return;
     }
     const latest = points[points.length - 1];
@@ -134,20 +172,56 @@ _LEAFLET_HTML = """<!doctype html>
     }
     currentIcao = payload.icao;
   };
+
+  window.updateReceiverLocation = function(payload) {
+    if (!payload || payload.latitude === null || payload.longitude === null) {
+      receiverLocation = null;
+      if (map.hasLayer(receiver)) map.removeLayer(receiver);
+      return;
+    }
+    receiverLocation = L.latLng(payload.latitude, payload.longitude);
+    // Keep the configured receiver unobtrusive. The RX marker is only a
+    // temporary click-position preview while selection mode is active.
+    if (map.hasLayer(receiver)) map.removeLayer(receiver);
+    if (!currentIcao) map.setView(receiverLocation, 10);
+  };
+
+  window.setReceiverSelectionMode = function(enabled) {
+    receiverSelectionMode = Boolean(enabled);
+    map.getContainer().classList.toggle('receiver-pick', receiverSelectionMode);
+  };
 </script>
 </body>
 </html>
 """
 
 
+class _ReceiverLocationBridge(QtCore.QObject):
+    selected = QtCore.Signal(float, float)
+
+    @QtCore.Slot(float, float)
+    def receiverLocationSelected(self, latitude: float, longitude: float) -> None:
+        self.selected.emit(float(latitude), float(longitude))
+
+
 class LeafletAircraftMap(QtWidgets.QWidget):
     """Create WebEngine only when the map tab is first opened."""
+
+    receiver_location_selected = QtCore.Signal(float, float)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._view: QtWidgets.QWidget | None = None
         self._loaded = False
         self._payload: dict[str, Any] = {"icao": None, "points": []}
+        self._receiver_payload: dict[str, float | None] = {
+            "latitude": None,
+            "longitude": None,
+        }
+        self._receiver_selection_mode = False
+        self._web_channel: QtCore.QObject | None = None
+        self._receiver_bridge = _ReceiverLocationBridge(self)
+        self._receiver_bridge.selected.connect(self.receiver_location_selected)
         self._layout = QtWidgets.QStackedLayout(self)
         self._placeholder = QtWidgets.QLabel(
             "Open Position History to load Leaflet / OpenStreetMap tiles."
@@ -160,6 +234,10 @@ class LeafletAircraftMap(QtWidgets.QWidget):
         return self._payload
 
     @property
+    def last_receiver_payload(self) -> dict[str, float | None]:
+        return self._receiver_payload
+
+    @property
     def web_view_created(self) -> bool:
         return self._view is not None
 
@@ -168,6 +246,7 @@ class LeafletAircraftMap(QtWidgets.QWidget):
             return
         from PySide6.QtWebEngineCore import QWebEngineSettings
         from PySide6.QtWebEngineWidgets import QWebEngineView
+        from PySide6.QtWebChannel import QWebChannel
 
         view = QWebEngineView(self)
         view.settings().setAttribute(
@@ -186,6 +265,10 @@ class LeafletAircraftMap(QtWidgets.QWidget):
             False,
         )
         view.loadFinished.connect(self._load_finished)
+        channel = QWebChannel(view.page())
+        channel.registerObject("receiverBridge", self._receiver_bridge)
+        view.page().setWebChannel(channel)
+        self._web_channel = channel
         self._layout.addWidget(view)
         self._layout.setCurrentWidget(view)
         self._view = view
@@ -198,6 +281,7 @@ class LeafletAircraftMap(QtWidgets.QWidget):
         callsign: str | None,
         track_deg: float | None,
         points: list[dict[str, float | int | None]],
+        render: bool = True,
     ) -> None:
         self._payload = {
             "icao": icao,
@@ -205,13 +289,34 @@ class LeafletAircraftMap(QtWidgets.QWidget):
             "track_deg": track_deg,
             "points": points,
         }
-        self._send_payload()
+        if render:
+            self._send_payload()
+
+    def set_receiver_location(
+        self, latitude: float | None, longitude: float | None
+    ) -> None:
+        self._receiver_payload = {
+            "latitude": None if latitude is None else float(latitude),
+            "longitude": None if longitude is None else float(longitude),
+        }
+        self._send_receiver_payload()
+
+    def begin_receiver_selection(self) -> None:
+        self.activate()
+        self._receiver_selection_mode = True
+        self._send_receiver_selection_mode()
+
+    def cancel_receiver_selection(self) -> None:
+        self._receiver_selection_mode = False
+        self._send_receiver_selection_mode()
 
     @QtCore.Slot(bool)
     def _load_finished(self, successful: bool) -> None:
         self._loaded = bool(successful)
         if successful:
             self._send_payload()
+            self._send_receiver_payload()
+            self._send_receiver_selection_mode()
         else:
             self._placeholder.setText(
                 "Leaflet could not be loaded. Check the network connection."
@@ -229,6 +334,22 @@ class LeafletAircraftMap(QtWidgets.QWidget):
             f"window.updateAircraftTrack({payload_json});"
         )
 
+    def _send_receiver_payload(self) -> None:
+        if not self._loaded or self._view is None:
+            return
+        payload_json = json.dumps(self._receiver_payload, separators=(",", ":"))
+        self._view.page().runJavaScript(
+            f"window.updateReceiverLocation({payload_json});"
+        )
+
+    def _send_receiver_selection_mode(self) -> None:
+        if not self._loaded or self._view is None:
+            return
+        enabled = "true" if self._receiver_selection_mode else "false"
+        self._view.page().runJavaScript(
+            f"window.setReceiverSelectionMode({enabled});"
+        )
+
     def shutdown(self) -> None:
         """Stop Chromium callbacks before Qt destroys the surrounding docks."""
 
@@ -236,6 +357,7 @@ class LeafletAircraftMap(QtWidgets.QWidget):
         if view is None:
             return
         self._loaded = False
+        self._receiver_selection_mode = False
         try:
             view.loadFinished.disconnect(self._load_finished)
         except (RuntimeError, TypeError):
@@ -248,4 +370,5 @@ class LeafletAircraftMap(QtWidgets.QWidget):
         self._layout.setCurrentWidget(self._placeholder)
         self._layout.removeWidget(view)
         self._view = None
+        self._web_channel = None
         view.deleteLater()

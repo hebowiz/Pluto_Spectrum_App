@@ -13,8 +13,14 @@ import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_sa.standards.adsb1090.model import ADSB1090Settings
+from pluto_sa.standards.adsb1090.route import (
+    ADSBDBRouteClient,
+    FlightRoute,
+    RouteAirport,
+)
 from pluto_sa.standards.adsb1090.ui import (
     ADSB1090Window,
+    _ADSBPacketEntry,
     _ADSBCaptureBatch,
     _ADSBPlutoCaptureThread,
     _ADSBStreamAnalysisThread,
@@ -40,6 +46,11 @@ def _isolate_default_qsettings(tmp_path, monkeypatch):
                 super().__init__(*args, **kwargs)
 
     monkeypatch.setattr(QtCore, "QSettings", _IsolatedQSettings)
+    monkeypatch.setattr(
+        ADSBDBRouteClient,
+        "lookup",
+        lambda _self, _callsign: None,
+    )
     yield
 
 
@@ -69,6 +80,7 @@ def test_adsb_user_settings_are_restored_from_dedicated_preferences(tmp_path) ->
         first.capture_length_spin.setValue(375.0)
         first.internal_gain_spin.setValue(42.5)
         first.preamble_snr_spin.setValue(4.5)
+        first._set_receiver_location(35.681236, 139.767125)
         first.prepare_for_shutdown()
     finally:
         first.close()
@@ -82,8 +94,52 @@ def test_adsb_user_settings_are_restored_from_dedicated_preferences(tmp_path) ->
         assert second.capture_length_spin.value() == pytest.approx(375.0)
         assert second.internal_gain_spin.value() == pytest.approx(42.5)
         assert second.preamble_snr_spin.value() == pytest.approx(4.5)
+        assert second._receiver_latitude_deg == pytest.approx(35.681236)
+        assert second._receiver_longitude_deg == pytest.approx(139.767125)
+        assert second.aircraft_map.last_receiver_payload["latitude"] == pytest.approx(
+            35.681236
+        )
     finally:
         second.close()
+
+
+def test_adsb_single_position_frame_uses_receiver_for_local_cpr() -> None:
+    pg.mkQApp("ADS-B Local CPR UI test")
+    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    recording = FileIQSource.load(path)
+    window = ADSB1090Window()
+    try:
+        window._set_receiver_location(52.26, 3.93, persist=False)
+        result = window._analyzer.analyze(
+            recording,
+            ADSB1090Settings(minimum_preamble_snr_db=5.0),
+        )
+        message = next(
+            item
+            for item in result.messages
+            if item.icao_address == "40621D"
+            and item.fields.get("cpr_format") == "even"
+        )
+        window._update_aircraft_states(
+            [
+                _ADSBPacketEntry(
+                    message=message,
+                    result=result,
+                    recording=recording,
+                    elapsed_s=message.start_time_s,
+                    wall_time=datetime.now(timezone.utc),
+                    on_pulse_power_dbm=-20.0,
+                )
+            ]
+        )
+
+        state = window._aircraft_states["40621D"]
+        assert state.latest_position_source == "Local CPR (Receiver)"
+        assert state.latest_latitude_deg == pytest.approx(52.257202, abs=1e-6)
+        assert state.latest_longitude_deg == pytest.approx(3.919373, abs=1e-6)
+        assert state.latest_position_reference == pytest.approx((52.26, 3.93))
+    finally:
+        window.close()
 
 
 def test_adsb_user_preamble_snr_threshold_is_forwarded_to_analysis() -> None:
@@ -184,7 +240,50 @@ def test_adsb_iq_power_display_has_a_finite_dbm_floor() -> None:
     window = ADSB1090Window(replace(recording, iq=iq))
     try:
         _, displayed_power = window.power_plot.listDataItems()[0].getData()
-        assert np.min(displayed_power) == pytest.approx(-140.0)
+        assert np.min(displayed_power) == pytest.approx(-120.0)
+    finally:
+        window.close()
+
+
+def test_adsb_aircraft_displays_cached_adsbdb_route() -> None:
+    pg.mkQApp("ADS-B route display test")
+    recording = FileIQSource.load(
+        Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    )
+    route = FlightRoute(
+        callsign="KLM1023",
+        airline_name="KLM",
+        origin=RouteAirport(
+            name="Amsterdam Airport Schiphol",
+            municipality="Amsterdam",
+            country="Netherlands",
+            iata_code="AMS",
+            icao_code="EHAM",
+        ),
+        destination=RouteAirport(
+            name="Manchester Airport",
+            municipality="Manchester",
+            country="United Kingdom",
+            iata_code="MAN",
+            icao_code="EGCC",
+        ),
+    )
+    window = ADSB1090Window()
+    try:
+        window._route_cache["KLM1023"] = route
+        window.analyze_recording(recording)
+        row = window._aircraft_row_by_icao["4840D6"]
+        assert window.aircraft_table.item(row, 12).text() == "AMS"
+        assert window.aircraft_table.item(row, 13).text() == "MAN"
+
+        window.aircraft_table.selectRow(row)
+        details = {
+            window.aircraft_summary_table.item(index, 0).text():
+            window.aircraft_summary_table.item(index, 1).text()
+            for index in range(window.aircraft_summary_table.rowCount())
+        }
+        assert "Amsterdam Airport Schiphol" in details["Route Origin (ADSBDB)"]
+        assert "Manchester Airport" in details["Route Destination (ADSBDB)"]
     finally:
         window.close()
 

@@ -12,6 +12,7 @@ from pluto_sa.standards.adsb1090.decoder import (
     classify_mode_s_parity,
     decode_adsb_fields,
     decode_global_airborne_cpr,
+    decode_local_airborne_cpr,
     decode_mode_s_header_fields,
     mode_s_crc_remainder,
 )
@@ -112,6 +113,39 @@ def test_global_airborne_cpr_decodes_even_odd_pair() -> None:
 
     assert even_position == pytest.approx((52.257202, 3.919373), abs=1e-6)
     assert odd_position == pytest.approx((52.265780, 3.938913), abs=1e-6)
+
+
+def test_local_airborne_cpr_decodes_each_frame_near_reference() -> None:
+    even = decode_adsb_fields(_hex_bits(KNOWN_DF17))
+    odd = decode_adsb_fields(_hex_bits(KNOWN_DF17_ODD))
+
+    even_position = decode_local_airborne_cpr(
+        even["cpr_latitude"],
+        even["cpr_longitude"],
+        is_odd=False,
+        reference_latitude_deg=52.26,
+        reference_longitude_deg=3.93,
+    )
+    odd_position = decode_local_airborne_cpr(
+        odd["cpr_latitude"],
+        odd["cpr_longitude"],
+        is_odd=True,
+        reference_latitude_deg=52.26,
+        reference_longitude_deg=3.93,
+    )
+
+    assert even_position == pytest.approx((52.257202, 3.919373), abs=1e-6)
+    assert odd_position == pytest.approx((52.265780, 3.938913), abs=1e-6)
+
+
+def test_local_airborne_cpr_rejects_invalid_reference() -> None:
+    assert decode_local_airborne_cpr(
+        93_000,
+        51_372,
+        is_odd=False,
+        reference_latitude_deg=91.0,
+        reference_longitude_deg=3.9,
+    ) is None
 
 
 def test_velocity_message_decodes_vertical_rate_and_airborne_state() -> None:
