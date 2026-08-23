@@ -163,9 +163,14 @@ def test_adsb_aircraft_summary_aggregates_messages_by_confirmed_icao() -> None:
         assert values["Latitude"] == "52.265780 degree"
         assert values["Longitude"] == "3.938913 degree"
         assert values["Type Codes"] == "11"
-        track_longitude, track_latitude = window.aircraft_track_item.getData()
-        assert track_longitude[-1] == pytest.approx(3.938913, abs=1e-6)
-        assert track_latitude[-1] == pytest.approx(52.265780, abs=1e-6)
+        track = window.aircraft_map.last_track_payload
+        assert track["icao"] == "40621D"
+        assert track["points"][-1]["longitude"] == pytest.approx(
+            3.938913, abs=1e-6
+        )
+        assert track["points"][-1]["latitude"] == pytest.approx(
+            52.265780, abs=1e-6
+        )
     finally:
         window.close()
 

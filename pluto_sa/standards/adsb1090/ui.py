@@ -19,6 +19,7 @@ from pluto_sa.standards.adsb1090.metadata import (
     AircraftMetadata,
     AircraftMetadataDatabase,
 )
+from pluto_sa.standards.adsb1090.leaflet_map import LeafletAircraftMap
 from pluto_sa.standards.adsb1090.model import (
     ADSB1090AnalysisResult,
     ADSB1090Message,
@@ -65,20 +66,6 @@ _FLIGHT_STATUS_DESCRIPTIONS = {
     6: "Reserved",
     7: "Not assigned",
 }
-
-# Deliberately low-resolution, local coastline context for the equirectangular
-# position-history plot. Measurement positions never depend on this artwork.
-_WORLD_OUTLINES = (
-    ((-168, 72), (-140, 70), (-124, 50), (-82, 25), (-52, 47), (-60, 66), (-95, 83), (-168, 72)),
-    ((-82, 12), (-70, -5), (-78, -20), (-66, -55), (-40, -23), (-35, 5), (-52, 12), (-82, 12)),
-    ((-73, 60), (-45, 83), (-20, 76), (-28, 60), (-48, 58), (-73, 60)),
-    ((-17, 36), (10, 37), (35, 30), (52, 12), (42, -12), (20, -35), (5, -35), (-15, 5), (-17, 36)),
-    ((-10, 36), (15, 58), (40, 70), (90, 77), (180, 65), (145, 42), (120, 20), (105, 5), (75, 8), (55, 25), (35, 30), (-10, 36)),
-    ((112, -11), (154, -10), (153, -40), (130, -44), (113, -25), (112, -11)),
-    ((129, 31), (142, 46), (146, 43), (136, 32), (129, 31)),
-    ((166, -34), (178, -38), (174, -47), (166, -34)),
-    ((-180, -70), (-120, -75), (-60, -72), (0, -78), (60, -70), (120, -75), (180, -70)),
-)
 
 
 def _peak_envelope_decimate(
@@ -748,33 +735,13 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.aircraft_summary_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
-        self.aircraft_map_plot = make_measurement_plot(
-            "Latitude (degree)", "Longitude (degree)"
-        )
-        self.aircraft_map_plot.setAspectLocked(True)
-        self.aircraft_map_plot.setLimits(
-            xMin=-180.0, xMax=180.0, yMin=-90.0, yMax=90.0
-        )
-        coastline_pen = pg.mkPen((105, 115, 125), width=1)
-        for outline in _WORLD_OUTLINES:
-            coordinates = np.asarray(outline, dtype=np.float64)
-            self.aircraft_map_plot.plot(
-                coordinates[:, 0], coordinates[:, 1], pen=coastline_pen
-            )
-        self.aircraft_track_item = self.aircraft_map_plot.plot(
-            [], [], pen=pg.mkPen(_TRACE_COLOR, width=2)
-        )
-        self.aircraft_position_item = pg.ScatterPlotItem(
-            [], [], symbol="o", size=12, brush=pg.mkBrush(0, 255, 255),
-            pen=pg.mkPen("k", width=1),
-        )
-        self.aircraft_map_plot.addItem(self.aircraft_position_item)
-        self.aircraft_map_plot.setRange(
-            xRange=(-180.0, 180.0), yRange=(-90.0, 90.0), padding=0.0
-        )
+        self.aircraft_map = LeafletAircraftMap()
         self.aircraft_detail_tabs = QtWidgets.QTabWidget()
         self.aircraft_detail_tabs.addTab(self.aircraft_summary_table, "Details")
-        self.aircraft_detail_tabs.addTab(self.aircraft_map_plot, "Position History")
+        self.aircraft_detail_tabs.addTab(self.aircraft_map, "Position History")
+        self.aircraft_detail_tabs.currentChanged.connect(
+            self._aircraft_detail_tab_changed
+        )
         # Keep Python references as well as Qt parentage.  PySide can otherwise
         # collect a locally-created QDockWidget and delete its child ViewBox while
         # the PlotWidget wrapper is still reachable from this window.
@@ -1768,6 +1735,11 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self._aircraft_states.get(icao) if icao is not None else None
         )
 
+    @QtCore.Slot(int)
+    def _aircraft_detail_tab_changed(self, index: int) -> None:
+        if index == 1:
+            self.aircraft_map.activate()
+
     def _show_aircraft_summary(
         self, state: _ADSBAircraftState | None
     ) -> None:
@@ -1885,36 +1857,27 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
     def _show_aircraft_map(self, state: _ADSBAircraftState | None) -> None:
         if state is None or not state.position_history:
-            self.aircraft_track_item.setData([], [])
-            self.aircraft_position_item.setData([], [])
-            self.aircraft_map_plot.setRange(
-                xRange=(-180.0, 180.0), yRange=(-90.0, 90.0), padding=0.0
+            self.aircraft_map.set_aircraft_track(
+                icao=None if state is None else state.icao_address,
+                callsign=None if state is None else state.callsign,
+                track_deg=None if state is None else state.latest_track_deg,
+                points=[],
             )
             return
-        longitude = np.asarray(
-            [point[2] for point in state.position_history], dtype=np.float64
-        )
-        latitude = np.asarray(
-            [point[1] for point in state.position_history], dtype=np.float64
-        )
-        self.aircraft_track_item.setData(longitude, latitude)
-        self.aircraft_position_item.setData(
-            [longitude[-1]], [latitude[-1]]
-        )
-        longitude_span = max(float(np.ptp(longitude)), 0.5)
-        latitude_span = max(float(np.ptp(latitude)), 0.5)
-        longitude_margin = max(longitude_span * 0.15, 0.25)
-        latitude_margin = max(latitude_span * 0.15, 0.25)
-        self.aircraft_map_plot.setRange(
-            xRange=(
-                max(-180.0, float(np.min(longitude)) - longitude_margin),
-                min(180.0, float(np.max(longitude)) + longitude_margin),
-            ),
-            yRange=(
-                max(-90.0, float(np.min(latitude)) - latitude_margin),
-                min(90.0, float(np.max(latitude)) + latitude_margin),
-            ),
-            padding=0.0,
+        history = state.position_history[-5_000:]
+        self.aircraft_map.set_aircraft_track(
+            icao=state.icao_address,
+            callsign=state.callsign,
+            track_deg=state.latest_track_deg,
+            points=[
+                {
+                    "elapsed_s": elapsed_s,
+                    "latitude": latitude,
+                    "longitude": longitude,
+                    "altitude_ft": altitude_ft,
+                }
+                for elapsed_s, latitude, longitude, altitude_ft in history
+            ],
         )
 
     def _show_message_plot(self, entry: _ADSBPacketEntry) -> None:
@@ -2102,13 +2065,6 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                     plot_name, target
                 ),
             )
-        self._plot_context_actions["aircraft_map"] = install_measurement_plot_menu(
-            self.aircraft_map_plot,
-            reset=lambda: self.aircraft_map_plot.setRange(
-                xRange=(-180.0, 180.0), yRange=(-90.0, 90.0), padding=0.0
-            ),
-        )
-
     def _remember_plot_range(self, name: str, plot: pg.PlotWidget) -> None:
         plot.getViewBox().updateAutoRange()
         x_range, y_range = plot.viewRange()
@@ -2152,6 +2108,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self.aircraft_table.blockSignals(True)
         except RuntimeError:
             pass
+        self.aircraft_map.shutdown()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.prepare_for_shutdown()
