@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import queue
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -12,7 +14,11 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.standards.adsb1090.analysis import ADSB1090Analyzer
-from pluto_sa.standards.adsb1090.model import ADSB1090AnalysisResult, ADSB1090Message
+from pluto_sa.standards.adsb1090.model import (
+    ADSB1090AnalysisResult,
+    ADSB1090Message,
+    ADSB1090Settings,
+)
 from pluto_sa.vsa.model import IQRecording
 from pluto_sa.vsa.pluto_source import (
     CaptureCancelledError,
@@ -35,6 +41,7 @@ _STREAM_BLOCK_DURATION_S = 0.050
 _STREAM_OVERLAP_S = 160e-6
 _SINGLE_PRETRIGGER_S = 1e-3
 _IQ_POWER_DISPLAY_FLOOR_DBM = -140.0
+_MAX_POWER_PLOT_POINTS = 100_000
 _MODE_S_HEADER_FIELDS = (
     "flight_status",
     "capability",
@@ -55,9 +62,43 @@ _FLIGHT_STATUS_DESCRIPTIONS = {
 }
 
 
+def _peak_envelope_decimate(
+    x: np.ndarray,
+    y: np.ndarray,
+    maximum_points: int = _MAX_POWER_PLOT_POINTS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bound GUI trace size while preserving each bucket's low/high peaks."""
+
+    count = min(x.size, y.size)
+    if count <= maximum_points:
+        return x[:count], y[:count]
+    bucket_count = max(1, maximum_points // 2)
+    bucket_size = int(np.ceil(count / bucket_count))
+    padded_count = int(np.ceil(count / bucket_size) * bucket_size)
+    pad = padded_count - count
+    x_values = np.pad(x[:count], (0, pad), mode="edge").reshape(-1, bucket_size)
+    y_values = np.pad(y[:count], (0, pad), mode="edge").reshape(-1, bucket_size)
+    low_index = np.argmin(y_values, axis=1)
+    high_index = np.argmax(y_values, axis=1)
+    order = np.stack((low_index, high_index), axis=1)
+    order.sort(axis=1)
+    rows = np.arange(y_values.shape[0])[:, None]
+    return x_values[rows, order].reshape(-1), y_values[rows, order].reshape(-1)
+
+
 @dataclass(frozen=True)
 class _ADSBCaptureBatch:
     recording: IQRecording
+
+
+@dataclass(frozen=True)
+class _ADSBStreamView:
+    recording: IQRecording
+    result: ADSB1090AnalysisResult
+    append: bool
+    elapsed_base_s: float
+    capture_started_at: datetime
+    single_complete: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +151,238 @@ class _ADSBPlutoCaptureThread(QtCore.QThread):
             fresh = False
 
 
+class _ADSBStreamProcessor:
+    """Stateful ADS-B DSP pipeline with no dependency on Qt widgets."""
+
+    def __init__(
+        self,
+        settings: PlutoCaptureSettings,
+        analysis_settings: ADSB1090Settings,
+        *,
+        continuous: bool,
+        scan_started_wall_time: datetime,
+    ) -> None:
+        self.settings = settings
+        self.analysis_settings = analysis_settings
+        self.continuous = bool(continuous)
+        self.scan_started_wall_time = scan_started_wall_time
+        self.analyzer = ADSB1090Analyzer()
+        self.sample_rate_hz = float(settings.requested_sample_rate_hz)
+        self.total_samples = 0
+        self.ring_start_sample = 0
+        self.ring_iq = np.empty(0, dtype=np.complex64)
+        self.tail_start_sample = 0
+        self.tail_iq = np.empty(0, dtype=np.complex64)
+        self.last_reported_start_sample = -1
+        self.single_trigger_sample: int | None = None
+        self.single_messages: list[tuple[int, ADSB1090Message]] = []
+        self.single_complete = False
+
+    def process(self, recording: IQRecording) -> _ADSBStreamView | None:
+        if self.single_complete:
+            return None
+        sample_rate_hz = float(recording.sample_rate_hz)
+        if not np.isclose(self.sample_rate_hz, sample_rate_hz):
+            raise ValueError("ADS-B stream sample rate changed during acquisition")
+        block_iq = np.asarray(recording.iq, dtype=np.complex64)
+        block_start = self.total_samples
+        self.total_samples += block_iq.size
+        self._append_ring(block_iq)
+
+        if self.tail_iq.size:
+            analysis_iq = np.concatenate((self.tail_iq, block_iq))
+            analysis_start = self.tail_start_sample
+        else:
+            analysis_iq = block_iq
+            analysis_start = block_start
+        analysis_recording = replace(
+            recording,
+            iq=analysis_iq,
+            start_sample_index=analysis_start,
+            trigger_sample_index=None,
+            source="VSA Pluto ADS-B Stream",
+        )
+        analysis_result = self.analyzer.analyze(
+            analysis_recording,
+            self.analysis_settings,
+        )
+        new_messages: list[tuple[int, ADSB1090Message]] = []
+        for message in analysis_result.messages:
+            absolute_start = analysis_start + message.start_sample
+            if absolute_start <= self.last_reported_start_sample:
+                continue
+            new_messages.append((absolute_start, message))
+        if new_messages:
+            self.last_reported_start_sample = max(
+                absolute_start for absolute_start, _message in new_messages
+            )
+
+        view: _ADSBStreamView | None = None
+        if self.continuous and new_messages:
+            view_start = max(
+                self.ring_start_sample,
+                self.total_samples - self.settings.capture_samples,
+            )
+            view = self._make_view(
+                recording,
+                view_start,
+                self.total_samples,
+                new_messages,
+                append=True,
+            )
+        elif not self.continuous:
+            if new_messages:
+                self.single_messages.extend(new_messages)
+                if self.single_trigger_sample is None:
+                    self.single_trigger_sample = new_messages[0][0]
+            if self.single_trigger_sample is not None:
+                target_stop = (
+                    self.single_trigger_sample + self.settings.capture_samples
+                )
+                if self.total_samples >= target_stop:
+                    pretrigger = int(round(_SINGLE_PRETRIGGER_S * sample_rate_hz))
+                    view_start = max(
+                        self.ring_start_sample,
+                        self.single_trigger_sample - pretrigger,
+                    )
+                    view = self._make_view(
+                        recording,
+                        view_start,
+                        target_stop,
+                        self.single_messages,
+                        append=False,
+                        single_complete=True,
+                    )
+                    self.single_complete = True
+
+        overlap_samples = max(1, int(round(_STREAM_OVERLAP_S * sample_rate_hz)))
+        keep = min(overlap_samples, analysis_iq.size)
+        self.tail_iq = analysis_iq[-keep:].copy()
+        self.tail_start_sample = self.total_samples - keep
+        return view
+
+    def _append_ring(self, block_iq: np.ndarray) -> None:
+        if self.ring_iq.size:
+            self.ring_iq = np.concatenate((self.ring_iq, block_iq))
+        else:
+            self.ring_iq = block_iq.copy()
+        pretrigger = int(
+            round(_SINGLE_PRETRIGGER_S * self.settings.requested_sample_rate_hz)
+        )
+        stream_block = int(
+            round(_STREAM_BLOCK_DURATION_S * self.settings.requested_sample_rate_hz)
+        )
+        maximum = self.settings.capture_samples + pretrigger + 2 * stream_block
+        excess = self.ring_iq.size - maximum
+        if excess > 0:
+            self.ring_iq = self.ring_iq[excess:].copy()
+            self.ring_start_sample += excess
+
+    def _make_view(
+        self,
+        template: IQRecording,
+        start_sample: int,
+        stop_sample: int,
+        messages: list[tuple[int, ADSB1090Message]],
+        *,
+        append: bool,
+        single_complete: bool = False,
+    ) -> _ADSBStreamView | None:
+        start_sample = max(start_sample, self.ring_start_sample)
+        stop_sample = min(stop_sample, self.total_samples)
+        lo = start_sample - self.ring_start_sample
+        hi = stop_sample - self.ring_start_sample
+        if hi <= lo:
+            return None
+        view_recording = replace(
+            template,
+            iq=self.ring_iq[lo:hi].copy(),
+            start_sample_index=start_sample,
+            trigger_sample_index=None,
+            source="VSA Pluto ADS-B Stream",
+        )
+        relative_messages = tuple(
+            replace(message, start_sample=absolute_start - start_sample)
+            for absolute_start, message in messages
+            if start_sample <= absolute_start < stop_sample
+        )
+        linear_power = (
+            np.abs(view_recording.iq) / float(view_recording.full_scale)
+        ) ** 2
+        result = ADSB1090AnalysisResult(
+            time_s=np.arange(view_recording.sample_count, dtype=np.float64)
+            / view_recording.sample_rate_hz,
+            power_dbfs=10.0
+            * np.log10(np.maximum(linear_power, np.finfo(np.float64).tiny)),
+            messages=relative_messages,
+            metadata={
+                "source": view_recording.source,
+                "stream_start_sample": start_sample,
+            },
+        )
+        elapsed_base_s = start_sample / view_recording.sample_rate_hz
+        return _ADSBStreamView(
+            recording=view_recording,
+            result=result,
+            append=append,
+            elapsed_base_s=elapsed_base_s,
+            capture_started_at=self.scan_started_wall_time
+            + timedelta(seconds=elapsed_base_s),
+            single_complete=single_complete,
+        )
+
+
+class _ADSBStreamAnalysisThread(QtCore.QThread):
+    """Consume IQ blocks away from the GUI thread and emit display snapshots."""
+
+    view_ready = QtCore.Signal(object)
+    analysis_failed = QtCore.Signal(str)
+
+    def __init__(
+        self,
+        processor: _ADSBStreamProcessor,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.processor = processor
+        self._queue: queue.Queue[IQRecording | None] = queue.Queue()
+        self._accepting = True
+
+    def enqueue(self, payload: object) -> None:
+        if not self._accepting:
+            return
+        if not isinstance(payload, _ADSBCaptureBatch):
+            self.analysis_failed.emit("capture returned an invalid IQ recording")
+            return
+        self._queue.put(payload.recording)
+
+    def stop(self) -> None:
+        self._accepting = False
+        self.requestInterruption()
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+        self._queue.put(None)
+
+    def run(self) -> None:
+        while not self.isInterruptionRequested():
+            recording = self._queue.get()
+            if recording is None:
+                break
+            try:
+                view = self.processor.process(recording)
+            except Exception as error:
+                self.analysis_failed.emit(str(error))
+                break
+            if view is not None:
+                self.view_ready.emit(view)
+                if view.single_complete:
+                    break
+        self._accepting = False
+
+
 class ADSB1090Window(QtWidgets.QMainWindow):
     """Protocol workspace kept separate from generic modulation analysis."""
 
@@ -121,6 +394,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         recording: IQRecording | None = None,
         pluto_source: PlutoLiveSource | None = None,
         owns_pluto_source: bool = True,
+        preferences: QtCore.QSettings | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("Pluto VSA - ADS-B 1090ES")
@@ -130,7 +404,14 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._analyzer = ADSB1090Analyzer()
         self._pluto_source = pluto_source or PlutoLiveSource()
         self._owns_pluto_source = bool(owns_pluto_source)
+        # ADS-B receiver settings intentionally use their own application
+        # store.  They must not inherit the generic VSA Pluto frontend setup.
+        self._preferences = preferences or QtCore.QSettings(
+            "PlutoSA", "PlutoVSA-ADSB1090"
+        )
         self._capture_thread: _ADSBPlutoCaptureThread | None = None
+        self._analysis_stream_thread: _ADSBStreamAnalysisThread | None = None
+        self._sync_stream_processor: _ADSBStreamProcessor | None = None
         self._packet_history: list[_ADSBPacketEntry] = []
         self._continuous_scan = False
         self._scan_started_wall_time: datetime | None = None
@@ -152,6 +433,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._packet_selection_connected = False
         self._build_menu()
         self._build_ui()
+        self._restore_user_settings()
+        self._connect_user_setting_persistence()
         if recording is not None:
             self.analyze_recording(recording)
 
@@ -160,6 +443,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         open_action = file_menu.addAction("Open IQ...")
         open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._open_iq)
+        self.export_packet_list_action = file_menu.addAction("Export Packet List...")
+        self.export_packet_list_action.triggered.connect(self._export_packet_list)
         file_menu.addSeparator()
         close_action = file_menu.addAction("Close")
         close_action.triggered.connect(self.application_close_requested.emit)
@@ -214,6 +499,18 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.internal_gain_spin.setValue(50.0)
         self.internal_gain_spin.setSuffix(" dB")
         toolbar.addWidget(self.internal_gain_spin)
+        toolbar.addWidget(QtWidgets.QLabel("   Preamble SNR Threshold:"))
+        self.preamble_snr_spin = QtWidgets.QDoubleSpinBox()
+        self.preamble_snr_spin.setRange(-20.0, 40.0)
+        self.preamble_snr_spin.setDecimals(1)
+        self.preamble_snr_spin.setSingleStep(0.5)
+        self.preamble_snr_spin.setValue(5.0)
+        self.preamble_snr_spin.setSuffix(" dB")
+        self.preamble_snr_spin.setToolTip(
+            "Minimum pulse/quiet power ratio accepted for the 8 us Mode S preamble. "
+            "This is a receiver detection threshold, not a fixed ICAO limit."
+        )
+        toolbar.addWidget(self.preamble_snr_spin)
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self.power_plot = make_measurement_plot(
             "IQ Power (dBm)", "Measurement Elapsed Time (ms)"
@@ -227,7 +524,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 "#",
                 "Elapsed (s)",
                 "OS Time",
-                "Capture (ms)",
+                "Raw Message",
                 "DF",
                 "ICAO",
                 "TC",
@@ -248,14 +545,24 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         for column in range(10):
             packet_header.setSectionResizeMode(
                 column,
-                QtWidgets.QHeaderView.ResizeMode.ResizeToContents,
+                QtWidgets.QHeaderView.ResizeMode.Interactive,
             )
+        for column, width in enumerate(
+            (45, 105, 205, 235, 45, 80, 45, 105, 110, 75)
+        ):
+            self.packet_table.setColumnWidth(column, width)
         packet_header.setSectionResizeMode(
             10,
             QtWidgets.QHeaderView.ResizeMode.Stretch,
         )
         self.packet_table.itemSelectionChanged.connect(self._selected_packet_changed)
         self._packet_selection_connected = True
+        self.packet_table.setContextMenuPolicy(
+            QtCore.Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.packet_table.customContextMenuRequested.connect(
+            self._show_packet_table_context_menu
+        )
         self.summary_table = QtWidgets.QTableWidget(0, 2)
         self.summary_table.setHorizontalHeaderLabels(["Parameter", "Current"])
         summary_header = self.summary_table.horizontalHeader()
@@ -293,9 +600,47 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._configure_plot_context_menus()
         self.statusBar().showMessage("Ready - load 1090 MHz IQ or pass the current VSA capture")
 
+    def _restore_user_settings(self) -> None:
+        sample_rate_msps = int(
+            self._preferences.value("capture/sample_rate_msps", 8, type=int)
+        )
+        sample_rate_index = self.sample_rate_combo.findData(sample_rate_msps)
+        if sample_rate_index >= 0:
+            self.sample_rate_combo.setCurrentIndex(sample_rate_index)
+        self.capture_length_spin.setValue(
+            float(self._preferences.value("capture/length_ms", 250.0, type=float))
+        )
+        self.internal_gain_spin.setValue(
+            float(self._preferences.value("capture/internal_gain_db", 50.0, type=float))
+        )
+        self.preamble_snr_spin.setValue(
+            float(self._preferences.value("detection/preamble_snr_db", 5.0, type=float))
+        )
+
+    def _connect_user_setting_persistence(self) -> None:
+        self.sample_rate_combo.currentIndexChanged.connect(self._save_user_settings)
+        self.capture_length_spin.valueChanged.connect(self._save_user_settings)
+        self.internal_gain_spin.valueChanged.connect(self._save_user_settings)
+        self.preamble_snr_spin.valueChanged.connect(self._save_user_settings)
+
+    @QtCore.Slot()
+    def _save_user_settings(self) -> None:
+        self._preferences.setValue(
+            "capture/sample_rate_msps", int(self.sample_rate_combo.currentData())
+        )
+        self._preferences.setValue(
+            "capture/length_ms", float(self.capture_length_spin.value())
+        )
+        self._preferences.setValue(
+            "capture/internal_gain_db", float(self.internal_gain_spin.value())
+        )
+        self._preferences.setValue(
+            "detection/preamble_snr_db", float(self.preamble_snr_spin.value())
+        )
+        self._preferences.sync()
+
     def _open_iq(self) -> None:
-        settings = QtCore.QSettings()
-        directory = str(settings.value("adsb1090/iq_directory", ""))
+        directory = str(self._preferences.value("paths/iq_directory", ""))
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open 1090 MHz IQ",
@@ -310,7 +655,89 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "ADS-B 1090ES", str(error))
             return
-        settings.setValue("adsb1090/iq_directory", str(Path(path).resolve().parent))
+        self._preferences.setValue(
+            "paths/iq_directory", str(Path(path).resolve().parent)
+        )
+
+    def _show_packet_table_context_menu(self, position: QtCore.QPoint) -> None:
+        menu = QtWidgets.QMenu(self.packet_table)
+        menu.addAction(self.export_packet_list_action)
+        menu.exec(self.packet_table.viewport().mapToGlobal(position))
+
+    def _export_packet_list(self) -> None:
+        if not self._packet_history:
+            self.statusBar().showMessage("Packet List is empty - nothing to export")
+            return
+        directory = str(self._preferences.value("paths/export_directory", ""))
+        suggested = str(Path(directory) / "adsb1090_packets.jsonl") if directory else "adsb1090_packets.jsonl"
+        path_text, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export ADS-B Packet List",
+            suggested,
+            "JSON Lines (*.jsonl);;All Files (*)",
+        )
+        if not path_text:
+            return
+        path = Path(path_text)
+        if not path.suffix:
+            path = path.with_suffix(".jsonl")
+        try:
+            with path.open("w", encoding="utf-8", newline="\n") as stream:
+                for index, entry in enumerate(self._packet_history, start=1):
+                    record = self._packet_export_record(index, entry)
+                    stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+                    stream.write("\n")
+        except OSError as error:
+            QtWidgets.QMessageBox.critical(self, "Packet List Export Error", str(error))
+            return
+        self._preferences.setValue(
+            "paths/export_directory", str(path.resolve().parent)
+        )
+        self.statusBar().showMessage(
+            f"Exported {len(self._packet_history)} ADS-B packets to {path.name}"
+        )
+
+    @staticmethod
+    def _packet_export_record(index: int, entry: _ADSBPacketEntry) -> dict[str, object]:
+        message = entry.message
+        return {
+            "schema": "pluto-vsa.adsb1090.packet",
+            "version": 1,
+            "index": int(index),
+            "elapsed_s": float(entry.elapsed_s),
+            "os_time": entry.wall_time.isoformat(timespec="microseconds"),
+            "raw_message": message.raw_hex,
+            "bit_length": message.bit_length,
+            "downlink_format": message.downlink_format,
+            "icao_address": message.icao_address,
+            "icao_address_source": message.icao_address_source,
+            "icao_confirmed": message.icao_confirmed,
+            "type_code": message.type_code,
+            "parity": {
+                "kind": message.parity_kind,
+                "display": message.parity_display,
+                "remainder_hex": f"{message.crc_remainder:06X}",
+                "verified": message.parity_ok,
+                "interrogator_identifier": message.interrogator_identifier,
+            },
+            "mean_on_pulse_power_dbm": float(entry.on_pulse_power_dbm),
+            "preamble_snr_db": float(message.preamble_snr_db),
+            "preamble_correlation": float(message.preamble_correlation),
+            "decoded_fields": ADSB1090Window._json_compatible(dict(message.fields)),
+        }
+
+    @staticmethod
+    def _json_compatible(value: object) -> object:
+        if isinstance(value, dict):
+            return {
+                str(key): ADSB1090Window._json_compatible(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [ADSB1090Window._json_compatible(item) for item in value]
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
 
     def _refresh(self) -> None:
         if self.recording is not None:
@@ -329,6 +756,11 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 external_attenuation_db=0.0,
                 external_gain_db=0.0,
             ),
+        )
+
+    def _analysis_settings(self) -> ADSB1090Settings:
+        return ADSB1090Settings(
+            minimum_preamble_snr_db=self.preamble_snr_spin.value(),
         )
 
     def _run_pluto_single(self) -> None:
@@ -369,7 +801,19 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             settings,
             parent=self,
         )
-        thread.capture_ready.connect(self._pluto_capture_ready)
+        processor = _ADSBStreamProcessor(
+            settings,
+            self._analysis_settings(),
+            continuous=continuous,
+            scan_started_wall_time=self._scan_started_wall_time,
+        )
+        analysis_thread = _ADSBStreamAnalysisThread(processor, parent=self)
+        analysis_thread.view_ready.connect(self._stream_analysis_ready)
+        analysis_thread.analysis_failed.connect(self._pluto_capture_failed)
+        analysis_thread.finished.connect(self._stream_analysis_stopped)
+        analysis_thread.finished.connect(analysis_thread.deleteLater)
+        self._analysis_stream_thread = analysis_thread
+        thread.capture_ready.connect(analysis_thread.enqueue)
         thread.capture_failed.connect(self._pluto_capture_failed)
         thread.capture_cancelled.connect(
             lambda: self.statusBar().showMessage("Pluto capture cancelled")
@@ -377,6 +821,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         thread.finished.connect(self._pluto_capture_stopped)
         thread.finished.connect(thread.deleteLater)
         self._capture_thread = thread
+        analysis_thread.start()
         thread.start()
 
     def _reset_stream_state(self, sample_rate_hz: float) -> None:
@@ -390,6 +835,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._single_trigger_sample = None
         self._single_messages.clear()
         self._single_complete = False
+        self._sync_stream_processor = None
 
     def _pluto_capture_ready(self, payload: object) -> None:
         if not isinstance(payload, _ADSBCaptureBatch):
@@ -425,7 +871,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             source="VSA Pluto ADS-B Stream",
         )
         try:
-            analysis_result = self._analyzer.analyze(analysis_recording)
+            analysis_result = self._analyzer.analyze(
+                analysis_recording,
+                self._analysis_settings(),
+            )
         except Exception as error:
             self._pluto_capture_failed(str(error))
             if self._capture_thread is not None:
@@ -563,12 +1012,65 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             f"{len(self._packet_history)} total"
         )
 
+    @QtCore.Slot(object)
+    def _stream_analysis_ready(self, payload: object) -> None:
+        if not isinstance(payload, _ADSBStreamView) or self._closing:
+            return
+        self.recording = payload.recording
+        self.result = payload.result
+        self._display_result(
+            payload.result,
+            payload.recording,
+            append=payload.append,
+            capture_started_at=payload.capture_started_at,
+            elapsed_base_s=payload.elapsed_base_s,
+            fit_latest_group=False,
+        )
+        valid = sum(
+            message.parity_ok is True for message in payload.result.messages
+        )
+        self.statusBar().showMessage(
+            f"{'Continuous scan' if payload.append else 'Single complete'} - "
+            f"{len(payload.result.messages)} new messages, "
+            f"{valid} parity verified, {len(self._packet_history)} total"
+        )
+        if payload.single_complete:
+            self._single_complete = True
+            processor = (
+                self._analysis_stream_thread.processor
+                if self._analysis_stream_thread is not None
+                else None
+            )
+            if processor is not None:
+                self._single_trigger_sample = processor.single_trigger_sample
+            if self._capture_thread is not None:
+                self._capture_thread.requestInterruption()
+
     def _pluto_capture_failed(self, message: str) -> None:
         self.statusBar().showMessage(f"Pluto capture failed: {message}")
+        if self._capture_thread is not None:
+            self._capture_thread.requestInterruption()
+        if self._analysis_stream_thread is not None:
+            self._analysis_stream_thread.stop()
         QtWidgets.QMessageBox.critical(self, "Pluto Capture", message)
 
     def _pluto_capture_stopped(self) -> None:
         self._capture_thread = None
+        if (
+            self._analysis_stream_thread is not None
+            and self._analysis_stream_thread.isRunning()
+        ):
+            self._analysis_stream_thread.stop()
+            self.statusBar().showMessage("Stopping ADS-B analysis...")
+            return
+        self._finalize_pluto_run_controls()
+
+    def _stream_analysis_stopped(self) -> None:
+        self._analysis_stream_thread = None
+        if self._capture_thread is None:
+            self._finalize_pluto_run_controls()
+
+    def _finalize_pluto_run_controls(self) -> None:
         self.run_single_action.setText("Run Single (Pluto)")
         self.run_continuous_action.setText("Run Continuous (Pluto)")
         self.run_single_action.setEnabled(True)
@@ -586,7 +1088,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Analyzing 1090 MHz capture...")
         QtWidgets.QApplication.processEvents()
         try:
-            result = self._analyzer.analyze(recording)
+            result = self._analyzer.analyze(
+                recording,
+                self._analysis_settings(),
+            )
         except Exception as error:
             self.statusBar().showMessage(f"Analysis failed: {error}")
             QtWidgets.QMessageBox.critical(self, "ADS-B 1090ES", str(error))
@@ -637,7 +1142,11 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             result.power_dbfs + recording.dbfs_to_dbm_offset_db,
             _IQ_POWER_DISPLAY_FLOOR_DBM,
         )
-        self.power_plot.plot(time_ms, display_power, pen=_TRACE_COLOR)
+        plot_time_ms, plot_power = _peak_envelope_decimate(
+            time_ms,
+            display_power,
+        )
+        self.power_plot.plot(plot_time_ms, plot_power, pen=_TRACE_COLOR)
         new_entries: list[_ADSBPacketEntry] = []
         for message in result.messages:
             elapsed_s = elapsed_base_s + message.start_time_s
@@ -661,9 +1170,14 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             )
             self.power_plot.addItem(line)
         first_new_row = len(self._packet_history)
+        previous_selected_row = self.packet_table.currentRow()
+        follow_latest = append and (
+            previous_selected_row < 0
+            or previous_selected_row == first_new_row - 1
+        )
         self._packet_history.extend(new_entries)
         selection_blocker = QtCore.QSignalBlocker(self.packet_table)
-        if not append or new_entries:
+        if not append:
             self.packet_table.clearSelection()
         self.packet_table.setRowCount(len(self._packet_history))
         for offset, entry in enumerate(new_entries):
@@ -676,7 +1190,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 str(row + 1),
                 f"{entry.elapsed_s:.6f}",
                 entry.wall_time.strftime("%Y-%m-%d %H:%M:%S.%f"),
-                f"{message.start_time_s * 1e3:.6f}",
+                message.raw_hex,
                 str(message.downlink_format),
                 message.icao_address or "-",
                 "-" if message.type_code is None else str(message.type_code),
@@ -689,8 +1203,14 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 item = QtWidgets.QTableWidgetItem(value)
                 item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 self.packet_table.setItem(row, column, item)
-        selected_entry = new_entries[-1] if append and new_entries else None
-        selected_row = len(self._packet_history) - 1 if selected_entry is not None else -1
+        selected_entry = (
+            new_entries[-1]
+            if append and new_entries and follow_latest
+            else None
+        )
+        selected_row = (
+            len(self._packet_history) - 1 if selected_entry is not None else -1
+        )
         if not append and new_entries:
             selected_entry = new_entries[0]
             selected_row = 0
@@ -925,6 +1445,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
         if self._closing:
             return
+        self._save_user_settings()
         self._closing = True
         if self._packet_selection_connected:
             try:
@@ -944,6 +1465,12 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         if self._capture_thread is not None and self._capture_thread.isRunning():
             self._capture_thread.requestInterruption()
             self._capture_thread.wait(1500)
+        if (
+            self._analysis_stream_thread is not None
+            and self._analysis_stream_thread.isRunning()
+        ):
+            self._analysis_stream_thread.stop()
+            self._analysis_stream_thread.wait(1500)
         if self._owns_pluto_source:
             self._pluto_source.close()
         super().closeEvent(event)

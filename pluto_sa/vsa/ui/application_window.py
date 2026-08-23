@@ -48,6 +48,9 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         adsb_capture = self.adsb1090_workspace._capture_thread
         if adsb_capture is not None and adsb_capture.isRunning():
             return "ADS-B Pluto capture is running"
+        adsb_analysis = self.adsb1090_workspace._analysis_stream_thread
+        if adsb_analysis is not None and adsb_analysis.isRunning():
+            return "ADS-B stream analysis is running"
         return None
 
     @QtCore.Slot(str)
