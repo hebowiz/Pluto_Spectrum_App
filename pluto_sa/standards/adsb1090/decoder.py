@@ -6,12 +6,27 @@ bit is bit 1.  Python slices are therefore deliberately documented where used.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
 
 
 MODE_S_GENERATOR = 0x1FFF409
+
+ADDRESS_PARITY_DFS = frozenset({0, 4, 5, 16, 20, 21, *range(24, 32)})
+CRC_PARITY_DFS = frozenset({17, 18, 19})
+
+
+@dataclass(frozen=True)
+class ModeSParity:
+    """DF-aware interpretation of the 24-bit Mode S parity field."""
+
+    kind: str
+    remainder: int
+    valid: bool | None
+    recovered_icao: str | None = None
+    interrogator_identifier: int | None = None
 
 
 def bits_to_int(bits: Iterable[int]) -> int:
@@ -38,6 +53,62 @@ def mode_s_crc_remainder(bits: np.ndarray) -> int:
         if work & (1 << position):
             work ^= MODE_S_GENERATOR << (position - 24)
     return int(work & 0xFFFFFF)
+
+
+def classify_mode_s_parity(bits: np.ndarray) -> ModeSParity:
+    """Interpret the polynomial syndrome according to the downlink format.
+
+    Address-parity replies do not carry a stand-alone CRC.  Their syndrome is
+    the aircraft address when the message is error-free, so validity remains
+    unknown until that address can be corroborated by another message.
+    """
+
+    values = np.asarray(bits, dtype=np.uint8).reshape(-1)
+    remainder = mode_s_crc_remainder(values)
+    downlink_format = bits_to_int(values[0:5])
+    if downlink_format in ADDRESS_PARITY_DFS:
+        return ModeSParity(
+            kind="address",
+            remainder=remainder,
+            valid=None,
+            recovered_icao=f"{remainder:06X}",
+        )
+    if downlink_format == 11:
+        # The all-call parity/interrogator field overlays at most seven low
+        # syndrome bits.  Non-zero upper bits indicate an invalid reply.
+        return ModeSParity(
+            kind="interrogator",
+            remainder=remainder,
+            valid=(remainder & 0xFFFF80) == 0,
+            interrogator_identifier=remainder & 0x7F,
+        )
+    if downlink_format in CRC_PARITY_DFS:
+        return ModeSParity(
+            kind="crc",
+            remainder=remainder,
+            valid=remainder == 0,
+        )
+    return ModeSParity(kind="unsupported", remainder=remainder, valid=None)
+
+
+def decode_mode_s_header_fields(bits: np.ndarray) -> dict[str, object]:
+    """Decode DF-dependent fields immediately following the five-bit DF."""
+
+    values = np.asarray(bits, dtype=np.uint8).reshape(-1)
+    downlink_format = bits_to_int(values[0:5])
+    if downlink_format in {4, 5, 20, 21}:
+        return {"flight_status": bits_to_int(values[5:8])}
+    if downlink_format in {11, 17}:
+        return {"capability": bits_to_int(values[5:8])}
+    if downlink_format == 18:
+        return {"control_field": bits_to_int(values[5:8])}
+    if downlink_format in {0, 16}:
+        return {
+            "vertical_status": int(values[5]),
+            "cross_link_capability": int(values[6]),
+            "sensitivity_level": bits_to_int(values[7:10]),
+        }
+    return {}
 
 
 def _decode_callsign(me: np.ndarray) -> str:

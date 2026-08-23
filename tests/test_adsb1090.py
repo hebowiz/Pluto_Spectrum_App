@@ -9,7 +9,9 @@ from pluto_sa.standards.adsb1090 import (
     ADSB1090Settings,
 )
 from pluto_sa.standards.adsb1090.decoder import (
+    classify_mode_s_parity,
     decode_adsb_fields,
+    decode_mode_s_header_fields,
     mode_s_crc_remainder,
 )
 from pluto_sa.vsa.model import IQRecording
@@ -18,6 +20,7 @@ from pluto_sa.vsa.sources import FileIQSource
 
 KNOWN_DF17 = "8D40621D58C382D690C8AC2863A7"
 KNOWN_IDENTIFICATION = "8D4840D6202CC371C32CE0576098"
+OBSERVED_DF5_ADDRESS_PARITY = "28201507C8E5CD"
 
 
 def _hex_bits(value: str) -> np.ndarray:
@@ -59,6 +62,17 @@ def _mode_s_recording(
         center_frequency_hz=1_090_000_000.0,
         source="Synthetic 1090ES",
     )
+
+
+def _short_reply_with_overlay(
+    *, downlink_format: int, first_field: int, address: int, overlay: int
+) -> str:
+    prefix = (downlink_format << 27) | (first_field << 24) | address
+    zero_parity = np.asarray(
+        [int(bit) for bit in f"{prefix:032b}{0:024b}"], dtype=np.uint8
+    )
+    parity = mode_s_crc_remainder(zero_parity) ^ overlay
+    return f"{prefix:08X}{parity:06X}"
 
 
 def test_known_df17_crc_and_airborne_position_fields() -> None:
@@ -110,6 +124,62 @@ def test_crc_filter_rejects_corrupt_message() -> None:
     assert len(unfiltered.messages) == 1
     assert unfiltered.messages[0].crc_ok is False
     assert filtered.messages == ()
+
+
+def test_df5_address_parity_recovers_and_confirms_icao() -> None:
+    raw = _short_reply_with_overlay(
+        downlink_format=5,
+        first_field=2,
+        address=0x123456,
+        overlay=0x40621D,
+    )
+    bits = _hex_bits(raw)
+
+    parity = classify_mode_s_parity(bits)
+    result = ADSB1090Analyzer().analyze(
+        _mode_s_recording([raw, KNOWN_DF17]),
+        ADSB1090Settings(require_valid_crc=True),
+    )
+
+    assert parity.kind == "address"
+    assert parity.valid is None
+    assert parity.recovered_icao == "40621D"
+    assert decode_mode_s_header_fields(bits) == {"flight_status": 2}
+    assert len(result.messages) == 2
+    reply = result.messages[0]
+    assert reply.icao_address == "40621D"
+    assert reply.icao_address_source == "address_parity"
+    assert reply.icao_confirmed is True
+    assert reply.parity_ok is True
+    assert reply.parity_display == "AP 40621D Confirmed"
+
+
+def test_observed_df5_syndrome_is_an_icao_address_not_crc_failure() -> None:
+    bits = _hex_bits(OBSERVED_DF5_ADDRESS_PARITY)
+
+    parity = classify_mode_s_parity(bits)
+
+    assert parity.kind == "address"
+    assert parity.valid is None
+    assert parity.recovered_icao == "84D28E"
+    assert decode_mode_s_header_fields(bits) == {"flight_status": 0}
+
+
+def test_df11_interrogator_parity_and_capability_are_df_aware() -> None:
+    raw = _short_reply_with_overlay(
+        downlink_format=11,
+        first_field=5,
+        address=0xABCDEF,
+        overlay=0x2A,
+    )
+    bits = _hex_bits(raw)
+
+    parity = classify_mode_s_parity(bits)
+
+    assert parity.kind == "interrogator"
+    assert parity.valid is True
+    assert parity.interrogator_identifier == 0x2A
+    assert decode_mode_s_header_fields(bits) == {"capability": 5}
 
 
 def test_analyzer_requires_enough_time_resolution() -> None:

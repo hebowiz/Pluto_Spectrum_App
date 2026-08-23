@@ -34,6 +34,25 @@ _PACKET_GROUP_GAP_S = 0.020
 _STREAM_BLOCK_DURATION_S = 0.050
 _STREAM_OVERLAP_S = 160e-6
 _SINGLE_PRETRIGGER_S = 1e-3
+_IQ_POWER_DISPLAY_FLOOR_DBM = -140.0
+_MODE_S_HEADER_FIELDS = (
+    "flight_status",
+    "capability",
+    "control_field",
+    "vertical_status",
+    "cross_link_capability",
+    "sensitivity_level",
+)
+_FLIGHT_STATUS_DESCRIPTIONS = {
+    0: "No alert, no SPI, airborne",
+    1: "No alert, no SPI, on ground",
+    2: "Alert, no SPI, airborne",
+    3: "Alert, no SPI, on ground",
+    4: "Alert, SPI",
+    5: "No alert, SPI",
+    6: "Reserved",
+    7: "Not assigned",
+}
 
 
 @dataclass(frozen=True)
@@ -212,7 +231,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 "DF",
                 "ICAO",
                 "TC",
-                "CRC",
+                "Parity / CRC",
                 "ON Power (dBm)",
                 "SNR (dB)",
                 "Decoded",
@@ -537,10 +556,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             elapsed_base_s=elapsed_base_s,
             fit_latest_group=False,
         )
-        valid = sum(message.crc_ok for message in relative_messages)
+        valid = sum(message.parity_ok is True for message in relative_messages)
         self.statusBar().showMessage(
             f"{'Continuous scan' if append else 'Single complete'} - "
-            f"{len(relative_messages)} new messages, {valid} CRC valid, "
+            f"{len(relative_messages)} new messages, {valid} parity verified, "
             f"{len(self._packet_history)} total"
         )
 
@@ -582,10 +601,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             capture_started_at=started_at,
             elapsed_base_s=float(elapsed_base_s),
         )
-        valid = sum(message.crc_ok for message in result.messages)
+        valid = sum(message.parity_ok is True for message in result.messages)
         self.statusBar().showMessage(
             f"{'Continuous scan' if append else 'Analysis complete'} - "
-            f"{len(result.messages)} new messages, {valid} CRC valid, "
+            f"{len(result.messages)} new messages, {valid} parity verified, "
             f"{len(self._packet_history)} total"
         )
 
@@ -614,7 +633,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self._clear_packet_history()
         self.power_plot.clear()
         time_ms = (elapsed_base_s + result.time_s) * 1e3
-        display_power = result.power_dbfs + recording.dbfs_to_dbm_offset_db
+        display_power = np.maximum(
+            result.power_dbfs + recording.dbfs_to_dbm_offset_db,
+            _IQ_POWER_DISPLAY_FLOOR_DBM,
+        )
         self.power_plot.plot(time_ms, display_power, pen=_TRACE_COLOR)
         new_entries: list[_ADSBPacketEntry] = []
         for message in result.messages:
@@ -658,7 +680,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 str(message.downlink_format),
                 message.icao_address or "-",
                 "-" if message.type_code is None else str(message.type_code),
-                "OK" if message.crc_ok else f"FAIL {message.crc_remainder:06X}",
+                message.parity_display,
                 f"{entry.on_pulse_power_dbm:+.2f}",
                 f"{message.preamble_snr_db:.1f}",
                 str(decoded or ""),
@@ -776,19 +798,45 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 ("Raw Message", message.raw_hex),
                 ("Length", f"{message.bit_length} bit"),
                 ("Downlink Format", message.downlink_format),
-                ("Capability", message.capability),
+            ]
+            rows.extend(
+                (
+                    key.replace("_", " ").title(),
+                    self._format_mode_s_header_field(key, message.fields[key]),
+                )
+                for key in _MODE_S_HEADER_FIELDS
+                if key in message.fields
+            )
+            rows.extend([
                 ("ICAO Address", message.icao_address or "-"),
+                (
+                    "ICAO Address Source",
+                    (message.icao_address_source or "-").replace("_", " ").title(),
+                ),
                 ("Type Code", message.type_code if message.type_code is not None else "-"),
-                ("CRC", "Valid" if message.crc_ok else f"Invalid ({message.crc_remainder:06X})"),
+                ("Parity / CRC", message.parity_display),
                 ("Mean ON Pulse Power", f"{entry.on_pulse_power_dbm:+.2f} dBm"),
                 ("Preamble SNR", f"{message.preamble_snr_db:.2f} dB"),
                 ("Preamble Correlation", f"{message.preamble_correlation:.3f}"),
-            ]
-            rows.extend((key.replace("_", " ").title(), value) for key, value in message.fields.items())
+            ])
+            fixed_fields = {"type_code", "icao_address", *_MODE_S_HEADER_FIELDS}
+            rows.extend(
+                (key.replace("_", " ").title(), value)
+                for key, value in message.fields.items()
+                if key not in fixed_fields
+            )
         self.summary_table.setRowCount(len(rows))
         for row, (name, value) in enumerate(rows):
             self.summary_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(name)))
             self.summary_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(value)))
+
+    @staticmethod
+    def _format_mode_s_header_field(key: str, value: object) -> object:
+        if key != "flight_status":
+            return value
+        numeric = int(value)
+        description = _FLIGHT_STATUS_DESCRIPTIONS.get(numeric, "Unknown")
+        return f"{numeric} ({description})"
 
     def _on_pulse_power_dbm(
         self,

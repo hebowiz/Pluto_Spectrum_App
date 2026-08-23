@@ -43,6 +43,20 @@ def test_adsb_workspace_displays_saved_multi_packet_fixture() -> None:
         window.close()
 
 
+def test_adsb_iq_power_display_has_a_finite_dbm_floor() -> None:
+    pg.mkQApp("ADS-B IQ power floor test")
+    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    recording = FileIQSource.load(path)
+    iq = recording.iq.copy()
+    iq[-100:] = 0.0
+    window = ADSB1090Window(replace(recording, iq=iq))
+    try:
+        _, displayed_power = window.power_plot.listDataItems()[0].getData()
+        assert np.min(displayed_power) == pytest.approx(-140.0)
+    finally:
+        window.close()
+
+
 def test_adsb_workspace_appends_history_with_elapsed_and_os_time() -> None:
     pg.mkQApp("ADS-B continuous history test")
     path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"

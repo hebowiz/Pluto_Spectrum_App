@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from pluto_sa.standards.adsb1090.decoder import (
     bits_to_hex,
     bits_to_int,
+    classify_mode_s_parity,
     decode_adsb_fields,
-    mode_s_crc_remainder,
+    decode_mode_s_header_fields,
 )
 from pluto_sa.standards.adsb1090.model import (
     ADSB1090AnalysisResult,
@@ -116,6 +119,9 @@ def _decode_ppm(
 class ADSB1090Analyzer:
     """Detect every Mode S burst in one immutable IQ recording."""
 
+    def __init__(self) -> None:
+        self._known_icao_addresses: set[str] = set()
+
     def analyze(
         self,
         recording: IQRecording,
@@ -156,15 +162,16 @@ class ADSB1090Analyzer:
             if downlink_format < 16 and bit_count == _LONG_MESSAGE_BITS:
                 bits = bits[:_SHORT_MESSAGE_BITS]
                 confidence = confidence[:_SHORT_MESSAGE_BITS]
-            remainder = mode_s_crc_remainder(bits)
-            crc_ok = remainder == 0
-            if resolved.require_valid_crc and not crc_ok:
-                continue
-            fields = decode_adsb_fields(bits)
+            parity = classify_mode_s_parity(bits)
+            fields = {
+                **decode_mode_s_header_fields(bits),
+                **decode_adsb_fields(bits),
+            }
+            explicit_icao = downlink_format in {11, 17, 18}
             icao = (
                 f"{bits_to_int(bits[8:32]):06X}"
-                if bits.size == 112 and downlink_format in {17, 18}
-                else None
+                if explicit_icao
+                else parity.recovered_icao
             )
             type_code = int(fields["type_code"]) if "type_code" in fields else None
             message = ADSB1090Message(
@@ -173,11 +180,16 @@ class ADSB1090Analyzer:
                 raw_hex=bits_to_hex(bits),
                 bits=bits,
                 downlink_format=downlink_format,
-                capability=bits_to_int(bits[5:8]),
                 icao_address=icao,
+                icao_address_source=(
+                    "explicit" if explicit_icao else "address_parity" if icao else None
+                ),
+                icao_confirmed=False,
                 type_code=type_code,
-                crc_remainder=remainder,
-                crc_ok=crc_ok,
+                crc_remainder=parity.remainder,
+                parity_kind=parity.kind,
+                parity_ok=parity.valid,
+                interrogator_identifier=parity.interrogator_identifier,
                 preamble_snr_db=snr_db,
                 preamble_correlation=float(correlations[int(start)]),
                 fields={
@@ -187,6 +199,29 @@ class ADSB1090Analyzer:
                 },
             )
             messages.append(message)
+        corroborated = {
+            message.icao_address
+            for message in messages
+            if message.icao_address_source == "explicit"
+            and message.parity_ok is True
+            and message.icao_address is not None
+        }
+        self._known_icao_addresses.update(corroborated)
+        resolved_messages: list[ADSB1090Message] = []
+        for message in messages:
+            if message.parity_kind == "address":
+                confirmed = message.icao_address in self._known_icao_addresses
+                message = replace(
+                    message,
+                    icao_confirmed=confirmed,
+                    parity_ok=True if confirmed else None,
+                )
+            elif message.icao_address_source == "explicit":
+                message = replace(message, icao_confirmed=message.parity_ok is True)
+            if resolved.require_valid_crc and message.parity_ok is not True:
+                continue
+            resolved_messages.append(message)
+        messages = resolved_messages
         return ADSB1090AnalysisResult(
             time_s=time_s,
             power_dbfs=power_dbfs,
@@ -196,6 +231,6 @@ class ADSB1090Analyzer:
                 "sample_rate_hz": sample_rate_hz,
                 "center_frequency_hz": recording.center_frequency_hz,
                 "candidate_count": int(starts.size),
-                "valid_message_count": sum(message.crc_ok for message in messages),
+                "valid_message_count": sum(message.parity_ok is True for message in messages),
             },
         )

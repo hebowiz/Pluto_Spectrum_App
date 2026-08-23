@@ -34,11 +34,14 @@ class ADSB1090Message:
     raw_hex: str
     bits: np.ndarray
     downlink_format: int
-    capability: int
     icao_address: str | None
+    icao_address_source: str | None
+    icao_confirmed: bool
     type_code: int | None
     crc_remainder: int
-    crc_ok: bool
+    parity_kind: str
+    parity_ok: bool | None
+    interrogator_identifier: int | None
     preamble_snr_db: float
     preamble_correlation: float
     fields: Mapping[str, object] = field(default_factory=dict)
@@ -64,6 +67,26 @@ class ADSB1090Message:
     @property
     def is_adsb_extended_squitter(self) -> bool:
         return self.downlink_format in {17, 18}
+
+    @property
+    def crc_ok(self) -> bool:
+        """Backward-compatible verified-parity result."""
+
+        return self.parity_ok is True
+
+    @property
+    def parity_display(self) -> str:
+        if self.parity_kind == "address":
+            suffix = " Confirmed" if self.icao_confirmed else " Candidate"
+            address = self.icao_address or f"{self.crc_remainder:06X}"
+            return f"AP {address}{suffix}"
+        if self.parity_kind == "interrogator":
+            if self.parity_ok is False:
+                return f"PI FAIL {self.crc_remainder:06X}"
+            return f"PI {int(self.interrogator_identifier or 0):02X}"
+        if self.parity_kind == "crc":
+            return "OK" if self.parity_ok else f"FAIL {self.crc_remainder:06X}"
+        return f"UNSUPPORTED {self.crc_remainder:06X}"
 
 
 @dataclass(frozen=True)
