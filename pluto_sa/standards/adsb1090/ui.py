@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -14,6 +14,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.standards.adsb1090.analysis import ADSB1090Analyzer
+from pluto_sa.standards.adsb1090.decoder import decode_global_airborne_cpr
 from pluto_sa.standards.adsb1090.model import (
     ADSB1090AnalysisResult,
     ADSB1090Message,
@@ -109,6 +110,40 @@ class _ADSBPacketEntry:
     elapsed_s: float
     wall_time: datetime
     on_pulse_power_dbm: float
+
+
+@dataclass
+class _ADSBAircraftState:
+    icao_address: str
+    first_elapsed_s: float
+    first_wall_time: datetime
+    last_elapsed_s: float
+    last_wall_time: datetime
+    message_count: int = 0
+    parity_verified_count: int = 0
+    callsign: str | None = None
+    emitter_category: int | None = None
+    latest_altitude_ft: int | None = None
+    latest_ground_speed_kt: float | None = None
+    latest_track_deg: float | None = None
+    latest_vertical_rate_fpm: float | None = None
+    latest_vertical_rate_source: str | None = None
+    latest_air_ground: str | None = None
+    latest_latitude_deg: float | None = None
+    latest_longitude_deg: float | None = None
+    airborne_cpr_even: tuple[float, int, int] | None = None
+    airborne_cpr_odd: tuple[float, int, int] | None = None
+    latest_power_dbm: float = float("nan")
+    power_sum_mw: float = 0.0
+    peak_power_dbm: float = -float("inf")
+    latest_snr_db: float = float("nan")
+    snr_sum_db: float = 0.0
+    peak_snr_db: float = -float("inf")
+    latest_correlation: float = float("nan")
+    latest_raw_message: str = ""
+    latest_fields: dict[str, object] = field(default_factory=dict)
+    downlink_formats: set[int] = field(default_factory=set)
+    type_codes: set[int] = field(default_factory=set)
 
 
 class _ADSBPlutoCaptureThread(QtCore.QThread):
@@ -413,6 +448,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._analysis_stream_thread: _ADSBStreamAnalysisThread | None = None
         self._sync_stream_processor: _ADSBStreamProcessor | None = None
         self._packet_history: list[_ADSBPacketEntry] = []
+        self._aircraft_states: dict[str, _ADSBAircraftState] = {}
+        self._aircraft_row_by_icao: dict[str, int] = {}
         self._continuous_scan = False
         self._scan_started_wall_time: datetime | None = None
         self._stream_sample_rate_hz: float | None = None
@@ -431,6 +468,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._plot_context_actions: dict[str, dict[str, QtGui.QAction]] = {}
         self._closing = False
         self._packet_selection_connected = False
+        self._aircraft_selection_connected = False
         self._build_menu()
         self._build_ui()
         self._restore_user_settings()
@@ -578,6 +616,65 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.summary_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
+        self.aircraft_table = QtWidgets.QTableWidget(0, 12)
+        self.aircraft_table.setHorizontalHeaderLabels(
+            [
+                "ICAO",
+                "Callsign",
+                "Air/Ground",
+                "Latitude",
+                "Longitude",
+                "Last Seen (s)",
+                "Messages",
+                "Altitude (ft / m)",
+                "Speed (kt / km/h)",
+                "V/Rate (ft/min / m/s)",
+                "Power (dBm)",
+                "SNR (dB)",
+            ]
+        )
+        self.aircraft_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.aircraft_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self.aircraft_table.verticalHeader().setVisible(False)
+        aircraft_header = self.aircraft_table.horizontalHeader()
+        for column in range(12):
+            aircraft_header.setSectionResizeMode(
+                column,
+                QtWidgets.QHeaderView.ResizeMode.Interactive,
+            )
+        for column, width in enumerate(
+            (75, 100, 85, 95, 95, 105, 80, 130, 145, 165, 100, 80)
+        ):
+            self.aircraft_table.setColumnWidth(column, width)
+        aircraft_header.setSectionResizeMode(
+            1,
+            QtWidgets.QHeaderView.ResizeMode.Stretch,
+        )
+        self.aircraft_table.itemSelectionChanged.connect(
+            self._selected_aircraft_changed
+        )
+        self._aircraft_selection_connected = True
+        self.aircraft_summary_table = QtWidgets.QTableWidget(0, 2)
+        self.aircraft_summary_table.setHorizontalHeaderLabels(
+            ["Parameter", "Current"]
+        )
+        aircraft_summary_header = self.aircraft_summary_table.horizontalHeader()
+        aircraft_summary_header.setSectionResizeMode(
+            0,
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents,
+        )
+        aircraft_summary_header.setSectionResizeMode(
+            1,
+            QtWidgets.QHeaderView.ResizeMode.Stretch,
+        )
+        self.aircraft_summary_table.verticalHeader().setVisible(False)
+        self.aircraft_summary_table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
         # Keep Python references as well as Qt parentage.  PySide can otherwise
         # collect a locally-created QDockWidget and delete its child ViewBox while
         # the PlotWidget wrapper is still reachable from this window.
@@ -585,8 +682,21 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.ppm_dock = self._dock("PPM Demodulation", self.ppm_plot)
         self.packet_dock = self._dock("Packet List", self.packet_table)
         self.summary_dock = self._dock("Message Summary", self.summary_table)
+        self.aircraft_dock = self._dock("Detected Aircraft", self.aircraft_table)
+        self.aircraft_summary_dock = self._dock(
+            "Aircraft Summary", self.aircraft_summary_table
+        )
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.power_dock)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, self.packet_dock)
+        self.splitDockWidget(
+            self.power_dock,
+            self.packet_dock,
+            QtCore.Qt.Orientation.Horizontal,
+        )
+        self.splitDockWidget(
+            self.packet_dock,
+            self.aircraft_dock,
+            QtCore.Qt.Orientation.Horizontal,
+        )
         self.splitDockWidget(
             self.power_dock,
             self.ppm_dock,
@@ -597,8 +707,32 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self.summary_dock,
             QtCore.Qt.Orientation.Vertical,
         )
+        self.splitDockWidget(
+            self.aircraft_dock,
+            self.aircraft_summary_dock,
+            QtCore.Qt.Orientation.Vertical,
+        )
         self._configure_plot_context_menus()
+        QtCore.QTimer.singleShot(0, self._equalize_result_docks)
         self.statusBar().showMessage("Ready - load 1090 MHz IQ or pass the current VSA capture")
+
+    def _equalize_result_docks(self) -> None:
+        top_row = (self.power_dock, self.packet_dock, self.aircraft_dock)
+        bottom_row = (
+            self.ppm_dock,
+            self.summary_dock,
+            self.aircraft_summary_dock,
+        )
+        self.resizeDocks(
+            list(top_row), [500, 500, 500], QtCore.Qt.Orientation.Horizontal
+        )
+        self.resizeDocks(
+            list(bottom_row), [500, 500, 500], QtCore.Qt.Orientation.Horizontal
+        )
+        for upper, lower in zip(top_row, bottom_row):
+            self.resizeDocks(
+                [upper, lower], [400, 400], QtCore.Qt.Orientation.Vertical
+            )
 
     def _restore_user_settings(self) -> None:
         sample_rate_msps = int(
@@ -1119,6 +1253,13 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.packet_table.clearSelection()
         self.packet_table.setRowCount(0)
         del blocker
+        self._aircraft_states.clear()
+        self._aircraft_row_by_icao.clear()
+        aircraft_blocker = QtCore.QSignalBlocker(self.aircraft_table)
+        self.aircraft_table.clearSelection()
+        self.aircraft_table.setRowCount(0)
+        del aircraft_blocker
+        self._show_aircraft_summary(None)
         self.power_plot.clear()
         self.ppm_plot.clear()
         self._plot_initial_ranges.clear()
@@ -1217,6 +1358,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         if selected_row >= 0:
             self.packet_table.selectRow(selected_row)
         del selection_blocker
+        self._update_aircraft_states(new_entries)
         if fit_latest_group:
             self._set_latest_group_power_range(result, elapsed_base_s)
         elif result.time_s.size:
@@ -1241,6 +1383,243 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         entry = self._packet_history[row]
         self._show_message_plot(entry)
         self._show_summary(entry)
+
+    def _update_aircraft_states(
+        self, entries: list[_ADSBPacketEntry]
+    ) -> None:
+        selected_icao = self._selected_aircraft_icao()
+        updated: set[str] = set()
+        for entry in entries:
+            message = entry.message
+            icao = message.icao_address
+            if not icao or not message.icao_confirmed:
+                continue
+            state = self._aircraft_states.get(icao)
+            if state is None:
+                state = _ADSBAircraftState(
+                    icao_address=icao,
+                    first_elapsed_s=entry.elapsed_s,
+                    first_wall_time=entry.wall_time,
+                    last_elapsed_s=entry.elapsed_s,
+                    last_wall_time=entry.wall_time,
+                )
+                self._aircraft_states[icao] = state
+                row = self.aircraft_table.rowCount()
+                self._aircraft_row_by_icao[icao] = row
+                self.aircraft_table.insertRow(row)
+            state.last_elapsed_s = entry.elapsed_s
+            state.last_wall_time = entry.wall_time
+            state.message_count += 1
+            state.parity_verified_count += int(message.parity_ok is True)
+            state.downlink_formats.add(message.downlink_format)
+            if message.type_code is not None:
+                state.type_codes.add(message.type_code)
+            fields = dict(message.fields)
+            callsign = str(fields.get("callsign", "")).strip()
+            if callsign:
+                state.callsign = callsign
+            if fields.get("emitter_category") is not None:
+                state.emitter_category = int(fields["emitter_category"])
+            if fields.get("altitude_ft") is not None:
+                state.latest_altitude_ft = int(fields["altitude_ft"])
+            if fields.get("ground_speed_kt") is not None:
+                state.latest_ground_speed_kt = float(fields["ground_speed_kt"])
+            if fields.get("track_deg") is not None:
+                state.latest_track_deg = float(fields["track_deg"])
+            if fields.get("vertical_rate_fpm") is not None:
+                state.latest_vertical_rate_fpm = float(fields["vertical_rate_fpm"])
+                state.latest_vertical_rate_source = str(
+                    fields.get("vertical_rate_source", "")
+                ) or None
+            if fields.get("air_ground") is not None:
+                state.latest_air_ground = str(fields["air_ground"])
+            elif fields.get("flight_status") in {0, 2}:
+                state.latest_air_ground = "airborne"
+            elif fields.get("flight_status") in {1, 3}:
+                state.latest_air_ground = "ground"
+            elif fields.get("vertical_status") == 0:
+                state.latest_air_ground = "airborne"
+            elif fields.get("vertical_status") == 1:
+                state.latest_air_ground = "ground"
+            if (
+                fields.get("position_type") == "airborne"
+                and fields.get("cpr_format") in {"even", "odd"}
+            ):
+                cpr = (
+                    entry.elapsed_s,
+                    int(fields["cpr_latitude"]),
+                    int(fields["cpr_longitude"]),
+                )
+                if fields["cpr_format"] == "even":
+                    state.airborne_cpr_even = cpr
+                else:
+                    state.airborne_cpr_odd = cpr
+                even = state.airborne_cpr_even
+                odd = state.airborne_cpr_odd
+                if even is not None and odd is not None and abs(even[0] - odd[0]) <= 10.0:
+                    position = decode_global_airborne_cpr(
+                        even[1], even[2], odd[1], odd[2],
+                        use_odd=odd[0] >= even[0],
+                    )
+                    if position is not None:
+                        state.latest_latitude_deg, state.latest_longitude_deg = position
+            state.latest_power_dbm = entry.on_pulse_power_dbm
+            state.power_sum_mw += 10.0 ** (entry.on_pulse_power_dbm / 10.0)
+            state.peak_power_dbm = max(
+                state.peak_power_dbm, entry.on_pulse_power_dbm
+            )
+            state.latest_snr_db = message.preamble_snr_db
+            state.snr_sum_db += message.preamble_snr_db
+            state.peak_snr_db = max(state.peak_snr_db, message.preamble_snr_db)
+            state.latest_correlation = message.preamble_correlation
+            state.latest_raw_message = message.raw_hex
+            state.latest_fields.update(fields)
+            updated.add(icao)
+
+        blocker = QtCore.QSignalBlocker(self.aircraft_table)
+        for icao in updated:
+            self._update_aircraft_row(self._aircraft_states[icao])
+        if selected_icao is not None:
+            selected_row = self._aircraft_row_by_icao.get(selected_icao)
+            if selected_row is not None:
+                self.aircraft_table.selectRow(selected_row)
+        elif self.aircraft_table.rowCount() > 0:
+            self.aircraft_table.selectRow(0)
+            selected_icao = self.aircraft_table.item(0, 0).text()
+        del blocker
+        if selected_icao is not None:
+            self._show_aircraft_summary(self._aircraft_states.get(selected_icao))
+
+    def _update_aircraft_row(self, state: _ADSBAircraftState) -> None:
+        row = self._aircraft_row_by_icao[state.icao_address]
+        altitude = (
+            "-"
+            if state.latest_altitude_ft is None
+            else f"{state.latest_altitude_ft} / {state.latest_altitude_ft * 0.3048:.0f}"
+        )
+        speed = (
+            "-"
+            if state.latest_ground_speed_kt is None
+            else f"{state.latest_ground_speed_kt:.1f} / {state.latest_ground_speed_kt * 1.852:.1f}"
+        )
+        vertical_rate = (
+            "-"
+            if state.latest_vertical_rate_fpm is None
+            else f"{state.latest_vertical_rate_fpm:+.0f} / {state.latest_vertical_rate_fpm * 0.00508:+.2f}"
+        )
+        values = (
+            state.icao_address,
+            state.callsign or "-",
+            state.latest_air_ground or "-",
+            "-" if state.latest_latitude_deg is None else f"{state.latest_latitude_deg:.5f}",
+            "-" if state.latest_longitude_deg is None else f"{state.latest_longitude_deg:.5f}",
+            f"{state.last_elapsed_s:.3f}",
+            str(state.message_count),
+            altitude,
+            speed,
+            vertical_rate,
+            f"{state.latest_power_dbm:+.2f}",
+            f"{state.latest_snr_db:.1f}",
+        )
+        for column, value in enumerate(values):
+            item = self.aircraft_table.item(row, column)
+            if item is None:
+                item = QtWidgets.QTableWidgetItem()
+                item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                self.aircraft_table.setItem(row, column, item)
+            item.setText(value)
+
+    def _selected_aircraft_icao(self) -> str | None:
+        row = self.aircraft_table.currentRow()
+        if not 0 <= row < self.aircraft_table.rowCount():
+            return None
+        item = self.aircraft_table.item(row, 0)
+        return item.text() if item is not None else None
+
+    def _selected_aircraft_changed(self) -> None:
+        if self._closing:
+            return
+        icao = self._selected_aircraft_icao()
+        self._show_aircraft_summary(
+            self._aircraft_states.get(icao) if icao is not None else None
+        )
+
+    def _show_aircraft_summary(
+        self, state: _ADSBAircraftState | None
+    ) -> None:
+        if state is None:
+            rows: list[tuple[str, object]] = []
+        else:
+            average_power_dbm = 10.0 * np.log10(
+                max(
+                    state.power_sum_mw / max(state.message_count, 1),
+                    np.finfo(np.float64).tiny,
+                )
+            )
+            average_snr_db = state.snr_sum_db / max(state.message_count, 1)
+            fields = state.latest_fields
+            rows = [
+                ("ICAO Address", state.icao_address),
+                ("Callsign", state.callsign or "-"),
+                (
+                    "Emitter Category",
+                    "-" if state.emitter_category is None else state.emitter_category,
+                ),
+                ("First Seen", f"{state.first_elapsed_s:.6f} s"),
+                ("First OS Time", state.first_wall_time.strftime("%Y-%m-%d %H:%M:%S.%f")),
+                ("Last Seen", f"{state.last_elapsed_s:.6f} s"),
+                ("Last OS Time", state.last_wall_time.strftime("%Y-%m-%d %H:%M:%S.%f")),
+                ("Messages", state.message_count),
+                ("Parity Verified", state.parity_verified_count),
+                ("Downlink Formats", ", ".join(map(str, sorted(state.downlink_formats)))),
+                ("Type Codes", ", ".join(map(str, sorted(state.type_codes))) or "-"),
+                (
+                    "Latest Altitude",
+                    "-" if state.latest_altitude_ft is None else f"{state.latest_altitude_ft} ft / {state.latest_altitude_ft * 0.3048:.0f} m",
+                ),
+                (
+                    "Latest Ground Speed",
+                    "-" if state.latest_ground_speed_kt is None else f"{state.latest_ground_speed_kt:.1f} kt / {state.latest_ground_speed_kt * 1.852:.1f} km/h",
+                ),
+                (
+                    "Latest Vertical Rate",
+                    "-" if state.latest_vertical_rate_fpm is None else f"{state.latest_vertical_rate_fpm:+.0f} ft/min / {state.latest_vertical_rate_fpm * 0.00508:+.2f} m/s",
+                ),
+                ("Vertical Rate Source", state.latest_vertical_rate_source or "-"),
+                ("Air/Ground", state.latest_air_ground or "-"),
+                (
+                    "Latitude",
+                    "-" if state.latest_latitude_deg is None else f"{state.latest_latitude_deg:.6f} degree",
+                ),
+                (
+                    "Longitude",
+                    "-" if state.latest_longitude_deg is None else f"{state.latest_longitude_deg:.6f} degree",
+                ),
+                (
+                    "Latest Track",
+                    "-" if state.latest_track_deg is None else f"{state.latest_track_deg:.1f} degree",
+                ),
+                ("Latest ON Power", f"{state.latest_power_dbm:+.2f} dBm"),
+                ("Average ON Power", f"{average_power_dbm:+.2f} dBm"),
+                ("Peak ON Power", f"{state.peak_power_dbm:+.2f} dBm"),
+                ("Latest Preamble SNR", f"{state.latest_snr_db:.2f} dB"),
+                ("Average Preamble SNR", f"{average_snr_db:.2f} dB"),
+                ("Peak Preamble SNR", f"{state.peak_snr_db:.2f} dB"),
+                ("Latest Correlation", f"{state.latest_correlation:.3f}"),
+                ("Position Type", fields.get("position_type", "-")),
+                ("CPR Format", fields.get("cpr_format", "-")),
+                ("CPR Latitude (Raw)", fields.get("cpr_latitude", "-")),
+                ("CPR Longitude (Raw)", fields.get("cpr_longitude", "-")),
+                ("Latest Raw Message", state.latest_raw_message),
+            ]
+        self.aircraft_summary_table.setRowCount(len(rows))
+        for row, (name, value) in enumerate(rows):
+            self.aircraft_summary_table.setItem(
+                row, 0, QtWidgets.QTableWidgetItem(str(name))
+            )
+            self.aircraft_summary_table.setItem(
+                row, 1, QtWidgets.QTableWidgetItem(str(value))
+            )
 
     def _show_message_plot(self, entry: _ADSBPacketEntry) -> None:
         message = entry.message
@@ -1455,8 +1834,20 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             except (RuntimeError, TypeError):
                 pass
             self._packet_selection_connected = False
+        if self._aircraft_selection_connected:
+            try:
+                self.aircraft_table.itemSelectionChanged.disconnect(
+                    self._selected_aircraft_changed
+                )
+            except (RuntimeError, TypeError):
+                pass
+            self._aircraft_selection_connected = False
         try:
             self.packet_table.blockSignals(True)
+        except RuntimeError:
+            pass
+        try:
+            self.aircraft_table.blockSignals(True)
         except RuntimeError:
             pass
 

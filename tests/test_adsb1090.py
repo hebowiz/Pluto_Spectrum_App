@@ -11,6 +11,7 @@ from pluto_sa.standards.adsb1090 import (
 from pluto_sa.standards.adsb1090.decoder import (
     classify_mode_s_parity,
     decode_adsb_fields,
+    decode_global_airborne_cpr,
     decode_mode_s_header_fields,
     mode_s_crc_remainder,
 )
@@ -19,6 +20,8 @@ from pluto_sa.vsa.sources import FileIQSource
 
 
 KNOWN_DF17 = "8D40621D58C382D690C8AC2863A7"
+KNOWN_DF17_ODD = "8D40621D58C386435CC412692AD6"
+KNOWN_VELOCITY = "8D485020994409940838175B284F"
 KNOWN_IDENTIFICATION = "8D4840D6202CC371C32CE0576098"
 OBSERVED_DF5_ADDRESS_PARITY = "28201507C8E5CD"
 
@@ -85,6 +88,38 @@ def test_known_df17_crc_and_airborne_position_fields() -> None:
     assert fields["icao_address"] == "40621D"
     assert fields["altitude_ft"] == 38_000
     assert fields["cpr_format"] == "even"
+    assert fields["air_ground"] == "airborne"
+
+
+def test_global_airborne_cpr_decodes_even_odd_pair() -> None:
+    even = decode_adsb_fields(_hex_bits(KNOWN_DF17))
+    odd = decode_adsb_fields(_hex_bits(KNOWN_DF17_ODD))
+
+    even_position = decode_global_airborne_cpr(
+        even["cpr_latitude"],
+        even["cpr_longitude"],
+        odd["cpr_latitude"],
+        odd["cpr_longitude"],
+        use_odd=False,
+    )
+    odd_position = decode_global_airborne_cpr(
+        even["cpr_latitude"],
+        even["cpr_longitude"],
+        odd["cpr_latitude"],
+        odd["cpr_longitude"],
+        use_odd=True,
+    )
+
+    assert even_position == pytest.approx((52.257202, 3.919373), abs=1e-6)
+    assert odd_position == pytest.approx((52.265780, 3.938913), abs=1e-6)
+
+
+def test_velocity_message_decodes_vertical_rate_and_airborne_state() -> None:
+    fields = decode_adsb_fields(_hex_bits(KNOWN_VELOCITY))
+
+    assert fields["air_ground"] == "airborne"
+    assert fields["vertical_rate_fpm"] == -832.0
+    assert fields["vertical_rate_source"] == "barometric"
 
 
 def test_analyzer_detects_and_decodes_every_burst() -> None:

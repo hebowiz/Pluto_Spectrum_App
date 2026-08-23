@@ -127,6 +127,40 @@ def test_adsb_workspace_displays_saved_multi_packet_fixture() -> None:
         assert window.packet_table.item(0, 1).text() == "0.000180"
         assert window.packet_table.item(0, 2).text()
         assert window.packet_table.item(0, 3).text() == "8D4840D6202CC371C32CE0576098"
+        assert window.aircraft_table.rowCount() == 3
+        assert window.power_dock.windowTitle() == "IQ Power"
+        assert window.ppm_dock.windowTitle() == "PPM Demodulation"
+        assert window.packet_dock.windowTitle() == "Packet List"
+        assert window.summary_dock.windowTitle() == "Message Summary"
+        assert window.aircraft_dock.windowTitle() == "Detected Aircraft"
+        assert window.aircraft_summary_dock.windowTitle() == "Aircraft Summary"
+    finally:
+        window.close()
+
+
+def test_adsb_aircraft_summary_aggregates_messages_by_confirmed_icao() -> None:
+    pg.mkQApp("ADS-B aircraft aggregation test")
+    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    window = ADSB1090Window(FileIQSource.load(path))
+    try:
+        row = window._aircraft_row_by_icao["40621D"]
+        window.aircraft_table.selectRow(row)
+        values = {
+            window.aircraft_summary_table.item(index, 0).text():
+            window.aircraft_summary_table.item(index, 1).text()
+            for index in range(window.aircraft_summary_table.rowCount())
+        }
+
+        assert window.aircraft_table.item(row, 6).text() == "2"
+        assert window.aircraft_table.item(row, 7).text() == "38000 / 11582"
+        assert values["ICAO Address"] == "40621D"
+        assert values["Messages"] == "2"
+        assert values["Parity Verified"] == "2"
+        assert values["Latest Altitude"] == "38000 ft / 11582 m"
+        assert values["Air/Ground"] == "airborne"
+        assert values["Latitude"] == "52.265780 degree"
+        assert values["Longitude"] == "3.938913 degree"
+        assert values["Type Codes"] == "11"
     finally:
         window.close()
 

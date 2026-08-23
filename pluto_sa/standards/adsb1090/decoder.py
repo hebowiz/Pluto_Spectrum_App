@@ -129,6 +129,73 @@ def _decode_altitude(ac12: int) -> int | None:
     return None
 
 
+def _cpr_nl(latitude_deg: float) -> int:
+    """Return the number of CPR longitude zones at *latitude_deg*."""
+
+    latitude = abs(float(latitude_deg))
+    if latitude >= 87.0:
+        return 1
+    if latitude < 1e-12:
+        return 59
+    nz = 15.0
+    denominator = np.cos(np.radians(latitude)) ** 2
+    argument = 1.0 - (1.0 - np.cos(np.pi / (2.0 * nz))) / denominator
+    argument = float(np.clip(argument, -1.0, 1.0))
+    return int(np.floor(2.0 * np.pi / np.arccos(argument)))
+
+
+def decode_global_airborne_cpr(
+    even_latitude: int,
+    even_longitude: int,
+    odd_latitude: int,
+    odd_longitude: int,
+    *,
+    use_odd: bool,
+) -> tuple[float, float] | None:
+    """Decode a globally unambiguous airborne CPR even/odd frame pair.
+
+    The caller owns temporal and ICAO pairing. ``use_odd`` selects the most
+    recently received frame, as required when resolving longitude.
+    """
+
+    scale = 131_072.0
+    yz_even = float(even_latitude) / scale
+    xz_even = float(even_longitude) / scale
+    yz_odd = float(odd_latitude) / scale
+    xz_odd = float(odd_longitude) / scale
+    latitude_index = int(np.floor(59.0 * yz_even - 60.0 * yz_odd + 0.5))
+    latitude_even = 6.0 * ((latitude_index % 60) + yz_even)
+    latitude_odd = (360.0 / 59.0) * ((latitude_index % 59) + yz_odd)
+    if latitude_even >= 270.0:
+        latitude_even -= 360.0
+    if latitude_odd >= 270.0:
+        latitude_odd -= 360.0
+    if not (-90.0 <= latitude_even <= 90.0 and -90.0 <= latitude_odd <= 90.0):
+        return None
+    nl_even = _cpr_nl(latitude_even)
+    nl_odd = _cpr_nl(latitude_odd)
+    if nl_even != nl_odd:
+        return None
+    longitude_index = int(
+        np.floor(xz_even * (nl_even - 1) - xz_odd * nl_even + 0.5)
+    )
+    if use_odd:
+        latitude = latitude_odd
+        longitude_zones = max(nl_odd - 1, 1)
+        longitude = (360.0 / longitude_zones) * (
+            (longitude_index % longitude_zones) + xz_odd
+        )
+    else:
+        latitude = latitude_even
+        longitude_zones = max(nl_even, 1)
+        longitude = (360.0 / longitude_zones) * (
+            (longitude_index % longitude_zones) + xz_even
+        )
+    if longitude >= 180.0:
+        longitude -= 360.0
+    return float(latitude), float(longitude)
+
+
 def decode_adsb_fields(bits: np.ndarray) -> dict[str, object]:
     """Decode stable DF17/18 fields without maintaining cross-frame state."""
     values = np.asarray(bits, dtype=np.uint8).reshape(-1)
@@ -150,6 +217,7 @@ def decode_adsb_fields(bits: np.ndarray) -> dict[str, object]:
         fields.update(
             {
                 "position_type": "surface",
+                "air_ground": "ground",
                 "cpr_format": "odd" if int(me[21]) else "even",
                 "cpr_latitude": bits_to_int(me[22:39]),
                 "cpr_longitude": bits_to_int(me[39:56]),
@@ -160,6 +228,7 @@ def decode_adsb_fields(bits: np.ndarray) -> dict[str, object]:
         fields.update(
             {
                 "position_type": "airborne",
+                "air_ground": "airborne",
                 "altitude_ft": altitude,
                 "time_flag": int(me[20]),
                 "cpr_format": "odd" if int(me[21]) else "even",
@@ -170,6 +239,7 @@ def decode_adsb_fields(bits: np.ndarray) -> dict[str, object]:
     elif type_code == 19:
         subtype = bits_to_int(me[5:8])
         fields["velocity_subtype"] = subtype
+        fields["air_ground"] = "airborne"
         if subtype in {1, 2}:
             ew_raw = bits_to_int(me[14:24])
             ns_raw = bits_to_int(me[25:35])
@@ -184,4 +254,13 @@ def decode_adsb_fields(bits: np.ndarray) -> dict[str, object]:
             if ew is not None and ns is not None:
                 fields["ground_speed_kt"] = float(np.hypot(ew, ns))
                 fields["track_deg"] = float((np.degrees(np.arctan2(ew, ns)) + 360.0) % 360.0)
+        vertical_rate_raw = bits_to_int(me[37:46])
+        if vertical_rate_raw:
+            vertical_rate_fpm = float((vertical_rate_raw - 1) * 64)
+            if int(me[36]):
+                vertical_rate_fpm = -vertical_rate_fpm
+            fields["vertical_rate_fpm"] = vertical_rate_fpm
+            fields["vertical_rate_source"] = (
+                "GNSS" if int(me[35]) else "barometric"
+            )
     return fields
