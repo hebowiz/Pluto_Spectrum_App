@@ -15,6 +15,10 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.standards.adsb1090.analysis import ADSB1090Analyzer
 from pluto_sa.standards.adsb1090.decoder import decode_global_airborne_cpr
+from pluto_sa.standards.adsb1090.metadata import (
+    AircraftMetadata,
+    AircraftMetadataDatabase,
+)
 from pluto_sa.standards.adsb1090.model import (
     ADSB1090AnalysisResult,
     ADSB1090Message,
@@ -61,6 +65,20 @@ _FLIGHT_STATUS_DESCRIPTIONS = {
     6: "Reserved",
     7: "Not assigned",
 }
+
+# Deliberately low-resolution, local coastline context for the equirectangular
+# position-history plot. Measurement positions never depend on this artwork.
+_WORLD_OUTLINES = (
+    ((-168, 72), (-140, 70), (-124, 50), (-82, 25), (-52, 47), (-60, 66), (-95, 83), (-168, 72)),
+    ((-82, 12), (-70, -5), (-78, -20), (-66, -55), (-40, -23), (-35, 5), (-52, 12), (-82, 12)),
+    ((-73, 60), (-45, 83), (-20, 76), (-28, 60), (-48, 58), (-73, 60)),
+    ((-17, 36), (10, 37), (35, 30), (52, 12), (42, -12), (20, -35), (5, -35), (-15, 5), (-17, 36)),
+    ((-10, 36), (15, 58), (40, 70), (90, 77), (180, 65), (145, 42), (120, 20), (105, 5), (75, 8), (55, 25), (35, 30), (-10, 36)),
+    ((112, -11), (154, -10), (153, -40), (130, -44), (113, -25), (112, -11)),
+    ((129, 31), (142, 46), (146, 43), (136, 32), (129, 31)),
+    ((166, -34), (178, -38), (174, -47), (166, -34)),
+    ((-180, -70), (-120, -75), (-60, -72), (0, -78), (60, -70), (120, -75), (180, -70)),
+)
 
 
 def _peak_envelope_decimate(
@@ -133,6 +151,10 @@ class _ADSBAircraftState:
     latest_longitude_deg: float | None = None
     airborne_cpr_even: tuple[float, int, int] | None = None
     airborne_cpr_odd: tuple[float, int, int] | None = None
+    position_history: list[tuple[float, float, float, int | None]] = field(
+        default_factory=list
+    )
+    metadata: AircraftMetadata | None = None
     latest_power_dbm: float = float("nan")
     power_sum_mw: float = 0.0
     peak_power_dbm: float = -float("inf")
@@ -144,6 +166,33 @@ class _ADSBAircraftState:
     latest_fields: dict[str, object] = field(default_factory=dict)
     downlink_formats: set[int] = field(default_factory=set)
     type_codes: set[int] = field(default_factory=set)
+
+
+class _AircraftMetadataThread(QtCore.QThread):
+    completed = QtCore.Signal(int)
+    failed = QtCore.Signal(str)
+
+    def __init__(
+        self,
+        database: AircraftMetadataDatabase,
+        *,
+        csv_path: str | None = None,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._database = database
+        self._csv_path = csv_path
+
+    def run(self) -> None:
+        try:
+            if self._csv_path is None:
+                count = self._database.download_and_import()
+            else:
+                count = self._database.import_opensky_csv(self._csv_path)
+        except Exception as error:
+            self.failed.emit(str(error))
+            return
+        self.completed.emit(count)
 
 
 class _ADSBPlutoCaptureThread(QtCore.QThread):
@@ -444,6 +493,16 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._preferences = preferences or QtCore.QSettings(
             "PlutoSA", "PlutoVSA-ADSB1090"
         )
+        metadata_path = str(
+            self._preferences.value("metadata/sqlite_path", "")
+        ).strip()
+        if not metadata_path:
+            application_data = QtCore.QStandardPaths.writableLocation(
+                QtCore.QStandardPaths.StandardLocation.AppDataLocation
+            )
+            metadata_path = str(Path(application_data) / "aircraft_metadata.sqlite")
+        self._aircraft_metadata_database = AircraftMetadataDatabase(metadata_path)
+        self._aircraft_metadata_thread: _AircraftMetadataThread | None = None
         self._capture_thread: _ADSBPlutoCaptureThread | None = None
         self._analysis_stream_thread: _ADSBStreamAnalysisThread | None = None
         self._sync_stream_processor: _ADSBStreamProcessor | None = None
@@ -469,6 +528,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._closing = False
         self._packet_selection_connected = False
         self._aircraft_selection_connected = False
+        self._dock_resize_pending = False
         self._build_menu()
         self._build_ui()
         self._restore_user_settings()
@@ -483,6 +543,19 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         open_action.triggered.connect(self._open_iq)
         self.export_packet_list_action = file_menu.addAction("Export Packet List...")
         self.export_packet_list_action.triggered.connect(self._export_packet_list)
+        metadata_menu = file_menu.addMenu("Aircraft Database")
+        self.import_aircraft_database_action = metadata_menu.addAction(
+            "Import OpenSky CSV..."
+        )
+        self.import_aircraft_database_action.triggered.connect(
+            self._import_aircraft_database
+        )
+        self.update_aircraft_database_action = metadata_menu.addAction(
+            "Download / Update from OpenSky..."
+        )
+        self.update_aircraft_database_action.triggered.connect(
+            self._download_aircraft_database
+        )
         file_menu.addSeparator()
         close_action = file_menu.addAction("Close")
         close_action.triggered.connect(self.application_close_requested.emit)
@@ -675,6 +748,33 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.aircraft_summary_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
+        self.aircraft_map_plot = make_measurement_plot(
+            "Latitude (degree)", "Longitude (degree)"
+        )
+        self.aircraft_map_plot.setAspectLocked(True)
+        self.aircraft_map_plot.setLimits(
+            xMin=-180.0, xMax=180.0, yMin=-90.0, yMax=90.0
+        )
+        coastline_pen = pg.mkPen((105, 115, 125), width=1)
+        for outline in _WORLD_OUTLINES:
+            coordinates = np.asarray(outline, dtype=np.float64)
+            self.aircraft_map_plot.plot(
+                coordinates[:, 0], coordinates[:, 1], pen=coastline_pen
+            )
+        self.aircraft_track_item = self.aircraft_map_plot.plot(
+            [], [], pen=pg.mkPen(_TRACE_COLOR, width=2)
+        )
+        self.aircraft_position_item = pg.ScatterPlotItem(
+            [], [], symbol="o", size=12, brush=pg.mkBrush(0, 255, 255),
+            pen=pg.mkPen("k", width=1),
+        )
+        self.aircraft_map_plot.addItem(self.aircraft_position_item)
+        self.aircraft_map_plot.setRange(
+            xRange=(-180.0, 180.0), yRange=(-90.0, 90.0), padding=0.0
+        )
+        self.aircraft_detail_tabs = QtWidgets.QTabWidget()
+        self.aircraft_detail_tabs.addTab(self.aircraft_summary_table, "Details")
+        self.aircraft_detail_tabs.addTab(self.aircraft_map_plot, "Position History")
         # Keep Python references as well as Qt parentage.  PySide can otherwise
         # collect a locally-created QDockWidget and delete its child ViewBox while
         # the PlotWidget wrapper is still reachable from this window.
@@ -684,7 +784,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.summary_dock = self._dock("Message Summary", self.summary_table)
         self.aircraft_dock = self._dock("Detected Aircraft", self.aircraft_table)
         self.aircraft_summary_dock = self._dock(
-            "Aircraft Summary", self.aircraft_summary_table
+            "Aircraft Details", self.aircraft_detail_tabs
         )
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.power_dock)
         self.splitDockWidget(
@@ -713,26 +813,52 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             QtCore.Qt.Orientation.Vertical,
         )
         self._configure_plot_context_menus()
+        for widget in (
+            self.power_plot,
+            self.ppm_plot,
+            self.packet_table,
+            self.summary_table,
+            self.aircraft_table,
+            self.aircraft_detail_tabs,
+        ):
+            widget.setMinimumSize(0, 0)
+        for dock in (
+            self.power_dock,
+            self.ppm_dock,
+            self.packet_dock,
+            self.summary_dock,
+            self.aircraft_dock,
+            self.aircraft_summary_dock,
+        ):
+            dock.setMinimumSize(0, 0)
         QtCore.QTimer.singleShot(0, self._equalize_result_docks)
         self.statusBar().showMessage("Ready - load 1090 MHz IQ or pass the current VSA capture")
 
     def _equalize_result_docks(self) -> None:
+        self._dock_resize_pending = False
         top_row = (self.power_dock, self.packet_dock, self.aircraft_dock)
         bottom_row = (
             self.ppm_dock,
             self.summary_dock,
             self.aircraft_summary_dock,
         )
+        column_width = max(self.width() // 3, 1)
         self.resizeDocks(
-            list(top_row), [500, 500, 500], QtCore.Qt.Orientation.Horizontal
+            list(top_row), [column_width] * 3, QtCore.Qt.Orientation.Horizontal
         )
         self.resizeDocks(
-            list(bottom_row), [500, 500, 500], QtCore.Qt.Orientation.Horizontal
+            list(bottom_row), [column_width] * 3, QtCore.Qt.Orientation.Horizontal
         )
         for upper, lower in zip(top_row, bottom_row):
             self.resizeDocks(
                 [upper, lower], [400, 400], QtCore.Qt.Orientation.Vertical
             )
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        if hasattr(self, "power_dock") and not self._dock_resize_pending:
+            self._dock_resize_pending = True
+            QtCore.QTimer.singleShot(0, self._equalize_result_docks)
 
     def _restore_user_settings(self) -> None:
         sample_rate_msps = int(
@@ -792,6 +918,89 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._preferences.setValue(
             "paths/iq_directory", str(Path(path).resolve().parent)
         )
+
+    def _import_aircraft_database(self) -> None:
+        directory = str(self._preferences.value("paths/metadata_directory", ""))
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import OpenSky Aircraft Database",
+            directory,
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+        self._preferences.setValue(
+            "paths/metadata_directory", str(Path(path).resolve().parent)
+        )
+        self._start_aircraft_database_update(csv_path=path)
+
+    def _download_aircraft_database(self) -> None:
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "Update Aircraft Database",
+            "Download the OpenSky aircraft metadata CSV and rebuild the local "
+            "lookup database?\n\nOpenSky states that this snapshot is not current "
+            "and is provided without guarantees.",
+        )
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self._start_aircraft_database_update(csv_path=None)
+
+    def _start_aircraft_database_update(self, *, csv_path: str | None) -> None:
+        if self._aircraft_metadata_thread is not None:
+            self.statusBar().showMessage("Aircraft database update is already running")
+            return
+        self.import_aircraft_database_action.setEnabled(False)
+        self.update_aircraft_database_action.setEnabled(False)
+        self.statusBar().showMessage(
+            "Importing aircraft metadata..."
+            if csv_path is not None
+            else "Downloading and indexing OpenSky aircraft metadata..."
+        )
+        thread = _AircraftMetadataThread(
+            self._aircraft_metadata_database,
+            csv_path=csv_path,
+            parent=self,
+        )
+        thread.completed.connect(self._aircraft_database_updated)
+        thread.failed.connect(self._aircraft_database_update_failed)
+        thread.finished.connect(self._aircraft_database_thread_finished)
+        self._aircraft_metadata_thread = thread
+        thread.start()
+
+    @QtCore.Slot(int)
+    def _aircraft_database_updated(self, count: int) -> None:
+        self._preferences.setValue(
+            "metadata/sqlite_path", str(self._aircraft_metadata_database.path)
+        )
+        for state in self._aircraft_states.values():
+            state.metadata = self._aircraft_metadata_database.lookup(
+                state.icao_address
+            )
+            self._update_aircraft_row(state)
+        selected_icao = self._selected_aircraft_icao()
+        self._show_aircraft_summary(
+            self._aircraft_states.get(selected_icao)
+            if selected_icao is not None
+            else None
+        )
+        self.statusBar().showMessage(
+            f"Aircraft database ready - {count:,} records indexed"
+        )
+
+    @QtCore.Slot(str)
+    def _aircraft_database_update_failed(self, message: str) -> None:
+        self.statusBar().showMessage("Aircraft database update failed")
+        QtWidgets.QMessageBox.critical(self, "Aircraft Database", message)
+
+    @QtCore.Slot()
+    def _aircraft_database_thread_finished(self) -> None:
+        thread = self._aircraft_metadata_thread
+        self._aircraft_metadata_thread = None
+        self.import_aircraft_database_action.setEnabled(True)
+        self.update_aircraft_database_action.setEnabled(True)
+        if thread is not None:
+            thread.deleteLater()
 
     def _show_packet_table_context_menu(self, position: QtCore.QPoint) -> None:
         menu = QtWidgets.QMenu(self.packet_table)
@@ -1403,6 +1612,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                     last_elapsed_s=entry.elapsed_s,
                     last_wall_time=entry.wall_time,
                 )
+                state.metadata = self._aircraft_metadata_database.lookup(icao)
                 self._aircraft_states[icao] = state
                 row = self.aircraft_table.rowCount()
                 self._aircraft_row_by_icao[icao] = row
@@ -1463,6 +1673,20 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                     )
                     if position is not None:
                         state.latest_latitude_deg, state.latest_longitude_deg = position
+                        history_point = (
+                            entry.elapsed_s,
+                            position[0],
+                            position[1],
+                            state.latest_altitude_ft,
+                        )
+                        if (
+                            not state.position_history
+                            or state.position_history[-1][1:3]
+                            != history_point[1:3]
+                        ):
+                            state.position_history.append(history_point)
+                            if len(state.position_history) > 10_000:
+                                del state.position_history[:-10_000]
             state.latest_power_dbm = entry.on_pulse_power_dbm
             state.power_sum_mw += 10.0 ** (entry.on_pulse_power_dbm / 10.0)
             state.peak_power_dbm = max(
@@ -1547,6 +1771,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
     def _show_aircraft_summary(
         self, state: _ADSBAircraftState | None
     ) -> None:
+        self._show_aircraft_map(state)
         if state is None:
             rows: list[tuple[str, object]] = []
         else:
@@ -1558,9 +1783,46 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             )
             average_snr_db = state.snr_sum_db / max(state.message_count, 1)
             fields = state.latest_fields
+            metadata = state.metadata
             rows = [
                 ("ICAO Address", state.icao_address),
                 ("Callsign", state.callsign or "-"),
+                (
+                    "Registration (DB)",
+                    "-" if metadata is None else metadata.registration or "-",
+                ),
+                (
+                    "Manufacturer (DB)",
+                    "-" if metadata is None else metadata.manufacturer or "-",
+                ),
+                (
+                    "Model (DB)",
+                    "-" if metadata is None else metadata.model or "-",
+                ),
+                (
+                    "Type Code (DB)",
+                    "-" if metadata is None else metadata.type_code or "-",
+                ),
+                (
+                    "Serial Number (DB)",
+                    "-" if metadata is None else metadata.serial_number or "-",
+                ),
+                (
+                    "Operator (DB)",
+                    "-" if metadata is None else metadata.operator or "-",
+                ),
+                (
+                    "Operator Callsign (DB)",
+                    "-" if metadata is None else metadata.operator_callsign or "-",
+                ),
+                (
+                    "Owner (DB)",
+                    "-" if metadata is None else metadata.owner or "-",
+                ),
+                (
+                    "Country (DB)",
+                    "-" if metadata is None else metadata.country or "-",
+                ),
                 (
                     "Emitter Category",
                     "-" if state.emitter_category is None else state.emitter_category,
@@ -1620,6 +1882,40 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self.aircraft_summary_table.setItem(
                 row, 1, QtWidgets.QTableWidgetItem(str(value))
             )
+
+    def _show_aircraft_map(self, state: _ADSBAircraftState | None) -> None:
+        if state is None or not state.position_history:
+            self.aircraft_track_item.setData([], [])
+            self.aircraft_position_item.setData([], [])
+            self.aircraft_map_plot.setRange(
+                xRange=(-180.0, 180.0), yRange=(-90.0, 90.0), padding=0.0
+            )
+            return
+        longitude = np.asarray(
+            [point[2] for point in state.position_history], dtype=np.float64
+        )
+        latitude = np.asarray(
+            [point[1] for point in state.position_history], dtype=np.float64
+        )
+        self.aircraft_track_item.setData(longitude, latitude)
+        self.aircraft_position_item.setData(
+            [longitude[-1]], [latitude[-1]]
+        )
+        longitude_span = max(float(np.ptp(longitude)), 0.5)
+        latitude_span = max(float(np.ptp(latitude)), 0.5)
+        longitude_margin = max(longitude_span * 0.15, 0.25)
+        latitude_margin = max(latitude_span * 0.15, 0.25)
+        self.aircraft_map_plot.setRange(
+            xRange=(
+                max(-180.0, float(np.min(longitude)) - longitude_margin),
+                min(180.0, float(np.max(longitude)) + longitude_margin),
+            ),
+            yRange=(
+                max(-90.0, float(np.min(latitude)) - latitude_margin),
+                min(90.0, float(np.max(latitude)) + latitude_margin),
+            ),
+            padding=0.0,
+        )
 
     def _show_message_plot(self, entry: _ADSBPacketEntry) -> None:
         message = entry.message
@@ -1806,6 +2102,12 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                     plot_name, target
                 ),
             )
+        self._plot_context_actions["aircraft_map"] = install_measurement_plot_menu(
+            self.aircraft_map_plot,
+            reset=lambda: self.aircraft_map_plot.setRange(
+                xRange=(-180.0, 180.0), yRange=(-90.0, 90.0), padding=0.0
+            ),
+        )
 
     def _remember_plot_range(self, name: str, plot: pg.PlotWidget) -> None:
         plot.getViewBox().updateAutoRange()
@@ -1853,6 +2155,11 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.prepare_for_shutdown()
+        if (
+            self._aircraft_metadata_thread is not None
+            and self._aircraft_metadata_thread.isRunning()
+        ):
+            self._aircraft_metadata_thread.wait()
         if self._capture_thread is not None and self._capture_thread.isRunning():
             self._capture_thread.requestInterruption()
             self._capture_thread.wait(1500)

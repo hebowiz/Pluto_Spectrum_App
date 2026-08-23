@@ -133,7 +133,9 @@ def test_adsb_workspace_displays_saved_multi_packet_fixture() -> None:
         assert window.packet_dock.windowTitle() == "Packet List"
         assert window.summary_dock.windowTitle() == "Message Summary"
         assert window.aircraft_dock.windowTitle() == "Detected Aircraft"
-        assert window.aircraft_summary_dock.windowTitle() == "Aircraft Summary"
+        assert window.aircraft_summary_dock.windowTitle() == "Aircraft Details"
+        assert window.aircraft_detail_tabs.count() == 2
+        assert window.aircraft_detail_tabs.tabText(1) == "Position History"
     finally:
         window.close()
 
@@ -161,6 +163,9 @@ def test_adsb_aircraft_summary_aggregates_messages_by_confirmed_icao() -> None:
         assert values["Latitude"] == "52.265780 degree"
         assert values["Longitude"] == "3.938913 degree"
         assert values["Type Codes"] == "11"
+        track_longitude, track_latitude = window.aircraft_track_item.getData()
+        assert track_longitude[-1] == pytest.approx(3.938913, abs=1e-6)
+        assert track_latitude[-1] == pytest.approx(52.265780, abs=1e-6)
     finally:
         window.close()
 
