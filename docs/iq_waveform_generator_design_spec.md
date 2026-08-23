@@ -864,3 +864,405 @@ Bluetooth HDTは、既存BR/EDRを単純に高速再生する機能として扱�
 - modulationとmapping
 - symbol rateとchannel定義
 - 規格固有の測定条件および合否判定
+
+---
+
+## 36. Visual Packet Composer UI（2026-08-24追記）
+
+従来の固定parameter panelだけではなく、GNU Radioのflow graphに近い視覚的な操作でpacketを構成できる
+`Visual Packet Composer`をGeneratorの中心UIとする。ただしMVPでは任意分岐を持つ汎用DSP graphにはせず、
+packet生成に特化した型付きの直列構造とする。これによりpacketの時間順序が常に一意となり、sample境界、
+CRC依存範囲、変調切替位置を検証可能にする。
+
+基本概念:
+
+```text
+Packet Fields
+[Preamble] -> [Sync / Access Address] -> [Header] -> [Payload] -> [CRC]
+
+Signal Processing
+[Bit Processing] -> [Symbol Mapping] -> [TX Filter] -> [Modulation]
+                 -> [Power Envelope] -> [Impairment] -> [Output]
+```
+
+`Packet Fields`はpacketの論理構造、`Signal Processing`はbit列からIQを生成する処理を表す。
+1つのfield cardへ全DSP設定を重複して埋め込まず、fieldまたは連続field groupに`Modulation Profile`を
+割り当てる。これにより、BR/EDRのように1packet中でGFSKからDPSKへ切り替わる波形を表現する。
+
+例:
+
+```text
+[Access Code: GFSK] -> [Header: GFSK] -> [Guard]
+                    -> [EDR Sync: DPSK] -> [Payload: pi/4-DQPSK] -> [Trailer]
+```
+
+### 36.1 Main Window構成
+
+- 左: Block Palette
+  - Field、data source、computed field、modulation profile、power制御blockを分類表示する
+- 中央: Packet Canvas / Timeline
+  - field cardを時間順に直列配置する
+  - drag and dropによる追加・挿入・並べ替えに対応する
+- 右: Property Inspector
+  - 選択blockの全parameterを数値・列挙・table形式で編集する
+- 下段: Preview Workspace
+  - 実際に生成したIQから計算した複数plotをdock widgetで表示する
+- 上部: Global / Output Toolbar
+  - sample rate、SPS、profile、output backend、Generate、Transmit、Stopを配置する
+
+field cardには少なくとも次を簡潔に表示する。
+
+- field name
+- data sourceまたは計算種別
+- bit / symbol length
+- modulation profile
+- duration
+- fixed / generated / computedの区別
+- validation error / warning
+
+### 36.2 Block操作
+
+- Paletteから接続位置へdropしてfieldを追加する
+- dragによる順序変更
+- copy / duplicate / delete
+- multi-selectとgroup化
+- enable / bypass
+- block名変更
+- propertyのcopy / paste
+- Standard Profileから生成した保護fieldはlock状態を表示する
+- lock解除または規定値変更時はExperimental Profileへ遷移することを明示する
+
+同一blockの再クリックやcanvas選択と、Preview上のfield region選択を相互連動させる。
+
+### 36.3 Field data source
+
+最低限、次のdata sourceを用意する。
+
+- Fixed binary / hexadecimal value
+- PRBS-9
+- Random
+- Counter
+- User text / byte sequence
+- File input
+- Computed field
+  - CRC
+  - HEC
+  - Length
+  - Whitening
+  - FEC output
+
+computed fieldは参照元を安定したfield IDと範囲で保持する。例えばCRCは`Header`から`Payload`までを
+対象として指定でき、並べ替え後も表示名ではなくIDにより依存関係を維持する。循環参照、参照切れ、
+規定長不一致は生成前validation errorとする。
+
+data表示・編集はbin / dec / hexを切り替え可能とし、bit orderingとair orderingを明示的に区別する。
+
+---
+
+## 37. Multi-track Packet Timeline
+
+Packet Canvasは単なるblock列ではなく、共通時間軸を持つ複数trackとして扱う。
+
+```text
+Time             ------------------------------------------------------>
+Field Track      [Preamble][Access][Header][Payload...............][CRC]
+Modulation Track [          GFSK          ][Guard][DPSK...............]
+Power Track      [Idle][Ramp Up][Plateau.................][Ramp Down]
+Marker Track             | Field / Symbol / Sample boundary |
+```
+
+初期track:
+
+1. Field Track
+2. Modulation Profile Track
+3. Power Envelope Track
+4. Marker / Boundary Track
+
+すべての境界は内部的にsample indexで保持し、GUIではbit、symbol、time、sampleの表示単位を切り替える。
+symbol rateが異なる区間や、bit数とsymbol数が一致しない多値変調でも丸め誤差を累積させない。
+
+---
+
+## 38. Power Envelope Layer
+
+Power制御は個々のfieldの付属parameterではなく、packet全体へ重ねる上位layerとして実装する。
+これにより立ち上がり・立ち下がり、Guard interval、変調切替部、inter-packet gapを同じ時間軸上で制御する。
+
+Power Envelopeの初期機能:
+
+- Pre Idle / Post Idle level
+- Ramp Up / Ramp Down duration
+- start / plateau / guard / end level
+- GFSK / DPSKなど区間ごとのrelative power
+- Guard PowerまたはGuard Depth
+- control pointの追加・削除・drag編集
+- 数値入力による厳密なboundary / level指定
+- Linear amplitude、Linear power、dB interpolationの区別
+- Linear、Raised Cosine、Gaussian shape
+- 将来のcustom curve
+- phase continuous / phase reset policy
+
+Power Trackの縦軸は既定でrelative dBとし、内部ではcomplex IQへ掛けるlinear amplitudeへ変換する。
+意図しない二重scalingを防ぐため、Modulatorのnormalized IQ、section relative power、global backoff、
+Backend output levelを別parameterとしてmetadataへ記録する。
+
+Power EnvelopeはIQ振幅制御であり、hardwareのRF muteとは同一視しない。特にPlutoではzero IQ区間でも
+LO leakageやDC offsetによる残留出力があり得る。hardware RF ON/OFF、TX attenuation、R&S marker制御などは
+Backend capabilityとして別に扱う。
+
+---
+
+## 39. Bluetooth Packet Template要件
+
+GeneratorはBluetooth専用画面へ固定せず、汎用blockからBluetooth templateを展開する。
+template展開後はVisual Packet Composer上で内容を確認でき、Experimental Profileでは自由に変更できる。
+
+最低限、次の要素を表現できること。
+
+### 39.1 BR
+
+- GFSK
+- Preamble / Access Code / Header / Payload
+- HEC / CRC
+- Whitening
+- packet typeに応じたFEC
+- PRBS-9およびfixed payload
+
+### 39.2 EDR
+
+- BR GFSK section
+- Guard
+- EDR Synchronization Sequence
+- pi/4-DQPSKおよび8DPSK
+- Trailer
+- Bluetooth mappingとair ordering
+- SRRC TX filter
+- BR / EDR section間のpower transition
+- 2-DHx / 3-DHx template（DH1をMVPとし、DH3 / DH5へ拡張）
+
+### 39.3 LE
+
+- LE 1M / LE 2M
+- Preamble polarityとAccess Address
+- PDU / CRC / Whitening
+- Advertising / Data channel template
+- LE CodedのFEC / Pattern Mapperを後から追加可能な構造
+
+### 39.4 共通送信layout
+
+- channel / center frequency
+- single、continuous、periodic、specified count
+- inter-packet interval
+- packet repetition
+- 将来のchannel hopping schedule
+
+規格値を固定したStandard Profileと、symbol rate、filter、guard、mapping、powerを変更できる
+Experimental Profileを明確に区別する。
+
+---
+
+## 40. Real-time Previewと編集時再生成
+
+Previewはparameterから描いた疑似図ではなく、常に生成済みIQとmetadataを入力として表示する。
+
+初期plot:
+
+- I / Q vs Time
+- IQ Power / Envelope
+- Instantaneous FrequencyまたはPhase
+- Spectrum
+- IQ Trajectory
+- Constellation
+- Field / Symbol Table
+- Field region、symbol boundary、power control point overlay
+
+時間軸plotはX軸を共有する。canvasでfieldを選択すると対応regionへfocusし、plot上のregionまたはsymbolを
+選択すると該当field cardとProperty Inspectorを選択する。Constellationは選択field、選択group、
+任意time regionのいずれかへ表示対象を限定できる。
+
+編集時は次の手順で更新する。
+
+```text
+Property / Block change
+        -> 100-200 ms debounce
+        -> dependency validation
+        -> changed block以降のcache invalidation
+        -> background waveform generation
+        -> preview analysis
+        -> GUI update
+```
+
+生成中に新しい変更が入った場合は古い結果を破棄し、generation revisionが最新の結果だけを表示する。
+長波形では表示専用decimationを使用するが、field / symbol boundaryとselected pointを必ず保持する。
+送信に使用するIQは表示用decimationを適用しない。
+
+---
+
+## 41. Project保存形式
+
+Visual Packet Composerのprojectはschema version付きJSONを中心とし、生成波形そのものと生成条件を分離する。
+
+保存対象:
+
+- field blockとstable ID
+- block order / group
+- data sourceとcomputed dependency
+- modulation profile
+- filter parameter
+- Power Envelope control pointとinterpolation
+- impairment
+- sample rate / SPS
+- Recording Layout
+- output backend設定（credential等の秘密情報は除外）
+- preview layout / display setting
+- Standard / Experimental Profileと仕様revision
+
+JSON projectから同一のnormalized IQを再生成できることを再現性の条件とする。NPZ、IQ-TAR、raw IQなどは
+生成結果のexportであり、project fileの代替とはしない。
+
+---
+
+## 42. Visual Composer MVP更新
+
+MVPのGUI範囲を次へ更新する。
+
+1. 直列Field TrackとBlock Palette
+2. add / insert / reorder / duplicate / delete / edit
+3. Fixed、PRBS-9、Random、CRC系computed field
+4. GFSK、pi/4-DQPSK、8DPSK Modulation Profile
+5. Power Envelope Track
+6. Ramp Up / Ramp Down / Guard level編集
+7. 2-DH1 / 3-DH1 template
+8. actual IQによるPower、Instantaneous Frequency、Spectrum、Constellation preview
+9. JSON project保存・読込
+10. NPZ / IQ-TAR export
+11. Pluto cyclic transmission
+
+任意分岐を持つDSP graph、厳密なhost timed single-shot、realtime hopping、LE Coded、R&S Backendは、
+このMVPの型付き直列modelを壊さず後から追加する。
+
+---
+
+## 43. Application名称と機器非依存性（2026-08-24追記）
+
+既存のPluto SA / Pluto VSAとの統一感を優先し、application表示名は`Pluto VSG`とする。
+ただし名称はapplication familyを示すものであり、送信先をADALM-Plutoへ限定しない。
+
+- Application name: `Pluto VSG`
+- Window title基本形: `Pluto VSG - IQ Waveform Generator`
+- Python package候補: `pluto_vsg`
+- Waveform Engine: hardware非依存
+- Output Backend: File、ADALM-Pluto、R&S SMCV100B、将来追加するSDR / VSG
+
+現在の出力先はtitleまたはstatus areaへ明示する。
+
+```text
+Pluto VSG - Offline Waveform
+Pluto VSG - ADALM-Pluto
+Pluto VSG - R&S SMCV100B
+```
+
+Generatorの`QSettings`はSA / VSAと別namespaceに保存する。ハードウェアの低レベル共通処理は再利用しても、
+SA / VSA / VSG間でmeasurement configやoutput configを暗黙共有しない。同一Plutoへの複数applicationからの
+競合アクセスはdevice lockにより拒否し、使用中applicationを可能な範囲で表示する。
+
+---
+
+## 44. RF Output Levelと校正
+
+### 44.1 電力値の責務分離
+
+ユーザーが指定する目標RF出力と、normalized IQ、digital backoff、hardware gain、外部経路補正を分離する。
+
+```text
+Target / Estimated RF Power
+  = calibrated hardware reference
+  + waveform RMS / digital backoff contribution
+  + TX hardware gain contribution
+  + frequency-dependent correction
+  + external gain
+  - external attenuation
+```
+
+実装では上式を単純な固定加算式と仮定せず、機器ごとの校正modelで推定する。PlutoのTX hardware gain設定値だけを
+connector端の絶対dBmとして扱わない。周波数、sample rate、RF bandwidth、個体差、温度、waveform PAPR、
+量子化・clippingなどにより実出力が変化し得る。
+
+UIでは少なくとも次を個別表示・設定する。
+
+- Target RF Power
+- Waveform Peak / RMS / PAPR
+- Digital Backoff
+- TX Hardware GainまたはR&S RF Level
+- External Gain
+- External Attenuation
+- Calibration Correction
+- Estimated Output Power
+- Last Measured Power
+- Calibrated / Uncalibrated / Out of Calibration Range状態
+
+### 44.2 変調波の電力基準
+
+packet波形の既定電力基準は、Ramp、Guard、Idleを除いた定常変調区間の`Mean ON Power`とする。
+Recording Layout全体の平均はduty cycleやinter-packet intervalで変化するため、目標RF出力の基準には使用しない。
+
+必要に応じて次を併記可能にする。
+
+- Mean ON Power
+- Burst Average Power（定義したburst region全体）
+- Recording Average Power
+- Peak Envelope Power
+
+Power Envelopeの各sectionへrelative powerを指定した場合、基準sectionと測定regionをmetadataへ記録する。
+
+### 44.3 Pluto手動校正workflow
+
+初期実装では外部power meter、SAまたは校正済みVSAによる手動合わせ込みを採用する。
+
+1. 対象Plutoと安全な初期TX gainを選択する
+2. 既知のCWまたは校正用基準波形を生成する
+3. 指定frequency / sample rate / RF bandwidthで送信する
+4. 外部測定器でconnector端または定義済みreference planeの電力を測定する
+5. 実測dBmと使用した外部ATT / Gainを入力する
+6. calibration pointを保存する
+7. 複数frequency・複数gain pointで繰り返す
+
+校正テーブルの最低項目:
+
+- Backend type
+- Device ID / serial
+- Center frequency
+- Sample rate
+- RF bandwidth
+- TX hardware gain / attenuation
+- Calibration waveform ID
+- Waveform peak / RMS / backoff
+- External gain / attenuation
+- Measured power at reference plane
+- Correctionまたはmodel parameter
+- Measurement timestamp
+- Measurement instrument memo
+
+校正点の間は明示した補間方式で推定する。校正範囲外を無警告で外挿せず、`Out of Calibration Range`として扱う。
+未校正時にも送信自体は可能とするが、表示は例えば`Estimated -12.3 dBm (Uncalibrated)`とし、保証値に見せない。
+
+### 44.4 R&S Backend
+
+SMCV100Bでは機器のRF level設定とARB waveform level / crest factorの関係をmanualおよび実測で確認する。
+機器のcalibrated level機能を利用する場合も、Pluto VSG側でnormalized IQのRMS、peak、PAPR、backoffを記録し、
+R&Sが示すlevel definitionと対応付ける。R&S設定値と外部実測値は別項目として保持する。
+
+### 44.5 将来のclosed-loop校正
+
+手動入力をMVPとし、将来はSCPI対応power meter、SA、R&S VSAなどから実測値を取得してcalibration tableを
+自動更新できる構造とする。自動校正中もRF安全上限、最大gain、周波数範囲、外部ATT確認を必須とする。
+
+### 44.6 RF安全要件
+
+- 起動時および接続直後はRF OFF
+- 未校正時は安全側の低いdefault outputから開始
+- Target Powerから必要gainを求める場合もbackend上限を超えない
+- clippingをhardware gain低下ではなく、まずdigital backoff不足として検出する
+- calibration reference planeと外部ATT / Gainを送信前確認画面へ表示する
+- Stop、例外、window終了時に既存の送信state machineでRF停止を試みる
+- zero IQはPlutoの完全なRF muteを保証しないことをUIとdocsに明記する
