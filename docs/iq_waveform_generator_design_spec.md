@@ -10,6 +10,9 @@ R&S SMCV100B と ADALM-Pluto で共用できる、PythonベースのIQ波形生�
 
 Bluetooth専用オプションを使用しない R&S SMCV100B でも、ARB用IQ波形を入力することでEDRパケットを模擬できる構成を想定する。
 
+R&S SMCV100B / WinIQSIM2の設定項目、メニュー構造、およびPluto VSGへ採用するUI方針は
+`docs/pluto_vsg_rs_winiqsim2_ui_study.md`に整理する。本設計書と同資料を合わせて実装時の基準とする。
+
 ---
 
 ## 2. 基本方針

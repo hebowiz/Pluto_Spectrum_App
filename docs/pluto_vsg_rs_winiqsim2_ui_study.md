@@ -1,0 +1,348 @@
+# Pluto VSG: R&S VSG / WinIQSIM2 UI調査
+
+更新日: 2026-08-24
+
+## 1. 目的と参照範囲
+
+R&S SMCV100Bのローカルマニュアルと、R&S公式のWinIQSIM2マニュアル、仕様書、Bluetooth関連ドキュメントを参照し、Pluto VSGでパケットを設計する際に必要な設定項目とUI階層を整理する。
+
+参照資料:
+
+- `docs/SMCV100B_UserManual_en_10.pdf`
+  - Custom Digital Modulation: おおむねp.106–123
+  - ARB / waveform再生と転送: おおむねp.138–160
+- R&S WinIQSIM2 User Manual（公式オンライン版）
+- R&S WinIQSIM2 Specifications（公式オンライン版）
+- R&S Bluetooth BR/EDR / LE waveform generation manuals（公式オンライン版）
+
+R&Sの画面を複製することが目的ではない。設定の責務分離、標準プリセット、依存項目の表示制御、Data/Control List Editor、グラフィック表示をPluto VSGのVisual Composerへ取り込むための調査である。
+
+## 2. R&S SMCV100Bの基本構造
+
+### 2.1 Custom Digital Modulation
+
+主要アクセスパスは次の構成である。
+
+```text
+Baseband
+└─ Custom Digital Mod
+   ├─ General
+   ├─ Trigger
+   ├─ Marker
+   ├─ Clock
+   ├─ Data Source
+   ├─ Modulation
+   └─ Filter
+```
+
+`Power Ramp Control`はGeneralから開く下位設定である。Custom Digital Modulationはリアルタイム生成系であり、設定変更が出力へ直接反映される。一方、WinIQSIM2で事前計算したIQはARBへ転送して再生する。
+
+### 2.2 General
+
+- State
+- Set To Default
+- Save / Recall
+- Set according to Standard
+- Symbol Rate
+- Coding
+- Power Ramp Control
+
+標準を選択すると変調方式、symbol rate、filter、codingが一括設定される。その後いずれかを変更すると設定種別は`User`になる。これはPluto VSGでも採用する。
+
+### 2.3 Data Source
+
+- All 0 / All 1
+- PRBSおよびPRBS type
+- Pattern（SMCV100Bでは最大64 bit）
+- Data List (`*.dm_iqd`)
+- Data Listの新規作成、編集、ファイル選択
+- Control List (`*.dm_iqc`)
+- Connector Settings
+
+Data List Editorの主な操作:
+
+- BIN / HEX表示
+- cursor position、list length、Go To
+- 範囲選択、Copy / Cut / Paste
+- Replace / Insert
+- Save / Save As
+
+Pluto VSGでは固定データ、PRBS、ファイル、計算フィールド、CRC/HEC、whiteningをField Blockごとに選択できるよう拡張する。
+
+### 2.4 Modulation
+
+- Modulation Type
+- theoretical constellation
+- User Mapping (`*.vam`)
+- ASK Depth
+- FSK Deviation
+- Angle Alpha
+- Variable FSK（4/8/16FSK）とシンボル別deviation
+- APSKのGamma / Gamma1
+- Modulation CW switching
+
+設定可能項目はmodulation typeに応じて切り替わる。常に全入力欄を並べるのではなく、選択方式に有効な設定だけをInspectorに表示する。
+
+### 2.5 Filter
+
+- Filter Type
+- Roll Off FactorまたはB×T
+- Cut Off Frequency Factor
+- Gaussian / Lowpass用cutoff
+- Raised Cosine用bandwidth
+- User Filter (`*.vaf`)
+
+WinIQSIM2側ではoversamplingのAuto/Manualも波形計算条件として扱われる。Pluto VSGでは`Samples per Symbol`、sample rate、filter span/group delay、出力帯域見積りを同じページで確認可能にする。
+
+### 2.6 Power Ramp ControlとControl List
+
+- Enable / State
+- Source（Control List）
+- Ramp Function: Linear / Cosine
+- Ramp Time [symbols]
+- Rise Delay [symbols]
+- Fall Delay [symbols]
+- Lev_Att時のattenuation
+- In Baseband Only
+
+Control Data EditorではMarker、CW、Hop、Burst Gate、Lev_Attを色分けされたレーンとして編集する。Ramp Up/Down等のpreset、cursor、transition position/state table、zoom、saveを備える。
+
+SMCV100Bのpower rampにはsymbol rate上限などの実機制約があるが、これはR&S Backendのcapabilityとして扱い、Waveform Engine全体の制約にはしない。
+
+### 2.7 Trigger / Marker / Clock
+
+共通baseband設定として次を持つ。
+
+- Trigger source: internal / external
+- Trigger mode: Auto、Single、Retrigger、Armed Auto、Armed Retrigger
+- Trigger delay / inhibit
+- Marker signal / mapping / connector
+- Clock source: internal / external
+
+Pluto VSGでは外部triggerが未対応でも、model上は`TriggerPolicy`として保持し、Backend capabilityによってUIの有効/無効を切り替える。
+
+## 3. WinIQSIM2で追加される設計概念
+
+WinIQSIM2のCustom Digital ModulationはSMCV100Bと概ね同じ分類を持つが、オフライン波形生成のため次が追加される。
+
+- Generate Waveform File
+- Sequence Length
+- Samples / Sample Rate
+- Oversampling Auto / Manual
+- 生成波形の機器転送
+- IQ import、AWGN、multicarrier、multisegment waveform
+- 最大3個のconfigurable graphic
+  - I/Q vs Time
+  - Magnitude / Phase vs Time
+  - Constellation
+  - Spectrum
+  - Eye Diagram
+  - CCDF
+
+Pluto VSGではgraphic数を3個へ制限せず、Dock Widgetとして追加・削除、配置保存を可能にする。previewは設定値から描くのではなく、生成済みIQを再解析した結果を表示する。
+
+## 4. Bluetooth packet generationで必要な設定
+
+### 4.1 BR / EDR
+
+- Bluetooth version / profile preset
+- Transport Mode
+- Packet Type
+- Sequence Length / packet count
+- Slot Timing / packet interval
+- Packet Configuration / Packet Editor
+  - BD_ADDRからAccess Code生成
+  - header各bit
+  - SEQN toggle
+  - HEC自動計算
+  - payload length / payload data source
+  - payload CRC自動計算
+  - whitening
+- BR GFSK parameters
+  - symbol rate
+  - modulation index / deviation
+  - Gaussian filter / B×T
+- EDR parameters
+  - π/4-DQPSK / 8DPSK
+  - mapping / bit ordering
+  - root raised cosine filter / roll-off
+  - guard、sync、trailer、modulation transition
+- Power Ramp
+- Dirty Transmitter / impairments
+  - carrier frequency offset
+  - drift rate / drift deviation
+  - start phase
+  - timing error
+  - modulation index error
+
+### 4.2 Bluetooth LE
+
+- PHY: LE 1M / LE 2M / LE Coded
+- RF channel / advertising or data channel
+- Access Address
+- preamble polarity derived from Access Address
+- CRCInit
+- whitening enable / channel index
+- PDU / payload
+- coding and pattern mapper for LE Coded
+- packet interval / event sequence
+- power ramp and impairments
+
+Bluetooth専用画面は汎用変調器の設定値を裏で上書きする別エンジンにしない。Packet TemplateがField Block、Modulation Segment、Filter、Power Envelope、Control Trackを生成する構造にする。
+
+## 5. Pluto VSGへ採用するメニュー構造
+
+```text
+File
+├─ New Project
+├─ Open / Recent
+├─ Save / Save As
+├─ Export IQ / Export Waveform Package
+└─ Exit
+
+Edit
+├─ Undo / Redo
+├─ Cut / Copy / Paste
+├─ Duplicate / Delete
+└─ Preferences
+
+Waveform
+├─ Profile / Standard
+├─ Packet Composer
+├─ Data Sources and Lists
+├─ Modulation Profiles
+├─ TX / Measurement Filters
+├─ Power Envelope and Control Tracks
+├─ Impairments / Dirty Transmitter
+└─ Recording Layout / Sequence
+
+Graphics
+├─ Add Graphic
+│  ├─ IQ / Magnitude / Phase / Power
+│  ├─ Instantaneous Frequency
+│  ├─ Spectrum / Time-Frequency
+│  ├─ Constellation / Eye
+│  └─ CCDF
+├─ Remove Graphic
+├─ Link Time Axes
+└─ Save / Restore Layout
+
+Output
+├─ Offline / File
+├─ Device Manager
+├─ ADALM-Pluto
+├─ R&S VSG
+├─ RF Frequency / Level / Calibration
+├─ Transfer / Generate
+└─ Start / Stop
+
+Tools
+├─ Validate Project
+├─ Inspect Generated IQ
+├─ Device Capabilities
+└─ Calibration
+```
+
+## 6. Composer内の設定階層
+
+R&Sのタブ分類は右側Inspectorへ取り込み、中央はGNU Radio風の直列Field Block Composerとする。
+
+1. Project / General
+   - Standard/User、sequence length、sample rate、SPS、metadata
+2. Packet / Frame
+   - transport、packet type、slot timing、field sequence
+3. Selected Field / Data Source
+   - fixed、pattern、PRBS、file、computed、CRC、whitening
+4. Modulation
+   - type、mapping、coding、symbol rate、deviation/phase alphabet
+5. Filter
+   - type、B×T、roll-off、cutoff、span、custom coefficients
+6. Power Envelope / Control Track
+   - level、ramp shape/time/offset、gate、idle/guard level
+7. Impairments
+   - CFO、drift、timing、phase、IQ imbalance、noise
+8. Sequence / Output
+   - repetition、period、trigger、marker、output device、RF level
+
+Field Blockを選択すると該当Inspectorへ移動し、上位Packet/Project設定はbreadcrumbから開く。R&Sの「タブ名に現在値を表示する」考え方を取り入れ、例えば`Filter: RRC α=0.4`のように現在値を要約する。
+
+## 7. UI動作ルール
+
+### 7.1 Standard presetとUser化
+
+- standard presetは関連設定を一括投入する。
+- preset値から編集された場合は`Standard (Modified)`または`User`と表示する。
+- 変更項目とstandard値の差分を表示し、preset再適用時の上書き範囲を確認可能にする。
+
+### 7.2 Context-sensitive settings
+
+- modulation/filter/packet typeに無関係な項目は非表示またはdisabledにする。
+- Backend固有制約はWaveform Engineの制約と分離する。
+- 無効な組合せは画面内に理由を表示し、曖昧な状態で生成しない。
+- sample count、sample rate、duration、bandwidth、memory estimateを常時表示する。
+
+### 7.3 Data / Control editor
+
+R&SのList Editorを参考に、次を採用する。
+
+- BIN / HEX / symbol表示
+- field boundaryとsymbol index
+- Insert / Replace、範囲選択、Go To、Copy/Cut/Paste
+- CRC/HEC/whitening等のcomputed fieldはlock表示し、入力依存関係を示す
+- Control Trackは色分けレーン、draggable point、symbol/field snap、presetを持つ
+- 平坦なdata/control fileだけを正本にせず、project内の構造化modelを正本とする
+
+### 7.4 Graphics
+
+- 設定変更はdebounceしてpreviewを再生成する。
+- graphは生成IQ、field boundary、symbol point、power envelope、marker/control eventを同じ時刻基準で表示する。
+- 選択Fieldへzoom、全体表示、X軸link、cursor/markerを提供する。
+- 重い波形はworkerで計算し、GUI threadには表示用decimated dataだけを渡す。
+
+## 8. R&Sから踏襲する点・変更する点
+
+踏襲する点:
+
+- General / Data / Modulation / Filter / Power / Triggerの責務分離
+- standard presetとUser化
+- context-sensitive parameter
+- frame structureの可視化
+- Data List / Control Listの編集思想
+- 波形生成、graphics、機器転送が一つのworkflowにあること
+
+Pluto VSG向けに変更する点:
+
+- 汎用Custom Digital ModとBluetooth専用Packet Editorを同じComposer modelへ統合する。
+- R&Sのbinary list中心ではなく、field/segment/control trackを正本にする。
+- realtime generatorとARBを別アプリにせず、Output Backendの違いとして扱う。
+- SMCV100B固有のsymbol rateやmemory制約を全Backendへ波及させない。
+- 無効な組合せを警告だけで生成せず、validation errorとして明確化する。
+- graphic数を固定せず、複数Dockとlayout保存へ対応する。
+
+## 9. 実装優先順位
+
+### MVP
+
+1. Project / Standard preset
+2. Field Block Composer
+3. Fixed / PRBS / computed data source
+4. GFSK、π/4-DQPSK、8DPSK
+5. Gaussian / RRC filter
+6. Power Envelope / guard / repetition
+7. IQ Power、Spectrum、Instantaneous Frequency、Constellation preview
+8. IQ file exportとPluto Backend
+
+### 次段階
+
+- Bluetooth Packet Editor、HEC/CRC/whitening
+- Control Track / marker
+- impairments / dirty transmitter
+- eye / CCDF / time-frequency
+- R&S transfer Backend
+- multisegment / mixed modulation packet
+
+## 10. 調査上の注意
+
+- WinIQSIM2のstandalone PDFは現時点でリポジトリへ保存していない。公式オンライン版を参照した。
+- R&SのBluetooth固有項目はoption/versionで差があるため、実装時は特定機種のUI名ではなく内部modelの意味を基準にする。
+- 本資料はUI/設定構造の参考資料であり、Bluetooth規格値の一次資料ではない。規格依存値はBluetooth Core Specificationと照合する。
