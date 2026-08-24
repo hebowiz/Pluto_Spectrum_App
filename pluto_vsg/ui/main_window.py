@@ -15,8 +15,9 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     make_measurement_plot,
 )
 from pluto_vsg.engine import BluetoothBRWaveformEngine, GenerationResult
-from pluto_vsg.export import save_iq_tar, save_npz
+from pluto_vsg.export import save_iq_tar, save_npz, save_wv
 from pluto_vsg.model import (
+    BluetoothPacketKind,
     PayloadSourceKind,
     WaveformProject,
     validate_project,
@@ -71,7 +72,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         if settings is None:
             raise ValueError("Bluetooth settings are required")
         self._project = project
-        self.setWindowTitle("Bluetooth BR / DH1 Settings")
+        self.setWindowTitle("Bluetooth BR / EDR Settings")
         form_widget = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(form_widget)
 
@@ -85,7 +86,12 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.uap_edit = QtWidgets.QLineEdit(f"{settings.uap:02X}")
         self.clock_edit = QtWidgets.QLineEdit(f"{settings.clock_6_1:02X}")
         self.lt_addr_spin = self._integer_spin(0, 7, settings.lt_addr)
-        self.packet_type_value = QtWidgets.QLabel("4 (DH1, fixed)")
+        self.packet_type_combo = QtWidgets.QComboBox()
+        for kind in BluetoothPacketKind:
+            self.packet_type_combo.addItem(kind.value, kind)
+        self.packet_type_combo.setCurrentIndex(
+            self.packet_type_combo.findData(BluetoothPacketKind(settings.packet_kind))
+        )
         self.flow_combo = self._bit_combo(settings.flow)
         self.arqn_combo = self._bit_combo(settings.arqn)
         self.seqn_combo = self._bit_combo(settings.seqn)
@@ -120,6 +126,11 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             -1000.0, 1000.0, settings.carrier_frequency_offset_hz / 1e3, 3
         )
         self.bt_spin = self._double_spin(0.05, 2.0, settings.gaussian_bt, 3)
+        self.edr_guard_spin = self._integer_spin(0, 1000, settings.edr_guard_symbols)
+        self.edr_rolloff_spin = self._double_spin(0.01, 1.0, settings.edr_rolloff, 3)
+        self.edr_power_spin = self._double_spin(
+            -60.0, 20.0, settings.edr_relative_power_db, 3
+        )
         self.pre_idle_spin = self._integer_spin(
             0, 1_000_000, settings.pre_idle_symbols
         )
@@ -163,7 +174,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         header_form = QtWidgets.QFormLayout(header_group)
         for label, widget in (
             ("LT_ADDR", self.lt_addr_spin),
-            ("TYPE", self.packet_type_value),
+            ("Packet Type / TYPE", self.packet_type_combo),
             ("FLOW", self.flow_combo),
             ("ARQN", self.arqn_combo),
             ("SEQN", self.seqn_combo),
@@ -181,6 +192,9 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             ("FSK Deviation [kHz]", self.deviation_spin),
             ("Carrier Offset [kHz]", self.cfo_spin),
             ("Gaussian B*T", self.bt_spin),
+            ("EDR Guard [symbols]", self.edr_guard_spin),
+            ("EDR SRRC Roll-off", self.edr_rolloff_spin),
+            ("EDR Power rel. GFSK [dB]", self.edr_power_spin),
             ("Pre Idle [symbols]", self.pre_idle_spin),
             ("Post Idle [symbols]", self.post_idle_spin),
             ("Ramp Up [symbols]", self.rise_spin),
@@ -215,7 +229,11 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.flow_combo.currentIndexChanged.connect(self._update_header_preview)
         self.arqn_combo.currentIndexChanged.connect(self._update_header_preview)
         self.seqn_combo.currentIndexChanged.connect(self._update_header_preview)
+        self.packet_type_combo.currentIndexChanged.connect(
+            self._packet_type_changed
+        )
         self._payload_source_changed()
+        self._packet_type_changed()
         self._update_header_preview()
 
     @staticmethod
@@ -252,9 +270,11 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         except ValueError:
             self.hec_value.setText("Invalid UAP")
             return
+        packet_kind = BluetoothPacketKind(self.packet_type_combo.currentData())
+        packet_type = 0x8 if packet_kind == BluetoothPacketKind.DH1_3 else 0x4
         packed = (
             self.lt_addr_spin.value()
-            | (0x4 << 3)
+            | (packet_type << 3)
             | (int(self.flow_combo.currentData()) << 7)
             | (int(self.arqn_combo.currentData()) << 8)
             | (int(self.seqn_combo.currentData()) << 9)
@@ -276,6 +296,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             return
         settings = replace(
             self._project.bluetooth_br,
+            packet_kind=BluetoothPacketKind(self.packet_type_combo.currentData()),
             lap=lap,
             uap=uap,
             clock_6_1=clock,
@@ -292,6 +313,9 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             frequency_deviation_hz=self.deviation_spin.value() * 1e3,
             carrier_frequency_offset_hz=self.cfo_spin.value() * 1e3,
             gaussian_bt=self.bt_spin.value(),
+            edr_guard_symbols=self.edr_guard_spin.value(),
+            edr_rolloff=self.edr_rolloff_spin.value(),
+            edr_relative_power_db=self.edr_power_spin.value(),
             pre_idle_symbols=self.pre_idle_spin.value(),
             post_idle_symbols=self.post_idle_spin.value(),
         )
@@ -323,6 +347,23 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             return
         self._project = project
         self.accept()
+
+    def _packet_type_changed(self) -> None:
+        kind = BluetoothPacketKind(self.packet_type_combo.currentData())
+        payload_max = {
+            BluetoothPacketKind.DH1: 27,
+            BluetoothPacketKind.DH1_2: 54,
+            BluetoothPacketKind.DH1_3: 83,
+        }[kind]
+        self.payload_length_spin.setMaximum(payload_max)
+        is_edr = kind != BluetoothPacketKind.DH1
+        for control in (
+            self.edr_guard_spin,
+            self.edr_rolloff_spin,
+            self.edr_power_spin,
+        ):
+            control.setEnabled(is_edr)
+        self._update_header_preview()
 
     def _payload_source_changed(self) -> None:
         source = PayloadSourceKind(self.payload_source_combo.currentData())
@@ -380,7 +421,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.save_action.triggered.connect(self._save_project)
         self.save_as_action = QtGui.QAction("Save As...", self)
         self.save_as_action.triggered.connect(self._save_project_as)
-        self.settings_action = QtGui.QAction("Bluetooth BR / DH1 Settings...", self)
+        self.settings_action = QtGui.QAction("Bluetooth BR / EDR Settings...", self)
         self.settings_action.triggered.connect(self._edit_bluetooth_settings)
         self.generate_action = QtGui.QAction("Generate Waveform", self)
         self.generate_action.setShortcut(QtGui.QKeySequence("F5"))
@@ -389,6 +430,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.export_npz_action.triggered.connect(self._export_npz)
         self.export_iqtar_action = QtGui.QAction("Export R&S IQ TAR...", self)
         self.export_iqtar_action.triggered.connect(self._export_iq_tar)
+        self.export_wv_action = QtGui.QAction("Export R&S WV...", self)
+        self.export_wv_action.triggered.connect(self._export_wv)
         self.validate_action = QtGui.QAction("Validate Project", self)
         self.validate_action.triggered.connect(self._show_validation)
         self.exit_action = QtGui.QAction("Exit", self)
@@ -415,7 +458,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             [self.new_action, self.open_action, self.save_action, self.save_as_action]
         )
         file_menu.addSeparator()
-        file_menu.addActions([self.export_npz_action, self.export_iqtar_action])
+        file_menu.addActions(
+            [self.export_npz_action, self.export_iqtar_action, self.export_wv_action]
+        )
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
         edit_menu = menu_bar.addMenu("Edit")
@@ -485,7 +530,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.inspector.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
-        edit_button = QtWidgets.QPushButton("Edit Bluetooth BR / DH1 Settings...")
+        edit_button = QtWidgets.QPushButton("Edit Bluetooth BR / EDR Settings...")
         edit_button.clicked.connect(self._edit_bluetooth_settings)
         generate_button = QtWidgets.QPushButton("Generate Waveform (F5)")
         generate_button.clicked.connect(self.generate_waveform)
@@ -631,7 +676,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         if settings is not None:
             parameters.extend(
                 [
-                    ("Packet", "DH1"),
+                    ("Packet", BluetoothPacketKind(settings.packet_kind).value),
                     ("BD_ADDR", f"{settings.uap:02X}{settings.lap:06X}"),
                     ("Payload", f"{settings.payload_length_bytes} byte / {settings.payload_source.value}"),
                     ("Whitening", "On" if settings.whitening_enabled else "Off"),
@@ -709,7 +754,23 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.clear()
         self.spectrum_plot.plot(frequency_mhz, spectrum_dbfs, pen=TRACE_COLOR)
 
-        symbol_samples = iq[:: self.project.samples_per_symbol]
+        edr_start = result.metadata.get("edr_start_sample")
+        edr_indices = np.asarray(
+            result.metadata.get("edr_phase_indices", ()), dtype=np.int16
+        )
+        if edr_start is not None and edr_indices.size:
+            sample_positions = (
+                int(edr_start)
+                + self.project.samples_per_symbol // 2
+                + np.arange(edr_indices.size + 1) * self.project.samples_per_symbol
+            )
+            sample_positions = sample_positions[sample_positions < iq.size]
+            symbol_samples = iq[sample_positions]
+            typical_amplitude = float(np.median(np.abs(symbol_samples)))
+            if typical_amplitude > 0.0:
+                symbol_samples = symbol_samples / typical_amplitude
+        else:
+            symbol_samples = iq[:: self.project.samples_per_symbol]
         self.constellation_plot.clear()
         self.constellation_plot.plot(
             symbol_samples.real,
@@ -833,6 +894,26 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         if path:
             save_iq_tar(path, self.result, self.project)
             self.statusBar().showMessage(f"Exported {Path(path).name}")
+
+    def _export_wv(self) -> None:
+        if self.result is None:
+            self.generate_waveform()
+        if self.result is None:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export R&S WV",
+            "waveform.wv",
+            "R&S ARB Waveform (*.wv)",
+        )
+        if not path:
+            return
+        try:
+            save_wv(path, self.result, self.project)
+        except (OSError, ValueError) as error:
+            QtWidgets.QMessageBox.critical(self, "Export R&S WV", str(error))
+            return
+        self.statusBar().showMessage(f"Exported {Path(path).name}")
 
     def _show_validation(self) -> None:
         issues = validate_project(self.project)

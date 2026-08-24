@@ -366,6 +366,7 @@ Pluto VSG向けに変更する点:
 - `pluto_vsg.export`
   - VSAから読めるNPZ
   - R&S互換IQ TAR (`complex float32`)
+  - R&S信号発生器のARBへ直接ロードするSMU-WV (`.wv`)
 - `pluto_vsg.ui`
   - Block Library / Packet Composer / Inspector
   - Bluetooth BR / DH1設定dialog
@@ -375,3 +376,44 @@ Pluto VSG向けに変更する点:
 現時点のComposerはBluetooth templateの構造を表示し、packet fieldの任意追加・削除・並べ替えはまだ無効である。これは、構造変更が生成結果へ反映されない見かけだけの編集UIを避けるためである。次段階でField Block modelを生成graphへ直接接続してから有効化する。
 
 生成IQは既存VSAのBluetooth BR復調器へ戻すround-trip testを行い、DH1のHEC、payload length、payload CRCが成立することを確認する。Project JSON、NPZ、IQ TARにもread-back testを設ける。
+
+次のvertical sliceとして、同じProject/Composer/Engineへ2-DH1と3-DH1を追加した。
+
+- Packet TypeをDH1 / 2-DH1 / 3-DH1から選択
+- packet typeごとのpayload上限（27 / 54 / 83 byte）をvalidationへ反映
+- BR Access Code/HeaderからGuardを経てEDRへ連続する単一IQを生成
+- 2-DH1: pi/4-DQPSK、3-DH1: 8DPSK（Bluetooth EDR mapping）
+- SRRC roll-off、Guard長、GFSKに対するEDR相対powerを設定可能
+- ComposerへGuard / EDR Sync / EDR Payload / EDR Trailer階層を表示
+- Constellation previewはEDR区間のsymbol判定点を抽出して表示
+- 既存VSAの検証済みEDR fixtureとdifferential phase列が一致することをtestで確認
+- 生成IQを汎用VSAへ直接渡し、両packetでsync相関99%以上、symbol error 0、
+  全244 symbol一致、差動EVM 5%未満となるoffline round-trip testを追加
+
+次の優先項目は、ComposerのField Block編集を生成graphへ接続することと、Pluto Backendの
+安全なcyclic送信を追加して実機loopback検証へ進むことである。
+
+## 12. R&S WV export仕様（2026-08-24）
+
+R&S SMCV100B User Manual revision 10、4.6.7「Tags for waveforms, data and
+control lists」（pp.175–184）を一次資料として実装した。`.wv`はraw IQではなく、ASCII tag
+headerとbinary IQを一つのfileに格納するARB waveform形式である。
+
+- 先頭tagは`{TYPE: SMU-WV,<checksum>}`。
+- `CLOCK`へsample rate [Hz]、`SAMPLES`へ複素sample数を格納する。
+- `LEVEL OFFS`には量子化後IQのRMS/Peakが16-bit full scaleより何dB低いかを格納する。
+- `EMPTYTAG`で`WAVEFORM` tag先頭をhex address `0x4000`へ揃える。
+- `WAVEFORM-Length`は`1 + 4 * complex sample count`。先頭1 byteは`#`。
+- binaryはI、Qの順に交互配置したsigned 16-bit two's complement、little-endian。
+- checksumは`0xA50F74FF`を初期値とし、`#`直後から全binary dataをlittle-endian
+  32-bit word単位でXORする。TYPE tagには結果を10進ASCIIで格納する。
+
+export時に波形単独の再正規化は行わない。Project/engineが生成したnormalized complex IQを
+32767 full scaleへ量子化し、実際に書き込んだ量子化IQから`LEVEL OFFS`を求める。これにより
+field間の相対levelとpower envelopeを保持する。空、非finite、全zero、またはvector magnitude
+が1.0を超えるIQは、暗黙のclippingやlevel metadata不整合を避けるためexport errorとする。
+
+UIは`File > Export R&S WV...`から保存する。read-back regression testでは、0x4000 alignment、
+tag値、checksum、I/Q ordering、量子化誤差、level offsetをbinaryから独立に再計算して検証する。
+中心周波数やRF出力levelはbaseband WVの属性ではないため格納せず、R&S VSG側または将来の
+Output Backendで設定する。marker/control listおよびmulti-segment WVは現時点では未実装。

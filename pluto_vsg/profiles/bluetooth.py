@@ -8,11 +8,15 @@ from __future__ import annotations
 
 from pluto_vsg.model import (
     BluetoothBRSettings,
+    BluetoothPacketKind,
     DataSourceKind,
     FieldDefinition,
     PayloadSourceKind,
     StandardProfile,
     WaveformProject,
+    ModulationDefinition,
+    ModulationKind,
+    FilterKind,
 )
 
 
@@ -22,6 +26,7 @@ def _computed_field(
     logical_bits: int,
     transmitted_symbols: int | None = None,
     data: str = "Computed",
+    modulation: ModulationDefinition | None = None,
 ) -> FieldDefinition:
     return FieldDefinition(
         name=name,
@@ -33,14 +38,41 @@ def _computed_field(
         logical_bit_count=int(logical_bits),
         data_source=DataSourceKind.COMPUTED,
         data=data,
+        modulation=modulation or ModulationDefinition(),
     )
 
 
 def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition, ...]:
-    """Return the logical/transmitted hierarchy for the implemented DH1 slice."""
+    """Return the logical/transmitted hierarchy for a BR/EDR DH1 packet."""
 
+    packet_kind = BluetoothPacketKind(settings.packet_kind)
     payload_body_bits = int(settings.payload_length_bytes) * 8
-    payload_symbols = 8 + payload_body_bits + 16
+    is_edr = packet_kind != BluetoothPacketKind.DH1
+    payload_header_bits = 16 if is_edr else 8
+    bits_per_symbol = 2 if packet_kind == BluetoothPacketKind.DH1_2 else 3
+    if not is_edr:
+        bits_per_symbol = 1
+    payload_modulation = (
+        ModulationDefinition()
+        if not is_edr
+        else ModulationDefinition(
+            kind=(
+                ModulationKind.PI_4_DQPSK
+                if packet_kind == BluetoothPacketKind.DH1_2
+                else ModulationKind.DPSK8
+            ),
+            filter_kind=FilterKind.ROOT_RAISED_COSINE,
+            filter_parameter=float(settings.edr_rolloff),
+        )
+    )
+    payload_bit_count = payload_header_bits + payload_body_bits + 16
+    payload_symbols = (payload_bit_count + bits_per_symbol - 1) // bits_per_symbol
+    header_symbols = (payload_header_bits + bits_per_symbol - 1) // bits_per_symbol
+    body_stop_symbols = (
+        payload_header_bits + payload_body_bits + bits_per_symbol - 1
+    ) // bits_per_symbol
+    body_symbols = body_stop_symbols - header_symbols
+    crc_symbols = payload_symbols - body_stop_symbols
     source = PayloadSourceKind(settings.payload_source)
     payload_source = {
         PayloadSourceKind.FIXED: DataSourceKind.FIXED,
@@ -54,23 +86,34 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
     )
     payload_children = [
         _computed_field(
-            "Payload Header", logical_bits=8, data="LLID + FLOW + LENGTH"
+            "Payload Header",
+            logical_bits=payload_header_bits,
+            transmitted_symbols=header_symbols,
+            data="LLID + FLOW + LENGTH",
+            modulation=payload_modulation,
         )
     ]
     if payload_body_bits:
         payload_children.append(
             FieldDefinition(
                 name="Payload Body",
-                symbol_count=payload_body_bits,
+                symbol_count=body_symbols,
                 logical_bit_count=payload_body_bits,
                 data_source=payload_source,
                 data=payload_data,
+                modulation=payload_modulation,
             )
         )
     payload_children.append(
-        _computed_field("Payload CRC", logical_bits=16, data="CRC-16")
+        _computed_field(
+            "Payload CRC",
+            logical_bits=16,
+            transmitted_symbols=crc_symbols,
+            data="CRC-16",
+            modulation=payload_modulation,
+        )
     )
-    return (
+    common = (
         FieldDefinition(
             name="Access Code",
             symbol_count=72,
@@ -104,12 +147,54 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
             ),
         ),
         FieldDefinition(
-            name="Payload",
+            name="Payload" if not is_edr else "EDR Payload",
             symbol_count=payload_symbols,
-            logical_bit_count=payload_symbols,
+            logical_bit_count=payload_bit_count,
             data_source=payload_source,
             data=payload_data,
+            modulation=payload_modulation,
             children=tuple(payload_children),
+        ),
+    )
+    if not is_edr:
+        return common
+    edr_modulation = common[-1].modulation
+    sync_bits = 20 if packet_kind == BluetoothPacketKind.DH1_2 else 30
+    return (
+        *common[:2],
+        FieldDefinition(
+            name="Guard",
+            symbol_count=int(settings.edr_guard_symbols),
+            logical_bit_count=None,
+            data_source=DataSourceKind.COMPUTED,
+            data="Hold GFSK phase",
+        ),
+        FieldDefinition(
+            name="EDR Data",
+            symbol_count=1 + sync_bits // bits_per_symbol + payload_symbols + 2,
+            logical_bit_count=None,
+            data_source=DataSourceKind.COMPUTED,
+            data=packet_kind.value,
+            modulation=edr_modulation,
+            children=(
+                FieldDefinition(
+                    name="EDR Sync",
+                    symbol_count=1 + sync_bits // bits_per_symbol,
+                    logical_bit_count=sync_bits,
+                    data_source=DataSourceKind.COMPUTED,
+                    data="Reference + Sync Word",
+                    modulation=edr_modulation,
+                ),
+                common[-1],
+                FieldDefinition(
+                    name="EDR Trailer",
+                    symbol_count=2,
+                    logical_bit_count=2 * bits_per_symbol,
+                    data_source=DataSourceKind.COMPUTED,
+                    data="Trailer",
+                    modulation=edr_modulation,
+                ),
+            ),
         ),
     )
 

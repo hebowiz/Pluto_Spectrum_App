@@ -37,6 +37,12 @@ class PayloadSourceKind(StrEnum):
     PRBS9 = "PRBS-9"
 
 
+class BluetoothPacketKind(StrEnum):
+    DH1 = "DH1"
+    DH1_2 = "2-DH1"
+    DH1_3 = "3-DH1"
+
+
 @dataclass(frozen=True)
 class ModulationDefinition:
     kind: ModulationKind = ModulationKind.GFSK
@@ -70,8 +76,9 @@ class PowerEnvelopeDefinition:
 
 @dataclass(frozen=True)
 class BluetoothBRSettings:
-    """Packet and RF-independent baseband settings for a BR DH1 packet."""
+    """Packet and RF-independent baseband settings for a BR/EDR DH1 packet."""
 
+    packet_kind: BluetoothPacketKind = BluetoothPacketKind.DH1
     lap: int = 0xC6967E
     uap: int = 0x6B
     clock_6_1: int = 0x2B
@@ -86,6 +93,9 @@ class BluetoothBRSettings:
     frequency_deviation_hz: float = 160_000.0
     carrier_frequency_offset_hz: float = 0.0
     gaussian_bt: float = 0.5
+    edr_guard_symbols: int = 5
+    edr_rolloff: float = 0.4
+    edr_relative_power_db: float = 0.0
     pre_idle_symbols: int = 8
     post_idle_symbols: int = 8
 
@@ -205,12 +215,18 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
 
     settings = project.bluetooth_br
     if settings is not None:
+        packet_kind = BluetoothPacketKind(settings.packet_kind)
+        payload_max = {
+            BluetoothPacketKind.DH1: 27,
+            BluetoothPacketKind.DH1_2: 54,
+            BluetoothPacketKind.DH1_3: 83,
+        }[packet_kind]
         integer_ranges = (
             ("lap", settings.lap, 0, 0xFFFFFF),
             ("uap", settings.uap, 0, 0xFF),
             ("clock_6_1", settings.clock_6_1, 0, 0x3F),
             ("lt_addr", settings.lt_addr, 0, 7),
-            ("payload_length_bytes", settings.payload_length_bytes, 0, 27),
+            ("payload_length_bytes", settings.payload_length_bytes, 0, payload_max),
         )
         for name, value, lower, upper in integer_ranges:
             if not lower <= int(value) <= upper:
@@ -240,6 +256,20 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
             issues.append(
                 ValidationIssue(
                     "bluetooth_br.gaussian_bt", "Gaussian B*T must be positive."
+                )
+            )
+        if settings.edr_guard_symbols < 0:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_br.edr_guard_symbols",
+                    "EDR guard duration must not be negative.",
+                )
+            )
+        if not 0.0 < settings.edr_rolloff <= 1.0:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_br.edr_rolloff",
+                    "EDR SRRC roll-off must be greater than 0 and at most 1.",
                 )
             )
         if settings.pre_idle_symbols < 0 or settings.post_idle_symbols < 0:

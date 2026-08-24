@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pluto_vsg.model import (
     BluetoothBRSettings,
+    BluetoothPacketKind,
     DataSourceKind,
     FieldDefinition,
     FilterKind,
@@ -72,6 +73,7 @@ def project_to_dict(project: WaveformProject) -> dict[str, object]:
     if project.bluetooth_br is not None:
         payload["bluetooth_br"] = {
             **asdict(project.bluetooth_br),
+            "packet_kind": BluetoothPacketKind(project.bluetooth_br.packet_kind).value,
             "payload_source": project.bluetooth_br.payload_source.value,
         }
     return {
@@ -101,14 +103,17 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
     if bluetooth_payload is not None:
         if not isinstance(bluetooth_payload, dict):
             raise ValueError("Invalid Bluetooth BR settings")
-        bluetooth = BluetoothBRSettings(
-            **{
+        bluetooth_values = {
                 **bluetooth_payload,
                 "payload_source": PayloadSourceKind(
                     str(bluetooth_payload["payload_source"])
                 ),
             }
-        )
+        if "packet_kind" in bluetooth_payload:
+            bluetooth_values["packet_kind"] = BluetoothPacketKind(
+                str(bluetooth_payload["packet_kind"])
+            )
+        bluetooth = BluetoothBRSettings(**bluetooth_values)
     standard = StandardProfile(str(payload["standard"]))
     if (
         standard == StandardProfile.BLUETOOTH_BR_EDR

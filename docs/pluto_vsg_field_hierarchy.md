@@ -30,7 +30,7 @@ Bluetooth BR header's rate-1/3 FEC.
 The project validator rejects a hierarchy when child symbol counts do not fill
 the parent or when all logical counts are known but do not sum to the parent.
 
-## Bluetooth BR / DH1 hierarchy currently implemented
+## Bluetooth BR / EDR DH1 hierarchy currently implemented
 
 - Access Code: Preamble, Sync Word, Trailer
 - Header: LT_ADDR, TYPE, FLOW, ARQN, SEQN, HEC
@@ -47,6 +47,22 @@ bits and UAP; the waveform engine uses the same calculation when generating IQ.
 The current DH1 vertical slice still uses the existing uncoded-payload generator.
 The Payload child spans deliberately describe that generated waveform; this
 change does not silently alter its coding or modulation behavior.
+
+The packet setting now selects `DH1`, `2-DH1`, or `3-DH1`. EDR projects keep the
+same Access Code and rate-1/3 coded Header hierarchy, followed by:
+
+- Guard (default 5 symbols, continuous final-GFSK phase)
+- EDR Data
+  - EDR Sync (one differential reference symbol plus the sync word)
+  - EDR Payload (16-bit header, body and CRC-16)
+  - EDR Trailer (two symbols)
+
+`2-DH1` uses Bluetooth differential mapping with pi/4-DQPSK; `3-DH1` uses the
+Bluetooth 8DPSK mapping. Both use an SRRC transmit filter with configurable
+roll-off (default 0.4). Payloads which do not end on an EDR symbol boundary are
+zero-padded internally; the padding count is recorded in generation metadata.
+The complete mixed-modulation packet is one continuous IQ array, not two preview
+fragments.
 
 ## UI behavior
 
@@ -76,6 +92,6 @@ Version-1 Bluetooth project files without children are upgraded to the current
 DH1 hierarchy when loaded. Other profiles remain valid with flat fields.
 
 Future packet profiles should generate their hierarchy from the same settings
-used to generate bits. EDR, HDT, mixed modulation and coding stages should add
+used to generate bits. HDT, mixed modulation and coding stages should add
 their own logical/transmitted mappings instead of deriving UI boundaries from
 display-only constants.
