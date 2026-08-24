@@ -62,6 +62,14 @@ Symbols. Preview plots use:
 `Graphics > Field Boundaries` selects `Major + Minor Fields`, `Major Fields
 Only`, or `Hide Field Boundaries`. The default is Major + Minor.
 
+All VSG preview plots use the shared VSA interaction surface:
+
+- left-button rectangle drag: zoom to the selected range
+- middle-button drag: pan
+- right-click `Reset`: restore the scale captured after waveform generation
+- right-click `View All`: fit all finite trace data
+- mouse interaction mode is fixed; the mutable pyqtgraph Mouse Mode menu is hidden
+
 ## Compatibility and next steps
 
 Version-1 Bluetooth project files without children are upgraded to the current

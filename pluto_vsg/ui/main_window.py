@@ -10,6 +10,10 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_sa.vsa.profiles.bluetooth_br import header_error_check
+from pluto_sa.vsa.ui.measurement_chrome import (
+    install_measurement_plot_menu,
+    make_measurement_plot,
+)
 from pluto_vsg.engine import BluetoothBRWaveformEngine, GenerationResult
 from pluto_vsg.export import save_iq_tar, save_npz
 from pluto_vsg.model import (
@@ -353,12 +357,17 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.result: GenerationResult | None = None
         self.project_path: Path | None = None
         self._field_display_mode = "all"
+        self._plot_initial_ranges: dict[
+            str, tuple[list[float], list[float]]
+        ] = {}
+        self._plot_context_actions: dict[str, dict[str, QtGui.QAction]] = {}
         self._engine = BluetoothBRWaveformEngine()
         self.setWindowTitle("Pluto VSG - IQ Waveform Generator")
         self.resize(1500, 900)
         self._build_actions()
         self._build_menus()
         self._build_workspace()
+        self._configure_plot_interaction()
         self._refresh_project_view()
         self.generate_waveform()
 
@@ -516,13 +525,43 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _make_plot(left: str, bottom: str) -> pg.PlotWidget:
-        plot = pg.PlotWidget()
-        plot.showGrid(x=True, y=True, alpha=0.25)
-        plot.setLabel("left", left)
-        plot.setLabel("bottom", bottom)
-        plot.setDownsampling(auto=True, mode="peak")
-        plot.setClipToView(True)
-        return plot
+        return make_measurement_plot(left, bottom)
+
+    def _plot_widgets(self) -> tuple[tuple[str, pg.PlotWidget], ...]:
+        return (
+            ("iq_waveform", self.iq_waveform_plot),
+            ("power", self.power_plot),
+            ("frequency", self.frequency_plot),
+            ("spectrum", self.spectrum_plot),
+            ("constellation", self.constellation_plot),
+        )
+
+    def _configure_plot_interaction(self) -> None:
+        for name, plot in self._plot_widgets():
+            actions = install_measurement_plot_menu(
+                plot,
+                reset=lambda plot_name=name, target=plot: self._reset_plot_scale(
+                    plot_name, target
+                ),
+            )
+            if actions:
+                actions["reset"].setToolTip(
+                    "Restore this plot's waveform-generation scale"
+                )
+                self._plot_context_actions[name] = actions
+
+    def _remember_plot_scales(self) -> None:
+        for name, plot in self._plot_widgets():
+            plot.getViewBox().updateAutoRange()
+            x_range, y_range = plot.viewRange()
+            self._plot_initial_ranges[name] = (list(x_range), list(y_range))
+
+    def _reset_plot_scale(self, name: str, plot: pg.PlotWidget) -> None:
+        ranges = self._plot_initial_ranges.get(name)
+        if ranges is None:
+            return
+        x_range, y_range = ranges
+        plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
 
     def _new_bluetooth_project(self) -> None:
         self.project = bluetooth_br_edr_project()
@@ -683,6 +722,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.constellation_plot.setRange(
             xRange=[-1.25, 1.25], yRange=[-1.25, 1.25], padding=0.0
         )
+        self._remember_plot_scales()
 
     @staticmethod
     def _add_field_guides(

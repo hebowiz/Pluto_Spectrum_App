@@ -15,6 +15,7 @@ from pluto_sa.vsa.profiles.bluetooth_br import (
     decode_dh1_payload,
 )
 from pluto_sa.vsa.model import IQRecording
+from pluto_sa.vsa.ui.measurement_chrome import FixedInteractionViewBox
 from pluto_vsg.engine import BluetoothBRWaveformEngine
 from pluto_vsg.export import save_iq_tar, save_npz
 from pluto_vsg.model import create_default_project, validate_project
@@ -117,6 +118,31 @@ def test_vsg_field_labels_are_present_and_keep_a_fixed_side() -> None:
                 line.label.anchors == [(0.0, 0.5), (0.0, 0.5)]
                 for line in lines
             )
+    finally:
+        window.close()
+
+
+def test_vsg_plots_use_fixed_vsa_interaction_and_reset() -> None:
+    pg.mkQApp("Pluto VSG VSA plot interaction test")
+    window = PlutoVSGWindow()
+    try:
+        for name, plot in window._plot_widgets():
+            view_box = plot.getViewBox()
+            assert isinstance(view_box, FixedInteractionViewBox)
+            assert view_box.state["mouseMode"] == pg.ViewBox.RectMode
+            menu = view_box.getMenu(None)
+            assert menu is not None
+            assert "Mouse Mode" not in [action.text() for action in menu.actions()]
+            assert name in window._plot_context_actions
+
+        power_initial = window._plot_initial_ranges["power"]
+        window.power_plot.setRange(
+            xRange=[0.0, 1.0], yRange=[-10.0, 10.0], padding=0.0
+        )
+        window._plot_context_actions["power"]["reset"].trigger()
+        x_range, y_range = window.power_plot.viewRange()
+        np.testing.assert_allclose(x_range, power_initial[0])
+        np.testing.assert_allclose(y_range, power_initial[1])
     finally:
         window.close()
 
