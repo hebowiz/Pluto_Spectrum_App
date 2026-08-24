@@ -7,6 +7,8 @@ from pyqtgraph.Qt import QtGui
 
 TRACE_COLOR = "#ffff00"
 ACCENT_COLOR = "#00e5ff"
+FIELD_BOUNDARY_COLOR = "#ff4de1"
+FIELD_MINOR_BOUNDARY_COLOR = "#ff9f43"
 PANEL_TITLE_SCALE = 1.3
 
 

@@ -346,3 +346,32 @@ Pluto VSG向けに変更する点:
 - WinIQSIM2のstandalone PDFは現時点でリポジトリへ保存していない。公式オンライン版を参照した。
 - R&SのBluetooth固有項目はoption/versionで差があるため、実装時は特定機種のUI名ではなく内部modelの意味を基準にする。
 - 本資料はUI/設定構造の参考資料であり、Bluetooth規格値の一次資料ではない。規格依存値はBluetooth Core Specificationと照合する。
+
+## 11. 実装状況（2026-08-24）
+
+最初のvertical sliceとして、Bluetooth BR DH1を対象に次を実装した。
+
+- `pluto_vsg.model`
+  - device-independentなProject、Field、Modulation、Power Envelope、Bluetooth BR設定
+  - payload source: Fixed / Pattern / PRBS-9
+  - 設定値validation
+- `pluto_vsg.engine.bluetooth_br`
+  - Access Code、header、HEC、whitening、DH1 payload header、payload CRC
+  - Gaussian GFSK、CFO、cosine/linear power ramp、pre/post idle、repeat
+  - Access Code / Header / Payloadのsample境界metadata
+  - Ramp開始をpacket先頭/末尾からの相対symbol位置で定義
+  - packet外へRampが張り出す区間は先頭/最終symbolの周波数偏移を保持し、位相を連続化
+- `pluto_vsg.persistence`
+  - version付き`.pvsg.json`保存・復元
+- `pluto_vsg.export`
+  - VSAから読めるNPZ
+  - R&S互換IQ TAR (`complex float32`)
+- `pluto_vsg.ui`
+  - Block Library / Packet Composer / Inspector
+  - Bluetooth BR / DH1設定dialog
+  - I/Q time waveform、IQ Power、Instantaneous Frequency、Spectrum、Constellation preview
+  - Project open/save、NPZ/IQ TAR export
+
+現時点のComposerはBluetooth templateの構造を表示し、packet fieldの任意追加・削除・並べ替えはまだ無効である。これは、構造変更が生成結果へ反映されない見かけだけの編集UIを避けるためである。次段階でField Block modelを生成graphへ直接接続してから有効化する。
+
+生成IQは既存VSAのBluetooth BR復調器へ戻すround-trip testを行い、DH1のHEC、payload length、payload CRCが成立することを確認する。Project JSON、NPZ、IQ TARにもread-back testを設ける。

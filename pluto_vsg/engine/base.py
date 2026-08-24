@@ -16,6 +16,11 @@ class FieldBoundary:
     name: str
     start_sample: int
     stop_sample: int
+    start_symbol: int = 0
+    stop_symbol: int = 0
+    logical_bit_count: int | None = None
+    level: int = 0
+    parent_name: str | None = None
 
 
 @dataclass(frozen=True)
