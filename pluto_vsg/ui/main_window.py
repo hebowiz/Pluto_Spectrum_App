@@ -14,6 +14,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     install_measurement_plot_menu,
     make_measurement_plot,
 )
+from pluto_vsg.backends import PlutoOutputBackend, PlutoTransmitSettings
 from pluto_vsg.engine import BluetoothBRWaveformEngine, GenerationResult
 from pluto_vsg.export import save_iq_tar, save_npz, save_wv
 from pluto_vsg.model import (
@@ -81,7 +82,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             0.0, 6000.0, project.center_frequency_hz / 1e6, 6
         )
         self.sps_spin = self._integer_spin(4, 64, project.samples_per_symbol)
-        self.repeat_spin = self._integer_spin(1, 1_000_000, project.repeat_count)
+        self.repeat_spin = self._integer_spin(1, 1000, project.repeat_count)
         self.lap_edit = QtWidgets.QLineEdit(f"{settings.lap:06X}")
         self.uap_edit = QtWidgets.QLineEdit(f"{settings.uap:02X}")
         self.clock_edit = QtWidgets.QLineEdit(f"{settings.clock_6_1:02X}")
@@ -389,6 +390,125 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         return self._project
 
 
+class _PlutoOutputDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        settings: PlutoTransmitSettings,
+        packet_count: int,
+        parent: QtWidgets.QWidget,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("ADALM-Pluto Output Settings")
+        self._settings = settings
+        form = QtWidgets.QFormLayout()
+        self.uri_combo = QtWidgets.QComboBox()
+        self.uri_combo.setEditable(True)
+        self.uri_combo.addItem("Auto (USB preferred)", "")
+        for uri, description in PlutoOutputBackend.discover().items():
+            self.uri_combo.addItem(f"{uri} — {description}", uri)
+        configured_uri = settings.connection_uri or ""
+        index = self.uri_combo.findData(configured_uri)
+        if index < 0 and configured_uri:
+            self.uri_combo.addItem(configured_uri, configured_uri)
+            index = self.uri_combo.count() - 1
+        self.uri_combo.setCurrentIndex(max(0, index))
+        self.bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.bandwidth_spin.setRange(0.2, 56.0)
+        self.bandwidth_spin.setDecimals(3)
+        self.bandwidth_spin.setSuffix(" MHz")
+        self.bandwidth_spin.setValue(settings.rf_bandwidth_hz / 1e6)
+        self.bandwidth_spin.setKeyboardTracking(False)
+        self.gain_spin = QtWidgets.QDoubleSpinBox()
+        self.gain_spin.setRange(-89.75, 0.0)
+        self.gain_spin.setDecimals(2)
+        self.gain_spin.setSingleStep(0.25)
+        self.gain_spin.setSuffix(" dB")
+        self.gain_spin.setValue(settings.hardware_gain_db)
+        self.gain_spin.setKeyboardTracking(False)
+        form.addRow("Connection URI", self.uri_combo)
+        form.addRow(
+            "Center Frequency",
+            QtWidgets.QLabel(f"{settings.center_frequency_hz / 1e6:.6f} MHz (Project)"),
+        )
+        form.addRow(
+            "Sample Rate",
+            QtWidgets.QLabel(f"{settings.sample_rate_hz / 1e6:.3f} MS/s (Project)"),
+        )
+        form.addRow("TX RF Bandwidth", self.bandwidth_spin)
+        form.addRow("TX Hardware Gain", self.gain_spin)
+        form.addRow("Packets per transmission", QtWidgets.QLabel(str(packet_count)))
+        warning = QtWidgets.QLabel(
+            "TX Hardware Gain is a relative Pluto setting, not calibrated dBm. "
+            "Start with sufficient external attenuation and verify the output level."
+        )
+        warning.setWordWrap(True)
+        warning.setStyleSheet("color: #e0b050;")
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept_settings)
+        buttons.rejected.connect(self.reject)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(warning)
+        layout.addWidget(buttons)
+        self.resize(560, 280)
+
+    def _accept_settings(self) -> None:
+        uri = self.uri_combo.currentData()
+        if uri is None:
+            uri = self.uri_combo.currentText().strip()
+            if uri == "Auto (USB preferred)":
+                uri = ""
+        candidate = replace(
+            self._settings,
+            connection_uri=str(uri).strip() or None,
+            rf_bandwidth_hz=self.bandwidth_spin.value() * 1e6,
+            hardware_gain_db=self.gain_spin.value(),
+        )
+        try:
+            PlutoOutputBackend(candidate)
+        except ValueError as error:
+            QtWidgets.QMessageBox.warning(self, "Pluto Output Settings", str(error))
+            return
+        self._settings = candidate
+        self.accept()
+
+    @property
+    def settings(self) -> PlutoTransmitSettings:
+        return self._settings
+
+
+class _PlutoTransmitWorker(QtCore.QObject):
+    finished = QtCore.Signal(bool, str)
+
+    def __init__(self, backend: PlutoOutputBackend, result: GenerationResult) -> None:
+        super().__init__()
+        self.backend = backend
+        self.result = result
+        self._cancel_requested = False
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            self.backend.transfer(self.result)
+            self.backend.start()
+        except Exception as error:
+            self.finished.emit(False, str(error))
+            return
+        self.finished.emit(
+            True,
+            "Pluto transmission stopped"
+            if self._cancel_requested
+            else "Pluto transmission complete",
+        )
+
+    def cancel(self) -> None:
+        self._cancel_requested = True
+        self.backend.stop()
+
+
 class PlutoVSGWindow(QtWidgets.QMainWindow):
     """Own project state, generation, preview and first export workflow."""
 
@@ -403,6 +523,17 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         ] = {}
         self._plot_context_actions: dict[str, dict[str, QtGui.QAction]] = {}
         self._engine = BluetoothBRWaveformEngine()
+        self._tx_thread: QtCore.QThread | None = None
+        self._tx_worker: _PlutoTransmitWorker | None = None
+        self._close_after_tx = False
+        preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
+        self._pluto_uri = str(preferences.value("pluto_tx/uri", "") or "")
+        self._pluto_gain_db = float(
+            preferences.value("pluto_tx/hardware_gain_db", -30.0)
+        )
+        self._pluto_bandwidth_hz = float(
+            preferences.value("pluto_tx/rf_bandwidth_hz", 8_000_000.0)
+        )
         self.setWindowTitle("Pluto VSG - IQ Waveform Generator")
         self.resize(1500, 900)
         self._build_actions()
@@ -432,6 +563,14 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.export_iqtar_action.triggered.connect(self._export_iq_tar)
         self.export_wv_action = QtGui.QAction("Export R&S WV...", self)
         self.export_wv_action.triggered.connect(self._export_wv)
+        self.pluto_settings_action = QtGui.QAction("ADALM-Pluto Settings...", self)
+        self.pluto_settings_action.triggered.connect(self._edit_pluto_settings)
+        self.pluto_transmit_action = QtGui.QAction("Transmit with ADALM-Pluto", self)
+        self.pluto_transmit_action.setShortcut(QtGui.QKeySequence("Ctrl+T"))
+        self.pluto_transmit_action.triggered.connect(self._start_pluto_transmission)
+        self.pluto_stop_action = QtGui.QAction("Stop Pluto Transmission", self)
+        self.pluto_stop_action.setEnabled(False)
+        self.pluto_stop_action.triggered.connect(self._stop_pluto_transmission)
         self.validate_action = QtGui.QAction("Validate Project", self)
         self.validate_action.triggered.connect(self._show_validation)
         self.exit_action = QtGui.QAction("Exit", self)
@@ -487,14 +626,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         field_menu = graphics_menu.addMenu("Field Boundaries")
         field_menu.addActions(self.field_display_group.actions())
         output_menu = menu_bar.addMenu("Output")
-        for label in (
-            "Device Manager",
-            "RF Frequency / Level / Calibration",
-            "Generate / Transfer",
-            "Start",
-            "Stop",
-        ):
-            output_menu.addAction(label).setEnabled(False)
+        output_menu.addAction(self.pluto_settings_action)
+        output_menu.addSeparator()
+        output_menu.addAction(self.pluto_transmit_action)
+        output_menu.addAction(self.pluto_stop_action)
+        output_toolbar = self.addToolBar("Output")
+        output_toolbar.setObjectName("PlutoVSGOutputToolbar")
+        output_toolbar.addAction(self.pluto_settings_action)
+        output_toolbar.addSeparator()
+        output_toolbar.addAction(self.pluto_transmit_action)
+        output_toolbar.addAction(self.pluto_stop_action)
         tools_menu = menu_bar.addMenu("Tools")
         tools_menu.addAction(self.validate_action)
         tools_menu.addAction("Device Capabilities").setEnabled(False)
@@ -915,6 +1056,110 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return
         self.statusBar().showMessage(f"Exported {Path(path).name}")
 
+    def _current_pluto_settings(self) -> PlutoTransmitSettings:
+        bandwidth_hz = min(
+            56_000_000.0,
+            max(200_000.0, self._pluto_bandwidth_hz),
+        )
+        return PlutoTransmitSettings(
+            center_frequency_hz=self.project.center_frequency_hz,
+            sample_rate_hz=self.project.sample_rate_hz,
+            rf_bandwidth_hz=bandwidth_hz,
+            hardware_gain_db=self._pluto_gain_db,
+            connection_uri=self._pluto_uri or None,
+        )
+
+    def _edit_pluto_settings(self) -> None:
+        dialog = _PlutoOutputDialog(
+            self._current_pluto_settings(), self.project.repeat_count, self
+        )
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        settings = dialog.settings
+        self._pluto_uri = settings.connection_uri or ""
+        self._pluto_gain_db = settings.hardware_gain_db
+        self._pluto_bandwidth_hz = settings.rf_bandwidth_hz
+        preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
+        preferences.setValue("pluto_tx/uri", self._pluto_uri)
+        preferences.setValue("pluto_tx/hardware_gain_db", self._pluto_gain_db)
+        preferences.setValue("pluto_tx/rf_bandwidth_hz", self._pluto_bandwidth_hz)
+        self.statusBar().showMessage("ADALM-Pluto output settings saved")
+
+    def _start_pluto_transmission(self) -> None:
+        if self._tx_thread is not None:
+            return
+        if self.result is None:
+            self.generate_waveform()
+        if self.result is None:
+            return
+        issues = validate_project(self.project)
+        if issues:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Pluto Transmission",
+                "\n".join(f"{issue.path}: {issue.message}" for issue in issues),
+            )
+            return
+        try:
+            backend = PlutoOutputBackend(self._current_pluto_settings())
+        except ValueError as error:
+            QtWidgets.QMessageBox.warning(self, "Pluto Transmission", str(error))
+            return
+        worker = _PlutoTransmitWorker(backend, self.result)
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._pluto_transmission_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._pluto_thread_finished)
+        self._tx_worker = worker
+        self._tx_thread = thread
+        self._set_transmitting(True)
+        duration_ms = 1e3 * self.result.iq.size / self.result.sample_rate_hz
+        self.statusBar().showMessage(
+            f"Starting Pluto TX: {self.project.repeat_count} packet(s), "
+            f"{duration_ms:.3f} ms, {self.project.center_frequency_hz / 1e6:.6f} MHz"
+        )
+        thread.start()
+
+    def _stop_pluto_transmission(self) -> None:
+        if self._tx_worker is None:
+            return
+        self._tx_worker.cancel()
+        self.pluto_stop_action.setEnabled(False)
+        self.statusBar().showMessage("Stopping Pluto transmission...")
+
+    @QtCore.Slot(bool, str)
+    def _pluto_transmission_finished(self, success: bool, message: str) -> None:
+        if success:
+            self.statusBar().showMessage(message)
+        else:
+            self.statusBar().showMessage(f"Pluto transmission failed: {message}")
+            QtWidgets.QMessageBox.critical(self, "Pluto Transmission", message)
+        self._set_transmitting(False)
+
+    @QtCore.Slot()
+    def _pluto_thread_finished(self) -> None:
+        self._tx_worker = None
+        self._tx_thread = None
+        if self._close_after_tx:
+            self._close_after_tx = False
+            self.close()
+
+    def _set_transmitting(self, active: bool) -> None:
+        for action in (
+            self.new_action,
+            self.open_action,
+            self.settings_action,
+            self.generate_action,
+            self.pluto_settings_action,
+            self.pluto_transmit_action,
+        ):
+            action.setEnabled(not active)
+        self.pluto_stop_action.setEnabled(active)
+
     def _show_validation(self) -> None:
         issues = validate_project(self.project)
         text = (
@@ -923,3 +1168,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             else "\n".join(f"{issue.path}: {issue.message}" for issue in issues)
         )
         QtWidgets.QMessageBox.information(self, "Project Validation", text)
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self._tx_thread is not None:
+            self._close_after_tx = True
+            self._stop_pluto_transmission()
+            event.ignore()
+            return
+        super().closeEvent(event)

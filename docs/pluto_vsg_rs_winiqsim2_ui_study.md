@@ -417,3 +417,26 @@ UIは`File > Export R&S WV...`から保存する。read-back regression testで�
 tag値、checksum、I/Q ordering、量子化誤差、level offsetをbinaryから独立に再計算して検証する。
 中心周波数やRF出力levelはbaseband WVの属性ではないため格納せず、R&S VSG側または将来の
 Output Backendで設定する。marker/control listおよびmulti-segment WVは現時点では未実装。
+
+## 13. ADALM-Pluto finite transmit backend（2026-08-24）
+
+`Output > ADALM-Pluto Settings...`で接続URI、TX RF bandwidth、TX hardware gainを設定し、
+`Transmit with ADALM-Pluto`（`Ctrl+T`）で現在の生成IQを直接送信する。中心周波数、sample
+rate、packet repetition countはProjectを正本とする。Pluto固有設定はVSA/SAの受信設定や
+Project JSONへ混在させず、Pluto VSG専用`QSettings`へ保存する。
+
+- Projectの`Repeat Count`は1～1000 packetに制限する。
+- packetごとのpre/post idleとpower rampを含む有限IQ列をengineで生成する。
+- Plutoへはnormalized IQを`2^14-1` scaleへ変換して渡す。
+- `tx_cyclic_buffer=False`固定とし、IQ列を一度だけ送信する。cyclic bufferによる意図しない
+  無限RF出力は使用しない。
+- 接続、転送、air time待機、buffer破棄はGUI thread外で実行する。送信中もGUIのStop操作を
+  受け付ける。
+- Stopまたはwindow closeはcancelを要求し、TX owner threadが`tx_destroy_buffer()`を実行する。
+- TX hardware gain初期値は`-30 dB`。これはPlutoの相対hardware settingであり、dBm校正値では
+  ない。絶対出力levelは外部ATTを含め実測し、将来のOutput calibrationで管理する。
+
+現時点ではsoftware triggerによる有限送信であり、hardware trigger、時刻指定、連続cyclic
+送信、R&S VSGへのSCPI転送は未実装。unit testはPluto deviceをmockし、LO/sample rate/RF
+bandwidth/gain、非cyclic設定、DAC scale、停止前要求、buffer cleanupを検証する。実機では
+スペアナまたは十分なATTを介したloopbackで、packet数、level、packet間隔を確認する。

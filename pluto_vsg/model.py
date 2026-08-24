@@ -137,6 +137,12 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
         )
     if project.repeat_count < 1:
         issues.append(ValidationIssue("repeat_count", "Repeat count must be positive."))
+    elif project.repeat_count > 1000:
+        issues.append(
+            ValidationIssue(
+                "repeat_count", "Pluto VSG supports at most 1000 packet repetitions."
+            )
+        )
     if project.center_frequency_hz < 0.0:
         issues.append(
             ValidationIssue(
