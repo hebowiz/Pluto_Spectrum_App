@@ -126,6 +126,33 @@ All VSG preview plots use the shared VSA interaction surface:
 - right-click `View All`: fit all finite trace data
 - mouse interaction mode is fixed; the mutable pyqtgraph Mouse Mode menu is hidden
 
+## Visual Packet Composer foundation
+
+The first Visual Packet Composer phase is implemented as a read-only graph view.
+It is the default tab in the Packet Composer panel; the existing `Field Tree` is
+retained as a second tab for detailed inspection and compatibility. The graph is
+derived from the same `WaveformProject` and `FieldDefinition` objects used by the
+waveform engines, so it does not introduce a display-only packet definition.
+
+The canvas has three time-aligned tracks:
+
+- `Packet / Data`: major fields and their minor-field hierarchy
+- `Modulation`: adjacent leaf fields with identical modulation are combined into
+  one region, while BR-to-EDR changes remain separate regions
+- `Power`: ramp-up, packet ON level and ramp-down controls
+
+Every visual block has a stable path-based ID (`field:0`, `field:0.1`, etc.) plus
+its start, duration, logical-bit count, transmitted-symbol count, data source and
+modulation properties. Selecting a block populates the existing Inspector with
+those values. The canvas supports horizontal scrolling and Ctrl+wheel zoom.
+
+This phase deliberately does not mutate the project. The next editor phase must
+operate on the graph/model layer and then regenerate `WaveformProject.fields`;
+it must not edit graphics items as an independent source of truth. Planned editor
+operations are field insertion/removal/reordering, property editing, validation,
+and undo/redo. Standard-owned computed fields must remain distinguishable from
+freely editable user fields.
+
 ## Compatibility and next steps
 
 Version-1 Bluetooth project files without children are upgraded to the current

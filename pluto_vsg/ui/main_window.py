@@ -15,6 +15,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     make_measurement_plot,
 )
 from pluto_vsg.backends import PlutoOutputBackend, PlutoTransmitSettings
+from pluto_vsg.composer import ComposerBlock, build_composer_graph
 from pluto_vsg.engine import (
     BluetoothBRWaveformEngine,
     BluetoothLEWaveformEngine,
@@ -50,6 +51,7 @@ from pluto_vsg.ui.style import (
     TRACE_COLOR,
     panel_title_font,
 )
+from pluto_vsg.ui.composer_view import PacketComposerView
 
 
 def _instantaneous_frequency_khz(
@@ -1012,6 +1014,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.field_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
+        self.composer_view = PacketComposerView()
+        self.composer_view.selected_block_changed.connect(
+            self._composer_block_selected
+        )
+        composer_tabs = QtWidgets.QTabWidget()
+        composer_tabs.addTab(self.composer_view, "Visual Composer")
+        composer_tabs.addTab(self.field_table, "Field Tree")
         inspector_widget = QtWidgets.QWidget()
         inspector_layout = QtWidgets.QVBoxLayout(inspector_widget)
         self.inspector = QtWidgets.QTableWidget(0, 2)
@@ -1032,7 +1041,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         inspector_layout.addWidget(self.edit_settings_button)
         inspector_layout.addWidget(generate_button)
         upper.addWidget(_Panel("Block Library", self.block_library))
-        upper.addWidget(_Panel("Packet Composer", self.field_table))
+        upper.addWidget(_Panel("Packet Composer", composer_tabs))
         upper.addWidget(_Panel("Inspector", inspector_widget))
         upper.setStretchFactor(0, 1)
         upper.setStretchFactor(1, 3)
@@ -1212,6 +1221,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         for packet_field in self.project.fields:
             add_field(packet_field)
         self.field_table.expandAll()
+        self.composer_view.set_graph(build_composer_graph(self.project))
         settings = self.project.bluetooth_br
         le_settings = self.project.bluetooth_le
         parameters = [
@@ -1268,14 +1278,34 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self.settings_action.setText(settings_label)
         self.edit_settings_button.setText(f"Edit {settings_label}")
+        self._project_inspector_parameters = parameters
+        self._populate_inspector(parameters)
+        status = "Ready" if not validate_project(self.project) else "Project has validation errors"
+        self.statusBar().showMessage(status)
+
+    def _populate_inspector(self, parameters: list[tuple[str, str]]) -> None:
         self.inspector.setRowCount(len(parameters))
         for row, values in enumerate(parameters):
             for column, value in enumerate(values):
                 self.inspector.setItem(
                     row, column, QtWidgets.QTableWidgetItem(value)
                 )
-        status = "Ready" if not validate_project(self.project) else "Project has validation errors"
-        self.statusBar().showMessage(status)
+
+    def _composer_block_selected(self, block: ComposerBlock | None) -> None:
+        if block is None:
+            self._populate_inspector(
+                getattr(self, "_project_inspector_parameters", [])
+            )
+            return
+        parameters = [
+            ("Block", block.name),
+            ("Track", block.track.value),
+            ("Role", block.role.value),
+            ("Start", f"{block.start_symbol:g} symbols"),
+            ("Duration", f"{block.symbol_count:g} symbols"),
+            *list(block.properties),
+        ]
+        self._populate_inspector(parameters)
 
     def generate_waveform(self) -> None:
         try:
