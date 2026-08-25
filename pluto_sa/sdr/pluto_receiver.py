@@ -10,6 +10,7 @@ import adi
 import iio
 import numpy as np
 
+from pluto_common import resolve_pluto_uri
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.sdr.iq_stream import (
     IQBlock,
@@ -50,22 +51,12 @@ class PlutoReceiver:
 
     @staticmethod
     def _resolve_connection_uri(configured_uri: str | None) -> str | None:
-        """Prefer deterministic direct USB unless the caller selects a URI."""
-        if configured_uri is not None and configured_uri.strip():
-            return configured_uri.strip()
+        """Resolve a stable serial selector, explicit URI, or automatic USB."""
         try:
             contexts = iio.scan_contexts()
         except Exception:
-            return None
-        usb_uris = sorted(uri for uri in contexts if uri.startswith("usb:"))
-        if usb_uris:
-            return usb_uris[0]
-        pluto_ip_uris = sorted(
-            uri
-            for uri, description in contexts.items()
-            if uri.startswith("ip:") and "pluto" in description.lower()
-        )
-        return pluto_ip_uris[0] if pluto_ip_uris else None
+            contexts = {}
+        return resolve_pluto_uri(configured_uri, contexts)
 
     def _configure_sdr(self, config: SpectrumConfig) -> None:
         self.config = config

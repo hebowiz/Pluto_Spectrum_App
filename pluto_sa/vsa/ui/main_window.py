@@ -11,6 +11,9 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 from scipy.ndimage import gaussian_filter
 
+import iio
+
+from pluto_common import discover_pluto_devices
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.mapping import (
@@ -971,8 +974,16 @@ class VSAWindow(QtWidgets.QMainWindow):
         source_layout.addWidget(open_button)
         source_layout.addSpacing(12)
         pluto_form = QtWidgets.QFormLayout()
-        self.pluto_uri_edit = QtWidgets.QLineEdit()
-        self.pluto_uri_edit.setPlaceholderText("Auto (direct USB preferred)")
+        self.pluto_uri_edit = QtWidgets.QComboBox()
+        self.pluto_uri_edit.setEditable(True)
+        self.pluto_uri_edit.addItem("Auto (USB preferred)", "")
+        self.pluto_refresh_button = QtWidgets.QPushButton("Refresh Devices")
+        self.pluto_refresh_button.clicked.connect(self._refresh_pluto_devices)
+        pluto_selector = QtWidgets.QWidget()
+        pluto_selector_layout = QtWidgets.QHBoxLayout(pluto_selector)
+        pluto_selector_layout.setContentsMargins(0, 0, 0, 0)
+        pluto_selector_layout.addWidget(self.pluto_uri_edit, 1)
+        pluto_selector_layout.addWidget(self.pluto_refresh_button)
         self.capture_center_spin = QtWidgets.QDoubleSpinBox()
         self.capture_center_spin.setRange(70.0, 6000.0)
         self.capture_center_spin.setDecimals(6)
@@ -1009,7 +1020,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.external_gain_spin.setValue(0.0)
         self.external_gain_spin.setSuffix(" dB")
         self.capture_correction_label = QtWidgets.QLabel()
-        pluto_form.addRow("Pluto URI", self.pluto_uri_edit)
+        pluto_form.addRow("ADALM-Pluto", pluto_selector)
         pluto_form.addRow("Center Frequency", self.capture_center_spin)
         pluto_form.addRow("RF Bandwidth", self.capture_rf_bandwidth_spin)
         pluto_form.addRow("LO Offset", self.lo_offset_check)
@@ -2070,7 +2081,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         return {
             "input_frontend": {
                 "input_source": self.input_source_combo.currentText(),
-                "pluto_uri": self.pluto_uri_edit.text().strip(),
+                "pluto_uri": self._selected_pluto_target(),
                 "center_frequency_mhz": self.capture_center_spin.value(),
                 "rf_bandwidth_mhz": self.capture_rf_bandwidth_spin.value(),
                 "lo_offset_enabled": self.lo_offset_check.isChecked(),
@@ -2280,7 +2291,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self._set_combo_text(
                     self.input_source_combo, source["input_source"], "input source"
                 )
-            self.pluto_uri_edit.setText(str(source.get("pluto_uri", "")))
+            self._set_selected_pluto_target(str(source.get("pluto_uri", "")))
             self.capture_center_spin.setValue(
                 float(source.get("center_frequency_mhz", 2441.0))
             )
@@ -2793,6 +2804,54 @@ class VSAWindow(QtWidgets.QMainWindow):
             external_gain_db=self.external_gain_spin.value(),
         )
 
+    def _selected_pluto_target(self) -> str:
+        data = self.pluto_uri_edit.currentData()
+        if data is not None:
+            return str(data).strip()
+        text = self.pluto_uri_edit.currentText().strip()
+        return "" if text == "Auto (USB preferred)" else text
+
+    def _set_selected_pluto_target(self, target: str | None) -> None:
+        value = "" if target is None else str(target).strip()
+        index = self.pluto_uri_edit.findData(value)
+        if index >= 0:
+            self.pluto_uri_edit.setCurrentIndex(index)
+            return
+        self.pluto_uri_edit.addItem(value, value)
+        self.pluto_uri_edit.setCurrentIndex(self.pluto_uri_edit.count() - 1)
+
+    def _refresh_pluto_devices(self) -> None:
+        selected = self._selected_pluto_target()
+        try:
+            devices = discover_pluto_devices(iio.scan_contexts())
+        except Exception as error:
+            QtWidgets.QMessageBox.warning(
+                self, "ADALM-Pluto Discovery", f"Device scan failed: {error}"
+            )
+            return
+        matching_device = next(
+            (device for device in devices if device.uri == selected), None
+        )
+        if matching_device is not None:
+            selected = matching_device.selector
+        self.pluto_uri_edit.blockSignals(True)
+        try:
+            self.pluto_uri_edit.clear()
+            self.pluto_uri_edit.addItem("Auto (USB preferred)", "")
+            for device in devices:
+                self.pluto_uri_edit.addItem(device.label, device.selector)
+                self.pluto_uri_edit.setItemData(
+                    self.pluto_uri_edit.count() - 1,
+                    device.description,
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                )
+            self._set_selected_pluto_target(selected)
+        finally:
+            self.pluto_uri_edit.blockSignals(False)
+        self.statusBar().showMessage(
+            f"Detected {len(devices)} ADALM-Pluto device(s)"
+        )
+
     def _pluto_capture_settings(self) -> PlutoCaptureSettings:
         return PlutoCaptureSettings(
             center_frequency_hz=self.capture_center_spin.value() * 1e6,
@@ -2810,7 +2869,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 if self.channel_filter_check.isChecked()
                 else None
             ),
-            sdr_uri=self.pluto_uri_edit.text().strip() or None,
+            sdr_uri=self._selected_pluto_target() or None,
             swap_iq=self.swap_iq_check.isChecked(),
             power_correction=self._input_power_correction(),
             trigger_source=TriggerKind(

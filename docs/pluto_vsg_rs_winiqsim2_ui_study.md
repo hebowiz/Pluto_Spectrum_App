@@ -418,7 +418,7 @@ tag値、checksum、I/Q ordering、量子化誤差、level offsetをbinaryから
 中心周波数やRF出力levelはbaseband WVの属性ではないため格納せず、R&S VSG側または将来の
 Output Backendで設定する。marker/control listおよびmulti-segment WVは現時点では未実装。
 
-## 13. ADALM-Pluto finite transmit backend（2026-08-24）
+## 13. ADALM-Pluto finite transmit backend（2026-08-24、2026-08-25改訂）
 
 `Output > ADALM-Pluto Settings...`で接続URI、TX RF bandwidth、TX hardware gainを設定し、
 `Transmit with ADALM-Pluto`（`Ctrl+T`）で現在の生成IQを直接送信する。中心周波数、sample
@@ -428,15 +428,32 @@ Project JSONへ混在させず、Pluto VSG専用`QSettings`へ保存する。
 - Projectの`Repeat Count`は1～1000 packetに制限する。
 - packetごとのpre/post idleとpower rampを含む有限IQ列をengineで生成する。
 - Plutoへはnormalized IQを`2^14-1` scaleへ変換して渡す。
-- `tx_cyclic_buffer=False`固定とし、IQ列を一度だけ送信する。cyclic bufferによる意図しない
-  無限RF出力は使用しない。
-- 接続、転送、air time待機、buffer破棄はGUI thread外で実行する。送信中もGUIのStop操作を
-  受け付ける。
-- Stopまたはwindow closeはcancelを要求し、TX owner threadが`tx_destroy_buffer()`を実行する。
+- 2026-08-25の実機検証では、短い非cyclic bufferを送信すると、1 packetのDH1（既定設定で
+  3056 sample / 8 MS/s = 382 us）の予定に対して約660 msの間欠出力が観測され、FSKも正常に
+  復調できなかった。一方、同じgeneratorがexportしたDH1/2DH1 WVはSMCV100Bから正常送信
+  でき、offline HEC/CRC testも通る。このためgeneratorではなく、stock Pluto/libiioの短い
+  non-cyclic DMA転送とbuffer teardownの境界を主要因と判断した。
+- 直接送信は`[Lead-in zero guard][生成済み有限IQ列][Stop zero guard]`という1周期の
+  superframeへ変更する。既定guardは10 ms / 100 msで、`tx_cyclic_buffer=True`によりDMA
+  underflowを避ける。packet repetitionは従来どおり生成済みIQ列内に1～1000 packetを配置し、
+  cyclic周回でrepeat countを作らない。
+- backendはStop guardへ入ってから、TX gainを最小値`-89.75 dB`へ下げ、bufferを破棄し、
+  TX channelを無効化してDAC zero sourceへ切り替える。この一連の停止をsuperframeが先頭へ
+  周回する前に完了させる。
+- 接続、転送、guard待機、buffer破棄はGUI thread外で実行する。送信中もGUIのStop操作を
+  受け付ける。Stopまたはwindow closeは同じmute/teardown sequenceを実行する。
+- Lead-in/Stop guardはPluto VSG専用Output Settings/QSettingsで調整でき、Projectの波形内容、
+  SA/VSAの設定とは共有しない。
+- 2台構成ではIIOの一時的なUSB URIではなくhardware serialを個体IDとして選択・保存する。
+  Output Settingsは`serial:<id>`を保持し、送信開始時に現在のdirect USB URIへ解決する。同じ
+  個体がUSB/IPの両contextで見える場合は1台へまとめてUSBを優先する。選択個体が不在なら
+  他のPlutoへfallbackせず送信を中止する。VSA側のRX個体選択とは独立して保存する。
 - TX hardware gain初期値は`-30 dB`。これはPlutoの相対hardware settingであり、dBm校正値では
   ない。絶対出力levelは外部ATTを含め実測し、将来のOutput calibrationで管理する。
 
-現時点ではsoftware triggerによる有限送信であり、hardware trigger、時刻指定、連続cyclic
-送信、R&S VSGへのSCPI転送は未実装。unit testはPluto deviceをmockし、LO/sample rate/RF
-bandwidth/gain、非cyclic設定、DAC scale、停止前要求、buffer cleanupを検証する。実機では
-スペアナまたは十分なATTを介したloopbackで、packet数、level、packet間隔を確認する。
+現時点ではsoftware timingによる有限送信であり、hardware trigger、時刻指定、連続ユーザー
+波形送信、R&S VSGへのSCPI転送は未実装。zero IQは変調成分を止めるがRF LO leakageを物理的に
+遮断するものではない。unit testはPluto deviceをmockし、LO/sample rate/RF bandwidth/gain、
+guarded cyclic superframe、DAC scale、停止前要求、mute、buffer cleanup、DAC zero source切替を
+検証する。実機ではスペアナまたは十分なATTを介したloopbackで、packet数、level、packet間隔、
+先頭への再周回がないことを確認する。

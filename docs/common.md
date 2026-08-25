@@ -123,6 +123,8 @@ consumerは独立cursorを持ちます。保持容量を超えた場合は`overr
 
 ## 10. PlutoSDR接続
 
-接続URIの優先順は、`SpectrumConfig.sdr_uri`、環境変数`PLUTO_SDR_URI`、列挙されたdirect USB、PlutoのIP contextです。direct USBとRNDISが同時に見える場合にpyadi-iioの自動選択へ依存しないようにしています。
+接続targetの優先順は、`SpectrumConfig.sdr_uri`、環境変数`PLUTO_SDR_URI`、列挙されたdirect USB、PlutoのIP contextです。2026-08-25以降、targetには一時的なIIO URIだけでなく`serial:<hardware serial>`を指定できます。接続時にserialから現在のURIを解決するため、USB portや列挙順が変わっても同じ個体へ接続できます。選択したserialが見つからない場合は別個体へ自動接続せずerrorとします。
 
-現在選択されたURIは`PlutoReceiver.connection_uri`で参照できます。実機の短時間測定結果と再現手順は[PlutoSDR実機検証記録](hardware-validation.md)を参照してください。
+VSAのInput/Frontendでは`Refresh Devices`で個体一覧を更新し、VSGのADALM-Pluto Settingsでは画面を開くたびに一覧を取得します。同じPlutoがdirect USBとRNDISの両方で見える場合はserialで1台にまとめ、direct USBを優先します。VSAはMeas Config、VSGは専用`QSettings`へそれぞれ独立したserial selectorを保存するため、2台構成ではRX用とTX用を明示的に分離できます。serialを取得できないcontextは従来どおり明示URIで選択します。
+
+解決後に実際に使われたURIは`PlutoReceiver.connection_uri`で参照できます。実機の短時間測定結果と再現手順は[PlutoSDR実機検証記録](hardware-validation.md)を参照してください。

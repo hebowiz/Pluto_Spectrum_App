@@ -44,6 +44,18 @@
 python -m pluto_sa.main
 ```
 
+Windowsではリポジトリ直下のBATをダブルクリックして各アプリを起動できる。いずれも
+リポジトリ直下をworking directoryとし、`.venv\Scripts\python.exe`を明示的に使用する。
+
+| BAT | アプリ | Python entry point |
+|---|---|---|
+| `Pluto_RTSA.bat` | RTSA / Spectrum Analyzer | `python -m pluto_sa.main` |
+| `Pluto_VSA.bat` | Generic VSA / ADS-B切替 | `python -m pluto_sa.vsa.main` |
+| `Pluto_VSG.bat` | IQ Waveform Generator / Pluto TX | `python -m pluto_vsg` |
+
+`.venv`が存在しない場合、またはアプリが非zero codeで終了した場合は、原因を確認できるよう
+consoleを閉じずにメッセージを表示する。正常終了時はpauseしない。
+
 起動時に次のコンポーネントを生成し、PlutoSDRの連続受信を開始してからウィンドウを表示します。
 
 1. `SpectrumConfig`: 全モード共通の設定状態

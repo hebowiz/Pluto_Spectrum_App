@@ -215,6 +215,33 @@ def test_configured_uri_overrides_usb_autodetection(monkeypatch) -> None:
     assert receiver.connection_uri == "ip:pluto.local"
 
 
+def test_configured_serial_selects_the_matching_pluto(monkeypatch) -> None:
+    fake = FakePluto()
+    selected: dict[str, str | None] = {}
+    serial_a = "1044730c370e00100400120023338fb325"
+    serial_b = "1044730c370e001004001200abcdef0123"
+    monkeypatch.setattr(
+        receiver_module.iio,
+        "scan_contexts",
+        lambda: {
+            "usb:1.54.5": f"Analog Devices PlutoSDR, serial={serial_a}",
+            "usb:2.8.5": f"Analog Devices PlutoSDR, serial={serial_b}",
+        },
+    )
+    monkeypatch.setattr(
+        receiver_module.adi,
+        "Pluto",
+        lambda *, uri=None: selected.update(uri=uri) or fake,
+    )
+
+    receiver = PlutoReceiver(
+        SpectrumConfig(fft_size=4, sdr_uri=f"serial:{serial_b}")
+    )
+
+    assert selected["uri"] == "usb:2.8.5"
+    assert receiver.connection_uri == "usb:2.8.5"
+
+
 def test_close_destroys_rx_buffer_after_worker_stops(monkeypatch) -> None:
     receiver = build_receiver(monkeypatch)
     receiver.start(block_size=4)

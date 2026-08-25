@@ -404,10 +404,22 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.uri_combo = QtWidgets.QComboBox()
         self.uri_combo.setEditable(True)
         self.uri_combo.addItem("Auto (USB preferred)", "")
-        for uri, description in PlutoOutputBackend.discover().items():
-            self.uri_combo.addItem(f"{uri} — {description}", uri)
+        devices = PlutoOutputBackend.discover_devices()
+        for device in devices:
+            self.uri_combo.addItem(device.label, device.selector)
+            self.uri_combo.setItemData(
+                self.uri_combo.count() - 1,
+                device.description,
+                QtCore.Qt.ItemDataRole.ToolTipRole,
+            )
         configured_uri = settings.connection_uri or ""
         index = self.uri_combo.findData(configured_uri)
+        if index < 0:
+            matching_device = next(
+                (device for device in devices if device.uri == configured_uri), None
+            )
+            if matching_device is not None:
+                index = self.uri_combo.findData(matching_device.selector)
         if index < 0 and configured_uri:
             self.uri_combo.addItem(configured_uri, configured_uri)
             index = self.uri_combo.count() - 1
@@ -425,6 +437,18 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.gain_spin.setSuffix(" dB")
         self.gain_spin.setValue(settings.hardware_gain_db)
         self.gain_spin.setKeyboardTracking(False)
+        self.lead_in_guard_spin = QtWidgets.QDoubleSpinBox()
+        self.lead_in_guard_spin.setRange(0.0, 1000.0)
+        self.lead_in_guard_spin.setDecimals(3)
+        self.lead_in_guard_spin.setSuffix(" ms")
+        self.lead_in_guard_spin.setValue(settings.lead_in_guard_s * 1e3)
+        self.lead_in_guard_spin.setKeyboardTracking(False)
+        self.stop_guard_spin = QtWidgets.QDoubleSpinBox()
+        self.stop_guard_spin.setRange(10.0, 5000.0)
+        self.stop_guard_spin.setDecimals(3)
+        self.stop_guard_spin.setSuffix(" ms")
+        self.stop_guard_spin.setValue(settings.stop_guard_s * 1e3)
+        self.stop_guard_spin.setKeyboardTracking(False)
         form.addRow("Connection URI", self.uri_combo)
         form.addRow(
             "Center Frequency",
@@ -436,10 +460,13 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         )
         form.addRow("TX RF Bandwidth", self.bandwidth_spin)
         form.addRow("TX Hardware Gain", self.gain_spin)
+        form.addRow("Lead-in Zero Guard", self.lead_in_guard_spin)
+        form.addRow("Stop Zero Guard", self.stop_guard_spin)
         form.addRow("Packets per transmission", QtWidgets.QLabel(str(packet_count)))
         warning = QtWidgets.QLabel(
             "TX Hardware Gain is a relative Pluto setting, not calibrated dBm. "
-            "Start with sufficient external attenuation and verify the output level."
+            "Start with sufficient external attenuation and verify the output level. "
+            "Zero-IQ guards suppress modulation but do not remove LO leakage."
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("color: #e0b050;")
@@ -453,7 +480,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         layout.addLayout(form)
         layout.addWidget(warning)
         layout.addWidget(buttons)
-        self.resize(560, 280)
+        self.resize(560, 330)
 
     def _accept_settings(self) -> None:
         uri = self.uri_combo.currentData()
@@ -466,6 +493,8 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             connection_uri=str(uri).strip() or None,
             rf_bandwidth_hz=self.bandwidth_spin.value() * 1e6,
             hardware_gain_db=self.gain_spin.value(),
+            lead_in_guard_s=self.lead_in_guard_spin.value() * 1e-3,
+            stop_guard_s=self.stop_guard_spin.value() * 1e-3,
         )
         try:
             PlutoOutputBackend(candidate)
@@ -533,6 +562,12 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self._pluto_bandwidth_hz = float(
             preferences.value("pluto_tx/rf_bandwidth_hz", 8_000_000.0)
+        )
+        self._pluto_lead_in_guard_s = float(
+            preferences.value("pluto_tx/lead_in_guard_s", 0.010)
+        )
+        self._pluto_stop_guard_s = float(
+            preferences.value("pluto_tx/stop_guard_s", 0.100)
         )
         self.setWindowTitle("Pluto VSG - IQ Waveform Generator")
         self.resize(1500, 900)
@@ -1067,6 +1102,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             rf_bandwidth_hz=bandwidth_hz,
             hardware_gain_db=self._pluto_gain_db,
             connection_uri=self._pluto_uri or None,
+            lead_in_guard_s=self._pluto_lead_in_guard_s,
+            stop_guard_s=self._pluto_stop_guard_s,
         )
 
     def _edit_pluto_settings(self) -> None:
@@ -1079,10 +1116,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_uri = settings.connection_uri or ""
         self._pluto_gain_db = settings.hardware_gain_db
         self._pluto_bandwidth_hz = settings.rf_bandwidth_hz
+        self._pluto_lead_in_guard_s = settings.lead_in_guard_s
+        self._pluto_stop_guard_s = settings.stop_guard_s
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
         preferences.setValue("pluto_tx/uri", self._pluto_uri)
         preferences.setValue("pluto_tx/hardware_gain_db", self._pluto_gain_db)
         preferences.setValue("pluto_tx/rf_bandwidth_hz", self._pluto_bandwidth_hz)
+        preferences.setValue(
+            "pluto_tx/lead_in_guard_s", self._pluto_lead_in_guard_s
+        )
+        preferences.setValue("pluto_tx/stop_guard_s", self._pluto_stop_guard_s)
         self.statusBar().showMessage("ADALM-Pluto output settings saved")
 
     def _start_pluto_transmission(self) -> None:

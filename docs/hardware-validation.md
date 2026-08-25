@@ -22,13 +22,15 @@
 
 `PlutoReceiver`は現在、次の優先順で接続します。
 
-1. `SpectrumConfig.sdr_uri`で明示したURI
+1. `SpectrumConfig.sdr_uri`で明示したserial selectorまたはURI
 2. 環境変数`PLUTO_SDR_URI`
 3. `iio.scan_contexts()`で列挙したdirect USB
 4. Plutoと識別できるIP context
 5. 列挙不能時はpyadi-iioの既定探索
 
-USB URIは起動時に列挙して選ぶため、`usb:1.54.5`をコードへ固定していません。RNDISを明示的に使う例は次のとおりです。
+2026-08-25に2台構成向けの共通個体識別を追加した。`iio.scan_contexts()`のdescriptionからhardware serialを取得し、`serial:<id>`を接続時の安定IDとして保存する。USB URIは起動時のbus/device列挙で変化し得るため、個体選択には固定しない。同一serialのUSB/IP contextは1台へ統合し、USBを優先する。指定serialが不在なら誤って別個体へ接続しない。VSA/VSGで異なるserialを保存できるが、2台同時RX/TXの実機検証は未実施である。
+
+RNDISを明示的に使う例は次のとおりです。
 
 ```powershell
 $env:PLUTO_SDR_URI = 'ip:pluto.local'
@@ -540,3 +542,17 @@ RF-PHY conformance result.
 - Internal Gain: 50 dB
 - 結果: Pluto finite captureからADS-B専用解析器まで例外なく完走
 - 検出: 0 message。antenna条件と短い観測時間のため感度評価には使用しない
+
+## 2026-08-25 Pluto VSG短packet送信の実機結果と対策
+
+- 同一generatorからexportしたDH1/2DH1 WVは、SMCV100Bへ転送して正常送信できた。
+- Plutoの旧non-cyclic直接送信では、1 packetのDH1（約382 us）を指定したにもかかわらず、
+  約660 msにわたり間欠的なRF出力が観測され、周波数変調も正常に復調できなかった。
+- WV実機結果とoffline HEC/CRC testから、波形生成よりも短いnon-cyclic DMA bufferの終了処理を
+  原因候補とした。
+- 2026-08-25に直接送信backendを、Lead-in zero guard 10 ms、生成IQ、Stop zero guard 100 msから
+  成るcyclic superframe方式へ変更した。Stop guard内でgain最小化、buffer破棄、DAC zero source
+  切替を行う。
+- mock testではpacket領域とguard長、cyclic設定、mute/cleanup順を確認済み。Pluto実機では未再検証。
+  再検証ではDH1 Repeat Count=1を基準に、RF burst長、packet数、復調、先頭への再周回、停止後の
+  LO leakageを確認する。
