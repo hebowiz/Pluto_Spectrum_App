@@ -24,6 +24,8 @@ from pluto_vsg.model import (
     FieldDefinition,
     PayloadSourceKind,
     WaveformProject,
+    bluetooth_packet_is_edr,
+    bluetooth_packet_properties,
     validate_project,
 )
 
@@ -109,17 +111,12 @@ def _payload_body(project: WaveformProject) -> np.ndarray:
     return sequence[np.arange(count) % sequence.size]
 
 
-def _packet_type(settings) -> int:
-    kind = BluetoothPacketKind(settings.packet_kind)
-    return 0x8 if kind == BluetoothPacketKind.DH1_3 else 0x4
-
-
 def _header_data_bits(project: WaveformProject) -> np.ndarray:
     settings = project.bluetooth_br
     assert settings is not None
     packed = (
         int(settings.lt_addr)
-        | (_packet_type(settings) << 3)
+        | (bluetooth_packet_properties(settings.packet_kind)[1] << 3)
         | (int(settings.flow) << 7)
         | (int(settings.arqn) << 8)
         | (int(settings.seqn) << 9)
@@ -139,10 +136,6 @@ def _unwhitened_packet_bits(
     return np.concatenate(
         (access_code_bits(settings.lap), header_air, payload_bits)
     )
-
-
-def _edr_payload_header_bits(payload_length_bytes: int) -> np.ndarray:
-    return _bits_lsb(0b10 | (1 << 2) | (int(payload_length_bytes) << 3), 16)
 
 
 def _phase_indices(bits: np.ndarray, bits_per_symbol: int) -> np.ndarray:
@@ -307,7 +300,7 @@ def _extend_edge_phase(iq: np.ndarray, positions: np.ndarray) -> np.ndarray:
 
 
 class BluetoothBRWaveformEngine:
-    """Generate a normalized, standards-structured BR/EDR DH1 waveform."""
+    """Generate a normalized, standards-structured BR/EDR DHx waveform."""
 
     def generate(self, project: WaveformProject) -> GenerationResult:
         issues = validate_project(project)
@@ -326,12 +319,16 @@ class BluetoothBRWaveformEngine:
             )
 
         packet_kind = BluetoothPacketKind(settings.packet_kind)
-        is_edr = packet_kind != BluetoothPacketKind.DH1
+        is_edr = bluetooth_packet_is_edr(packet_kind)
+        _, packet_type, bits_per_symbol, _ = bluetooth_packet_properties(
+            packet_kind
+        )
         body = _payload_body(project)
         payload_header = (
-            _edr_payload_header_bits(settings.payload_length_bytes)
-            if is_edr
-            else _bits_lsb(0b10 | (1 << 2) | (settings.payload_length_bytes << 3), 8)
+            _bits_lsb(
+                0b10 | (1 << 2) | (settings.payload_length_bytes << 3),
+                8 if packet_kind == BluetoothPacketKind.DH1 else 16,
+            )
         )
         payload_crc = _bytes_to_air_bits(
             payload_crc_bytes(np.concatenate((payload_header, body)), settings.uap)
@@ -346,7 +343,7 @@ class BluetoothBRWaveformEngine:
                 uap=settings.uap,
                 payload_bits=payload,
                 lt_addr=settings.lt_addr,
-                packet_type=_packet_type(settings),
+                packet_type=packet_type,
                 flow=settings.flow,
                 arqn=settings.arqn,
                 seqn=settings.seqn,
@@ -380,10 +377,9 @@ class BluetoothBRWaveformEngine:
                 gaussian_bt=settings.gaussian_bt,
             )
             gfsk_sample_count = int(gfsk.size)
-            bits_per_symbol = 2 if packet_kind == BluetoothPacketKind.DH1_2 else 3
             sync = (
                 EDR_SYNC_BITS_2MBPS
-                if packet_kind == BluetoothPacketKind.DH1_2
+                if bits_per_symbol == 2
                 else EDR_SYNC_BITS_3MBPS
             )
             trailer = np.zeros(2 * bits_per_symbol, dtype=np.uint8)
@@ -489,8 +485,12 @@ class BluetoothBRWaveformEngine:
                 f"({project_symbol_count} != {generated_symbol_count})"
             )
         boundaries: list[FieldBoundary] = []
+        packet_ranges_samples: list[tuple[int, int]] = []
         for repeat in range(project.repeat_count):
             repeat_offset = repeat * single.size + data_start_in_single
+            packet_ranges_samples.append(
+                (repeat_offset, repeat_offset + data_sample_count)
+            )
             suffix_name = "" if project.repeat_count == 1 else f" [{repeat + 1}]"
             stop_symbol = _append_field_boundaries(
                 boundaries,
@@ -518,7 +518,7 @@ class BluetoothBRWaveformEngine:
                 "edr_phase_indices": edr_phase_indices,
                 "edr_padding_bits": int(
                     (-payload.size) % (
-                        2 if packet_kind == BluetoothPacketKind.DH1_2 else 3
+                        bits_per_symbol
                     )
                 ) if is_edr else 0,
                 "edr_rolloff": settings.edr_rolloff if is_edr else None,
@@ -538,6 +538,7 @@ class BluetoothBRWaveformEngine:
                 "frequency_deviation_hz": settings.frequency_deviation_hz,
                 "gaussian_bt": settings.gaussian_bt,
                 "packet_sample_count": int(data_sample_count),
+                "packet_ranges_samples": tuple(packet_ranges_samples),
                 "active_sample_count": int(active_iq.size),
                 "data_start_sample": int(data_start_in_single),
                 "data_stop_sample": int(data_start_in_single + data_sample_count),

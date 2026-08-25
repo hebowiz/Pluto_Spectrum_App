@@ -8,6 +8,10 @@ from pathlib import Path
 
 from pluto_vsg.model import (
     BluetoothBRSettings,
+    BluetoothLEPayloadType,
+    BluetoothLEPayloadSourceKind,
+    BluetoothLEPhy,
+    BluetoothLESettings,
     BluetoothPacketKind,
     DataSourceKind,
     FieldDefinition,
@@ -76,6 +80,17 @@ def project_to_dict(project: WaveformProject) -> dict[str, object]:
             "packet_kind": BluetoothPacketKind(project.bluetooth_br.packet_kind).value,
             "payload_source": project.bluetooth_br.payload_source.value,
         }
+    if project.bluetooth_le is not None:
+        payload["bluetooth_le"] = {
+            **asdict(project.bluetooth_le),
+            "phy": BluetoothLEPhy(project.bluetooth_le.phy).value,
+            "payload_type": BluetoothLEPayloadType(
+                project.bluetooth_le.payload_type
+            ).value,
+            "payload_source": BluetoothLEPayloadSourceKind(
+                project.bluetooth_le.payload_source
+            ).value,
+        }
     return {
         "format": PROJECT_FORMAT,
         "version": PROJECT_VERSION,
@@ -114,6 +129,27 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
                 str(bluetooth_payload["packet_kind"])
             )
         bluetooth = BluetoothBRSettings(**bluetooth_values)
+    bluetooth_le_payload = payload.get("bluetooth_le")
+    bluetooth_le = None
+    if bluetooth_le_payload is not None:
+        if not isinstance(bluetooth_le_payload, dict):
+            raise ValueError("Invalid Bluetooth LE settings")
+        bluetooth_le = BluetoothLESettings(
+            **{
+                **bluetooth_le_payload,
+                "phy": BluetoothLEPhy(str(bluetooth_le_payload["phy"])),
+                "payload_type": BluetoothLEPayloadType(
+                    str(bluetooth_le_payload["payload_type"])
+                ),
+                "payload_source": BluetoothLEPayloadSourceKind(
+                    str(
+                        bluetooth_le_payload.get(
+                            "payload_source", BluetoothLEPayloadSourceKind.PATTERN.value
+                        )
+                    )
+                ),
+            }
+        )
     standard = StandardProfile(str(payload["standard"]))
     if (
         standard == StandardProfile.BLUETOOTH_BR_EDR
@@ -135,6 +171,7 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
         fields=tuple(fields),
         power_envelope=PowerEnvelopeDefinition(**envelope_payload),
         bluetooth_br=bluetooth,
+        bluetooth_le=bluetooth_le,
     )
     issues = validate_project(project)
     if issues:

@@ -15,20 +15,38 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     make_measurement_plot,
 )
 from pluto_vsg.backends import PlutoOutputBackend, PlutoTransmitSettings
-from pluto_vsg.engine import BluetoothBRWaveformEngine, GenerationResult
+from pluto_vsg.engine import (
+    BluetoothBRWaveformEngine,
+    BluetoothLEWaveformEngine,
+    GenerationResult,
+)
 from pluto_vsg.export import save_iq_tar, save_npz, save_wv
 from pluto_vsg.model import (
+    BluetoothLEPayloadType,
+    BluetoothLEPayloadSourceKind,
+    BluetoothLEPhy,
     BluetoothPacketKind,
     PayloadSourceKind,
+    StandardProfile,
     WaveformProject,
+    bluetooth_packet_is_edr,
+    bluetooth_packet_properties,
     validate_project,
 )
 from pluto_vsg.persistence import load_project, save_project
-from pluto_vsg.profiles import bluetooth_br_edr_project, bluetooth_br_fields
+from pluto_vsg.profiles import (
+    bluetooth_br_edr_project,
+    bluetooth_br_fields,
+    bluetooth_le_fields,
+    bluetooth_le_project,
+    bluetooth_le_test_project,
+    apply_bluetooth_le_rf_test_preset,
+)
 from pluto_vsg.ui.style import (
     ACCENT_COLOR,
     FIELD_BOUNDARY_COLOR,
     FIELD_MINOR_BOUNDARY_COLOR,
+    PACKET_END_COLOR,
     TRACE_COLOR,
     panel_title_font,
 )
@@ -66,6 +84,253 @@ class _Panel(QtWidgets.QGroupBox):
         layout.addWidget(child)
 
 
+class _BluetoothLESettingsDialog(QtWidgets.QDialog):
+    """Edit an uncoded LE Direct Test Mode packet."""
+
+    def __init__(self, project: WaveformProject, parent: QtWidgets.QWidget) -> None:
+        super().__init__(parent)
+        settings = project.bluetooth_le
+        if settings is None:
+            raise ValueError("Bluetooth LE settings are required")
+        self._project = project
+        self.setWindowTitle("Bluetooth LE Packet Settings")
+        form = QtWidgets.QFormLayout()
+        self.name_edit = QtWidgets.QLineEdit(project.name)
+        self.phy_combo = QtWidgets.QComboBox()
+        for phy in BluetoothLEPhy:
+            self.phy_combo.addItem(phy.value, phy)
+        self.phy_combo.setCurrentIndex(self.phy_combo.findData(BluetoothLEPhy(settings.phy)))
+        self.payload_combo = QtWidgets.QComboBox()
+        for payload_type in BluetoothLEPayloadType:
+            self.payload_combo.addItem(payload_type.value, payload_type)
+        self.payload_combo.setCurrentIndex(
+            self.payload_combo.findData(BluetoothLEPayloadType(settings.payload_type))
+        )
+        self.apply_rf_test_button = QtWidgets.QPushButton(
+            "Apply RF Test Packet Preset"
+        )
+        self.apply_rf_test_button.clicked.connect(self._apply_rf_test_preset)
+        preset_row = QtWidgets.QWidget()
+        preset_layout = QtWidgets.QHBoxLayout(preset_row)
+        preset_layout.setContentsMargins(0, 0, 0, 0)
+        preset_layout.addWidget(self.payload_combo)
+        preset_layout.addWidget(self.apply_rf_test_button)
+        self.preamble_edit = QtWidgets.QLineEdit(settings.preamble_bits)
+        self.sync_edit = QtWidgets.QLineEdit(settings.sync_word_bits)
+        self.header_edit = QtWidgets.QLineEdit(settings.pdu_header_bits)
+        self.payload_source_combo = QtWidgets.QComboBox()
+        for source in BluetoothLEPayloadSourceKind:
+            self.payload_source_combo.addItem(source.value, source)
+        self.payload_source_combo.setCurrentIndex(
+            self.payload_source_combo.findData(
+                BluetoothLEPayloadSourceKind(settings.payload_source)
+            )
+        )
+        self.payload_pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern)
+        self.length_spin = QtWidgets.QSpinBox()
+        self.length_spin.setRange(0, 255)
+        self.length_spin.setValue(settings.payload_length_bytes)
+        self.crc_check = QtWidgets.QCheckBox()
+        self.crc_check.setChecked(settings.crc_enabled)
+        self.crc_init_edit = QtWidgets.QLineEdit(f"{settings.crc_init:06X}")
+        self.whitening_check = QtWidgets.QCheckBox()
+        self.whitening_check.setChecked(settings.whitening_enabled)
+        self.whitening_channel_spin = self._integer_spin(
+            0, 39, settings.whitening_channel_index
+        )
+        self.center_spin = self._double_spin(0.0, 6000.0, project.center_frequency_hz / 1e6, 6)
+        self.sps_spin = self._integer_spin(4, 64, project.samples_per_symbol)
+        self.repeat_spin = self._integer_spin(1, 1000, project.repeat_count)
+        self.deviation_spin = self._double_spin(1.0, 2000.0, settings.frequency_deviation_hz / 1e3, 3)
+        self.bt_spin = self._double_spin(0.05, 2.0, settings.gaussian_bt, 3)
+        self.pre_idle_spin = self._integer_spin(0, 1_000_000, settings.pre_idle_symbols)
+        self.post_idle_spin = self._integer_spin(0, 1_000_000, settings.post_idle_symbols)
+        self.rise_spin = self._double_spin(0.0, 1000.0, project.power_envelope.rise_symbols, 3)
+        self.rise_delay_spin = self._double_spin(-1000.0, 1000.0, project.power_envelope.rise_delay_symbols, 3)
+        self.fall_spin = self._double_spin(0.0, 1000.0, project.power_envelope.fall_symbols, 3)
+        self.fall_delay_spin = self._double_spin(-1000.0, 1000.0, project.power_envelope.fall_delay_symbols, 3)
+        self.ramp_combo = QtWidgets.QComboBox()
+        self.ramp_combo.addItems(["Cosine", "Linear"])
+        self.ramp_combo.setCurrentText(project.power_envelope.shape)
+        for label, widget in (
+            ("Project Name", self.name_edit),
+            ("PHY", self.phy_combo),
+            ("RF Test Payload Preset", preset_row),
+            ("Preamble [air-order bits]", self.preamble_edit),
+            ("Access Address / Sync [air-order bits]", self.sync_edit),
+            ("PDU Header [air-order bits]", self.header_edit),
+            ("Payload Length [byte]", self.length_spin),
+            ("Payload Source", self.payload_source_combo),
+            ("Payload Pattern [bin]", self.payload_pattern_edit),
+            ("CRC-24", self.crc_check),
+            ("CRCInit [hex]", self.crc_init_edit),
+            ("Whitening", self.whitening_check),
+            ("Whitening Channel Index", self.whitening_channel_spin),
+            ("Center Frequency [MHz]", self.center_spin),
+            ("Samples / Symbol", self.sps_spin),
+            ("Repeat Count", self.repeat_spin),
+            ("FSK Deviation [kHz]", self.deviation_spin),
+            ("Gaussian B*T", self.bt_spin),
+            ("Pre Idle [symbols]", self.pre_idle_spin),
+            ("Post Idle [symbols]", self.post_idle_spin),
+            ("Ramp Up [symbols]", self.rise_spin),
+            ("Ramp Up Start rel. Packet [symbols]", self.rise_delay_spin),
+            ("Ramp Down [symbols]", self.fall_spin),
+            ("Ramp Down Start rel. Packet End [symbols]", self.fall_delay_spin),
+            ("Ramp Shape", self.ramp_combo),
+        ):
+            form.addRow(label, widget)
+        note = QtWidgets.QLabel(
+            "All packet fields remain editable. Applying an RF Test Packet preset "
+            "loads the Core test Sync Word/header/payload, CRCInit 0x555555, "
+            "Whitening Off and the standard packet interval into these controls."
+        )
+        note.setWordWrap(True)
+        form.addRow(note)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText(
+            "Apply and Generate"
+        )
+        buttons.accepted.connect(self._accept_settings)
+        buttons.rejected.connect(self.reject)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self.resize(620, 650)
+        self.phy_combo.currentIndexChanged.connect(self._phy_changed)
+        self.payload_source_combo.currentIndexChanged.connect(
+            self._payload_source_changed
+        )
+        self._payload_source_changed()
+
+    @staticmethod
+    def _double_spin(minimum: float, maximum: float, value: float, decimals: int) -> QtWidgets.QDoubleSpinBox:
+        control = QtWidgets.QDoubleSpinBox()
+        control.setRange(minimum, maximum)
+        control.setDecimals(decimals)
+        control.setValue(value)
+        control.setKeyboardTracking(False)
+        return control
+
+    @staticmethod
+    def _integer_spin(minimum: int, maximum: int, value: int) -> QtWidgets.QSpinBox:
+        control = QtWidgets.QSpinBox()
+        control.setRange(minimum, maximum)
+        control.setValue(value)
+        return control
+
+    def _phy_changed(self) -> None:
+        phy = BluetoothLEPhy(self.phy_combo.currentData())
+        self.deviation_spin.setValue(250.0 if phy == BluetoothLEPhy.LE_1M else 500.0)
+
+    def _payload_source_changed(self) -> None:
+        source = BluetoothLEPayloadSourceKind(self.payload_source_combo.currentData())
+        self.payload_pattern_edit.setEnabled(
+            source
+            in {
+                BluetoothLEPayloadSourceKind.FIXED,
+                BluetoothLEPayloadSourceKind.PATTERN,
+            }
+        )
+
+    def _apply_rf_test_preset(self) -> None:
+        phy = BluetoothLEPhy(self.phy_combo.currentData())
+        payload_type = BluetoothLEPayloadType(self.payload_combo.currentData())
+        settings = apply_bluetooth_le_rf_test_preset(
+            self._project.bluetooth_le,
+            phy=phy,
+            payload_type=payload_type,
+            payload_length_bytes=self.length_spin.value(),
+        )
+        self.preamble_edit.setText(settings.preamble_bits)
+        self.sync_edit.setText(settings.sync_word_bits)
+        self.header_edit.setText(settings.pdu_header_bits)
+        self.payload_source_combo.setCurrentIndex(
+            self.payload_source_combo.findData(settings.payload_source)
+        )
+        self.payload_pattern_edit.setText(settings.payload_pattern)
+        self.crc_check.setChecked(True)
+        self.crc_init_edit.setText("555555")
+        self.whitening_check.setChecked(False)
+        self.deviation_spin.setValue(settings.frequency_deviation_hz / 1e3)
+        self.bt_spin.setValue(settings.gaussian_bt)
+
+    def _accept_settings(self) -> None:
+        phy = BluetoothLEPhy(self.phy_combo.currentData())
+        try:
+            crc_init = int(self.crc_init_edit.text().strip(), 16)
+        except ValueError:
+            QtWidgets.QMessageBox.warning(
+                self, "Bluetooth LE Settings", "CRCInit must be hexadecimal."
+            )
+            return
+        previous = self._project.bluetooth_le
+        rf_test_fields = (
+            self.sync_edit.text().strip().replace(" ", "")
+            == "10010100100000100110111010001110"
+            and not self.whitening_check.isChecked()
+            and crc_init == 0x555555
+        )
+        settings = replace(
+            previous,
+            phy=phy,
+            preamble_bits=self.preamble_edit.text(),
+            sync_word_bits=self.sync_edit.text(),
+            pdu_header_bits=self.header_edit.text(),
+            payload_type=BluetoothLEPayloadType(self.payload_combo.currentData()),
+            payload_source=BluetoothLEPayloadSourceKind(
+                self.payload_source_combo.currentData()
+            ),
+            payload_pattern=self.payload_pattern_edit.text(),
+            payload_length_bytes=self.length_spin.value(),
+            crc_enabled=self.crc_check.isChecked(),
+            crc_init=crc_init,
+            whitening_enabled=self.whitening_check.isChecked(),
+            whitening_channel_index=self.whitening_channel_spin.value(),
+            rf_test_interval_enabled=rf_test_fields,
+            frequency_deviation_hz=self.deviation_spin.value() * 1e3,
+            gaussian_bt=self.bt_spin.value(),
+            pre_idle_symbols=self.pre_idle_spin.value(),
+            post_idle_symbols=self.post_idle_spin.value(),
+        )
+        symbol_rate_hz = 1_000_000.0 if phy == BluetoothLEPhy.LE_1M else 2_000_000.0
+        project = replace(
+            self._project,
+            name=self.name_edit.text(),
+            center_frequency_hz=self.center_spin.value() * 1e6,
+            samples_per_symbol=self.sps_spin.value(),
+            sample_rate_hz=symbol_rate_hz * self.sps_spin.value(),
+            repeat_count=self.repeat_spin.value(),
+            fields=bluetooth_le_fields(settings),
+            bluetooth_le=settings,
+            power_envelope=replace(
+                self._project.power_envelope,
+                rise_symbols=self.rise_spin.value(),
+                rise_delay_symbols=self.rise_delay_spin.value(),
+                fall_symbols=self.fall_spin.value(),
+                fall_delay_symbols=self.fall_delay_spin.value(),
+                shape=self.ramp_combo.currentText(),
+            ),
+        )
+        issues = validate_project(project)
+        if issues:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Bluetooth LE Settings",
+                "\n".join(f"{issue.path}: {issue.message}" for issue in issues),
+            )
+            return
+        self._project = project
+        self.accept()
+
+    @property
+    def project(self) -> WaveformProject:
+        return self._project
+
+
 class _BluetoothSettingsDialog(QtWidgets.QDialog):
     def __init__(self, project: WaveformProject, parent: QtWidgets.QWidget) -> None:
         super().__init__(parent)
@@ -99,8 +364,24 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.hec_value = QtWidgets.QLabel()
         self.hec_value.setToolTip("Automatically calculated from Header and UAP")
         self.payload_length_spin = self._integer_spin(
-            0, 27, settings.payload_length_bytes
+            0, 1021, settings.payload_length_bytes
         )
+        self.rf_test_payload_combo = QtWidgets.QComboBox()
+        for label, value in (
+            ("PRBS-9", "prbs9"),
+            ("Constant 0", "0"),
+            ("Constant 1", "1"),
+            ("Alternating 1010", "10"),
+            ("Repeating 11110000", "11110000"),
+        ):
+            self.rf_test_payload_combo.addItem(label, value)
+        self.rf_test_apply_button = QtWidgets.QPushButton("Apply RF Test Packet Preset")
+        self.rf_test_apply_button.clicked.connect(self._apply_rf_test_preset)
+        rf_test_row = QtWidgets.QWidget()
+        rf_test_layout = QtWidgets.QHBoxLayout(rf_test_row)
+        rf_test_layout.setContentsMargins(0, 0, 0, 0)
+        rf_test_layout.addWidget(self.rf_test_payload_combo)
+        rf_test_layout.addWidget(self.rf_test_apply_button)
         self.payload_source_combo = QtWidgets.QComboBox()
         for label, source in (
             ("Constant (All 0 / All 1)", PayloadSourceKind.FIXED),
@@ -185,6 +466,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         form.addRow(header_group)
 
         for label, widget in (
+            ("RF Test Payload Preset", rf_test_row),
             ("Payload Length [byte]", self.payload_length_spin),
             ("Payload Source", self.payload_source_combo),
             ("Source Behavior", self.payload_source_help),
@@ -234,7 +516,10 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             self._packet_type_changed
         )
         self._payload_source_changed()
-        self._packet_type_changed()
+        # Opening Settings must preserve the saved payload length. Only a
+        # subsequent user-initiated packet-type change selects the new
+        # packet type's maximum payload.
+        self._packet_type_changed(reset_payload=False)
         self._update_header_preview()
 
     @staticmethod
@@ -272,7 +557,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             self.hec_value.setText("Invalid UAP")
             return
         packet_kind = BluetoothPacketKind(self.packet_type_combo.currentData())
-        packet_type = 0x8 if packet_kind == BluetoothPacketKind.DH1_3 else 0x4
+        packet_type = bluetooth_packet_properties(packet_kind)[1]
         packed = (
             self.lt_addr_spin.value()
             | (packet_type << 3)
@@ -349,15 +634,15 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self._project = project
         self.accept()
 
-    def _packet_type_changed(self) -> None:
+    def _packet_type_changed(
+        self, _index: int | None = None, *, reset_payload: bool = True
+    ) -> None:
         kind = BluetoothPacketKind(self.packet_type_combo.currentData())
-        payload_max = {
-            BluetoothPacketKind.DH1: 27,
-            BluetoothPacketKind.DH1_2: 54,
-            BluetoothPacketKind.DH1_3: 83,
-        }[kind]
+        payload_max = bluetooth_packet_properties(kind)[0]
         self.payload_length_spin.setMaximum(payload_max)
-        is_edr = kind != BluetoothPacketKind.DH1
+        if reset_payload:
+            self.payload_length_spin.setValue(payload_max)
+        is_edr = bluetooth_packet_is_edr(kind)
         for control in (
             self.edr_guard_spin,
             self.edr_rolloff_spin,
@@ -384,6 +669,23 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             self.payload_source_help.setText(
                 "Generates the Bluetooth test PRBS-9 sequence; Payload Data is ignored."
             )
+
+    def _apply_rf_test_preset(self) -> None:
+        value = str(self.rf_test_payload_combo.currentData())
+        if value == "prbs9":
+            source = PayloadSourceKind.PRBS9
+            pattern = self.pattern_edit.text()
+        elif value in {"0", "1"}:
+            source = PayloadSourceKind.FIXED
+            pattern = value
+        else:
+            source = PayloadSourceKind.PATTERN
+            pattern = value
+        self.payload_source_combo.setCurrentIndex(
+            self.payload_source_combo.findData(source)
+        )
+        self.pattern_edit.setText(pattern)
+        self.whitening_check.setChecked(False)
 
     @property
     def project(self) -> WaveformProject:
@@ -551,7 +853,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             str, tuple[list[float], list[float]]
         ] = {}
         self._plot_context_actions: dict[str, dict[str, QtGui.QAction]] = {}
-        self._engine = BluetoothBRWaveformEngine()
         self._tx_thread: QtCore.QThread | None = None
         self._tx_worker: _PlutoTransmitWorker | None = None
         self._close_after_tx = False
@@ -579,8 +880,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.generate_waveform()
 
     def _build_actions(self) -> None:
-        self.new_action = QtGui.QAction("New Project", self)
+        self.new_action = QtGui.QAction("New Bluetooth BR / EDR Project", self)
         self.new_action.triggered.connect(self._new_bluetooth_project)
+        self.new_le1m_action = QtGui.QAction("New Bluetooth LE 1M Packet", self)
+        self.new_le1m_action.triggered.connect(
+            lambda: self._new_bluetooth_le_project(BluetoothLEPhy.LE_1M)
+        )
+        self.new_le2m_action = QtGui.QAction("New Bluetooth LE 2M Packet", self)
+        self.new_le2m_action.triggered.connect(
+            lambda: self._new_bluetooth_le_project(BluetoothLEPhy.LE_2M)
+        )
         self.open_action = QtGui.QAction("Open...", self)
         self.open_action.triggered.connect(self._open_project)
         self.save_action = QtGui.QAction("Save", self)
@@ -588,7 +897,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.save_as_action = QtGui.QAction("Save As...", self)
         self.save_as_action.triggered.connect(self._save_project_as)
         self.settings_action = QtGui.QAction("Bluetooth BR / EDR Settings...", self)
-        self.settings_action.triggered.connect(self._edit_bluetooth_settings)
+        self.settings_action.triggered.connect(self._edit_project_settings)
+        self.rf_test_preset_action = QtGui.QAction(
+            "Apply Default Bluetooth RF Test Packet Preset", self
+        )
+        self.rf_test_preset_action.triggered.connect(self._apply_rf_test_preset)
         self.generate_action = QtGui.QAction("Generate Waveform", self)
         self.generate_action.setShortcut(QtGui.QKeySequence("F5"))
         self.generate_action.triggered.connect(self.generate_waveform)
@@ -628,9 +941,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def _build_menus(self) -> None:
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("File")
-        file_menu.addActions(
-            [self.new_action, self.open_action, self.save_action, self.save_as_action]
+        new_menu = file_menu.addMenu("New")
+        new_menu.addActions(
+            [self.new_action, self.new_le1m_action, self.new_le2m_action]
         )
+        file_menu.addActions([self.open_action, self.save_action, self.save_as_action])
         file_menu.addSeparator()
         file_menu.addActions(
             [self.export_npz_action, self.export_iqtar_action, self.export_wv_action]
@@ -641,6 +956,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         edit_menu.addActions([QtGui.QAction("Undo", self), QtGui.QAction("Redo", self)])
         waveform_menu = menu_bar.addMenu("Waveform")
         waveform_menu.addAction(self.settings_action)
+        waveform_menu.addAction(self.rf_test_preset_action)
         waveform_menu.addSeparator()
         for label in (
             "Packet Composer",
@@ -706,12 +1022,14 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.inspector.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
-        edit_button = QtWidgets.QPushButton("Edit Bluetooth BR / EDR Settings...")
-        edit_button.clicked.connect(self._edit_bluetooth_settings)
+        self.edit_settings_button = QtWidgets.QPushButton(
+            "Edit Bluetooth BR / EDR Settings..."
+        )
+        self.edit_settings_button.clicked.connect(self._edit_project_settings)
         generate_button = QtWidgets.QPushButton("Generate Waveform (F5)")
         generate_button.clicked.connect(self.generate_waveform)
         inspector_layout.addWidget(self.inspector)
-        inspector_layout.addWidget(edit_button)
+        inspector_layout.addWidget(self.edit_settings_button)
         inspector_layout.addWidget(generate_button)
         upper.addWidget(_Panel("Block Library", self.block_library))
         upper.addWidget(_Panel("Packet Composer", self.field_table))
@@ -790,8 +1108,62 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._refresh_project_view()
         self.generate_waveform()
 
+    def _new_bluetooth_le_project(self, phy: BluetoothLEPhy) -> None:
+        self.project = bluetooth_le_project(phy)
+        self.project_path = None
+        self._refresh_project_view()
+        self.generate_waveform()
+
+    def _apply_rf_test_preset(self) -> None:
+        if self.project.standard == StandardProfile.BLUETOOTH_LE:
+            current = self.project.bluetooth_le
+            if current is None:
+                return
+            settings = apply_bluetooth_le_rf_test_preset(
+                current,
+                payload_type=BluetoothLEPayloadType(current.payload_type),
+                payload_length_bytes=current.payload_length_bytes,
+            )
+            self.project = replace(
+                self.project,
+                name=f"Bluetooth {BluetoothLEPhy(settings.phy).value} RF Test Packet",
+                fields=bluetooth_le_fields(settings),
+                bluetooth_le=settings,
+            )
+        else:
+            current = self.project.bluetooth_br
+            if current is None:
+                return
+            settings = replace(
+                current,
+                payload_source=PayloadSourceKind.PRBS9,
+                whitening_enabled=False,
+            )
+            self.project = replace(
+                self.project,
+                name=f"Bluetooth {BluetoothPacketKind(settings.packet_kind).value} RF Test Packet",
+                fields=bluetooth_br_fields(settings),
+                bluetooth_br=settings,
+            )
+        self._refresh_project_view()
+        self.generate_waveform()
+
+    def _edit_project_settings(self) -> None:
+        if self.project.standard == StandardProfile.BLUETOOTH_LE:
+            self._edit_bluetooth_le_settings()
+        else:
+            self._edit_bluetooth_settings()
+
     def _edit_bluetooth_settings(self) -> None:
         dialog = _BluetoothSettingsDialog(self.project, self)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self.project = dialog.project
+        self._refresh_project_view()
+        self.generate_waveform()
+
+    def _edit_bluetooth_le_settings(self) -> None:
+        dialog = _BluetoothLESettingsDialog(self.project, self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
         self.project = dialog.project
@@ -841,6 +1213,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             add_field(packet_field)
         self.field_table.expandAll()
         settings = self.project.bluetooth_br
+        le_settings = self.project.bluetooth_le
         parameters = [
             ("Project", self.project.name),
             ("Standard", self.project.standard.value),
@@ -860,6 +1233,41 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                     ("Gaussian B*T", f"{settings.gaussian_bt:.3f}"),
                 ]
             )
+        elif le_settings is not None:
+            parameters.extend(
+                [
+                    ("PHY", BluetoothLEPhy(le_settings.phy).value),
+                    (
+                        "Payload",
+                        f"{le_settings.payload_length_bytes} byte / "
+                        f"{BluetoothLEPayloadSourceKind(le_settings.payload_source).value}",
+                    ),
+                    (
+                        "Whitening",
+                        (
+                            f"On / Channel {le_settings.whitening_channel_index}"
+                            if le_settings.whitening_enabled
+                            else "Off"
+                        ),
+                    ),
+                    (
+                        "CRCInit",
+                        f"0x{le_settings.crc_init:06X}"
+                        if le_settings.crc_enabled
+                        else "Disabled",
+                    ),
+                    ("Deviation", f"{le_settings.frequency_deviation_hz / 1e3:.3f} kHz"),
+                    ("Gaussian B*T", f"{le_settings.gaussian_bt:.3f}"),
+                ]
+            )
+        is_le = self.project.standard == StandardProfile.BLUETOOTH_LE
+        settings_label = (
+            "Bluetooth LE Packet Settings..."
+            if is_le
+            else "Bluetooth BR / EDR Settings..."
+        )
+        self.settings_action.setText(settings_label)
+        self.edit_settings_button.setText(f"Edit {settings_label}")
         self.inspector.setRowCount(len(parameters))
         for row, values in enumerate(parameters):
             for column, value in enumerate(values):
@@ -871,7 +1279,12 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
 
     def generate_waveform(self) -> None:
         try:
-            self.result = self._engine.generate(self.project)
+            engine = (
+                BluetoothLEWaveformEngine()
+                if self.project.standard == StandardProfile.BLUETOOTH_LE
+                else BluetoothBRWaveformEngine()
+            )
+            self.result = engine.generate(self.project)
         except ValueError as error:
             self.result = None
             QtWidgets.QMessageBox.warning(self, "Waveform Generation", str(error))
@@ -1004,6 +1417,33 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 span=(0.0, 1.0) if is_major else (0.0, 0.22),
                 label=label,
                 labelOpts=label_options,
+            )
+            plot.addItem(line)
+
+        packet_ranges = result.metadata.get("packet_ranges_samples", ())
+        for index, packet_range in enumerate(packet_ranges):
+            if not isinstance(packet_range, (tuple, list)) or len(packet_range) != 2:
+                continue
+            stop_sample = int(packet_range[1])
+            stop_us = stop_sample / result.sample_rate_hz * 1e6
+            suffix = "" if len(packet_ranges) == 1 else f" [{index + 1}]"
+            line = pg.InfiniteLine(
+                stop_us,
+                angle=90,
+                pen=pg.mkPen(PACKET_END_COLOR, width=1.75),
+                span=(0.0, 1.0),
+                label=f"Packet End{suffix}" if include_labels else None,
+                labelOpts=(
+                    {
+                        # Align Packet End with the major-field labels.
+                        "position": 0.92,
+                        "color": PACKET_END_COLOR,
+                        "fill": (0, 0, 0, 170),
+                        "anchors": [(0.0, 0.5), (0.0, 0.5)],
+                    }
+                    if include_labels
+                    else None
+                ),
             )
             plot.addItem(line)
 

@@ -457,3 +457,26 @@ Project JSONへ混在させず、Pluto VSG専用`QSettings`へ保存する。
 guarded cyclic superframe、DAC scale、停止前要求、mute、buffer cleanup、DAC zero source切替を
 検証する。実機ではスペアナまたは十分なATTを介したloopbackで、packet数、level、packet間隔、
 先頭への再周回がないことを確認する。
+
+## 14. Bluetooth settings / preview補正（2026-08-25）
+
+- 新規Bluetooth BR/EDR ProjectのWhitening初期値はOFFとする。既存Projectは保存済みの
+  `whitening_enabled`を維持し、規格波形が必要な場合はユーザーがONを選択する。
+- Packet TypeごとのPayload最大長はDH1=27 byte、2-DH1=54 byte、3-DH1=83 byteである。
+  Settings dialogは保存値をspin boxへ設定する前に全体上限83 byteを確保し、その後選択packet
+  typeの上限へ絞る。これにより2-DH1/3-DH1の27 byte超の値がdialog再表示時にclampされない。
+- generation metadataへrepeatごとの`packet_ranges_samples`を格納する。IQ Waveform、IQ Power、
+  Instantaneous Frequencyの各Previewは全field startに加え、packet data最終sampleの直後へ
+  `Packet End` guideを表示する。Power RampやPost Idleの終端ではなく、論理packet境界を示す。
+
+## 15. LE 1M / LE 2M RF Test Packet（2026-08-25）
+
+Visual Packet Composerへ進む前の規格profileとして、編集可能なLE 1M/LE 2M packet
+generatorを追加した。Preamble、Access Address/Sync、Header、Payload、CRC、Whiteningを
+同じSettingsで編集できる。Direct Test ModeのRF Test Packetは別形式にせず、Core規定値を
+これらの編集欄へロードするpresetとした。BR/EDRにも同じ考え方でRF test payload presetを
+追加した。
+
+生成結果は既存PreviewおよびNPZ/IQ TAR/WV/Pluto Outputの共通経路を通る。次のComposer
+段階ではpreset適用後のfield graphも通常packetと同じblockとして見え、ユーザーが内容を確認・
+変更できることを維持する。

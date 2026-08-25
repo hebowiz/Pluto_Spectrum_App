@@ -17,6 +17,8 @@ from pluto_vsg.model import (
     ModulationDefinition,
     ModulationKind,
     FilterKind,
+    bluetooth_packet_is_edr,
+    bluetooth_packet_properties,
 )
 
 
@@ -47,18 +49,16 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
 
     packet_kind = BluetoothPacketKind(settings.packet_kind)
     payload_body_bits = int(settings.payload_length_bytes) * 8
-    is_edr = packet_kind != BluetoothPacketKind.DH1
-    payload_header_bits = 16 if is_edr else 8
-    bits_per_symbol = 2 if packet_kind == BluetoothPacketKind.DH1_2 else 3
-    if not is_edr:
-        bits_per_symbol = 1
+    is_edr = bluetooth_packet_is_edr(packet_kind)
+    _, _, bits_per_symbol, _ = bluetooth_packet_properties(packet_kind)
+    payload_header_bits = 8 if packet_kind == BluetoothPacketKind.DH1 else 16
     payload_modulation = (
         ModulationDefinition()
         if not is_edr
         else ModulationDefinition(
             kind=(
                 ModulationKind.PI_4_DQPSK
-                if packet_kind == BluetoothPacketKind.DH1_2
+                if bits_per_symbol == 2
                 else ModulationKind.DPSK8
             ),
             filter_kind=FilterKind.ROOT_RAISED_COSINE,
@@ -159,7 +159,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
     if not is_edr:
         return common
     edr_modulation = common[-1].modulation
-    sync_bits = 20 if packet_kind == BluetoothPacketKind.DH1_2 else 30
+    sync_bits = 20 if bits_per_symbol == 2 else 30
     return (
         *common[:2],
         FieldDefinition(
@@ -206,6 +206,7 @@ def bluetooth_br_edr_project() -> WaveformProject:
         standard=StandardProfile.BLUETOOTH_BR_EDR,
         sample_rate_hz=8_000_000.0,
         samples_per_symbol=8,
+        center_frequency_hz=2_440_000_000.0,
         bluetooth_br=settings,
         fields=bluetooth_br_fields(settings),
     )

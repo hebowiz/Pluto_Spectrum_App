@@ -33,16 +33,28 @@ from pluto_sa.vsa.ui.measurement_chrome import FixedInteractionViewBox
 from pluto_vsg.engine import BluetoothBRWaveformEngine, GenerationResult
 from pluto_vsg.export import save_iq_tar, save_npz, save_wv
 from pluto_vsg.model import create_default_project, validate_project
-from pluto_vsg.model import BluetoothPacketKind, PayloadSourceKind
+from pluto_vsg.model import (
+    BluetoothLEPayloadSourceKind,
+    BluetoothLEPhy,
+    BluetoothPacketKind,
+    PayloadSourceKind,
+    bluetooth_packet_is_edr,
+    bluetooth_packet_properties,
+)
 from pluto_vsg.persistence import (
     load_project,
     project_from_dict,
     project_to_dict,
     save_project,
 )
-from pluto_vsg.profiles import bluetooth_br_edr_project, bluetooth_br_fields
+from pluto_vsg.profiles import (
+    bluetooth_br_edr_project,
+    bluetooth_br_fields,
+    bluetooth_le_project,
+)
 from pluto_vsg.ui.main_window import (
     PlutoVSGWindow,
+    _BluetoothLESettingsDialog,
     _BluetoothSettingsDialog,
     _instantaneous_frequency_khz,
 )
@@ -53,6 +65,16 @@ def test_default_vsg_project_is_valid() -> None:
 
     assert project.samples_per_symbol == 8
     assert validate_project(project) == ()
+
+    bluetooth_project = bluetooth_br_edr_project()
+    assert bluetooth_project.bluetooth_br is not None
+    assert bluetooth_project.center_frequency_hz == 2_440_000_000.0
+    assert bluetooth_project.bluetooth_br.whitening_enabled is False
+    assert bluetooth_project.power_envelope.rise_symbols == 1.0
+    assert bluetooth_project.power_envelope.rise_delay_symbols == -1.0
+    assert bluetooth_project.power_envelope.fall_symbols == 1.0
+    assert bluetooth_project.power_envelope.fall_delay_symbols == 1.0
+    assert bluetooth_project.power_envelope.shape == "Cosine"
 
 
 def test_invalid_vsg_project_reports_model_path() -> None:
@@ -132,6 +154,7 @@ def test_vsg_field_labels_are_present_and_keep_a_fixed_side() -> None:
                 line.label.anchors == [(0.0, 0.5), (0.0, 0.5)]
                 for line in lines
             )
+            assert any(line.label.format == "Packet End" for line in lines)
     finally:
         window.close()
 
@@ -234,6 +257,44 @@ def test_vsg_settings_edit_packet_header_and_recalculate_hec() -> None:
         parent.close()
 
 
+def test_classic_rf_test_preset_populates_existing_payload_controls() -> None:
+    pg.mkQApp("Pluto VSG Classic RF preset test")
+    parent = PlutoVSGWindow()
+    dialog = _BluetoothSettingsDialog(parent.project, parent)
+    try:
+        dialog.rf_test_payload_combo.setCurrentIndex(
+            dialog.rf_test_payload_combo.findData("11110000")
+        )
+        dialog._apply_rf_test_preset()
+
+        assert dialog.payload_source_combo.currentData() == PayloadSourceKind.PATTERN
+        assert dialog.pattern_edit.text() == "11110000"
+        assert dialog.whitening_check.isChecked() is False
+    finally:
+        dialog.close()
+        parent.close()
+
+
+def test_le_rf_test_preset_populates_editable_packet_controls() -> None:
+    pg.mkQApp("Pluto VSG LE RF preset test")
+    project = bluetooth_le_project(BluetoothLEPhy.LE_2M)
+    parent = PlutoVSGWindow(project)
+    dialog = _BluetoothLESettingsDialog(project, parent)
+    try:
+        dialog._apply_rf_test_preset()
+
+        assert dialog.sync_edit.text() == "10010100100000100110111010001110"
+        assert dialog.payload_source_combo.currentData() == (
+            BluetoothLEPayloadSourceKind.PATTERN
+        )
+        assert dialog.payload_pattern_edit.text() == "10101010"
+        assert dialog.crc_init_edit.text() == "555555"
+        assert dialog.whitening_check.isChecked() is False
+    finally:
+        dialog.close()
+        parent.close()
+
+
 def test_vsg_frequency_preview_does_not_connect_burst_to_zero_hz() -> None:
     phase_step = 2.0 * np.pi * 100_000.0 / 8_000_000.0
     active = np.exp(1j * phase_step * np.arange(8))
@@ -247,13 +308,17 @@ def test_vsg_frequency_preview_does_not_connect_burst_to_zero_hz() -> None:
 
 
 def test_vsg_dh1_generation_decodes_with_valid_hec_and_crc() -> None:
-    project = bluetooth_br_edr_project()
+    base = bluetooth_br_edr_project()
+    assert base.bluetooth_br is not None
+    settings = replace(base.bluetooth_br, whitening_enabled=True)
+    project = replace(
+        base,
+        bluetooth_br=settings,
+        fields=bluetooth_br_fields(settings),
+    )
 
     result = BluetoothBRWaveformEngine().generate(project)
-    settings = project.bluetooth_br
-    assert settings is not None
-    packet_start = settings.pre_idle_symbols * project.samples_per_symbol
-    packet_stop = packet_start + int(result.metadata["packet_sample_count"])
+    packet_start, packet_stop = result.metadata["packet_ranges_samples"][0]
     recording = IQRecording(
         iq=result.iq[packet_start:packet_stop],
         sample_rate_hz=result.sample_rate_hz,
@@ -289,6 +354,7 @@ def test_vsg_edr_generation_matches_validated_phase_sequence(
         base.bluetooth_br,
         packet_kind=packet_kind,
         payload_length_bytes=payload_length,
+        whitening_enabled=True,
     )
     project = replace(
         base,
@@ -379,6 +445,128 @@ def test_vsg_packet_type_dialog_updates_edr_project() -> None:
         parent.close()
 
 
+def test_vsg_dialog_preserves_maximum_edr_payload_when_reopened() -> None:
+    pg.mkQApp("Pluto VSG payload persistence test")
+    parent = PlutoVSGWindow()
+    first = _BluetoothSettingsDialog(parent.project, parent)
+    second = None
+    try:
+        first.packet_type_combo.setCurrentIndex(
+            first.packet_type_combo.findData(BluetoothPacketKind.DH5_3)
+        )
+        first.payload_length_spin.setValue(1021)
+        first._accept_settings()
+
+        second = _BluetoothSettingsDialog(first.project, parent)
+
+        assert second.payload_length_spin.maximum() == 1021
+        assert second.payload_length_spin.value() == 1021
+    finally:
+        if second is not None:
+            second.close()
+        first.close()
+        parent.close()
+
+
+@pytest.mark.parametrize(
+    ("packet_kind", "payload_max"),
+    (
+        (BluetoothPacketKind.DH1, 27),
+        (BluetoothPacketKind.DH3, 183),
+        (BluetoothPacketKind.DH5, 339),
+        (BluetoothPacketKind.DH1_2, 54),
+        (BluetoothPacketKind.DH3_2, 367),
+        (BluetoothPacketKind.DH5_2, 679),
+        (BluetoothPacketKind.DH1_3, 83),
+        (BluetoothPacketKind.DH3_3, 552),
+        (BluetoothPacketKind.DH5_3, 1021),
+    ),
+)
+def test_vsg_dialog_packet_type_change_selects_maximum_payload(
+    packet_kind, payload_max
+) -> None:
+    parent = QtWidgets.QWidget()
+    dialog = _BluetoothSettingsDialog(bluetooth_br_edr_project(), parent)
+    try:
+        # Move away first so the DH1 case also emits currentIndexChanged.
+        dialog.packet_type_combo.setCurrentIndex(
+            dialog.packet_type_combo.findData(BluetoothPacketKind.DH5_3)
+        )
+        dialog.packet_type_combo.setCurrentIndex(
+            dialog.packet_type_combo.findData(packet_kind)
+        )
+        assert dialog.payload_length_spin.maximum() == payload_max
+        assert dialog.payload_length_spin.value() == payload_max
+    finally:
+        dialog.close()
+        parent.close()
+
+
+@pytest.mark.parametrize(
+    ("packet_kind", "payload_max", "packet_type", "bits_per_symbol", "slots"),
+    (
+        (BluetoothPacketKind.DH1, 27, 0x4, 1, 1),
+        (BluetoothPacketKind.DH3, 183, 0xB, 1, 3),
+        (BluetoothPacketKind.DH5, 339, 0xF, 1, 5),
+        (BluetoothPacketKind.DH1_2, 54, 0x4, 2, 1),
+        (BluetoothPacketKind.DH3_2, 367, 0xA, 2, 3),
+        (BluetoothPacketKind.DH5_2, 679, 0xE, 2, 5),
+        (BluetoothPacketKind.DH1_3, 83, 0x8, 3, 1),
+        (BluetoothPacketKind.DH3_3, 552, 0xB, 3, 3),
+        (BluetoothPacketKind.DH5_3, 1021, 0xF, 3, 5),
+    ),
+)
+def test_vsg_all_dhx_packet_definitions_generate(
+    packet_kind, payload_max, packet_type, bits_per_symbol, slots
+) -> None:
+    base = bluetooth_br_edr_project()
+    assert base.bluetooth_br is not None
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=packet_kind,
+        payload_length_bytes=payload_max,
+    )
+    project = replace(
+        base,
+        bluetooth_br=settings,
+        fields=bluetooth_br_fields(settings),
+    )
+
+    assert bluetooth_packet_properties(packet_kind) == (
+        payload_max,
+        packet_type,
+        bits_per_symbol,
+        slots,
+    )
+    assert bluetooth_packet_is_edr(packet_kind) is (bits_per_symbol > 1)
+    assert validate_project(project) == ()
+
+    result = BluetoothBRWaveformEngine().generate(project)
+    payload_header = np.asarray(result.metadata["payload_header_bits"])
+    assert payload_header.size == (
+        8 if packet_kind == BluetoothPacketKind.DH1 else 16
+    )
+    packed_payload_header = sum(
+        int(bit) << index for index, bit in enumerate(payload_header)
+    )
+    assert (packed_payload_header >> 3) & (
+        0x1F if packet_kind == BluetoothPacketKind.DH1 else 0x3FF
+    ) == payload_max
+    assert result.metadata["payload_body_bits"].size == payload_max * 8
+    assert result.metadata["packet_name"] == packet_kind.value
+    assert result.metadata["packet_sample_count"] > 0
+    header_air = np.asarray(result.metadata["packet_bits"])[72:126]
+    header_data = header_air.reshape(-1, 3)[:, 0]
+    packed_header = sum(
+        int(bit) << index for index, bit in enumerate(header_data[:10])
+    )
+    assert (packed_header >> 3) & 0xF == packet_type
+    packet_duration_us = (
+        result.metadata["packet_sample_count"] / result.sample_rate_hz * 1e6
+    )
+    assert packet_duration_us <= slots * 625.0
+
+
 def test_vsg_generation_emits_hierarchical_sample_boundaries() -> None:
     project = bluetooth_br_edr_project()
 
@@ -402,6 +590,21 @@ def test_vsg_generation_emits_hierarchical_sample_boundaries() -> None:
     assert header_type.stop_symbol - header_type.start_symbol == 12
     assert payload_body.logical_bit_count == 27 * 8
     assert payload_body.stop_sample - payload_body.start_sample == 27 * 8 * 8
+    packet_ranges = result.metadata["packet_ranges_samples"]
+    expected_start = (
+        project.bluetooth_br.pre_idle_symbols * project.samples_per_symbol
+        - min(
+            0,
+            round(
+                project.power_envelope.rise_delay_symbols
+                * project.samples_per_symbol
+            ),
+        )
+    )
+    assert packet_ranges == ((
+        expected_start,
+        expected_start + result.metadata["packet_sample_count"],
+    ),)
 
 
 def test_vsg_payload_sources_generate_distinct_expected_bits() -> None:

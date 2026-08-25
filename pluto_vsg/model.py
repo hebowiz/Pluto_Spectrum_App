@@ -39,8 +39,78 @@ class PayloadSourceKind(StrEnum):
 
 class BluetoothPacketKind(StrEnum):
     DH1 = "DH1"
+    DH3 = "DH3"
+    DH5 = "DH5"
     DH1_2 = "2-DH1"
+    DH3_2 = "2-DH3"
+    DH5_2 = "2-DH5"
     DH1_3 = "3-DH1"
+    DH3_3 = "3-DH3"
+    DH5_3 = "3-DH5"
+
+
+class BluetoothLEPhy(StrEnum):
+    LE_1M = "LE 1M"
+    LE_2M = "LE 2M"
+
+
+class BluetoothLEPayloadType(StrEnum):
+    PRBS9 = "PRBS9"
+    F0 = "11110000"
+    AA = "10101010"
+    PRBS15 = "PRBS15"
+    FF = "11111111"
+    ZERO = "00000000"
+    OF = "00001111"
+    FIVE = "01010101"
+
+
+class BluetoothLEPayloadSourceKind(StrEnum):
+    FIXED = "Fixed"
+    PATTERN = "Pattern"
+    PRBS9 = "PRBS9"
+    PRBS15 = "PRBS15"
+
+
+_BLUETOOTH_LE_PAYLOAD_CODES = {
+    BluetoothLEPayloadType.PRBS9: 0x0,
+    BluetoothLEPayloadType.F0: 0x1,
+    BluetoothLEPayloadType.AA: 0x2,
+    BluetoothLEPayloadType.PRBS15: 0x3,
+    BluetoothLEPayloadType.FF: 0x4,
+    BluetoothLEPayloadType.ZERO: 0x5,
+    BluetoothLEPayloadType.OF: 0x6,
+    BluetoothLEPayloadType.FIVE: 0x7,
+}
+
+
+def bluetooth_le_payload_code(payload_type: BluetoothLEPayloadType | str) -> int:
+    return _BLUETOOTH_LE_PAYLOAD_CODES[BluetoothLEPayloadType(payload_type)]
+
+
+_BLUETOOTH_PACKET_PROPERTIES = {
+    BluetoothPacketKind.DH1: (27, 0x4, 1, 1),
+    BluetoothPacketKind.DH3: (183, 0xB, 1, 3),
+    BluetoothPacketKind.DH5: (339, 0xF, 1, 5),
+    BluetoothPacketKind.DH1_2: (54, 0x4, 2, 1),
+    BluetoothPacketKind.DH3_2: (367, 0xA, 2, 3),
+    BluetoothPacketKind.DH5_2: (679, 0xE, 2, 5),
+    BluetoothPacketKind.DH1_3: (83, 0x8, 3, 1),
+    BluetoothPacketKind.DH3_3: (552, 0xB, 3, 3),
+    BluetoothPacketKind.DH5_3: (1021, 0xF, 3, 5),
+}
+
+
+def bluetooth_packet_properties(
+    packet_kind: BluetoothPacketKind | str,
+) -> tuple[int, int, int, int]:
+    """Return max payload, TYPE, bits/symbol and occupied slots."""
+
+    return _BLUETOOTH_PACKET_PROPERTIES[BluetoothPacketKind(packet_kind)]
+
+
+def bluetooth_packet_is_edr(packet_kind: BluetoothPacketKind | str) -> bool:
+    return bluetooth_packet_properties(packet_kind)[2] > 1
 
 
 @dataclass(frozen=True)
@@ -69,14 +139,14 @@ class PowerEnvelopeDefinition:
     idle_level_db: float = -120.0
     rise_symbols: float = 1.0
     fall_symbols: float = 1.0
-    rise_delay_symbols: float = 0.0
-    fall_delay_symbols: float = -1.0
+    rise_delay_symbols: float = -1.0
+    fall_delay_symbols: float = 1.0
     shape: str = "Cosine"
 
 
 @dataclass(frozen=True)
 class BluetoothBRSettings:
-    """Packet and RF-independent baseband settings for a BR/EDR DH1 packet."""
+    """Packet and RF-independent baseband settings for a BR/EDR DHx packet."""
 
     packet_kind: BluetoothPacketKind = BluetoothPacketKind.DH1
     lap: int = 0xC6967E
@@ -86,7 +156,7 @@ class BluetoothBRSettings:
     flow: int = 1
     arqn: int = 0
     seqn: int = 0
-    whitening_enabled: bool = True
+    whitening_enabled: bool = False
     payload_length_bytes: int = 27
     payload_source: PayloadSourceKind = PayloadSourceKind.PRBS9
     payload_pattern: str = "10101010"
@@ -96,6 +166,31 @@ class BluetoothBRSettings:
     edr_guard_symbols: int = 5
     edr_rolloff: float = 0.4
     edr_relative_power_db: float = 0.0
+    pre_idle_symbols: int = 8
+    post_idle_symbols: int = 8
+
+
+@dataclass(frozen=True)
+class BluetoothLESettings:
+    """Editable Bluetooth LE uncoded packet-bit and modulation settings."""
+
+    phy: BluetoothLEPhy = BluetoothLEPhy.LE_1M
+    preamble_bits: str = "10101010"
+    sync_word_bits: str = "01101011011111011001000101110001"
+    pdu_header_bits: str = "00000000"
+    payload_type: BluetoothLEPayloadType = BluetoothLEPayloadType.AA
+    payload_source: BluetoothLEPayloadSourceKind = (
+        BluetoothLEPayloadSourceKind.PATTERN
+    )
+    payload_pattern: str = "10101010"
+    payload_length_bytes: int = 37
+    crc_enabled: bool = True
+    crc_init: int = 0x555555
+    whitening_enabled: bool = True
+    whitening_channel_index: int = 37
+    rf_test_interval_enabled: bool = False
+    frequency_deviation_hz: float = 250_000.0
+    gaussian_bt: float = 0.5
     pre_idle_symbols: int = 8
     post_idle_symbols: int = 8
 
@@ -113,6 +208,7 @@ class WaveformProject:
         default_factory=PowerEnvelopeDefinition
     )
     bluetooth_br: BluetoothBRSettings | None = None
+    bluetooth_le: BluetoothLESettings | None = None
 
 
 @dataclass(frozen=True)
@@ -222,11 +318,7 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
     settings = project.bluetooth_br
     if settings is not None:
         packet_kind = BluetoothPacketKind(settings.packet_kind)
-        payload_max = {
-            BluetoothPacketKind.DH1: 27,
-            BluetoothPacketKind.DH1_2: 54,
-            BluetoothPacketKind.DH1_3: 83,
-        }[packet_kind]
+        payload_max = bluetooth_packet_properties(packet_kind)[0]
         integer_ranges = (
             ("lap", settings.lap, 0, 0xFFFFFF),
             ("uap", settings.uap, 0, 0xFF),
@@ -293,6 +385,82 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 issues.append(
                     ValidationIssue(
                         "bluetooth_br.payload_pattern",
+                        "Fixed and pattern payloads require a binary pattern.",
+                    )
+                )
+
+    le_settings = project.bluetooth_le
+    if le_settings is not None:
+        if not 0 <= int(le_settings.payload_length_bytes) <= 255:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_le.payload_length_bytes",
+                    "LE test payload length must be between 0 and 255 bytes.",
+                )
+            )
+        if le_settings.frequency_deviation_hz <= 0.0:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_le.frequency_deviation_hz",
+                    "LE frequency deviation must be positive.",
+                )
+            )
+        if le_settings.gaussian_bt <= 0.0:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_le.gaussian_bt",
+                    "LE Gaussian B*T must be positive.",
+                )
+            )
+        if le_settings.pre_idle_symbols < 0 or le_settings.post_idle_symbols < 0:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_le.idle_symbols",
+                    "LE idle symbol counts must not be negative.",
+                )
+            )
+        bit_fields = (
+            ("preamble_bits", le_settings.preamble_bits, None),
+            ("sync_word_bits", le_settings.sync_word_bits, 32),
+            ("pdu_header_bits", le_settings.pdu_header_bits, 8),
+        )
+        for name, value, required_length in bit_fields:
+            bits = str(value).strip().replace(" ", "")
+            if not bits or any(bit not in "01" for bit in bits):
+                issues.append(
+                    ValidationIssue(
+                        f"bluetooth_le.{name}", "Value must be a binary bit string."
+                    )
+                )
+            elif required_length is not None and len(bits) != required_length:
+                issues.append(
+                    ValidationIssue(
+                        f"bluetooth_le.{name}",
+                        f"Value must contain exactly {required_length} bits.",
+                    )
+                )
+        if not 0 <= int(le_settings.crc_init) <= 0xFFFFFF:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_le.crc_init", "CRCInit must be a 24-bit value."
+                )
+            )
+        if not 0 <= int(le_settings.whitening_channel_index) <= 39:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_le.whitening_channel_index",
+                    "Whitening channel index must be between 0 and 39.",
+                )
+            )
+        if le_settings.payload_source in {
+            BluetoothLEPayloadSourceKind.FIXED,
+            BluetoothLEPayloadSourceKind.PATTERN,
+        }:
+            pattern = le_settings.payload_pattern.strip().replace(" ", "")
+            if not pattern or any(bit not in "01" for bit in pattern):
+                issues.append(
+                    ValidationIssue(
+                        "bluetooth_le.payload_pattern",
                         "Fixed and pattern payloads require a binary pattern.",
                     )
                 )

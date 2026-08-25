@@ -30,7 +30,7 @@ Bluetooth BR header's rate-1/3 FEC.
 The project validator rejects a hierarchy when child symbol counts do not fill
 the parent or when all logical counts are known but do not sum to the parent.
 
-## Bluetooth BR / EDR DH1 hierarchy currently implemented
+## Bluetooth BR / EDR DHx hierarchy currently implemented
 
 - Access Code: Preamble, Sync Word, Trailer
 - Header: LT_ADDR, TYPE, FLOW, ARQN, SEQN, HEC
@@ -40,16 +40,16 @@ The Header records 18 logical bits and 54 transmitted symbols. Each subfield's
 transmitted span includes its rate-1/3 FEC expansion.
 
 The Bluetooth settings dialog exposes LT_ADDR, FLOW, ARQN and SEQN. TYPE is
-currently read-only as `4 (DH1)` because the first vertical slice only generates
-DH1. HEC is read-only and is recalculated immediately from the ten Header data
-bits and UAP; the waveform engine uses the same calculation when generating IQ.
+read-only and follows the selected DHx packet definition. HEC is read-only and
+is recalculated immediately from the ten Header data bits and UAP; the waveform
+engine uses the same calculation when generating IQ.
 
-The current DH1 vertical slice still uses the existing uncoded-payload generator.
-The Payload child spans deliberately describe that generated waveform; this
-change does not silently alter its coding or modulation behavior.
+BR supports `DH1`, `DH3` and `DH5`. DH1 uses an 8-bit payload header; DH3 and
+DH5 use a 16-bit payload header. All three use uncoded GFSK payloads with CRC-16.
 
-The packet setting now selects `DH1`, `2-DH1`, or `3-DH1`. EDR projects keep the
-same Access Code and rate-1/3 coded Header hierarchy, followed by:
+EDR supports `2-DH1`, `2-DH3`, `2-DH5`, `3-DH1`, `3-DH3` and `3-DH5`. These
+projects keep the same Access Code and rate-1/3 coded Header hierarchy, followed
+by:
 
 - Guard (default 5 symbols, continuous final-GFSK phase)
 - EDR Data
@@ -57,7 +57,7 @@ same Access Code and rate-1/3 coded Header hierarchy, followed by:
   - EDR Payload (16-bit header, body and CRC-16)
   - EDR Trailer (two symbols)
 
-`2-DH1` uses Bluetooth differential mapping with pi/4-DQPSK; `3-DH1` uses the
+`2-DHx` uses Bluetooth differential mapping with pi/4-DQPSK; `3-DHx` uses the
 Bluetooth 8DPSK mapping. Both use an SRRC transmit filter with configurable
 roll-off (default 0.4). Payloads which do not end on an EDR symbol boundary are
 zero-padded internally; the padding count is recorded in generation metadata.
@@ -72,8 +72,48 @@ Symbols. Preview plots use:
 - major fields: full-height magenta dashed guides
 - minor fields: lower-lane orange dotted guides
 - field labels: IQ Waveform, IQ Power and Instantaneous Frequency previews
+- packet end: a full-height white solid guide labelled `Packet End`; repeated
+  packets use a 1-based suffix so each generated packet endpoint is explicit
+- packet-end labels use the same upper label lane as major-field labels
 - label anchoring: fixed to the right of each boundary; labels do not switch
   sides when a boundary crosses the center of the visible plot
+
+New projects default to a one-symbol cosine ramp at each edge. Ramp Up starts
+one symbol before Packet Start (`-1.000`), while Ramp Down starts one symbol
+after Packet End (`+1.000`). A loaded project keeps its saved ramp values.
+
+New Bluetooth BR/EDR projects use 2440 MHz as the center frequency. Changing
+Packet Type in Settings selects that type's maximum payload: DH1/DH3/DH5 use
+27/183/339 bytes, 2-DH1/2-DH3/2-DH5 use 54/367/679 bytes, and
+3-DH1/3-DH3/3-DH5 use 83/552/1021 bytes. Reopening Settings preserves the
+currently saved payload length until Packet Type is changed by the user.
+
+## Bluetooth LE RF Test Packet hierarchy
+
+`File > New` offers editable LE 1M and LE 2M packet projects. Direct Test Mode
+is a preset which populates this same model rather than a separate engine. The
+hierarchy is:
+
+- Preamble (8 bits for LE 1M, 16 bits for LE 2M)
+- Sync Word (32 bits)
+- PDU Header (Payload Type, RFU, CP=0, RFU)
+- PDU Length (8 bits)
+- PDU Payload (0 to 255 octets; omitted from the tree when length is zero)
+- CRC-24 (CRCInit 0x555555)
+
+The settings dialog exposes editable air-order Preamble, Access Address/Sync,
+PDU Header, payload source/pattern/length, CRC enable/CRCInit, whitening and
+channel index in addition to PHY, RF parameters, idle and power ramps. Applying
+an RF Test Packet preset overwrites these controls with the fixed Sync Word,
+selected Core test payload type, CRCInit 0x555555, whitening Off and standard
+625-us-based interval. A PHY change selects the nominal 250 kHz (LE 1M) or
+500 kHz (LE 2M) deviation and sample rate remains symbol rate times samples per
+symbol.
+
+BR/EDR uses the same preset concept: Settings can load the RF test payload
+patterns into the existing Payload Source/Data controls. The preset is not a
+parallel waveform representation, so users can inspect and edit every loaded
+value before generation.
 
 `Graphics > Field Boundaries` selects `Major + Minor Fields`, `Major Fields
 Only`, or `Hide Field Boundaries`. The default is Major + Minor.

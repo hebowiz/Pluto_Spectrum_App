@@ -853,6 +853,39 @@ VSA:
 - payload pattern と CRC を検証
 - GFSK metrics を評価
 
+### D.3.1 Pluto VSG 実装状況（2026-08-25）
+
+LE 1M/2Mの編集可能なpacket generatorを実装し、Direct Test Mode用RF Test Packetは
+専用generatorではなく、同じfield/settingsへ規定値を入力するpresetとして扱う。
+
+- PHY: LE 1M / LE 2M
+- Samples/Symbol初期値: 8（8 MS/s / 16 MS/s）
+- Preamble、Access Address/Sync Word、PDU Headerをair-order bit列で直接編集可能
+- Payload source: Fixed、Pattern、PRBS9、PRBS15
+- Payload Length: 0～255 byte、初期値37 byte
+- CRC-24: 有効/無効と24-bit CRCInitを編集可能
+- Whitening: 有効/無効とChannel Index 0～39を編集可能
+- GFSK: BT=0.5、初期DeviationはLE 1M=250 kHz、LE 2M=500 kHz
+- Power ramp、pre/post idle、1～1000回のrepeat、Preview、NPZ/IQ TAR/WV exportを共通利用
+
+RF Test Packet presetを適用すると以下を同じ編集欄へロードする。
+
+- Preamble: LE 1M=8 bit、LE 2M=16 bit
+- Sync Word: `10010100100000100110111010001110`（transmission order）
+- PDU Header: Payload Type code + RFU/CP=0
+- Payload Type: PRBS9、`11110000`、`10101010`、PRBS15、`11111111`、
+  `00000000`、`00001111`、`01010101`
+- CRCInit=`0x555555`、Whitening OFF
+- Packet interval: `ceil((packet_duration_us + 249) / 625) * 625 us`
+
+BR/EDR SettingsにもRF test payload presetを設け、PRBS9、固定0/1、交互`1010`、
+反復`11110000`をPayload Source/Dataへロードし、WhiteningをOFFにする。メインメニューの
+default presetはBR/EDRではPRBS9、LEでは現在選択中のRF test payload typeを適用する。
+
+CTE/CTEInfo、LE Coded PHY、HCI command生成は未実装である。CRCとWhiteningはPDU
+（Header、Length、Payload）およびCRCの正しい処理範囲を分離し、CRCはCore仕様のLFSR
+register-position図を直接写した独立テストと照合する。
+
 ## D.4 HDT
 
 VSG:
