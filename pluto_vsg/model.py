@@ -129,6 +129,7 @@ class FieldDefinition:
     data_source: DataSourceKind = DataSourceKind.FIXED
     data: str = "0"
     modulation: ModulationDefinition = field(default_factory=ModulationDefinition)
+    relative_power_db: float = 0.0
     children: tuple[FieldDefinition, ...] = ()
 
 
@@ -164,6 +165,10 @@ class BluetoothBRSettings:
     carrier_frequency_offset_hz: float = 0.0
     gaussian_bt: float = 0.5
     edr_guard_symbols: int = 5
+    edr_guard_relative_power_db: float = 0.0
+    edr_guard_ramp_in_symbols: float = 1.0
+    edr_guard_ramp_out_symbols: float = 1.0
+    edr_guard_ramp_shape: str = "Cosine"
     edr_rolloff: float = 0.4
     edr_relative_power_db: float = 0.0
     pre_idle_symbols: int = 8
@@ -361,6 +366,41 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 ValidationIssue(
                     "bluetooth_br.edr_guard_symbols",
                     "EDR guard duration must not be negative.",
+                )
+            )
+        if not -120.0 <= settings.edr_guard_relative_power_db <= 20.0:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_br.edr_guard_relative_power_db",
+                    "EDR guard relative power must be between -120 and +20 dB.",
+                )
+            )
+        if (
+            settings.edr_guard_ramp_in_symbols < 0.0
+            or settings.edr_guard_ramp_out_symbols < 0.0
+        ):
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_br.edr_guard_ramp_symbols",
+                    "EDR guard ramp durations must not be negative.",
+                )
+            )
+        if (
+            settings.edr_guard_ramp_in_symbols
+            + settings.edr_guard_ramp_out_symbols
+            > settings.edr_guard_symbols
+        ):
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_br.edr_guard_ramp_symbols",
+                    "EDR guard Ramp In plus Ramp Out must not exceed Guard duration.",
+                )
+            )
+        if settings.edr_guard_ramp_shape not in {"Cosine", "Linear"}:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_br.edr_guard_ramp_shape",
+                    "EDR guard ramp shape must be Cosine or Linear.",
                 )
             )
         if not 0.0 < settings.edr_rolloff <= 1.0:

@@ -69,6 +69,7 @@ class PacketComposerView(QtWidgets.QGraphicsView):
     """Timeline view of packet fields, modulation regions and power controls."""
 
     selected_block_changed = QtCore.Signal(object)
+    block_edit_requested = QtCore.Signal(object)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -118,6 +119,20 @@ class PacketComposerView(QtWidgets.QGraphicsView):
         block = selected[0].block if selected and isinstance(selected[0], _ComposerBlockItem) else None
         self.selected_block_changed.emit(block)
 
+    def mouseDoubleClickEvent(  # noqa: N802 - Qt override
+        self, event: QtGui.QMouseEvent
+    ) -> None:
+        item = self.itemAt(event.position().toPoint())
+        while item is not None and not isinstance(item, _ComposerBlockItem):
+            item = item.parentItem()
+        if isinstance(item, _ComposerBlockItem):
+            self._scene.clearSelection()
+            item.setSelected(True)
+            self.block_edit_requested.emit(item.block)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     @staticmethod
     def _block_color(block: ComposerBlock) -> QtGui.QColor:
         if block.role == ComposerBlockRole.MODULATION:
@@ -125,6 +140,9 @@ class PacketComposerView(QtWidgets.QGraphicsView):
                 block.modulation_summary, QtGui.QColor("#356f8c")
             )
         if block.role == ComposerBlockRole.POWER:
+            if block.relative_power_db is not None and block.relative_power_db < 0.0:
+                darkness = 100 + min(80, round(abs(block.relative_power_db) * 2.0))
+                return _POWER_COLOR.darker(darkness)
             return _POWER_COLOR
         return _BLOCK_COLORS.get(block.data_source, QtGui.QColor("#4d5968"))
 

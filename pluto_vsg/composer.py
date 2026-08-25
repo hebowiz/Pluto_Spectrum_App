@@ -34,6 +34,7 @@ class ComposerBlock:
     data_source: str = ""
     data_summary: str = ""
     modulation_summary: str = ""
+    relative_power_db: float | None = None
     properties: tuple[tuple[str, str], ...] = ()
 
     @property
@@ -63,6 +64,7 @@ def _field_properties(packet_field: FieldDefinition) -> tuple[tuple[str, str], .
         ("Tx Symbols", str(packet_field.symbol_count)),
         ("Data Source", packet_field.data_source.value),
         ("Data", packet_field.data or "-"),
+        ("Relative Power", f"{packet_field.relative_power_db:+.3g} dB"),
         ("Modulation", modulation.kind.value),
         ("Symbol Rate", f"{modulation.symbol_rate_hz / 1e6:.6g} MSym/s"),
         ("TX Filter", modulation.filter_kind.value),
@@ -206,6 +208,9 @@ def build_composer_graph(project: WaveformProject) -> ComposerGraph:
                     name=name,
                     start_symbol=float(start),
                     symbol_count=float(duration),
+                    relative_power_db=(
+                        envelope.on_level_db if block_id == "on-level" else None
+                    ),
                     properties=(
                         ("Control", name),
                         ("Start", f"{start:g} symbols"),
@@ -214,6 +219,85 @@ def build_composer_graph(project: WaveformProject) -> ComposerGraph:
                     ),
                 )
             )
+
+    field_cursor = 0.0
+    for field_index, packet_field in enumerate(project.fields):
+        relative_power_db = float(packet_field.relative_power_db)
+        is_edr_guard = (
+            project.bluetooth_br is not None
+            and packet_field.name == "Guard"
+        )
+        if is_edr_guard:
+            settings = project.bluetooth_br
+            ramp_in = min(
+                float(packet_field.symbol_count),
+                float(settings.edr_guard_ramp_in_symbols),
+            )
+            ramp_out = min(
+                float(packet_field.symbol_count) - ramp_in,
+                float(settings.edr_guard_ramp_out_symbols),
+            )
+            level_duration = max(
+                0.0,
+                float(packet_field.symbol_count) - ramp_in - ramp_out,
+            )
+            guard_specs = (
+                ("ramp-in", "Guard Ramp In", field_cursor, ramp_in),
+                (
+                    "level",
+                    "Guard Level",
+                    field_cursor + ramp_in,
+                    level_duration,
+                ),
+                (
+                    "ramp-out",
+                    "Guard Ramp Out",
+                    field_cursor + float(packet_field.symbol_count) - ramp_out,
+                    ramp_out,
+                ),
+            )
+            for suffix, name, start, duration in guard_specs:
+                if duration <= 0.0:
+                    continue
+                blocks.append(
+                    ComposerBlock(
+                        block_id=f"power:field:{field_index}:{suffix}",
+                        track=ComposerTrackKind.POWER,
+                        role=ComposerBlockRole.POWER,
+                        name=name,
+                        start_symbol=start,
+                        symbol_count=duration,
+                        relative_power_db=relative_power_db,
+                        properties=(
+                            ("Control", name),
+                            ("Start", f"{start:g} symbols"),
+                            ("Duration", f"{duration:g} symbols"),
+                            ("Relative Power", f"{relative_power_db:+.3g} dB"),
+                            ("Shape", settings.edr_guard_ramp_shape),
+                        ),
+                    )
+                )
+            field_cursor += packet_field.symbol_count
+            continue
+        if abs(relative_power_db) > 1e-12:
+            blocks.append(
+                ComposerBlock(
+                    block_id=f"power:field:{field_index}",
+                    track=ComposerTrackKind.POWER,
+                    role=ComposerBlockRole.POWER,
+                    name=f"{packet_field.name} Level",
+                    start_symbol=field_cursor,
+                    symbol_count=float(packet_field.symbol_count),
+                    relative_power_db=relative_power_db,
+                    properties=(
+                        ("Control", f"{packet_field.name} relative level"),
+                        ("Start", f"{field_cursor:g} symbols"),
+                        ("Duration", f"{packet_field.symbol_count:g} symbols"),
+                        ("Relative Power", f"{relative_power_db:+.3g} dB"),
+                    ),
+                )
+            )
+        field_cursor += packet_field.symbol_count
 
     return ComposerGraph(
         project_name=project.name,

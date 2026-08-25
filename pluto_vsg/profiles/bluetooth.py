@@ -29,6 +29,7 @@ def _computed_field(
     transmitted_symbols: int | None = None,
     data: str = "Computed",
     modulation: ModulationDefinition | None = None,
+    relative_power_db: float = 0.0,
 ) -> FieldDefinition:
     return FieldDefinition(
         name=name,
@@ -41,6 +42,7 @@ def _computed_field(
         data_source=DataSourceKind.COMPUTED,
         data=data,
         modulation=modulation or ModulationDefinition(),
+        relative_power_db=float(relative_power_db),
     )
 
 
@@ -84,6 +86,9 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
         if source == PayloadSourceKind.PRBS9
         else settings.payload_pattern
     )
+    payload_relative_power_db = (
+        float(settings.edr_relative_power_db) if is_edr else 0.0
+    )
     payload_children = [
         _computed_field(
             "Payload Header",
@@ -91,6 +96,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
             transmitted_symbols=header_symbols,
             data="LLID + FLOW + LENGTH",
             modulation=payload_modulation,
+            relative_power_db=payload_relative_power_db,
         )
     ]
     if payload_body_bits:
@@ -102,6 +108,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
                 data_source=payload_source,
                 data=payload_data,
                 modulation=payload_modulation,
+                relative_power_db=payload_relative_power_db,
             )
         )
     payload_children.append(
@@ -111,6 +118,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
             transmitted_symbols=crc_symbols,
             data="CRC-16",
             modulation=payload_modulation,
+            relative_power_db=payload_relative_power_db,
         )
     )
     common = (
@@ -153,6 +161,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
             data_source=payload_source,
             data=payload_data,
             modulation=payload_modulation,
+            relative_power_db=payload_relative_power_db,
             children=tuple(payload_children),
         ),
     )
@@ -168,6 +177,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
             logical_bit_count=None,
             data_source=DataSourceKind.COMPUTED,
             data="Hold GFSK phase",
+            relative_power_db=float(settings.edr_guard_relative_power_db),
         ),
         FieldDefinition(
             name="EDR Data",
@@ -176,6 +186,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
             data_source=DataSourceKind.COMPUTED,
             data=packet_kind.value,
             modulation=edr_modulation,
+            relative_power_db=float(settings.edr_relative_power_db),
             children=(
                 FieldDefinition(
                     name="EDR Sync",
@@ -184,6 +195,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
                     data_source=DataSourceKind.COMPUTED,
                     data="Reference + Sync Word",
                     modulation=edr_modulation,
+                    relative_power_db=float(settings.edr_relative_power_db),
                 ),
                 common[-1],
                 FieldDefinition(
@@ -193,6 +205,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
                     data_source=DataSourceKind.COMPUTED,
                     data="Trailer",
                     modulation=edr_modulation,
+                    relative_power_db=float(settings.edr_relative_power_db),
                 ),
             ),
         ),

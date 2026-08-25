@@ -424,6 +424,97 @@ def test_vsg_edr_generation_matches_validated_phase_sequence(
     assert analyzed.evm_rms_percent < 5.0
 
 
+def test_vsg_edr_guard_relative_power_changes_only_guard_amplitude() -> None:
+    base = bluetooth_br_edr_project()
+    assert base.bluetooth_br is not None
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH1_2,
+        payload_length_bytes=54,
+        edr_guard_relative_power_db=-12.0,
+        edr_guard_ramp_in_symbols=0.0,
+        edr_guard_ramp_out_symbols=0.0,
+    )
+    project = replace(
+        base,
+        bluetooth_br=settings,
+        fields=bluetooth_br_fields(settings),
+    )
+
+    result = BluetoothBRWaveformEngine().generate(project)
+    gfsk_stop = int(result.metadata["gfsk_stop_sample"])
+    edr_start = int(result.metadata["edr_start_sample"])
+    reference = np.median(
+        np.abs(result.iq[gfsk_stop - 8 * project.samples_per_symbol : gfsk_stop])
+    )
+    guard = np.median(np.abs(result.iq[gfsk_stop:edr_start]))
+
+    assert 20.0 * np.log10(guard / reference) == pytest.approx(-12.0, abs=0.02)
+    assert result.metadata["edr_guard_relative_power_db"] == -12.0
+    assert project.fields[2].name == "Guard"
+    assert project.fields[2].relative_power_db == -12.0
+
+
+def test_vsg_edr_guard_power_uses_smooth_edge_transitions() -> None:
+    base = bluetooth_br_edr_project()
+    assert base.bluetooth_br is not None
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH1_2,
+        payload_length_bytes=54,
+        edr_guard_relative_power_db=-18.0,
+        edr_guard_ramp_in_symbols=1.0,
+        edr_guard_ramp_out_symbols=1.0,
+        edr_guard_ramp_shape="Cosine",
+    )
+    project = replace(
+        base,
+        bluetooth_br=settings,
+        fields=bluetooth_br_fields(settings),
+    )
+
+    result = BluetoothBRWaveformEngine().generate(project)
+    gfsk_stop = int(result.metadata["gfsk_stop_sample"])
+    edr_start = int(result.metadata["edr_start_sample"])
+    sps = project.samples_per_symbol
+    guard = result.iq[gfsk_stop:edr_start]
+    guard_magnitude = np.abs(guard)
+
+    assert guard[0] == pytest.approx(result.iq[gfsk_stop - 1])
+    assert guard[-1] == pytest.approx(result.iq[edr_start])
+    assert np.all(np.diff(guard_magnitude[:sps]) <= 1e-12)
+    assert np.all(np.diff(guard_magnitude[-sps:]) >= -1e-12)
+    assert result.metadata["edr_guard_ramp_in_symbols"] == 1.0
+    assert result.metadata["edr_guard_ramp_out_symbols"] == 1.0
+    assert result.metadata["edr_guard_ramp_shape"] == "Cosine"
+
+
+def test_vsg_settings_dialog_preserves_edr_guard_relative_power() -> None:
+    pg.mkQApp("Pluto VSG EDR guard power settings test")
+    parent = PlutoVSGWindow()
+    dialog = _BluetoothSettingsDialog(parent.project, parent)
+    try:
+        dialog.packet_type_combo.setCurrentIndex(
+            dialog.packet_type_combo.findData(BluetoothPacketKind.DH1_2)
+        )
+        dialog.edr_guard_power_spin.setValue(-18.5)
+        dialog.edr_guard_ramp_in_spin.setValue(0.75)
+        dialog.edr_guard_ramp_out_spin.setValue(0.5)
+        dialog.edr_guard_ramp_shape_combo.setCurrentText("Linear")
+        dialog._accept_settings()
+
+        settings = dialog.project.bluetooth_br
+        assert settings is not None
+        assert settings.edr_guard_relative_power_db == -18.5
+        assert settings.edr_guard_ramp_in_symbols == 0.75
+        assert settings.edr_guard_ramp_out_symbols == 0.5
+        assert settings.edr_guard_ramp_shape == "Linear"
+        assert dialog.project.fields[2].relative_power_db == -18.5
+    finally:
+        dialog.close()
+        parent.close()
+
+
 def test_vsg_packet_type_dialog_updates_edr_project() -> None:
     pg.mkQApp("Pluto VSG EDR settings test")
     parent = PlutoVSGWindow()

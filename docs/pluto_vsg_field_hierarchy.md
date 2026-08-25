@@ -64,6 +64,16 @@ zero-padded internally; the padding count is recorded in generation metadata.
 The complete mixed-modulation packet is one continuous IQ array, not two preview
 fragments.
 
+EDR Guard has an independent `Guard Power rel. GFSK` setting (default 0 dB,
+range -120 to +20 dB). `Guard Ramp In` and `Guard Ramp Out` (default one symbol
+each) smoothly connect the final GFSK amplitude to the Guard level and the Guard
+level to the actual first EDR sample amplitude. The transition shape is selectable
+between cosine (default) and linear, and the two transition durations must not
+exceed the Guard duration in total. The engine holds the final GFSK phase through
+Guard, so the amplitude transition does not introduce a phase discontinuity. These
+values are saved in the project, included in generation metadata and shown as
+separate Ramp In, level and Ramp Out sections on the Visual Composer Power track.
+
 ## UI behavior
 
 The Packet Composer uses an expanded tree and displays both Logical Bits and Tx
@@ -152,6 +162,26 @@ it must not edit graphics items as an independent source of truth. Planned edito
 operations are field insertion/removal/reordering, property editing, validation,
 and undo/redo. Standard-owned computed fields must remain distinguishable from
 freely editable user fields.
+
+The initial editing bridge now provides the following behavior:
+
+- Visual Composer and Field Tree selections are synchronized by stable block ID.
+- Double-clicking a visual block opens the owning Bluetooth packet/signal
+  settings. Power blocks use the same settings source because the envelope is
+  part of the immutable project snapshot. A separate Power Envelope button is
+  intentionally not shown while it would only duplicate Packet Settings.
+- Accepted settings changes and RF-test-preset application are project-level
+  undoable commands. `Ctrl+Z` / `Ctrl+Y` restore the complete project snapshot,
+  rebuild the graph, regenerate IQ and refresh every preview.
+- New/open project operations clear the history so undo never crosses a project
+  boundary.
+
+Bluetooth standard blocks remain protected at this stage. Directly changing a
+graphics item would desynchronize it from HEC, CRC, FEC, whitening and packet
+length calculation, so edits are routed through the standard profile settings.
+Free add/insert/reorder/delete will be enabled together with the Experimental
+Profile/generic waveform engine, where the field graph itself is the generation
+source of truth.
 
 ## Compatibility and next steps
 

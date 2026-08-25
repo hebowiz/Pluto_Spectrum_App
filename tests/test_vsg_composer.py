@@ -4,6 +4,7 @@ from dataclasses import replace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore
 
 from pluto_vsg.composer import (
     ComposerBlockRole,
@@ -17,6 +18,7 @@ from pluto_vsg.profiles import (
     bluetooth_le_project,
 )
 from pluto_vsg.ui.composer_view import PacketComposerView
+from pluto_vsg.ui.main_window import PlutoVSGWindow
 
 
 def test_le_composer_graph_has_three_time_aligned_tracks() -> None:
@@ -83,6 +85,42 @@ def test_edr_composer_graph_exposes_mixed_modulation_regions() -> None:
     assert all(block.role == ComposerBlockRole.MODULATION for block in modulation)
 
 
+def test_edr_composer_guard_exposes_relative_power() -> None:
+    base = bluetooth_br_edr_project()
+    assert base.bluetooth_br is not None
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH1_2,
+        payload_length_bytes=54,
+        edr_guard_relative_power_db=-15.0,
+    )
+    project = replace(
+        base,
+        bluetooth_br=settings,
+        fields=bluetooth_br_fields(settings),
+    )
+
+    graph = build_composer_graph(project)
+    guard = graph.block("field:2")
+    ramp_in = graph.block("power:field:2:ramp-in")
+    guard_level = graph.block("power:field:2:level")
+    ramp_out = graph.block("power:field:2:ramp-out")
+
+    assert guard is not None
+    assert ("Relative Power", "-15 dB") in guard.properties
+    assert ramp_in is not None
+    assert ramp_in.start_symbol == guard.start_symbol
+    assert ramp_in.symbol_count == 1.0
+    assert ("Shape", "Cosine") in ramp_in.properties
+    assert guard_level is not None
+    assert guard_level.start_symbol == guard.start_symbol + 1.0
+    assert guard_level.symbol_count == guard.symbol_count - 2.0
+    assert guard_level.relative_power_db == -15.0
+    assert ramp_out is not None
+    assert ramp_out.start_symbol == guard.stop_symbol - 1.0
+    assert ramp_out.symbol_count == 1.0
+
+
 def test_visual_composer_selection_emits_graph_block() -> None:
     pg.mkQApp("Pluto VSG visual composer test")
     view = PacketComposerView()
@@ -112,3 +150,40 @@ def test_visual_composer_labels_stay_inside_their_timeline_blocks() -> None:
             assert parent_rect.top() <= label_rect.center().y() <= parent_rect.bottom()
     finally:
         view.close()
+
+
+def test_field_tree_and_visual_composer_selection_are_synchronized() -> None:
+    app = pg.mkQApp("Pluto VSG composer selection synchronization test")
+    window = PlutoVSGWindow()
+    try:
+        tree_item = window._field_items_by_block_id["field:1.0"]
+        window.field_table.setCurrentItem(tree_item)
+        app.processEvents()
+        assert window._selected_composer_block is not None
+        assert window._selected_composer_block.block_id == "field:1.0"
+
+        assert window.composer_view.select_block("field:0") is True
+        app.processEvents()
+        assert window.field_table.currentItem().data(
+            0, QtCore.Qt.ItemDataRole.UserRole
+        ) == "field:0"
+    finally:
+        window.close()
+
+
+def test_project_settings_changes_support_undo_and_redo() -> None:
+    pg.mkQApp("Pluto VSG composer undo test")
+    window = PlutoVSGWindow()
+    try:
+        original = window.project
+        updated = replace(original, repeat_count=2)
+        window._commit_project_change(updated, "Change repeat count")
+        assert window.project.repeat_count == 2
+        assert window.undo_stack.canUndo() is True
+
+        window.undo_stack.undo()
+        assert window.project == original
+        window.undo_stack.redo()
+        assert window.project == updated
+    finally:
+        window.close()

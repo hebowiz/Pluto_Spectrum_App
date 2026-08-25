@@ -37,6 +37,7 @@ def _field_to_dict(packet_field: FieldDefinition) -> dict[str, object]:
         "logical_bit_count": packet_field.logical_bit_count,
         "data_source": packet_field.data_source.value,
         "data": packet_field.data,
+        "relative_power_db": packet_field.relative_power_db,
         "modulation": {
             **asdict(packet_field.modulation),
             "kind": packet_field.modulation.kind.value,
@@ -60,6 +61,7 @@ def _field_from_dict(item: object) -> FieldDefinition:
         logical_bit_count=(None if logical_count is None else int(logical_count)),
         data_source=DataSourceKind(str(item["data_source"])),
         data=str(item.get("data", "")),
+        relative_power_db=float(item.get("relative_power_db", 0.0)),
         modulation=ModulationDefinition(
             kind=ModulationKind(str(modulation_payload["kind"])),
             symbol_rate_hz=float(modulation_payload["symbol_rate_hz"]),

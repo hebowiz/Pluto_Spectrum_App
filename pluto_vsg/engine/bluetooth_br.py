@@ -280,6 +280,37 @@ def _placed_power_envelope(
     return envelope
 
 
+def _edr_guard_amplitude(
+    sample_count: int,
+    *,
+    start_amplitude: float,
+    guard_amplitude: float,
+    end_amplitude: float,
+    ramp_in_samples: int,
+    ramp_out_samples: int,
+    shape: str,
+) -> np.ndarray:
+    """Build the phase-neutral GFSK -> Guard -> EDR amplitude transition."""
+
+    count = max(0, int(sample_count))
+    values = np.full(count, float(guard_amplitude), dtype=np.float64)
+    if count == 0:
+        return values
+    ramp_in = min(count, max(0, int(ramp_in_samples)))
+    ramp_out = min(count - ramp_in, max(0, int(ramp_out_samples)))
+    if ramp_in:
+        curve = _ramp_curve(ramp_in, rising=True, shape=shape)
+        values[:ramp_in] = start_amplitude + (
+            guard_amplitude - start_amplitude
+        ) * curve
+    if ramp_out:
+        curve = _ramp_curve(ramp_out, rising=True, shape=shape)
+        values[-ramp_out:] = guard_amplitude + (
+            end_amplitude - guard_amplitude
+        ) * curve
+    return values
+
+
 def _extend_edge_phase(iq: np.ndarray, positions: np.ndarray) -> np.ndarray:
     """Extend a burst using its first/last phase increment, not constant IQ."""
 
@@ -395,11 +426,24 @@ class BluetoothBRWaveformEngine:
             )
             psk *= 10.0 ** (settings.edr_relative_power_db / 20.0)
             psk *= np.exp(1j * (np.angle(gfsk[-1]) - np.angle(psk[0])))
-            guard = np.full(
-                int(settings.edr_guard_symbols) * samples_per_symbol,
-                gfsk[-1],
-                dtype=np.complex128,
+            guard_sample_count = (
+                int(settings.edr_guard_symbols) * samples_per_symbol
             )
+            guard_amplitude = _edr_guard_amplitude(
+                guard_sample_count,
+                start_amplitude=float(np.abs(gfsk[-1])),
+                guard_amplitude=float(np.abs(gfsk[-1]))
+                * 10.0 ** (settings.edr_guard_relative_power_db / 20.0),
+                end_amplitude=float(np.abs(psk[0])),
+                ramp_in_samples=round(
+                    settings.edr_guard_ramp_in_symbols * samples_per_symbol
+                ),
+                ramp_out_samples=round(
+                    settings.edr_guard_ramp_out_symbols * samples_per_symbol
+                ),
+                shape=settings.edr_guard_ramp_shape,
+            )
+            guard = guard_amplitude * np.exp(1j * np.angle(gfsk[-1]))
             data_iq = np.concatenate((gfsk, guard, psk))
             edr_start_relative_sample = int(gfsk.size + guard.size)
             packet_bits = np.concatenate((gfsk_bits, psk_bits))
@@ -524,6 +568,18 @@ class BluetoothBRWaveformEngine:
                 "edr_rolloff": settings.edr_rolloff if is_edr else None,
                 "edr_relative_power_db": (
                     settings.edr_relative_power_db if is_edr else None
+                ),
+                "edr_guard_relative_power_db": (
+                    settings.edr_guard_relative_power_db if is_edr else None
+                ),
+                "edr_guard_ramp_in_symbols": (
+                    settings.edr_guard_ramp_in_symbols if is_edr else None
+                ),
+                "edr_guard_ramp_out_symbols": (
+                    settings.edr_guard_ramp_out_symbols if is_edr else None
+                ),
+                "edr_guard_ramp_shape": (
+                    settings.edr_guard_ramp_shape if is_edr else None
                 ),
                 "gfsk_stop_sample": (
                     int(data_start_in_single + gfsk_sample_count) if is_edr else None

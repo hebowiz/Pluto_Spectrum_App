@@ -411,6 +411,25 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         )
         self.bt_spin = self._double_spin(0.05, 2.0, settings.gaussian_bt, 3)
         self.edr_guard_spin = self._integer_spin(0, 1000, settings.edr_guard_symbols)
+        self.edr_guard_power_spin = self._double_spin(
+            -120.0, 20.0, settings.edr_guard_relative_power_db, 3
+        )
+        self.edr_guard_power_spin.setSuffix(" dB")
+        self.edr_guard_power_spin.setToolTip(
+            "Guard amplitude relative to the preceding GFSK section; 0 dB keeps "
+            "the current level and negative values reduce it."
+        )
+        self.edr_guard_ramp_in_spin = self._double_spin(
+            0.0, 1000.0, settings.edr_guard_ramp_in_symbols, 3
+        )
+        self.edr_guard_ramp_out_spin = self._double_spin(
+            0.0, 1000.0, settings.edr_guard_ramp_out_symbols, 3
+        )
+        self.edr_guard_ramp_shape_combo = QtWidgets.QComboBox()
+        self.edr_guard_ramp_shape_combo.addItems(["Cosine", "Linear"])
+        self.edr_guard_ramp_shape_combo.setCurrentText(
+            settings.edr_guard_ramp_shape
+        )
         self.edr_rolloff_spin = self._double_spin(0.01, 1.0, settings.edr_rolloff, 3)
         self.edr_power_spin = self._double_spin(
             -60.0, 20.0, settings.edr_relative_power_db, 3
@@ -478,6 +497,10 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             ("Carrier Offset [kHz]", self.cfo_spin),
             ("Gaussian B*T", self.bt_spin),
             ("EDR Guard [symbols]", self.edr_guard_spin),
+            ("EDR Guard Power rel. GFSK", self.edr_guard_power_spin),
+            ("EDR Guard Ramp In [symbols]", self.edr_guard_ramp_in_spin),
+            ("EDR Guard Ramp Out [symbols]", self.edr_guard_ramp_out_spin),
+            ("EDR Guard Ramp Shape", self.edr_guard_ramp_shape_combo),
             ("EDR SRRC Roll-off", self.edr_rolloff_spin),
             ("EDR Power rel. GFSK [dB]", self.edr_power_spin),
             ("Pre Idle [symbols]", self.pre_idle_spin),
@@ -602,6 +625,10 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             carrier_frequency_offset_hz=self.cfo_spin.value() * 1e3,
             gaussian_bt=self.bt_spin.value(),
             edr_guard_symbols=self.edr_guard_spin.value(),
+            edr_guard_relative_power_db=self.edr_guard_power_spin.value(),
+            edr_guard_ramp_in_symbols=self.edr_guard_ramp_in_spin.value(),
+            edr_guard_ramp_out_symbols=self.edr_guard_ramp_out_spin.value(),
+            edr_guard_ramp_shape=self.edr_guard_ramp_shape_combo.currentText(),
             edr_rolloff=self.edr_rolloff_spin.value(),
             edr_relative_power_db=self.edr_power_spin.value(),
             pre_idle_symbols=self.pre_idle_spin.value(),
@@ -647,6 +674,10 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         is_edr = bluetooth_packet_is_edr(kind)
         for control in (
             self.edr_guard_spin,
+            self.edr_guard_power_spin,
+            self.edr_guard_ramp_in_spin,
+            self.edr_guard_ramp_out_spin,
+            self.edr_guard_ramp_shape_combo,
             self.edr_rolloff_spin,
             self.edr_power_spin,
         ):
@@ -842,6 +873,28 @@ class _PlutoTransmitWorker(QtCore.QObject):
         self.backend.stop()
 
 
+class _ProjectChangeCommand(QtGui.QUndoCommand):
+    """Undoable replacement of the immutable WaveformProject snapshot."""
+
+    def __init__(
+        self,
+        window: "PlutoVSGWindow",
+        before: WaveformProject,
+        after: WaveformProject,
+        description: str,
+    ) -> None:
+        super().__init__(description)
+        self._window = window
+        self._before = before
+        self._after = after
+
+    def redo(self) -> None:
+        self._window._restore_project_snapshot(self._after)
+
+    def undo(self) -> None:
+        self._window._restore_project_snapshot(self._before)
+
+
 class PlutoVSGWindow(QtWidgets.QMainWindow):
     """Own project state, generation, preview and first export workflow."""
 
@@ -858,6 +911,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._tx_thread: QtCore.QThread | None = None
         self._tx_worker: _PlutoTransmitWorker | None = None
         self._close_after_tx = False
+        self.undo_stack = QtGui.QUndoStack(self)
+        self._selected_composer_block: ComposerBlock | None = None
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
         self._pluto_uri = str(preferences.value("pluto_tx/uri", "") or "")
         self._pluto_gain_db = float(
@@ -882,6 +937,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.generate_waveform()
 
     def _build_actions(self) -> None:
+        self.undo_action = self.undo_stack.createUndoAction(self, "Undo")
+        self.undo_action.setShortcut(QtGui.QKeySequence.StandardKey.Undo)
+        self.redo_action = self.undo_stack.createRedoAction(self, "Redo")
+        self.redo_action.setShortcut(QtGui.QKeySequence.StandardKey.Redo)
         self.new_action = QtGui.QAction("New Bluetooth BR / EDR Project", self)
         self.new_action.triggered.connect(self._new_bluetooth_project)
         self.new_le1m_action = QtGui.QAction("New Bluetooth LE 1M Packet", self)
@@ -955,7 +1014,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
         edit_menu = menu_bar.addMenu("Edit")
-        edit_menu.addActions([QtGui.QAction("Undo", self), QtGui.QAction("Redo", self)])
+        edit_menu.addActions([self.undo_action, self.redo_action])
         waveform_menu = menu_bar.addMenu("Waveform")
         waveform_menu.addAction(self.settings_action)
         waveform_menu.addAction(self.rf_test_preset_action)
@@ -1003,9 +1062,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self.block_library.setEnabled(False)
         self.field_table = QtWidgets.QTreeWidget()
-        self.field_table.setColumnCount(5)
+        self.field_table.setColumnCount(6)
         self.field_table.setHeaderLabels(
-            ["Field", "Logical Bits", "Tx Symbols", "Data Source", "Modulation"]
+            [
+                "Field",
+                "Logical Bits",
+                "Tx Symbols",
+                "Data Source",
+                "Modulation",
+                "Relative Power",
+            ]
         )
         self.field_table.header().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.ResizeToContents
@@ -1014,9 +1080,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.field_table.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
+        self.field_table.currentItemChanged.connect(self._field_tree_selected)
         self.composer_view = PacketComposerView()
         self.composer_view.selected_block_changed.connect(
             self._composer_block_selected
+        )
+        self.composer_view.block_edit_requested.connect(
+            self._edit_composer_block
         )
         composer_tabs = QtWidgets.QTabWidget()
         composer_tabs.addTab(self.composer_view, "Visual Composer")
@@ -1114,12 +1184,14 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def _new_bluetooth_project(self) -> None:
         self.project = bluetooth_br_edr_project()
         self.project_path = None
+        self.undo_stack.clear()
         self._refresh_project_view()
         self.generate_waveform()
 
     def _new_bluetooth_le_project(self, phy: BluetoothLEPhy) -> None:
         self.project = bluetooth_le_project(phy)
         self.project_path = None
+        self.undo_stack.clear()
         self._refresh_project_view()
         self.generate_waveform()
 
@@ -1133,7 +1205,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 payload_type=BluetoothLEPayloadType(current.payload_type),
                 payload_length_bytes=current.payload_length_bytes,
             )
-            self.project = replace(
+            updated_project = replace(
                 self.project,
                 name=f"Bluetooth {BluetoothLEPhy(settings.phy).value} RF Test Packet",
                 fields=bluetooth_le_fields(settings),
@@ -1148,14 +1220,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 payload_source=PayloadSourceKind.PRBS9,
                 whitening_enabled=False,
             )
-            self.project = replace(
+            updated_project = replace(
                 self.project,
                 name=f"Bluetooth {BluetoothPacketKind(settings.packet_kind).value} RF Test Packet",
                 fields=bluetooth_br_fields(settings),
                 bluetooth_br=settings,
             )
-        self._refresh_project_view()
-        self.generate_waveform()
+        self._commit_project_change(updated_project, "Apply RF test packet preset")
 
     def _edit_project_settings(self) -> None:
         if self.project.standard == StandardProfile.BLUETOOTH_LE:
@@ -1167,15 +1238,25 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         dialog = _BluetoothSettingsDialog(self.project, self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        self.project = dialog.project
-        self._refresh_project_view()
-        self.generate_waveform()
+        self._commit_project_change(dialog.project, "Edit Bluetooth BR / EDR settings")
 
     def _edit_bluetooth_le_settings(self) -> None:
         dialog = _BluetoothLESettingsDialog(self.project, self)
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return
-        self.project = dialog.project
+        self._commit_project_change(dialog.project, "Edit Bluetooth LE settings")
+
+    def _commit_project_change(
+        self, updated_project: WaveformProject, description: str
+    ) -> None:
+        if updated_project == self.project:
+            return
+        self.undo_stack.push(
+            _ProjectChangeCommand(self, self.project, updated_project, description)
+        )
+
+    def _restore_project_snapshot(self, project: WaveformProject) -> None:
+        self.project = project
         self._refresh_project_view()
         self.generate_waveform()
 
@@ -1190,8 +1271,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
 
     def _refresh_project_view(self) -> None:
         self.field_table.clear()
+        self._field_items_by_block_id: dict[str, QtWidgets.QTreeWidgetItem] = {}
 
-        def add_field(packet_field, parent=None) -> None:
+        def add_field(packet_field, parent=None, path="0") -> None:
             values = [
                 packet_field.name,
                 (
@@ -1202,8 +1284,12 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 str(packet_field.symbol_count),
                 packet_field.data_source.value,
                 packet_field.modulation.kind.value,
+                f"{packet_field.relative_power_db:+.3g} dB",
             ]
             item = QtWidgets.QTreeWidgetItem(values)
+            block_id = f"field:{path}"
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, block_id)
+            self._field_items_by_block_id[block_id] = item
             for column in range(1, len(values)):
                 item.setTextAlignment(
                     column, QtCore.Qt.AlignmentFlag.AlignCenter
@@ -1215,11 +1301,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 item.setFont(0, font)
             else:
                 parent.addChild(item)
-            for child in packet_field.children:
-                add_field(child, item)
+            for child_index, child in enumerate(packet_field.children):
+                add_field(child, item, f"{path}.{child_index}")
 
-        for packet_field in self.project.fields:
-            add_field(packet_field)
+        for field_index, packet_field in enumerate(self.project.fields):
+            add_field(packet_field, path=str(field_index))
         self.field_table.expandAll()
         self.composer_view.set_graph(build_composer_graph(self.project))
         settings = self.project.bluetooth_br
@@ -1243,6 +1329,26 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                     ("Gaussian B*T", f"{settings.gaussian_bt:.3f}"),
                 ]
             )
+            if bluetooth_packet_is_edr(settings.packet_kind):
+                parameters.extend(
+                    [
+                        ("EDR Guard", f"{settings.edr_guard_symbols} symbols"),
+                        (
+                            "EDR Guard Power",
+                            f"{settings.edr_guard_relative_power_db:+.3f} dB rel. GFSK",
+                        ),
+                        (
+                            "EDR Guard Transition",
+                            f"{settings.edr_guard_ramp_in_symbols:.3f} / "
+                            f"{settings.edr_guard_ramp_out_symbols:.3f} symbols, "
+                            f"{settings.edr_guard_ramp_shape}",
+                        ),
+                        (
+                            "EDR Data Power",
+                            f"{settings.edr_relative_power_db:+.3f} dB rel. GFSK",
+                        ),
+                    ]
+                )
         elif le_settings is not None:
             parameters.extend(
                 [
@@ -1292,11 +1398,15 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 )
 
     def _composer_block_selected(self, block: ComposerBlock | None) -> None:
+        self._selected_composer_block = block
         if block is None:
             self._populate_inspector(
                 getattr(self, "_project_inspector_parameters", [])
             )
             return
+        tree_item = self._field_items_by_block_id.get(block.block_id)
+        with QtCore.QSignalBlocker(self.field_table):
+            self.field_table.setCurrentItem(tree_item)
         parameters = [
             ("Block", block.name),
             ("Track", block.track.value),
@@ -1306,6 +1416,24 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             *list(block.properties),
         ]
         self._populate_inspector(parameters)
+
+    def _field_tree_selected(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        _previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        if current is None:
+            return
+        block_id = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if block_id:
+            self.composer_view.select_block(str(block_id))
+
+    def _edit_composer_block(self, _block: ComposerBlock) -> None:
+        # Standard-profile blocks are generated from the packet settings.  Route
+        # editing through that source of truth until Experimental Profile field
+        # mutation is introduced; editing graphics items directly would produce
+        # a preview that cannot be regenerated consistently.
+        self._edit_project_settings()
 
     def generate_waveform(self) -> None:
         try:
@@ -1492,6 +1620,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Open Project", str(error))
             return
         self.project_path = Path(path)
+        self.undo_stack.clear()
         self._refresh_project_view()
         self.generate_waveform()
 
