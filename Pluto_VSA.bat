@@ -1,24 +1,32 @@
 @echo off
 setlocal
-cd /d "%~dp0"
 
-set "APP_PYTHON=%~dp0.venv\Scripts\python.exe"
-if not exist "%APP_PYTHON%" goto missing_venv
+set "PROJECT_DIR=%~dp0"
+set "VENV_ACTIVATE=%PROJECT_DIR%.venv\Scripts\activate.bat"
 
-"%APP_PYTHON%" -m pluto_sa.vsa.main
-set "APP_EXIT_CODE=%ERRORLEVEL%"
-if not "%APP_EXIT_CODE%"=="0" goto launch_failed
-exit /b 0
+if not exist "%VENV_ACTIVATE%" (
+    echo Virtual environment was not found:
+    echo   %VENV_ACTIVATE%
+    echo.
+    echo Create it first with:
+    echo   python -m venv .venv
+    pause
+    exit /b 1
+)
 
-:missing_venv
-echo [Pluto VSA] Python virtual environment was not found:
-echo   %APP_PYTHON%
-echo Install the project dependencies into .venv before launching.
-pause
-exit /b 1
+pushd "%PROJECT_DIR%"
 
-:launch_failed
-echo.
-echo [Pluto VSA] Application exited with code %APP_EXIT_CODE%.
-pause
-exit /b %APP_EXIT_CODE%
+call "%VENV_ACTIVATE%"
+
+python -m pluto_sa.vsa.main
+set "EXIT_CODE=%ERRORLEVEL%"
+
+popd
+
+if not "%EXIT_CODE%"=="0" (
+    echo.
+    echo Pluto VSA exited with code %EXIT_CODE%.
+    pause
+)
+
+exit /b %EXIT_CODE%
