@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 from pathlib import Path
+import re
 
 import numpy as np
 import pyqtgraph as pg
@@ -735,6 +737,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("ADALM-Pluto Output Settings")
         self._settings = settings
+        self._packet_count = int(packet_count)
         form = QtWidgets.QFormLayout()
         self.uri_combo = QtWidgets.QComboBox()
         self.uri_combo.setEditable(True)
@@ -795,13 +798,19 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         )
         form.addRow("TX RF Bandwidth", self.bandwidth_spin)
         form.addRow("TX Hardware Gain", self.gain_spin)
-        form.addRow("Lead-in Zero Guard", self.lead_in_guard_spin)
-        form.addRow("Stop Zero Guard", self.stop_guard_spin)
+        form.addRow("Muted LO Settling Time", self.lead_in_guard_spin)
+        form.addRow("Completion Margin", self.stop_guard_spin)
         form.addRow("Packets per transmission", QtWidgets.QLabel(str(packet_count)))
         warning = QtWidgets.QLabel(
             "TX Hardware Gain is a relative Pluto setting, not calibrated dBm. "
             "Start with sufficient external attenuation and verify the output level. "
-            "Zero-IQ guards suppress modulation but do not remove LO leakage."
+            "The complete requested packet schedule is submitted once in a "
+            "non-cyclic DMA buffer. A short zero prefix protects the first "
+            "packet from the DAC source transition and a short trailing zero "
+            "section leaves the DAC at zero. Completion Margin controls how "
+            "long cleanup is deferred after submission. The tx() call is the "
+            "software start event; "
+            "residual LO leakage is not a calibrated RF-off state."
         )
         warning.setWordWrap(True)
         warning.setStyleSheet("color: #e0b050;")
@@ -830,6 +839,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             hardware_gain_db=self.gain_spin.value(),
             lead_in_guard_s=self.lead_in_guard_spin.value() * 1e-3,
             stop_guard_s=self.stop_guard_spin.value() * 1e-3,
+            burst_count=self._packet_count,
         )
         try:
             PlutoOutputBackend(candidate)
@@ -855,22 +865,65 @@ class _PlutoTransmitWorker(QtCore.QObject):
 
     @QtCore.Slot()
     def run(self) -> None:
+        success = False
+        message = ""
         try:
             self.backend.transfer(self.result)
             self.backend.start()
         except Exception as error:
-            self.finished.emit(False, str(error))
-            return
-        self.finished.emit(
-            True,
-            "Pluto transmission stopped"
-            if self._cancel_requested
-            else "Pluto transmission complete",
-        )
+            message = str(error)
+        else:
+            success = True
+            message = (
+                "Pluto transmission stopped"
+                if self._cancel_requested
+                else "Pluto transmission complete"
+            )
+        report = self.backend.diagnostic_report()
+        report["success"] = success
+        report["message"] = message
+        log_path = Path(__file__).resolve().parents[2] / "pluto_vsg_tx_trace.log"
+        try:
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(report, ensure_ascii=False) + "\n")
+        except OSError as error:
+            message = f"{message} (diagnostic log failed: {error})"
+        self.finished.emit(success, message)
 
     def cancel(self) -> None:
         self._cancel_requested = True
         self.backend.stop()
+
+
+class _PlutoPrepareWorker(QtCore.QObject):
+    finished = QtCore.Signal(bool, str)
+
+    def __init__(self, backend: PlutoOutputBackend) -> None:
+        super().__init__()
+        self.backend = backend
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        success = False
+        message = ""
+        try:
+            self.backend.prepare()
+        except Exception as error:
+            message = str(error)
+        else:
+            success = True
+            message = "ADALM-Pluto READY (configuration calibrated)"
+        report = self.backend.diagnostic_report()
+        report["operation"] = "prepare"
+        report["success"] = success
+        report["message"] = message
+        log_path = Path(__file__).resolve().parents[2] / "pluto_vsg_tx_trace.log"
+        try:
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(report, ensure_ascii=False) + "\n")
+        except OSError as error:
+            message = f"{message} (diagnostic log failed: {error})"
+        self.finished.emit(success, message)
 
 
 class _ProjectChangeCommand(QtGui.QUndoCommand):
@@ -910,6 +963,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._plot_context_actions: dict[str, dict[str, QtGui.QAction]] = {}
         self._tx_thread: QtCore.QThread | None = None
         self._tx_worker: _PlutoTransmitWorker | None = None
+        self._prepare_thread: QtCore.QThread | None = None
+        self._prepare_worker: _PlutoPrepareWorker | None = None
+        self._pluto_prepared_signature: tuple[object, ...] | None = None
+        self._preparing_signature: tuple[object, ...] | None = None
         self._close_after_tx = False
         self.undo_stack = QtGui.QUndoStack(self)
         self._selected_composer_block: ComposerBlock | None = None
@@ -974,6 +1031,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.export_wv_action.triggered.connect(self._export_wv)
         self.pluto_settings_action = QtGui.QAction("ADALM-Pluto Settings...", self)
         self.pluto_settings_action.triggered.connect(self._edit_pluto_settings)
+        self.pluto_prepare_action = QtGui.QAction(
+            "Prepare / Calibrate ADALM-Pluto", self
+        )
+        self.pluto_prepare_action.triggered.connect(self._start_pluto_preparation)
         self.pluto_transmit_action = QtGui.QAction("Transmit with ADALM-Pluto", self)
         self.pluto_transmit_action.setShortcut(QtGui.QKeySequence("Ctrl+T"))
         self.pluto_transmit_action.triggered.connect(self._start_pluto_transmission)
@@ -1040,12 +1101,14 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         output_menu = menu_bar.addMenu("Output")
         output_menu.addAction(self.pluto_settings_action)
         output_menu.addSeparator()
+        output_menu.addAction(self.pluto_prepare_action)
         output_menu.addAction(self.pluto_transmit_action)
         output_menu.addAction(self.pluto_stop_action)
         output_toolbar = self.addToolBar("Output")
         output_toolbar.setObjectName("PlutoVSGOutputToolbar")
         output_toolbar.addAction(self.pluto_settings_action)
         output_toolbar.addSeparator()
+        output_toolbar.addAction(self.pluto_prepare_action)
         output_toolbar.addAction(self.pluto_transmit_action)
         output_toolbar.addAction(self.pluto_stop_action)
         tools_menu = menu_bar.addMenu("Tools")
@@ -1182,18 +1245,22 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
 
     def _new_bluetooth_project(self) -> None:
+        previous_signature = self._pluto_configuration_signature()
         self.project = bluetooth_br_edr_project()
         self.project_path = None
         self.undo_stack.clear()
         self._refresh_project_view()
         self.generate_waveform()
+        self._configuration_maybe_changed(previous_signature)
 
     def _new_bluetooth_le_project(self, phy: BluetoothLEPhy) -> None:
+        previous_signature = self._pluto_configuration_signature()
         self.project = bluetooth_le_project(phy)
         self.project_path = None
         self.undo_stack.clear()
         self._refresh_project_view()
         self.generate_waveform()
+        self._configuration_maybe_changed(previous_signature)
 
     def _apply_rf_test_preset(self) -> None:
         if self.project.standard == StandardProfile.BLUETOOTH_LE:
@@ -1256,9 +1323,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
 
     def _restore_project_snapshot(self, project: WaveformProject) -> None:
+        previous_signature = self._pluto_configuration_signature()
         self.project = project
         self._refresh_project_view()
         self.generate_waveform()
+        self._configuration_maybe_changed(previous_signature)
 
     def _field_display_changed(self, checked: bool) -> None:
         if not checked:
@@ -1455,7 +1524,17 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
 
     def _update_previews(self, result: GenerationResult) -> None:
-        iq = np.asarray(result.iq)
+        complete_iq = np.asarray(result.iq)
+        repeat_count = max(1, int(self.project.repeat_count))
+        if complete_iq.size % repeat_count == 0:
+            preview_sample_count = complete_iq.size // repeat_count
+        else:
+            # Waveform engines are expected to return an integer number of
+            # repetitions. Fall back to the complete result rather than hide
+            # samples if a future engine has a different schedule model.
+            preview_sample_count = complete_iq.size
+        iq = complete_iq[:preview_sample_count]
+        single_repeat_preview = preview_sample_count < complete_iq.size
         time_us = np.arange(iq.size) / result.sample_rate_hz * 1e6
         power_dbfs = 20.0 * np.log10(np.maximum(np.abs(iq), 1e-6))
         frequency_khz = _instantaneous_frequency_khz(iq, result.sample_rate_hz)
@@ -1478,6 +1557,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                     result,
                     include_minor=self._field_display_mode == "all",
                     include_labels=True,
+                    preview_stop_sample=preview_sample_count,
+                    single_repeat_preview=single_repeat_preview,
                 )
 
         fft_size = min(
@@ -1539,8 +1620,15 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         *,
         include_minor: bool,
         include_labels: bool,
+        preview_stop_sample: int | None = None,
+        single_repeat_preview: bool = False,
     ) -> None:
         for boundary in result.field_boundaries:
+            if (
+                preview_stop_sample is not None
+                and boundary.start_sample >= preview_stop_sample
+            ):
+                continue
             if boundary.level > 0 and not include_minor:
                 continue
             is_major = boundary.level == 0
@@ -1558,6 +1646,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             )
             start_us = boundary.start_sample / result.sample_rate_hz * 1e6
             label = boundary.name if include_labels else None
+            if label is not None and single_repeat_preview:
+                label = re.sub(r" \[1\]$", "", label)
             label_options = None
             if label is not None:
                 label_options = {
@@ -1579,12 +1669,20 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             plot.addItem(line)
 
         packet_ranges = result.metadata.get("packet_ranges_samples", ())
-        for index, packet_range in enumerate(packet_ranges):
-            if not isinstance(packet_range, (tuple, list)) or len(packet_range) != 2:
-                continue
+        visible_packet_ranges = [
+            packet_range
+            for packet_range in packet_ranges
+            if isinstance(packet_range, (tuple, list))
+            and len(packet_range) == 2
+            and (
+                preview_stop_sample is None
+                or int(packet_range[0]) < preview_stop_sample
+            )
+        ]
+        for index, packet_range in enumerate(visible_packet_ranges):
             stop_sample = int(packet_range[1])
             stop_us = stop_sample / result.sample_rate_hz * 1e6
-            suffix = "" if len(packet_ranges) == 1 else f" [{index + 1}]"
+            suffix = "" if len(visible_packet_ranges) == 1 else f" [{index + 1}]"
             line = pg.InfiniteLine(
                 stop_us,
                 angle=90,
@@ -1614,6 +1712,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         if not path:
             return
+        previous_signature = self._pluto_configuration_signature()
         try:
             self.project = load_project(path)
         except ValueError as error:
@@ -1623,6 +1722,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.undo_stack.clear()
         self._refresh_project_view()
         self.generate_waveform()
+        self._configuration_maybe_changed(previous_signature)
 
     def _save_project(self) -> None:
         if self.project_path is None:
@@ -1703,9 +1803,37 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             connection_uri=self._pluto_uri or None,
             lead_in_guard_s=self._pluto_lead_in_guard_s,
             stop_guard_s=self._pluto_stop_guard_s,
+            burst_count=self.project.repeat_count,
         )
 
+    def _pluto_configuration_signature(self) -> tuple[object, ...]:
+        """Identify settings that require AD936x reconfiguration/calibration."""
+
+        settings = self._current_pluto_settings()
+        return (
+            settings.connection_uri or "",
+            int(round(settings.center_frequency_hz)),
+            int(round(settings.sample_rate_hz)),
+            int(round(settings.rf_bandwidth_hz)),
+        )
+
+    def _configuration_maybe_changed(
+        self, previous_signature: tuple[object, ...]
+    ) -> None:
+        if previous_signature == self._pluto_configuration_signature():
+            return
+        was_prepared = self._pluto_prepared_signature is not None
+        self._pluto_prepared_signature = None
+        self.statusBar().showMessage(
+            "ADALM-Pluto configuration changed; preparation required"
+        )
+        # Once this session has prepared a device, subsequent RF/baseband
+        # edits automatically run the explicit calibration step.
+        if was_prepared and self._prepare_thread is None and self._tx_thread is None:
+            QtCore.QTimer.singleShot(0, self._start_pluto_preparation)
+
     def _edit_pluto_settings(self) -> None:
+        previous_signature = self._pluto_configuration_signature()
         dialog = _PlutoOutputDialog(
             self._current_pluto_settings(), self.project.repeat_count, self
         )
@@ -1725,10 +1853,84 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             "pluto_tx/lead_in_guard_s", self._pluto_lead_in_guard_s
         )
         preferences.setValue("pluto_tx/stop_guard_s", self._pluto_stop_guard_s)
-        self.statusBar().showMessage("ADALM-Pluto output settings saved")
+        configuration_changed = (
+            previous_signature != self._pluto_configuration_signature()
+        )
+        if configuration_changed:
+            self._pluto_prepared_signature = None
+        if self._pluto_prepared_signature != self._pluto_configuration_signature():
+            self.statusBar().showMessage(
+                "ADALM-Pluto output settings saved; preparing configuration..."
+            )
+            # Accepting RF/baseband device settings is the explicit
+            # configuration action. Calibration may radiate an internal tone,
+            # so it is never deferred to the later Transmit command.
+            self._start_pluto_preparation()
+        else:
+            self.statusBar().showMessage(
+                "ADALM-Pluto output settings saved; configuration remains READY"
+            )
+
+    def _start_pluto_preparation(self) -> None:
+        if self._prepare_thread is not None or self._tx_thread is not None:
+            return
+        try:
+            backend = PlutoOutputBackend(self._current_pluto_settings())
+        except ValueError as error:
+            QtWidgets.QMessageBox.warning(self, "Pluto Preparation", str(error))
+            return
+        signature = self._pluto_configuration_signature()
+        worker = _PlutoPrepareWorker(backend)
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._pluto_preparation_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._pluto_prepare_thread_finished)
+        self._prepare_worker = worker
+        self._prepare_thread = thread
+        self._preparing_signature = signature
+        self._set_pluto_busy(preparing=True, transmitting=False)
+        self.statusBar().showMessage(
+            "Preparing ADALM-Pluto: muted configuration and explicit TX calibration..."
+        )
+        thread.start()
+
+    @QtCore.Slot(bool, str)
+    def _pluto_preparation_finished(self, success: bool, message: str) -> None:
+        if success and self._preparing_signature == self._pluto_configuration_signature():
+            self._pluto_prepared_signature = self._preparing_signature
+            self.statusBar().showMessage(message)
+        else:
+            self._pluto_prepared_signature = None
+            if success:
+                message = "Configuration changed during preparation; prepare again"
+            self.statusBar().showMessage(f"Pluto preparation failed: {message}")
+            QtWidgets.QMessageBox.critical(self, "Pluto Preparation", message)
+        self._set_pluto_busy(preparing=False, transmitting=False)
+
+    @QtCore.Slot()
+    def _pluto_prepare_thread_finished(self) -> None:
+        self._prepare_worker = None
+        self._prepare_thread = None
+        self._preparing_signature = None
+        if self._close_after_tx:
+            self._close_after_tx = False
+            self.close()
 
     def _start_pluto_transmission(self) -> None:
-        if self._tx_thread is not None:
+        if self._tx_thread is not None or self._prepare_thread is not None:
+            return
+        if self._pluto_prepared_signature != self._pluto_configuration_signature():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Pluto Transmission",
+                "ADALM-Pluto is not READY for the current RF/baseband settings. "
+                "Run 'Prepare / Calibrate ADALM-Pluto' first. Transmit never "
+                "changes these settings or launches calibration automatically.",
+            )
             return
         if self.result is None:
             self.generate_waveform()
@@ -1758,7 +1960,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         thread.finished.connect(self._pluto_thread_finished)
         self._tx_worker = worker
         self._tx_thread = thread
-        self._set_transmitting(True)
+        self._set_pluto_busy(preparing=False, transmitting=True)
         duration_ms = 1e3 * self.result.iq.size / self.result.sample_rate_hz
         self.statusBar().showMessage(
             f"Starting Pluto TX: {self.project.repeat_count} packet(s), "
@@ -1780,7 +1982,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         else:
             self.statusBar().showMessage(f"Pluto transmission failed: {message}")
             QtWidgets.QMessageBox.critical(self, "Pluto Transmission", message)
-        self._set_transmitting(False)
+        self._set_pluto_busy(preparing=False, transmitting=False)
 
     @QtCore.Slot()
     def _pluto_thread_finished(self) -> None:
@@ -1790,17 +1992,19 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self._close_after_tx = False
             self.close()
 
-    def _set_transmitting(self, active: bool) -> None:
+    def _set_pluto_busy(self, *, preparing: bool, transmitting: bool) -> None:
+        active = preparing or transmitting
         for action in (
             self.new_action,
             self.open_action,
             self.settings_action,
             self.generate_action,
             self.pluto_settings_action,
+            self.pluto_prepare_action,
             self.pluto_transmit_action,
         ):
             action.setEnabled(not active)
-        self.pluto_stop_action.setEnabled(active)
+        self.pluto_stop_action.setEnabled(transmitting)
 
     def _show_validation(self) -> None:
         issues = validate_project(self.project)
@@ -1812,6 +2016,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Project Validation", text)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        if self._prepare_thread is not None:
+            self._close_after_tx = True
+            event.ignore()
+            return
         if self._tx_thread is not None:
             self._close_after_tx = True
             self._stop_pluto_transmission()

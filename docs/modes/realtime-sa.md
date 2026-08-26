@@ -4,6 +4,18 @@
 
 PlutoSDRからIQを連続取得し、現在の受信帯域をFFTスペクトラムとウォーターフォールでリアルタイム表示します。
 
+## Pluto受信個体の選択
+
+2台以上のADALM-Plutoが接続されている場合、RTSA起動時にhardware serial付きの選択dialogを
+表示します。選択した`serial:<id>`はRTSA専用QSettingsへ保存し、次回dialogの初期選択に使います。
+VSG/VSAのdevice設定とは共有しないため、送信機と受信機へ同じ個体を誤って割り当てることを
+避けられます。`PLUTO_SDR_URI`環境変数が指定されている場合はそれを最優先し、dialogを表示しません。
+接続個体が1台だけの場合はそのserialを自動選択します。
+
+2026-08-26の2台構成検証では、RTSAにdevice selectorがなく、自動選択された個体がVSGの送信個体と
+重複したことで、RX workerのbuffer refillが`OSError: [Errno 110] host unreachable`で停止した
+可能性が高いと判断しました。この競合を避けるため、上記の起動時選択を追加しました。
+
 ## 周波数・取得条件
 
 - 最大表示Span: 55 MHz

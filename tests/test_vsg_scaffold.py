@@ -134,6 +134,33 @@ def test_vsg_window_starts_with_composer_shell() -> None:
         window.close()
 
 
+def test_vsg_preview_draws_only_first_packet_when_schedule_repeats() -> None:
+    pg.mkQApp("Pluto VSG single packet preview test")
+    project = replace(bluetooth_br_edr_project(), repeat_count=4)
+    result = BluetoothBRWaveformEngine().generate(project)
+    window = PlutoVSGWindow(project)
+    try:
+        window._update_previews(result)
+
+        expected_samples = result.iq.size // project.repeat_count
+        iq_x, _ = window.iq_waveform_plot.listDataItems()[0].getData()
+        power_x, _ = window.power_plot.listDataItems()[0].getData()
+        assert iq_x.size == expected_samples
+        assert power_x.size == expected_samples
+        assert result.iq.size == expected_samples * 4
+
+        lines = [
+            item
+            for item in window.power_plot.getPlotItem().items
+            if isinstance(item, pg.InfiniteLine) and item.label is not None
+        ]
+        labels = [line.label.format for line in lines]
+        assert labels.count("Packet End") == 1
+        assert not any(label.endswith(" [1]") for label in labels)
+    finally:
+        window.close()
+
+
 def test_vsg_field_labels_are_present_and_keep_a_fixed_side() -> None:
     pg.mkQApp("Pluto VSG field label anchor test")
     window = PlutoVSGWindow()

@@ -2,11 +2,11 @@
 setlocal
 
 set "PROJECT_DIR=%~dp0"
-set "VENV_ACTIVATE=%PROJECT_DIR%.venv\Scripts\activate.bat"
+set "PYTHON_EXE=%PROJECT_DIR%.venv\Scripts\python.exe"
 
-if not exist "%VENV_ACTIVATE%" (
-    echo Virtual environment was not found:
-    echo   %VENV_ACTIVATE%
+if not exist "%PYTHON_EXE%" (
+    echo Virtual environment Python was not found:
+    echo   %PYTHON_EXE%
     echo.
     echo Create it first with:
     echo   python -m venv .venv
@@ -16,9 +16,7 @@ if not exist "%VENV_ACTIVATE%" (
 
 pushd "%PROJECT_DIR%"
 
-call "%VENV_ACTIVATE%"
-
-python -m pluto_sa.vsa.main
+"%PYTHON_EXE%" -m pluto_sa.vsa.main
 set "EXIT_CODE=%ERRORLEVEL%"
 
 popd
