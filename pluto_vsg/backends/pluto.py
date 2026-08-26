@@ -18,7 +18,7 @@ from pluto_vsg.backends.base import BackendCapabilities
 from pluto_vsg.engine import GenerationResult
 
 
-_PLUTO_DAC_SCALE = 2**14 - 1
+_PLUTO_DAC_FULL_SCALE = 2**15 - 1
 _PLUTO_MUTED_GAIN_DB = -89.75
 _DEFAULT_STARTUP_DELAY_S = 0.010
 _DEFAULT_COMPLETION_MARGIN_S = 0.100
@@ -48,6 +48,7 @@ class PlutoTransmitSettings:
     sample_rate_hz: float
     rf_bandwidth_hz: float
     hardware_gain_db: float = -30.0
+    digital_backoff_db: float = 0.0
     connection_uri: str | None = None
     lead_in_guard_s: float = _DEFAULT_STARTUP_DELAY_S
     stop_guard_s: float = _DEFAULT_COMPLETION_MARGIN_S
@@ -70,6 +71,8 @@ class PlutoOutputBackend:
         self._superframe: np.ndarray | None = None
         self._sample_count = 0
         self._frame_sample_count = 0
+        self._waveform_peak = 0.0
+        self._dac_peak_code = 0.0
         self._preload_guard_s = 0.0
         self._stop_event = threading.Event()
         self._sdr = None
@@ -191,6 +194,9 @@ class PlutoOutputBackend:
             "settings": asdict(self.settings),
             "sample_count": self._sample_count,
             "frame_sample_count": self._frame_sample_count,
+            "waveform_peak": self._waveform_peak,
+            "dac_full_scale": _PLUTO_DAC_FULL_SCALE,
+            "dac_peak_code": self._dac_peak_code,
             "superframe_sample_count": 0
             if self._superframe is None
             else int(self._superframe.size),
@@ -228,7 +234,9 @@ class PlutoOutputBackend:
         if not 200_000.0 <= settings.rf_bandwidth_hz <= 56_000_000.0:
             raise ValueError("Pluto TX RF bandwidth must be between 200 kHz and 56 MHz")
         if not -89.75 <= settings.hardware_gain_db <= 0.0:
-            raise ValueError("Pluto TX hardware gain must be between -89.75 dB and 0 dB")
+            raise ValueError("Pluto TX attenuation must be between -89.75 dB and 0 dB")
+        if not -60.0 <= settings.digital_backoff_db <= 0.0:
+            raise ValueError("Pluto digital backoff must be between -60 dB and 0 dB")
         if settings.lead_in_guard_s < 0.0:
             raise ValueError("Pluto TX lead guard must not be negative")
         if settings.stop_guard_s < 0.010:
@@ -279,9 +287,13 @@ class PlutoOutputBackend:
         burst_count = int(self.settings.burst_count)
         if iq.size % burst_count:
             raise ValueError("Generated IQ cannot be divided into equal Pluto frames")
-        real = np.clip(iq.real, -1.0, 1.0) * _PLUTO_DAC_SCALE
-        imag = np.clip(iq.imag, -1.0, 1.0) * _PLUTO_DAC_SCALE
+        self._waveform_peak = float(np.max(np.abs(iq)))
+        digital_scale = 10.0 ** (self.settings.digital_backoff_db / 20.0)
+        dac_scale = _PLUTO_DAC_FULL_SCALE * digital_scale
+        real = np.clip(iq.real, -1.0, 1.0) * dac_scale
+        imag = np.clip(iq.imag, -1.0, 1.0) * dac_scale
         self._buffer = (real + 1j * imag).astype(np.complex64)
+        self._dac_peak_code = float(np.max(np.abs(self._buffer)))
         self._sample_count = int(iq.size)
         self._frame_sample_count = int(iq.size // burst_count)
         self._preload_guard_s = _NONCYCLIC_PREFIX_GUARD_S

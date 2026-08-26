@@ -775,6 +775,18 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.gain_spin.setSuffix(" dB")
         self.gain_spin.setValue(settings.hardware_gain_db)
         self.gain_spin.setKeyboardTracking(False)
+        self.digital_backoff_combo = QtWidgets.QComboBox()
+        for label, value in (("0 dB (Full Scale)", 0.0), ("-3 dB", -3.0), ("-6 dB", -6.0)):
+            self.digital_backoff_combo.addItem(label, value)
+        backoff_index = self.digital_backoff_combo.findData(
+            float(settings.digital_backoff_db)
+        )
+        if backoff_index < 0:
+            self.digital_backoff_combo.addItem(
+                f"{settings.digital_backoff_db:+.2f} dB", settings.digital_backoff_db
+            )
+            backoff_index = self.digital_backoff_combo.count() - 1
+        self.digital_backoff_combo.setCurrentIndex(backoff_index)
         self.lead_in_guard_spin = QtWidgets.QDoubleSpinBox()
         self.lead_in_guard_spin.setRange(0.0, 1000.0)
         self.lead_in_guard_spin.setDecimals(3)
@@ -797,12 +809,15 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             QtWidgets.QLabel(f"{settings.sample_rate_hz / 1e6:.3f} MS/s (Project)"),
         )
         form.addRow("TX RF Bandwidth", self.bandwidth_spin)
-        form.addRow("TX Hardware Gain", self.gain_spin)
+        form.addRow("TX Attenuation", self.gain_spin)
+        form.addRow("Digital Backoff", self.digital_backoff_combo)
         form.addRow("Muted LO Settling Time", self.lead_in_guard_spin)
         form.addRow("Completion Margin", self.stop_guard_spin)
         form.addRow("Packets per transmission", QtWidgets.QLabel(str(packet_count)))
         warning = QtWidgets.QLabel(
-            "TX Hardware Gain is a relative Pluto setting, not calibrated dBm. "
+            "TX Attenuation is a relative Pluto setting, not calibrated dBm. "
+            "Digital Backoff 0 dB drives the DMA/DAC path at full scale; "
+            "use -3 or -6 dB when additional linearity margin is required. "
             "Start with sufficient external attenuation and verify the output level. "
             "The complete requested packet schedule is submitted once in a "
             "non-cyclic DMA buffer. A short zero prefix protects the first "
@@ -837,6 +852,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             connection_uri=str(uri).strip() or None,
             rf_bandwidth_hz=self.bandwidth_spin.value() * 1e6,
             hardware_gain_db=self.gain_spin.value(),
+            digital_backoff_db=float(self.digital_backoff_combo.currentData()),
             lead_in_guard_s=self.lead_in_guard_spin.value() * 1e-3,
             stop_guard_s=self.stop_guard_spin.value() * 1e-3,
             burst_count=self._packet_count,
@@ -974,6 +990,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_uri = str(preferences.value("pluto_tx/uri", "") or "")
         self._pluto_gain_db = float(
             preferences.value("pluto_tx/hardware_gain_db", -30.0)
+        )
+        self._pluto_digital_backoff_db = float(
+            preferences.value("pluto_tx/digital_backoff_db", 0.0)
         )
         self._pluto_bandwidth_hz = float(
             preferences.value("pluto_tx/rf_bandwidth_hz", 8_000_000.0)
@@ -1800,6 +1819,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             sample_rate_hz=self.project.sample_rate_hz,
             rf_bandwidth_hz=bandwidth_hz,
             hardware_gain_db=self._pluto_gain_db,
+            digital_backoff_db=self._pluto_digital_backoff_db,
             connection_uri=self._pluto_uri or None,
             lead_in_guard_s=self._pluto_lead_in_guard_s,
             stop_guard_s=self._pluto_stop_guard_s,
@@ -1842,12 +1862,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         settings = dialog.settings
         self._pluto_uri = settings.connection_uri or ""
         self._pluto_gain_db = settings.hardware_gain_db
+        self._pluto_digital_backoff_db = settings.digital_backoff_db
         self._pluto_bandwidth_hz = settings.rf_bandwidth_hz
         self._pluto_lead_in_guard_s = settings.lead_in_guard_s
         self._pluto_stop_guard_s = settings.stop_guard_s
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
         preferences.setValue("pluto_tx/uri", self._pluto_uri)
         preferences.setValue("pluto_tx/hardware_gain_db", self._pluto_gain_db)
+        preferences.setValue(
+            "pluto_tx/digital_backoff_db", self._pluto_digital_backoff_db
+        )
         preferences.setValue("pluto_tx/rf_bandwidth_hz", self._pluto_bandwidth_hz)
         preferences.setValue(
             "pluto_tx/lead_in_guard_s", self._pluto_lead_in_guard_s

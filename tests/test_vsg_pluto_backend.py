@@ -192,6 +192,7 @@ def _settings(**changes) -> PlutoTransmitSettings:
         "sample_rate_hz": 8_000_000.0,
         "rf_bandwidth_hz": 8_000_000.0,
         "hardware_gain_db": -30.0,
+        "digital_backoff_db": 0.0,
         "connection_uri": "usb:test",
         "lead_in_guard_s": 0.0,
         "stop_guard_s": 0.010,
@@ -251,7 +252,7 @@ def test_pluto_backend_transfers_complete_schedule_once_with_noncyclic_dma(monke
     assert np.count_nonzero(device.transmitted[:prefix_count]) == 0
     np.testing.assert_allclose(
         device.transmitted[prefix_count : prefix_count + frame.size * 3],
-        np.tile(frame, 3) * (2**14 - 1),
+        np.tile(frame, 3) * (2**15 - 1),
         rtol=0.0,
         atol=1e-3,
     )
@@ -320,6 +321,9 @@ def test_pluto_backend_diagnostic_report_is_json_safe(monkeypatch) -> None:
     }
     assert observations["before_noncyclic_push"]["tx_gain_db"] == -30.0
     assert report["superframe_sample_count"] > report["sample_count"]
+    assert report["settings"]["digital_backoff_db"] == 0.0
+    assert report["dac_full_scale"] == 2**15 - 1
+    assert report["dac_peak_code"] == pytest.approx(2**15 - 1)
     assert report["dma_buffer_duration_ms"] > report["waveform_duration_ms"]
     assert "after_requested_gain" not in observations
 
@@ -439,7 +443,27 @@ def test_pluto_backend_preserves_nonidentical_packet_schedule() -> None:
     prefix_count = round(0.002 * 8_000_000)
     np.testing.assert_allclose(
         backend._superframe[prefix_count : prefix_count + 4],
-        result.iq * (2**14 - 1),
+        result.iq * (2**15 - 1),
+        rtol=0.0,
+        atol=1e-3,
+    )
+
+
+def test_pluto_backend_applies_configured_digital_backoff() -> None:
+    backend = PlutoOutputBackend(
+        _settings(burst_count=1, digital_backoff_db=-6.0)
+    )
+    result = GenerationResult(
+        iq=np.ones(4, dtype=np.complex64), sample_rate_hz=8_000_000.0
+    )
+
+    backend.transfer(result)
+
+    prefix_count = round(0.002 * 8_000_000)
+    expected = (2**15 - 1) * 10.0 ** (-6.0 / 20.0)
+    np.testing.assert_allclose(
+        backend._superframe[prefix_count : prefix_count + 4],
+        expected,
         rtol=0.0,
         atol=1e-3,
     )
@@ -569,6 +593,8 @@ def test_pluto_transmit_rejects_unprepared_device_without_reconfiguring(
         {"sample_rate_hz": 100_000.0},
         {"rf_bandwidth_hz": 100_000.0},
         {"hardware_gain_db": 1.0},
+        {"digital_backoff_db": 0.1},
+        {"digital_backoff_db": -60.1},
         {"lead_in_guard_s": -0.001},
         {"stop_guard_s": 0.001},
         {"burst_count": 0},

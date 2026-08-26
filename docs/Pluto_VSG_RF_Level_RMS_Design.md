@@ -670,3 +670,51 @@ VSG UI
 この構成により、
 Plutoのハードウェア特性を維持しつつ、
 R&S SMCV100B等の計測器に近い操作感・出力定義を実現する。
+
+---
+
+## 21. Pluto送信デジタルバックオフ（2026-08-27実装）
+
+### 背景
+
+従来のPluto送信バックエンドは、正規化IQの`|IQ| = 1.0`を
+16 bit複素サンプルの`16383`へ変換していた。
+これは符号付き16 bitの最大コード`32767`に対して、振幅で約-6.02 dBとなる。
+
+GFSKのような定包絡波形では生成IQのpeakとactive RMSがともにほぼ1であるため、
+この固定スケールがそのまま約6 dBの出力低下として現れる。
+
+### 実装仕様
+
+- DAC/DMA変換基準を`32767`（signed 16 bit full scale）へ変更する。
+- Pluto Output設定に`Digital Backoff`を追加する。
+- 選択肢は`0 dB (Full Scale)`、`-3 dB`、`-6 dB`とする。
+- 初期値は`0 dB`とする。
+- 設定は`pluto_tx/digital_backoff_db`として次回起動時も保持する。
+- UI上の`TX Hardware Gain`表記は、AD936xの実態に合わせて
+  `TX Attenuation`へ変更する（内部設定名は互換性維持のため当面そのまま）。
+
+変換式は次のとおり。
+
+```text
+DAC code = clip(IQ component, -1, +1)
+           * 32767
+           * 10^(Digital Backoff [dB] / 20)
+```
+
+送信診断ログには、正規化IQ peak、DAC full scale、実際のDAC peak code、
+Digital Backoff設定値を記録する。
+
+### 期待値と注意点
+
+`Digital Backoff = 0 dB`では、従来実装に対してRF出力が理論上約+6.02 dBとなる。
+ただし`TX Attenuation = 0 dB`は「Plutoの最大送信設定」であって、
+校正済みの0 dBmを意味しない。周波数、個体差、TX FIR、負荷、外部損失により
+実RF電力は変化する。
+
+Full Scale駆動ではDAC/アナログチェーンの非線形性やスペクトル再成長が
+増える可能性がある。実機では`0/-3/-6 dB`を同一条件で比較し、
+出力電力だけでなくEVM、イメージ、スプリアスも確認する。
+
+この実装は相対デジタル駆動量の明示化であり、将来予定している
+周波数別0 dBFS校正やRF Level（dBm）閉ループ設定の代替ではない。
