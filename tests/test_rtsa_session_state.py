@@ -10,6 +10,8 @@ from pluto_sa.config.session_state import (
 )
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
+import pluto_sa.main as main_module
+import pluto_sa.ui.session_window as session_window_module
 
 
 class FakeSettings:
@@ -87,3 +89,71 @@ def test_qsettings_compatible_save_and_load():
     assert settings.sync_count == 1
     assert restored is not None
     assert restored.analyzer_mode == AnalyzerMode.REALTIME_SA
+
+
+def test_device_change_replaces_receiver_and_restarts_current_mode(monkeypatch):
+    events = []
+
+    class Receiver:
+        def __init__(self, config, name="new"):
+            self.config = config
+            self.name = name
+
+        def close(self):
+            events.append(f"close:{self.name}")
+
+        def stop(self):
+            events.append(f"stop:{self.name}")
+            return True
+
+    class Timer:
+        def stop(self):
+            events.append("timer:stop")
+
+    class SweepController:
+        def __init__(self, receiver):
+            self.receiver = receiver
+            self.config = None
+
+    config = SpectrumConfig(sdr_uri="serial:old")
+    config.analyzer_mode = AnalyzerMode.HIGH_SPEED_TIME_ANALYZER
+    old_receiver = Receiver(config, "old")
+    window = type("WindowHarness", (), {})()
+    window.config = config
+    window.receiver = old_receiver
+    window.sweep_controller = SweepController(old_receiver)
+    window.timer = Timer()
+    window._session_settings = FakeSettings()
+    window._session_acquisition_started = True
+    window._page_history = [("System", object())]
+    window.main_menu_page = object()
+    window._reset_all_measurement_state = lambda **kwargs: events.append(
+        ("reset", kwargs)
+    )
+    window.start_initial_acquisition = lambda **kwargs: events.append(
+        ("start", config.analyzer_mode, kwargs)
+    )
+    window._reset_plot_state = lambda: events.append("plot:reset")
+    window._show_control_page = lambda *args, **kwargs: events.append(
+        ("page", args[0], kwargs)
+    )
+    window._refresh_status_label = lambda: events.append("status:refresh")
+    window._restart_timer_for_current_mode = lambda: events.append("timer:restart")
+
+    monkeypatch.setattr(
+        main_module,
+        "_choose_pluto_target",
+        lambda *_args, **_kwargs: (True, "serial:new"),
+    )
+    monkeypatch.setattr(session_window_module, "PlutoReceiver", Receiver)
+
+    session_window_module.SessionRealtimeSpectrumWindow._on_device_clicked(window)
+
+    assert config.sdr_uri == "serial:new"
+    assert window.receiver is not old_receiver
+    assert window.sweep_controller.receiver is window.receiver
+    assert window.sweep_controller.config is config
+    assert "stop:old" in events
+    assert "close:old" in events
+    assert ("start", AnalyzerMode.HIGH_SPEED_TIME_ANALYZER, {"force": True}) in events
+    assert window._page_history == []

@@ -70,7 +70,7 @@ RTSAは前回使用したPlutoのselectorを`QSettings`へ保存します。次�
 
 RTSA終了時には、Analyzer Mode、Frequency/Span、Amplitude/Input、RBW、FFT/Waterfall/Persistence、Sweep、High Speed TA/Triggerのユーザー設定に加え、Trace 1～4とMarker 1～4の設定を`QSettings`へ保存します。次回起動時は保存状態を復元して対応モードで取得を開始します。測定データ、TraceのAverage/Max Hold蓄積値、Waterfall履歴、Sweep進行位置などのruntimeデータは保存しません。Calibration中に終了した場合はCalibrationへ入る前の通常設定を保存し、次回起動時にその設定を基準としてCalibration固定profileを再適用します。
 
-Main Menuの`TRIGGER / MARKER`下には`SYSTEM`フレームがあり、`Preset`から`Restore Defaults`を実行できます。Presetは確認後、接続先Plutoのselectorを維持したまま、Analyzer Mode・各ユーザー設定・Trace・Marker・Display/Persistenceを現在のコードで定義された初期状態へ戻します。Preset後の状態は直ちに保存され、次回起動時も初期状態から開始します。SYSTEM配下も他の設定ページと同じstack/historyルールでBack操作します。SYSTEMフレーム追加に伴い、RTSAの固定ウィンドウ高さは従来より80 px拡大します。
+Main Menuの`TRIGGER / MARKER`下には`SYSTEM`フレームがあり、`System`ページから`Preset`または`Device`を実行できます。Presetは確認後、接続先Plutoのselectorを維持したまま、Analyzer Mode・各ユーザー設定・Trace・Marker・Display/Persistenceを現在のコードで定義された初期状態へ戻します。Deviceは接続中のPluto一覧を表示し、選択変更後に旧受信を停止、新Plutoの初期設定、現在Analyzer ModeのContinuous再始動を行います。新Plutoを初期化できなかった場合は旧selectorと旧Receiverへ戻して測定を再開します。SYSTEM配下も他の設定ページと同じstack/historyルールでBack操作します。SYSTEMフレーム追加に伴い、RTSAの固定ウィンドウ高さは従来より80 px拡大します。
 
 ## 更新方針
 

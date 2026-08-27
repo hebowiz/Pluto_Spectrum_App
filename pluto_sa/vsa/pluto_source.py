@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import time
 from typing import Callable
 
 import numpy as np
@@ -94,6 +95,22 @@ class PlutoCaptureSettings:
     def trigger_offset_samples(self) -> int:
         return int(round(self.trigger_offset_s * self.requested_sample_rate_hz))
 
+    @property
+    def default_trigger_prestore_samples(self) -> int:
+        """Return the zero-offset safety history retained before a trigger.
+
+        A software power trigger declares an edge only after an above-threshold
+        sample arrives.  Starting the record at that sample clips the leading
+        ramp or preamble of the first burst, although later bursts in the same
+        capture remain complete.  An explicitly non-zero Trigger Offset still
+        remains authoritative.
+        """
+
+        return min(
+            max(0, self.capture_samples - 1),
+            16 * int(self.samples_per_symbol),
+        )
+
 
 class CaptureCancelledError(RuntimeError):
     """Raised when the operator stops a pending Pluto acquisition."""
@@ -108,6 +125,7 @@ class PlutoLiveSource:
         hardware_trigger=False,
         writable_frontend=True,
     )
+    _STREAM_CAPTURE_BLOCK_SAMPLES = 65_536
 
     def __init__(
         self,
@@ -225,6 +243,14 @@ class PlutoLiveSource:
                 "acquisition_trigger_level_dbm": float(settings.trigger_level_dbm),
                 "acquisition_trigger_slope": settings.trigger_slope.value,
                 "acquisition_trigger_offset_s": float(settings.trigger_offset_s),
+                "acquisition_default_prestore_samples": int(
+                    settings.default_trigger_prestore_samples
+                    if (
+                        settings.trigger_source is TriggerKind.POWER_LEVEL
+                        and settings.trigger_offset_samples == 0
+                    )
+                    else 0
+                ),
                 "acquisition_trigger_sample_index": int(record.trigger_sample_index),
             },
         )
@@ -259,8 +285,15 @@ class PlutoLiveSource:
             return records[0], 0
 
         offset_samples = int(round(settings.trigger_offset_s * metadata.sample_rate_hz))
-        pretrigger_samples = max(0, -offset_samples)
-        posttrigger_samples = settings.capture_samples + max(0, offset_samples) - 1
+        default_prestore_samples = (
+            settings.default_trigger_prestore_samples if offset_samples == 0 else 0
+        )
+        output_start_from_trigger = offset_samples - default_prestore_samples
+        pretrigger_samples = max(0, -output_start_from_trigger)
+        posttrigger_samples = max(
+            0,
+            settings.capture_samples + output_start_from_trigger - 1,
+        )
         correction = settings.power_correction
         trigger = TriggerConfig(
             kind=TriggerKind.POWER_LEVEL,
@@ -280,23 +313,37 @@ class PlutoLiveSource:
             posttrigger_samples=posttrigger_samples,
         )
         controller = TriggerAcquisitionController(trigger, metadata)
-        block_size = max(4096, trigger.record_samples)
-        fresh = True
-        while True:
-            if cancelled():
-                raise CaptureCancelledError("Pluto capture cancelled")
-            block = self._receiver.capture_iq_block(
-                block_size,
-                source="VSA Pluto I/Q Power Trigger",
-                fresh=fresh,
-            )
-            if cancelled():
-                raise CaptureCancelledError("Pluto capture cancelled")
-            fresh = False
-            records = controller.feed(block)
-            if records:
-                output_start_offset = pretrigger_samples + offset_samples
-                return records[0], output_start_offset
+        cursor = self._receiver.start(
+            block_size=self._STREAM_CAPTURE_BLOCK_SAMPLES,
+            source="VSA Pluto I/Q Power Trigger",
+            fresh=fresh,
+        )
+        try:
+            while True:
+                if cancelled():
+                    raise CaptureCancelledError("Pluto capture cancelled")
+                read_result = self._receiver.read_iq_stream(cursor, max_blocks=32)
+                cursor = read_result.cursor
+                if read_result.overrun:
+                    raise RuntimeError(
+                        "VSA Pluto stream consumer overrun: "
+                        f"missed {read_result.missed_blocks} IQ block(s)"
+                    )
+                if not read_result.blocks:
+                    time.sleep(0.001)
+                    continue
+                for block in read_result.blocks:
+                    if cancelled():
+                        raise CaptureCancelledError("Pluto capture cancelled")
+                    records = controller.feed(block)
+                    if records:
+                        output_start_offset = (
+                            pretrigger_samples + output_start_from_trigger
+                        )
+                        return records[0], output_start_offset
+        finally:
+            if not self._receiver.stop():
+                raise RuntimeError("VSA Pluto receive worker did not stop")
 
     def close(self) -> None:
         if self._receiver is not None:

@@ -1186,7 +1186,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.acquisition_trigger_offset_spin.setSuffix(" sym")
         self.acquisition_trigger_offset_spin.setToolTip(
             "R&S Trigger Offset: positive starts the record after the crossing; "
-            "negative retains pretrigger samples."
+            "negative retains pretrigger samples. At exactly zero, Pluto VSA "
+            "automatically retains 16 symbols to protect the first burst ramp "
+            "and preamble."
         )
         self.acquisition_trigger_hysteresis_spin = QtWidgets.QDoubleSpinBox()
         self.acquisition_trigger_hysteresis_spin.setRange(0.0, 50.0)

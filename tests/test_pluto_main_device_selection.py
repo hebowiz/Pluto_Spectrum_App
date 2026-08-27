@@ -58,3 +58,29 @@ def test_two_devices_prompt_for_and_remember_receiver_serial(monkeypatch) -> Non
     assert accepted is True
     assert selector == f"serial:{serial_b}"
     assert _FakeSettings.values[main_module.RTSA_DEVICE_KEY] == selector
+
+
+def test_force_prompt_allows_reselecting_the_only_receiver(monkeypatch) -> None:
+    serial = "1044730c370e00100400120023338fb325"
+    monkeypatch.delenv("PLUTO_SDR_URI", raising=False)
+    monkeypatch.setattr(
+        main_module.iio,
+        "scan_contexts",
+        lambda: {"usb:1.31.5": f"Analog Devices PlutoSDR, serial={serial}"},
+    )
+    _FakeSettings.values = {main_module.RTSA_DEVICE_KEY: "serial:old"}
+    monkeypatch.setattr(main_module.QtCore, "QSettings", _FakeSettings)
+    prompts = []
+
+    def choose(_parent, title, prompt, labels, selected, _editable):
+        prompts.append((title, prompt, tuple(labels), selected))
+        return labels[0], True
+
+    monkeypatch.setattr(main_module.QtWidgets.QInputDialog, "getItem", choose)
+
+    accepted, selector = main_module._choose_pluto_target(force_prompt=True)
+
+    assert accepted is True
+    assert selector == f"serial:{serial}"
+    assert prompts and prompts[0][3] == 0
+    assert _FakeSettings.values[main_module.RTSA_DEVICE_KEY] == selector

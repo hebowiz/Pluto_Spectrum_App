@@ -108,6 +108,21 @@ def test_continuous_worker_publishes_to_common_stream(monkeypatch) -> None:
         assert current.start_sample_index == previous.end_sample_index
 
 
+def test_fresh_continuous_worker_recreates_rx_buffer(monkeypatch) -> None:
+    receiver = build_receiver(monkeypatch, fft_size=8)
+    destroy_count = receiver.sdr.destroy_count
+
+    receiver.start(block_size=8, source="vsa", max_blocks=1, fresh=True)
+    deadline = time.perf_counter() + 1.0
+    while receiver._rx_thread is not None and receiver._rx_thread.is_alive():
+        if time.perf_counter() >= deadline:
+            pytest.fail("finite receive worker did not stop")
+        time.sleep(0.005)
+
+    assert receiver.stop()
+    assert receiver.sdr.destroy_count == destroy_count + 1
+
+
 def test_finite_worker_stops_after_requested_block_count(monkeypatch) -> None:
     receiver = build_receiver(monkeypatch)
     cursor = receiver.start(

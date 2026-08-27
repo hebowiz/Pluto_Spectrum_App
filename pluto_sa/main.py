@@ -21,40 +21,62 @@ from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.ui.session_window import SessionRealtimeSpectrumWindow
 
 
-def _choose_pluto_target(parent=None) -> tuple[bool, str | None]:
+def _choose_pluto_target(
+    parent=None,
+    *,
+    force_prompt: bool = False,
+) -> tuple[bool, str | None]:
     """Choose a physical receiver, reusing the previous choice when possible."""
 
     environment_target = os.environ.get("PLUTO_SDR_URI", "").strip()
-    if environment_target:
+    if environment_target and not force_prompt:
         return True, environment_target
     try:
         devices = discover_pluto_devices(iio.scan_contexts())
     except Exception:
         devices = ()
     if not devices:
+        if force_prompt:
+            QtWidgets.QMessageBox.warning(
+                parent,
+                "Select ADALM-Pluto Receiver",
+                "No ADALM-Pluto receiver was found.",
+            )
+            return False, None
         return True, None
 
     settings = QtCore.QSettings(RTSA_ORGANIZATION, RTSA_APPLICATION)
     saved = str(settings.value(RTSA_DEVICE_KEY, "")).strip()
-    if saved:
+    if saved and not force_prompt:
         saved_key = saved.casefold()
         for device in devices:
             if device.selector.casefold() == saved_key:
                 return True, device.selector
 
-    if len(devices) == 1:
+    if len(devices) == 1 and not force_prompt:
         selector = devices[0].selector
         settings.setValue(RTSA_DEVICE_KEY, selector)
         settings.sync()
         return True, selector
 
     labels = [device.label for device in devices]
+    selected_index = 0
+    if saved:
+        saved_key = saved.casefold()
+        selected_index = next(
+            (
+                index
+                for index, device in enumerate(devices)
+                if device.selector.casefold() == saved_key
+            ),
+            0,
+        )
     label, accepted = QtWidgets.QInputDialog.getItem(
         parent,
         "Select ADALM-Pluto Receiver",
-        "Two or more Pluto devices are connected. Select the RTSA receiver:",
+        "Select the ADALM-Pluto receiver used by RTSA:",
         labels,
-        0,
+        selected_index,
         False,
     )
     if not accepted:

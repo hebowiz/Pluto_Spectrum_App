@@ -9,6 +9,7 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_sa.config.session_state import (
     RTSA_APPLICATION,
+    RTSA_DEVICE_KEY,
     RTSA_ORGANIZATION,
     RTSASessionState,
     apply_config_values,
@@ -19,6 +20,7 @@ from pluto_sa.config.session_state import (
 )
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
+from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.ui.main_window import (
     GRAPH_VIEW_BOTH,
     GRAPH_VIEW_OPTIONS,
@@ -84,32 +86,93 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
             self.spectrum_plot.setFixedSize(PLOT_WIDTH, SESSION_PLOT_HEIGHT)
 
     def _install_system_frame(self) -> None:
-        """Add SYSTEM -> Preset using the same stacked-page navigation rules."""
+        """Add SYSTEM -> System -> Preset / Device navigation."""
 
         system_group = QtWidgets.QGroupBox("SYSTEM")
         self._apply_groupbox_title_font(system_group)
         system_layout = QtWidgets.QVBoxLayout(system_group)
-        self.preset_menu_button = self._make_control_button("Preset")
-        system_layout.addWidget(self.preset_menu_button)
+        self.system_menu_button = self._make_control_button("System")
+        system_layout.addWidget(self.system_menu_button)
 
         main_layout = self.main_menu_page.layout()
         insert_index = max(0, main_layout.count() - 1)
         main_layout.insertWidget(insert_index, system_group)
 
-        self.preset_page = QtWidgets.QWidget()
-        preset_layout = QtWidgets.QVBoxLayout(self.preset_page)
-        preset_layout.setContentsMargins(0, 0, 0, 0)
-        preset_layout.setSpacing(10)
-        self.restore_defaults_button = self._make_control_button("Restore Defaults")
-        preset_layout.addWidget(self.restore_defaults_button)
-        preset_layout.addStretch(1)
-        self.control_stack.addWidget(self.preset_page)
+        self.system_page = QtWidgets.QWidget()
+        system_page_layout = QtWidgets.QVBoxLayout(self.system_page)
+        system_page_layout.setContentsMargins(0, 0, 0, 0)
+        system_page_layout.setSpacing(10)
+        self.preset_button = self._make_control_button("Preset")
+        self.device_button = self._make_control_button("Device")
+        system_page_layout.addWidget(self.preset_button)
+        system_page_layout.addWidget(self.device_button)
+        system_page_layout.addStretch(1)
+        self.control_stack.addWidget(self.system_page)
 
-        self.preset_menu_button.clicked.connect(
-            lambda: self._show_control_page("Preset", self.preset_page)
+        self.system_menu_button.clicked.connect(
+            lambda: self._show_control_page("System", self.system_page)
         )
-        self.restore_defaults_button.clicked.connect(self._on_restore_defaults_clicked)
+        self.preset_button.clicked.connect(self._on_restore_defaults_clicked)
+        self.device_button.clicked.connect(self._on_device_clicked)
         self._install_control_panel_event_filters()
+
+    def _on_device_clicked(self) -> None:
+        """Select another Pluto, initialize it, and restart the current mode."""
+
+        # Keep startup and in-application device identity rules identical.
+        # The local import avoids making the application entry point a module
+        # dependency while session_window itself is imported by that entry point.
+        from pluto_sa.main import _choose_pluto_target
+
+        accepted, selector = _choose_pluto_target(self, force_prompt=True)
+        if not accepted:
+            return
+        if selector == self.config.sdr_uri:
+            return
+
+        old_receiver = self.receiver
+        old_selector = self.config.sdr_uri
+        self.timer.stop()
+        if not old_receiver.stop():
+            self._restart_timer_for_current_mode()
+            QtWidgets.QMessageBox.critical(
+                self,
+                "ADALM-Pluto Connection Error",
+                "The current receiver is still stopping. Device selection was not changed.",
+            )
+            return
+        self._reset_all_measurement_state(
+            stop_receiver=False,
+            stop_sweep=True,
+            reset_markers=False,
+        )
+        self._session_acquisition_started = False
+        self.config.sdr_uri = selector
+        try:
+            new_receiver = PlutoReceiver(self.config)
+        except Exception as error:
+            self.config.sdr_uri = old_selector
+            self._session_settings.setValue(RTSA_DEVICE_KEY, old_selector or "")
+            self._session_settings.sync()
+            self.receiver = old_receiver
+            self.sweep_controller.receiver = old_receiver
+            self.start_initial_acquisition(force=True)
+            QtWidgets.QMessageBox.critical(
+                self,
+                "ADALM-Pluto Connection Error",
+                f"Could not initialize the selected receiver.\n\n{error}",
+            )
+            return
+
+        self.receiver = new_receiver
+        self.sweep_controller.receiver = new_receiver
+        self.sweep_controller.config = self.config
+        old_receiver.close()
+        self._reset_plot_state()
+        self.start_initial_acquisition(force=True)
+        self._page_history.clear()
+        self._show_control_page("Main Menu", self.main_menu_page, push_history=False)
+        self._refresh_status_label()
 
     def _restore_saved_session_on_startup(self) -> None:
         state = load_session_state(self._session_settings)

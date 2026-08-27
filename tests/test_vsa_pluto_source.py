@@ -7,7 +7,7 @@ import pytest
 
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.sdr.iq_stream import IQBlock
+from pluto_sa.sdr.iq_stream import IQBlock, IQStreamBuffer
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.analysis import VSAAnalyzer
 from pluto_sa.vsa.model import ModulationKind, SignalDescription, VSASettings
@@ -26,6 +26,10 @@ class _FakeReceiver:
         self.closed = False
         self.reconfigured: list[SpectrumConfig] = []
         self.capture_fresh: list[bool] = []
+        self.stream_fresh: list[bool] = []
+        self.stream_block_sizes: list[int] = []
+        self.stop_calls = 0
+        self.iq_stream = IQStreamBuffer(capacity_blocks=8)
         self.__class__.instances.append(self)
 
     def reconfigure(self, config: SpectrumConfig) -> None:
@@ -54,6 +58,37 @@ class _FakeReceiver:
 
     def get_current_rf_bandwidth_hz(self) -> int:
         return self.config.rx_bandwidth_hz
+
+    def start(
+        self,
+        *,
+        block_size: int | None = None,
+        source: str = "continuous",
+        max_blocks: int | None = None,
+        fresh: bool = False,
+    ):
+        del max_blocks
+        count = max(1, int(block_size or self.config.rx_buffer_size))
+        self.stream_fresh.append(bool(fresh))
+        self.stream_block_sizes.append(count)
+        self.iq_stream.begin_stream(clear=True)
+        cursor = self.iq_stream.create_cursor(start="latest")
+        self.iq_stream.publish(
+            np.full(count, 100.0 + 0.0j, dtype=np.complex64),
+            source=source,
+        )
+        self.iq_stream.publish(
+            np.full(count, 200.0 + 0.0j, dtype=np.complex64),
+            source=source,
+        )
+        return cursor
+
+    def read_iq_stream(self, cursor, *, max_blocks: int | None = None):
+        return self.iq_stream.read(cursor, max_blocks=max_blocks)
+
+    def stop(self) -> bool:
+        self.stop_calls += 1
+        return True
 
     def close(self) -> None:
         self.closed = True
@@ -232,6 +267,51 @@ def test_pluto_power_trigger_applies_signed_trigger_offset(
             recording.trigger_sample_index - recording.start_sample_index
             == expected_trigger_offset
         )
+
+
+def test_pluto_power_trigger_zero_offset_retains_default_prestore() -> None:
+    _FakeReceiver.instances.clear()
+    source = PlutoLiveSource(receiver_factory=_FakeReceiver)
+    settings = PlutoCaptureSettings(
+        symbol_rate_hz=1_000_000.0,
+        samples_per_symbol=8,
+        capture_length_s=400 / 8_000_000.0,
+        trigger_source=TriggerKind.POWER_LEVEL,
+        trigger_level_dbm=-30.0,
+        trigger_offset_s=0.0,
+    )
+
+    recording = source.capture_single(settings)
+
+    assert settings.default_trigger_prestore_samples == 128
+    assert recording.sample_count == 400
+    assert recording.trigger_sample_index is not None
+    assert recording.trigger_sample_index - recording.start_sample_index == 128
+    assert recording.metadata["acquisition_trigger_offset_s"] == 0.0
+    assert recording.metadata["acquisition_default_prestore_samples"] == 128
+    receiver = _FakeReceiver.instances[0]
+    assert receiver.stream_block_sizes == [65_536]
+    assert receiver.stream_fresh == [True]
+    assert receiver.stop_calls == 1
+
+
+def test_pluto_power_trigger_record_crosses_continuous_stream_blocks() -> None:
+    _FakeReceiver.instances.clear()
+    source = PlutoLiveSource(receiver_factory=_FakeReceiver)
+    settings = PlutoCaptureSettings(
+        symbol_rate_hz=1_000_000.0,
+        samples_per_symbol=8,
+        capture_length_s=0.010,
+        trigger_source=TriggerKind.POWER_LEVEL,
+        trigger_level_dbm=-30.0,
+    )
+
+    recording = source.capture_single(settings)
+
+    assert recording.sample_count == 80_000
+    assert recording.trigger_sample_index - recording.start_sample_index == 128
+    np.testing.assert_array_equal(recording.iq[:65_536], 100.0 + 0.0j)
+    np.testing.assert_array_equal(recording.iq[65_536:], 200.0 + 0.0j)
 
 
 def test_pluto_power_trigger_wait_can_be_cancelled() -> None:

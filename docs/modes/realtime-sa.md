@@ -8,6 +8,9 @@ PlutoSDRからIQを連続取得し、現在の受信帯域をFFTスペクトラ�
 
 2台以上のADALM-Plutoが接続されている場合、RTSA起動時にhardware serial付きの選択dialogを
 表示します。選択した`serial:<id>`はRTSA専用QSettingsへ保存し、次回dialogの初期選択に使います。
+起動後も`SYSTEM > System > Device`から選択dialogを開けます。選択を変更すると現在の受信処理を
+停止し、新しいPlutoへ中心周波数、sample rate、RF bandwidth、manual gain等の初期設定を適用した後、
+現在のAnalyzer ModeをContinuousで再始動します。初期化に失敗した場合は旧Receiverへrollbackします。
 VSG/VSAのdevice設定とは共有しないため、送信機と受信機へ同じ個体を誤って割り当てることを
 避けられます。`PLUTO_SDR_URI`環境変数が指定されている場合はそれを最優先し、dialogを表示しません。
 接続個体が1台だけの場合はそのserialを自動選択します。

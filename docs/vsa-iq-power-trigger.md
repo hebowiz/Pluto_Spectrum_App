@@ -125,7 +125,7 @@ Acquisition Trigger defaults:
 | Trigger Source | Free Run | — |
 | Level | -20.00 | dBm |
 | Slope | Rising | — |
-| Trigger Offset | 0.000 | symbols |
+| Trigger Offset | 0.000 | symbols（0では先頭burst保護のため16 symbolsを自動prestore） |
 | Hysteresis | 3.0 | dB |
 
 Post-capture Burst Search defaults:

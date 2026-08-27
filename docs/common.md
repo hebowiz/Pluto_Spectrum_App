@@ -45,7 +45,7 @@ RBW処理は全モードで同じGaussian complex IQ FIR特性を共有します
 - ウィンドウサイズは1664×1060固定です。SYSTEMフレーム追加前の980 pxから80 px拡大しています。
 - 左側にステータス、ウォーターフォール、スペクトラムを配置します。
 - 右側に測定器風の階層メニューを配置します。
-- Main Menuの`TRIGGER / MARKER`下に`SYSTEM`フレームを配置し、`Preset`を収容します。
+- Main Menuの`TRIGGER / MARKER`下に`SYSTEM`フレームを配置し、`System`を収容します。
 - 右クリックで右側メニューの前ページへ戻ります。
 - 周波数軸はGHz、振幅軸はdBmです。
 - Time Analyzer系では横軸が時間へ切り替わります。
@@ -93,9 +93,10 @@ Sweep系では完了した掃引データを基準にマーカーを更新しま
 | Continuous | 現在のモードを連続実行 |
 | Single | 1フレーム、1掃引、または1時間窓を取得して停止 |
 | Reset | トレースや進行状態を初期化し、実行状態を可能な範囲で復元 |
-| SYSTEM > Preset > Restore Defaults | 接続先Plutoを維持し、それ以外の保存対象設定を現行コードの初期値へ戻す |
+| SYSTEM > System > Preset | 接続先Plutoを維持し、それ以外の保存対象設定を現行コードの初期値へ戻す |
+| SYSTEM > System > Device | 接続先Plutoを選択し、初期設定後に現在のAnalyzer Modeを再始動する |
 
-Presetページは他の右ペイン設定ページと同じstack/historyへ入り、Backまたは右クリックで前ページへ戻ります。Restore Defaults実行時は確認ダイアログを表示します。
+Systemページは他の右ペイン設定ページと同じstack/historyへ入り、Backまたは右クリックで前ページへ戻ります。Preset実行時は確認ダイアログを表示します。
 
 ## 7. 設定と校正ファイル
 

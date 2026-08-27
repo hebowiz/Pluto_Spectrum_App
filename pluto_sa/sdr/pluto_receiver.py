@@ -78,6 +78,7 @@ class PlutoReceiver:
         block_size: int | None = None,
         source: str = "continuous",
         max_blocks: int | None = None,
+        fresh: bool = False,
     ) -> IQStreamCursor:
         resolved_block_size = max(
             1,
@@ -105,8 +106,12 @@ class PlutoReceiver:
 
             with self._iq_lock:
                 with self._sdr_lock:
-                    if int(self.sdr.rx_buffer_size) != resolved_block_size:
+                    buffer_size_changed = (
+                        int(self.sdr.rx_buffer_size) != resolved_block_size
+                    )
+                    if buffer_size_changed:
                         self.sdr.rx_buffer_size = resolved_block_size
+                    if fresh or buffer_size_changed:
                         try:
                             self.sdr.rx_destroy_buffer()
                         except Exception:
