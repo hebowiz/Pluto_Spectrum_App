@@ -174,20 +174,27 @@ def build_composer_graph(project: WaveformProject) -> ComposerGraph:
 
     envelope = project.power_envelope
     if envelope.enabled:
+        power_start = min(0.0, float(envelope.rise_delay_symbols))
+        power_stop = max(
+            cursor,
+            cursor
+            + float(envelope.fall_delay_symbols)
+            + float(envelope.fall_symbols),
+        )
         power_specs = (
+            (
+                "on-level",
+                "Power Envelope",
+                power_start,
+                power_stop - power_start,
+                (("Level", f"{envelope.on_level_db:.3g} dB"),),
+            ),
             (
                 "ramp-up",
                 "Ramp Up",
                 envelope.rise_delay_symbols,
                 envelope.rise_symbols,
                 (("Shape", envelope.shape), ("Target", f"{envelope.on_level_db:.3g} dB")),
-            ),
-            (
-                "on-level",
-                "Packet ON",
-                0.0,
-                cursor,
-                (("Level", f"{envelope.on_level_db:.3g} dB"),),
             ),
             (
                 "ramp-down",

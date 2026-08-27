@@ -764,3 +764,16 @@ generatorを追加した。Preamble、Access Address/Sync、Header、Payload、C
 生成結果は既存PreviewおよびNPZ/IQ TAR/WV/Pluto Outputの共通経路を通る。次のComposer
 段階ではpreset適用後のfield graphも通常packetと同じblockとして見え、ユーザーが内容を確認・
 変更できることを維持する。
+
+### Packet periodと有限repeat（2026-08-28）
+
+Settingsの時間設定は、直接編集する`Post Idle`から`Period [symbols]`へ変更した。Post Idleは
+`Period - (Pre Idle + Ramp UpからRamp Down終端まで)`として参考表示する。Periodがこの最小値を
+下回る場合は最小値へ制限する。旧projectの`post_idle_symbols`は後方互換入力として読み込むが、
+新規保存後は`period_symbols`を1周期のauthoritative valueとする。
+
+生成engineはPeriodをsample整数へ一度だけ丸め、`[Pre Idle][Rampを含むactive burst][Post Idle]`
+を正確にそのsample数で構築してから`repeat_count`回tileする。これにより複数packetの開始間隔、
+packet長、Ramp端が全repeatで同一になる。Previewは引き続き先頭1周期だけを描画し、Plutoへの
+finite TX bufferには全repeatを格納する。Visual ComposerのPower trackも論理packetだけでなく、
+Ramp Up開始からRamp Down終了までをPower Envelope帯として表示する。

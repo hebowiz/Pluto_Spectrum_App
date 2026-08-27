@@ -42,8 +42,14 @@ def test_le_composer_graph_has_three_time_aligned_tracks() -> None:
     assert modulation[0].name == "GFSK"
     assert modulation[0].start_symbol == 0
     assert modulation[0].stop_symbol == graph.total_symbols
-    assert [block.name for block in power] == ["Ramp Up", "Packet ON", "Ramp Down"]
+    assert [block.name for block in power] == [
+        "Power Envelope",
+        "Ramp Up",
+        "Ramp Down",
+    ]
     assert power[0].start_symbol == -1
+    assert power[0].stop_symbol == graph.total_symbols + 2
+    assert power[1].start_symbol == -1
     assert power[-1].start_symbol == graph.total_symbols + 1
 
 

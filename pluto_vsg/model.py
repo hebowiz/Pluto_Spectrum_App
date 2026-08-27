@@ -207,6 +207,9 @@ class WaveformProject:
     sample_rate_hz: float = 8_000_000.0
     samples_per_symbol: int = 8
     repeat_count: int = 1
+    # Complete repetition period. ``None`` keeps version-1 project files
+    # compatible by deriving the period from Pre/Post Idle and the envelope.
+    period_symbols: float | None = None
     center_frequency_hz: float = 2_441_000_000.0
     fields: tuple[FieldDefinition, ...] = ()
     power_envelope: PowerEnvelopeDefinition = field(
@@ -220,6 +223,49 @@ class WaveformProject:
 class ValidationIssue:
     path: str
     message: str
+
+
+def packet_symbol_count(project: WaveformProject) -> int:
+    return int(sum(packet_field.symbol_count for packet_field in project.fields))
+
+
+def waveform_timing_samples(project: WaveformProject) -> tuple[int, int, int, int]:
+    """Return active start/stop, minimum period and effective period in samples."""
+
+    sps = int(project.samples_per_symbol)
+    packet_samples = packet_symbol_count(project) * sps
+    envelope = project.power_envelope
+    if envelope.enabled:
+        rise_start = round(envelope.rise_delay_symbols * sps)
+        rise_count = round(envelope.rise_symbols * sps)
+        fall_start = packet_samples + round(envelope.fall_delay_symbols * sps)
+        fall_count = round(envelope.fall_symbols * sps)
+        active_start = min(0, rise_start)
+        active_stop = max(packet_samples, fall_start + fall_count)
+    else:
+        active_start, active_stop = 0, packet_samples
+    settings = project.bluetooth_br or project.bluetooth_le
+    pre_idle = int(getattr(settings, "pre_idle_symbols", 0)) * sps
+    post_idle = int(getattr(settings, "post_idle_symbols", 0)) * sps
+    minimum_period = pre_idle + active_stop - active_start
+    if project.period_symbols is None:
+        period = minimum_period + post_idle
+    else:
+        period = round(float(project.period_symbols) * sps)
+    return active_start, active_stop, minimum_period, period
+
+
+def minimum_period_symbols(project: WaveformProject) -> float:
+    return waveform_timing_samples(project)[2] / float(project.samples_per_symbol)
+
+
+def effective_period_symbols(project: WaveformProject) -> float:
+    return waveform_timing_samples(project)[3] / float(project.samples_per_symbol)
+
+
+def effective_post_idle_symbols(project: WaveformProject) -> float:
+    _, _, minimum, period = waveform_timing_samples(project)
+    return max(0, period - minimum) / float(project.samples_per_symbol)
 
 
 def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
@@ -244,6 +290,19 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 "repeat_count", "Pluto VSG supports at most 1000 packet repetitions."
             )
         )
+    if project.period_symbols is not None:
+        if project.period_symbols <= 0.0:
+            issues.append(
+                ValidationIssue("period_symbols", "Packet period must be positive.")
+            )
+        elif waveform_timing_samples(project)[3] < waveform_timing_samples(project)[2]:
+            issues.append(
+                ValidationIssue(
+                    "period_symbols",
+                    "Packet period is shorter than Pre Idle plus the complete "
+                    "Ramp Up/packet/Ramp Down interval.",
+                )
+            )
     if project.center_frequency_hz < 0.0:
         issues.append(
             ValidationIssue(

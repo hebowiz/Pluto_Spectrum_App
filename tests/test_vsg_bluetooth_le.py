@@ -154,6 +154,19 @@ def test_le_packet_interval_and_repeat_layout() -> None:
     assert starts[1] - starts[0] == starts[2] - starts[1] == 5000
 
 
+def test_explicit_le_period_produces_equal_complete_repetitions() -> None:
+    base = bluetooth_le_project(BluetoothLEPhy.LE_1M)
+    project = replace(base, repeat_count=4, period_symbols=512.375)
+
+    result = BluetoothLEWaveformEngine().generate(project)
+
+    period_samples = round(512.375 * project.samples_per_symbol)
+    assert result.metadata["period_sample_count"] == period_samples
+    assert result.iq.size == 4 * period_samples
+    starts = [start for start, _stop in result.metadata["packet_ranges_samples"]]
+    assert np.diff(starts).tolist() == [period_samples] * 3
+
+
 def test_zero_length_le_payload_is_valid() -> None:
     base = bluetooth_le_test_project()
     settings = replace(base.bluetooth_le, payload_length_bytes=0)

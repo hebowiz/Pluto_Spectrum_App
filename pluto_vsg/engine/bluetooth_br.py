@@ -26,6 +26,7 @@ from pluto_vsg.model import (
     WaveformProject,
     bluetooth_packet_is_edr,
     bluetooth_packet_properties,
+    waveform_timing_samples,
     validate_project,
 )
 
@@ -512,7 +513,10 @@ class BluetoothBRWaveformEngine:
             )
 
         prefix_count = settings.pre_idle_symbols * samples_per_symbol
-        suffix_count = settings.post_idle_symbols * samples_per_symbol
+        _, _, minimum_period_count, period_count = waveform_timing_samples(project)
+        if period_count < minimum_period_count:
+            raise ValueError("Packet period is shorter than the generated burst")
+        suffix_count = period_count - prefix_count - active_iq.size
         prefix = np.zeros(prefix_count, dtype=np.complex128)
         suffix = np.zeros(suffix_count, dtype=np.complex128)
         single = np.concatenate((prefix, active_iq, suffix))
@@ -555,6 +559,9 @@ class BluetoothBRWaveformEngine:
                 "standard": project.standard.value,
                 "center_frequency_hz": project.center_frequency_hz,
                 "packet_name": packet_kind.value,
+                "period_sample_count": single.size,
+                "period_symbols": single.size / samples_per_symbol,
+                "post_idle_sample_count": suffix_count,
                 "packet_bits": packet_bits,
                 "payload_header_bits": payload_header,
                 "payload_body_bits": body,

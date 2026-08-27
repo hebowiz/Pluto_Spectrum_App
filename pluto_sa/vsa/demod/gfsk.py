@@ -184,12 +184,18 @@ def _fractional_symbol_values(
     samples_per_symbol: int,
     symbol_count: int,
 ) -> np.ndarray:
-    """Average symbol-frequency windows at a fractional sample boundary.
+    """Measure symbol-frequency windows at a fractional sample boundary.
 
     The integer case is identical to :func:`_symbol_values`.  Interpolation is
     only used after the all-point frequency-model fit has estimated the timing
     offset, so the final decisions and timestamps use the fitted symbol clock
     rather than the coarse integer phase selected by pattern correlation.
+
+    An isolated capture phase discontinuity creates two extreme instantaneous-
+    frequency samples after fractional interpolation.  A mean can therefore
+    reverse an otherwise valid FSK decision.  The median preserves the symbol
+    plateau while rejecting those sparse discontinuities; coarse acquisition
+    intentionally retains its existing integrate-and-dump mean.
     """
     frequency = np.asarray(frequency_hz, dtype=np.float64)
     sps = int(samples_per_symbol)
@@ -219,7 +225,7 @@ def _fractional_symbol_values(
         np.arange(frequency.size, dtype=np.float64),
         frequency,
     ).reshape(count, offsets.size)
-    return np.mean(interpolated, axis=1)
+    return np.median(interpolated, axis=1)
 
 
 def _normalized_sliding_correlation(

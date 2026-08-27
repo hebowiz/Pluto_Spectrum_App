@@ -201,6 +201,19 @@ def test_vsg_preview_draws_only_first_packet_when_schedule_repeats() -> None:
         window.close()
 
 
+def test_explicit_br_period_produces_equal_complete_repetitions() -> None:
+    base = bluetooth_br_edr_project()
+    project = replace(base, repeat_count=5, period_symbols=512.375)
+
+    result = BluetoothBRWaveformEngine().generate(project)
+
+    period_samples = round(512.375 * project.samples_per_symbol)
+    assert result.metadata["period_sample_count"] == period_samples
+    assert result.iq.size == 5 * period_samples
+    starts = [start for start, _stop in result.metadata["packet_ranges_samples"]]
+    assert np.diff(starts).tolist() == [period_samples] * 4
+
+
 def test_vsg_field_labels_are_present_and_keep_a_fixed_side() -> None:
     pg.mkQApp("Pluto VSG field label anchor test")
     window = PlutoVSGWindow()

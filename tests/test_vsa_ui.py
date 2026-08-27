@@ -888,25 +888,8 @@ def test_symbol_table_click_places_and_toggles_fsk_plot_markers(tmp_path) -> Non
             * window.session.signal.symbol_rate_hz
             / (2.0 * np.pi)
         )
-        display_result = window.session.carrier_corrected_result
-        measured_trace_hz, measured_time_s = _prepare_fsk_display_frequency(
-            display_result.iq,
-            sample_rate_hz=float(
-                display_result.metadata["analysis_sample_rate_hz"]
-            ),
-            symbol_rate_hz=window.session.signal.symbol_rate_hz,
-            gaussian_bt=window.session.signal.filter_parameter,
-            result_start_time_s=pattern_result.result_start_time_s,
-            result_stop_time_s=pattern_result.result_stop_time_s,
-        )
         assert modulation_y[0] * 1e3 == pytest.approx(
-            float(
-                np.interp(
-                    expected_time_s,
-                    measured_time_s,
-                    measured_trace_hz,
-                )
-            )
+            float(np.real(pattern_result.measured_symbols[symbol_index]))
         )
         window.raw_modulation_signal_action.trigger()
         raw_modulation_point, _raw_modulation_label = (
@@ -1359,8 +1342,10 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.differential_iq_symbol_plot_action.setChecked(True)
         window.fsk_constellation_frequency_action.setChecked(True)
         window.measurement_filter_combo.setCurrentText("None")
+        window._set_selected_pluto_target("serial:rx-a")
         selected_summary_items = set(window._selected_result_summary_ids)
         saved = window._meas_config_values()
+        assert "pluto_uri" not in saved["input_frontend"]
         assert "match_selection" not in saved["pattern_search"]
         assert "match_index" not in saved["pattern_search"]
         assert saved["pattern_search"]["allow_inverted_fsk_pattern"] is True
@@ -1388,6 +1373,8 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.physical_iq_symbol_plot_action.setChecked(True)
         window.fsk_phase_difference_action.setChecked(True)
         window.measurement_filter_combo.setCurrentText("Auto")
+        window._set_selected_pluto_target("serial:rx-b")
+        saved["input_frontend"]["pluto_uri"] = "serial:legacy-config-value"
         window._apply_meas_config_values(saved)
 
         assert window._parse_pattern_symbols(2) == (0, 1, 1, 0, 1, 0)
@@ -1397,6 +1384,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.exclude_incomplete_result_check.isChecked()
         assert window.bit_order_combo.currentText() == "LSB"
         assert window.measurement_filter_combo.currentText() == "None"
+        assert window._selected_pluto_target() == "serial:rx-b"
         assert window.capture_oversampling_combo.currentData() == 8
         assert window.capture_sample_rate_label.text() == "8.000 MS/s"
         assert window.capture_samples_label.text() == "24,000 samples"
@@ -1780,6 +1768,7 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
         first._set_pattern_symbols([1, 0, 1, 1, 0, 0, 1, 0])
         first._apply_result_summary_preset("measurement")
         first.constellation_density_action.setChecked(True)
+        first._set_selected_pluto_target("serial:test-pluto")
         expected_summary_items = set(first._selected_result_summary_ids)
     finally:
         first._meas_config_dialog.close()
@@ -1796,6 +1785,7 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
         "recording",
         "recording_path",
     }.intersection(document["settings"])
+    assert "pluto_uri" not in document["settings"]["input_frontend"]
 
     restored_preferences = QtCore.QSettings(
         str(preferences_path), QtCore.QSettings.Format.IniFormat
@@ -1818,6 +1808,7 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
         assert second._parse_pattern_symbols(2) == (1, 0, 1, 1, 0, 0, 1, 0)
         assert second._selected_result_summary_ids == expected_summary_items
         assert second.constellation_density_action.isChecked()
+        assert second._selected_pluto_target() == "serial:test-pluto"
         assert not second._analyze()
         assert "configuration restored" in second.statusBar().currentMessage()
     finally:

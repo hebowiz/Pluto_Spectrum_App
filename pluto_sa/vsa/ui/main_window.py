@@ -547,6 +547,18 @@ class _AnalysisThread(QtCore.QThread):
         self.analysis_ready.emit(self.generation, self.session)
 
 
+class _PlutoDiscoveryThread(QtCore.QThread):
+    discovery_ready = QtCore.Signal(object, str)
+
+    def run(self) -> None:
+        try:
+            devices = discover_pluto_devices(iio.scan_contexts())
+        except Exception as error:
+            self.discovery_ready.emit((), str(error))
+            return
+        self.discovery_ready.emit(tuple(devices), "")
+
+
 class VSAWindow(QtWidgets.QMainWindow):
     """One VSA measurement session with detachable result windows."""
 
@@ -566,6 +578,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._pluto_source = pluto_source or PlutoLiveSource()
         self._owns_pluto_source = bool(owns_pluto_source)
         self._pluto_capture_thread: _PlutoSingleCaptureThread | None = None
+        self._pluto_discovery_thread: QtCore.QThread | None = None
         self._analysis_thread: _AnalysisThread | None = None
         self._analysis_generation = 0
         self._pending_analysis: tuple[int, VSASession, dict[str, float]] | None = None
@@ -595,6 +608,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._build_summary_bar()
         self._build_results()
         self._build_configuration()
+        self._set_selected_pluto_target(
+            self._preferences.value("pluto/selected_target", "", type=str)
+        )
         restored = self._restore_startup_meas_config()
         self._update_summary()
         if self.session.recording is None:
@@ -2081,7 +2097,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         return {
             "input_frontend": {
                 "input_source": self.input_source_combo.currentText(),
-                "pluto_uri": self._selected_pluto_target(),
                 "center_frequency_mhz": self.capture_center_spin.value(),
                 "rf_bandwidth_mhz": self.capture_rf_bandwidth_spin.value(),
                 "lo_offset_enabled": self.lo_offset_check.isChecked(),
@@ -2291,7 +2306,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self._set_combo_text(
                     self.input_source_combo, source["input_source"], "input source"
                 )
-            self._set_selected_pluto_target(str(source.get("pluto_uri", "")))
             self.capture_center_spin.setValue(
                 float(source.get("center_frequency_mhz", 2441.0))
             )
@@ -2821,14 +2835,33 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.pluto_uri_edit.setCurrentIndex(self.pluto_uri_edit.count() - 1)
 
     def _refresh_pluto_devices(self) -> None:
+        if self._pluto_discovery_thread is not None:
+            return
         selected = self._selected_pluto_target()
-        try:
-            devices = discover_pluto_devices(iio.scan_contexts())
-        except Exception as error:
+        thread = _PlutoDiscoveryThread(self)
+        self._pluto_discovery_thread = thread
+        self.pluto_refresh_button.setEnabled(False)
+        self.pluto_refresh_button.setText("Scanning...")
+        thread.discovery_ready.connect(
+            lambda devices, error: self._pluto_devices_discovered(
+                selected, devices, error
+            )
+        )
+        thread.finished.connect(self._pluto_discovery_finished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _pluto_devices_discovered(
+        self, selected: str, devices: object, error: str
+    ) -> None:
+        self.pluto_refresh_button.setEnabled(True)
+        self.pluto_refresh_button.setText("Refresh Devices")
+        if error:
             QtWidgets.QMessageBox.warning(
                 self, "ADALM-Pluto Discovery", f"Device scan failed: {error}"
             )
             return
+        devices = tuple(devices)
         matching_device = next(
             (device for device in devices if device.uri == selected), None
         )
@@ -2851,6 +2884,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             f"Detected {len(devices)} ADALM-Pluto device(s)"
         )
+
+    def _pluto_discovery_finished(self) -> None:
+        self._pluto_discovery_thread = None
 
     def _pluto_capture_settings(self) -> PlutoCaptureSettings:
         return PlutoCaptureSettings(
@@ -3235,6 +3271,15 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if (
+            self._pluto_discovery_thread is not None
+            and self._pluto_discovery_thread.isRunning()
+        ):
+            self.statusBar().showMessage(
+                "Pluto device discovery is still running; close again after it completes."
+            )
+            event.ignore()
+            return
+        if (
             self._pluto_capture_thread is not None
             and self._pluto_capture_thread.isRunning()
         ):
@@ -3249,6 +3294,9 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             event.ignore()
             return
+        self._preferences.setValue(
+            "pluto/selected_target", self._selected_pluto_target()
+        )
         self._save_startup_meas_config()
         if self._owns_pluto_source:
             self._pluto_source.close()
@@ -3838,15 +3886,25 @@ class VSAWindow(QtWidgets.QMainWindow):
                 display_frequency_khz,
                 pen=pg.mkPen(_TRACE_COLOR, width=1),
             )
-            modulation_frequency_hz = (
-                np.interp(
-                    symbol_times_s,
-                    modulation_time_s,
-                    modulation_frequency_trace_hz,
-                )
-                if symbol_times_s.size
-                else np.empty(0, dtype=np.float64)
+            measured_frequency_hz = np.real(
+                self.session.pattern_result.measured_symbols
+                if self.session.pattern_result is not None
+                else display_result.measured_symbols
             )
+            # Measured symbol points are the recovered decision values used by
+            # Constellation Frequency, not a single instantaneous-frequency
+            # sample.  Raw IQ intentionally keeps the uncorrected trace value.
+            modulation_frequency_hz = measured_frequency_hz
+            if not measured_selected:
+                modulation_frequency_hz = (
+                    np.interp(
+                        symbol_times_s,
+                        modulation_time_s,
+                        modulation_frequency_trace_hz,
+                    )
+                    if symbol_times_s.size
+                    else np.empty(0, dtype=np.float64)
+                )
             marker_context["modulation_frequency_hz"] = (
                 modulation_frequency_hz
             )
@@ -3872,11 +3930,6 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.modulation_plot, fit_range=reset_ranges
             )
 
-            measured_frequency_hz = np.real(
-                self.session.pattern_result.measured_symbols
-                if self.session.pattern_result is not None
-                else display_result.measured_symbols
-            )
             marker_context["symbol_frequency_hz"] = measured_frequency_hz
             if self.fsk_constellation_frequency_action.isChecked():
                 self.symbol_plot.getAxis("left").enableAutoSIPrefix(False)

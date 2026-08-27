@@ -31,7 +31,10 @@ from pluto_sa.vsa.profiles.bluetooth_br import (
     giac_access_code_bits,
     modulate_packet_bits,
 )
-from pluto_sa.vsa.demod.gfsk import fsk_reference_frequency_levels
+from pluto_sa.vsa.demod.gfsk import (
+    demodulate_gfsk,
+    fsk_reference_frequency_levels,
+)
 
 
 def _pattern_from_generated(recording, start: int, length: int) -> KnownPattern:
@@ -1033,6 +1036,37 @@ def test_real_pluto_fsk_fractional_timing_is_stable_across_analysis_bandwidth():
         max(start_times) - min(start_times)
     ) * 8_000_000.0
     assert timing_span_analysis_samples < 0.1
+
+
+def test_le1m_phase_discontinuity_does_not_reverse_symbol_frequency():
+    fixture = Path(__file__).with_name("fixtures") / "LE1M_FSK_error.npz"
+    recording = FileIQSource.load(fixture)
+    access = np.asarray(
+        [
+            1, 0, 1, 0, 1, 0, 1, 0, 1, 0,
+            0, 1, 0, 1, 0, 0, 1, 0, 0, 0,
+            0, 0, 1, 0, 0, 1, 1, 0, 1, 1,
+            1, 0, 1, 0, 0, 0, 1, 1, 1, 0,
+        ],
+        dtype=np.uint8,
+    )
+
+    result = demodulate_gfsk(
+        recording.iq,
+        sample_rate_hz=recording.sample_rate_hz,
+        access_bits=access,
+        symbol_rate_hz=1_000_000.0,
+        minimum_correlation=0.9,
+        gaussian_bt=0.5,
+        apply_measurement_filter=False,
+        maximum_symbols=376,
+        match_selection="First",
+        require_zero_pattern_errors=True,
+        allow_complemented_pattern_match=True,
+    )
+
+    assert result.bits[60] == 1
+    assert result.symbol_frequency_hz[60] == pytest.approx(232_000.0, abs=20_000.0)
 
 
 def test_real_pluto_cfo_stays_anchored_to_known_pattern():

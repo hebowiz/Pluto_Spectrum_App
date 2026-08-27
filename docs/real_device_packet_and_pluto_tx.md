@@ -49,5 +49,7 @@
   到達可能範囲内では希望dBmを保つようTx Gainを逆算する。詳細は
   `Pluto_VSG_RF_Level_RMS_Design.md`の22章を参照。
 - BLEパケットでCRC計算間違いあり。他フォーマットも含め見直しを
-- Visual ComposerのPowerは実際に出力している時間を表示すべきでは？現状有効パケット内のみ表示
-- 送信したパケットが不完全だったり等間隔ではなかったりするので要検証
+- 2026-08-28: Visual ComposerのPower帯をRamp Up開始からRamp Down終了までへ拡張済み。
+  送信周期はPost Idle直接指定ではなくPeriod指定へ統一し、複数packet生成はsample整数化した
+  1周期をtileするため、不完全packetや周期短縮を発生させない。
+- 2026-08-28: 複数送信の各packetが完全長・等間隔になることを自動testで固定済み。

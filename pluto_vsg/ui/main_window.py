@@ -40,6 +40,9 @@ from pluto_vsg.model import (
     WaveformProject,
     bluetooth_packet_is_edr,
     bluetooth_packet_properties,
+    effective_post_idle_symbols,
+    effective_period_symbols,
+    minimum_period_symbols,
     validate_project,
 )
 from pluto_vsg.persistence import load_project, save_project
@@ -154,7 +157,13 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         self.deviation_spin = self._double_spin(1.0, 2000.0, settings.frequency_deviation_hz / 1e3, 3)
         self.bt_spin = self._double_spin(0.05, 2.0, settings.gaussian_bt, 3)
         self.pre_idle_spin = self._integer_spin(0, 1_000_000, settings.pre_idle_symbols)
-        self.post_idle_spin = self._integer_spin(0, 1_000_000, settings.post_idle_symbols)
+        self._minimum_period_symbols = minimum_period_symbols(project)
+        self.period_spin = self._double_spin(
+            0.0, 1_000_000.0, effective_period_symbols(project), 3
+        )
+        self.post_idle_value = QtWidgets.QLabel()
+        self.period_spin.valueChanged.connect(self._update_post_idle_reference)
+        self._update_post_idle_reference()
         self.rise_spin = self._double_spin(0.0, 1000.0, project.power_envelope.rise_symbols, 3)
         self.rise_delay_spin = self._double_spin(-1000.0, 1000.0, project.power_envelope.rise_delay_symbols, 3)
         self.fall_spin = self._double_spin(0.0, 1000.0, project.power_envelope.fall_symbols, 3)
@@ -182,7 +191,8 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             ("FSK Deviation [kHz]", self.deviation_spin),
             ("Gaussian B*T", self.bt_spin),
             ("Pre Idle [symbols]", self.pre_idle_spin),
-            ("Post Idle [symbols]", self.post_idle_spin),
+            ("Period [symbols]", self.period_spin),
+            ("Post Idle [symbols] (reference)", self.post_idle_value),
             ("Ramp Up [symbols]", self.rise_spin),
             ("Ramp Up Start rel. Packet [symbols]", self.rise_delay_spin),
             ("Ramp Down [symbols]", self.fall_spin),
@@ -214,6 +224,18 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         self.payload_source_combo.currentIndexChanged.connect(
             self._payload_source_changed
         )
+        for signal in (
+            self.phy_combo.currentIndexChanged,
+            self.length_spin.valueChanged,
+            self.sps_spin.valueChanged,
+            self.pre_idle_spin.valueChanged,
+            self.rise_spin.valueChanged,
+            self.rise_delay_spin.valueChanged,
+            self.fall_spin.valueChanged,
+            self.fall_delay_spin.valueChanged,
+        ):
+            signal.connect(self._update_period_constraints)
+        self._update_period_constraints()
         self._payload_source_changed()
 
     @staticmethod
@@ -267,6 +289,41 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         self.whitening_check.setChecked(False)
         self.deviation_spin.setValue(settings.frequency_deviation_hz / 1e3)
         self.bt_spin.setValue(settings.gaussian_bt)
+        symbol_rate_hz = 1_000_000.0 if phy == BluetoothLEPhy.LE_1M else 2_000_000.0
+        packet_symbols = sum(field.symbol_count for field in bluetooth_le_fields(settings))
+        interval_us = np.ceil((packet_symbols / symbol_rate_hz * 1e6 + 249.0) / 625.0) * 625.0
+        self.period_spin.setValue(interval_us * 1e-6 * symbol_rate_hz)
+
+    def _update_post_idle_reference(self) -> None:
+        post_idle = max(0.0, self.period_spin.value() - self._minimum_period_symbols)
+        self.post_idle_value.setText(f"{post_idle:.3f}")
+
+    def _update_period_constraints(self, _value=None) -> None:
+        phy = BluetoothLEPhy(self.phy_combo.currentData())
+        settings = replace(
+            self._project.bluetooth_le,
+            phy=phy,
+            payload_length_bytes=self.length_spin.value(),
+            pre_idle_symbols=self.pre_idle_spin.value(),
+        )
+        symbol_rate_hz = 1_000_000.0 if phy == BluetoothLEPhy.LE_1M else 2_000_000.0
+        candidate = replace(
+            self._project,
+            sample_rate_hz=symbol_rate_hz * self.sps_spin.value(),
+            samples_per_symbol=self.sps_spin.value(),
+            fields=bluetooth_le_fields(settings),
+            bluetooth_le=settings,
+            power_envelope=replace(
+                self._project.power_envelope,
+                rise_symbols=self.rise_spin.value(),
+                rise_delay_symbols=self.rise_delay_spin.value(),
+                fall_symbols=self.fall_spin.value(),
+                fall_delay_symbols=self.fall_delay_spin.value(),
+            ),
+        )
+        self._minimum_period_symbols = minimum_period_symbols(candidate)
+        self.period_spin.setMinimum(self._minimum_period_symbols)
+        self._update_post_idle_reference()
 
     def _accept_settings(self) -> None:
         phy = BluetoothLEPhy(self.phy_combo.currentData())
@@ -304,7 +361,7 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             frequency_deviation_hz=self.deviation_spin.value() * 1e3,
             gaussian_bt=self.bt_spin.value(),
             pre_idle_symbols=self.pre_idle_spin.value(),
-            post_idle_symbols=self.post_idle_spin.value(),
+            post_idle_symbols=0,
         )
         symbol_rate_hz = 1_000_000.0 if phy == BluetoothLEPhy.LE_1M else 2_000_000.0
         project = replace(
@@ -314,6 +371,7 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             samples_per_symbol=self.sps_spin.value(),
             sample_rate_hz=symbol_rate_hz * self.sps_spin.value(),
             repeat_count=self.repeat_spin.value(),
+            period_symbols=self.period_spin.value(),
             fields=bluetooth_le_fields(settings),
             bluetooth_le=settings,
             power_envelope=replace(
@@ -325,6 +383,12 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
                 shape=self.ramp_combo.currentText(),
             ),
         )
+        minimum_period = minimum_period_symbols(project)
+        if project.period_symbols is not None and project.period_symbols < minimum_period:
+            project = replace(project, period_symbols=minimum_period)
+            self.period_spin.setValue(minimum_period)
+            self._minimum_period_symbols = minimum_period
+            self._update_post_idle_reference()
         issues = validate_project(project)
         if issues:
             QtWidgets.QMessageBox.warning(
@@ -445,9 +509,13 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.pre_idle_spin = self._integer_spin(
             0, 1_000_000, settings.pre_idle_symbols
         )
-        self.post_idle_spin = self._integer_spin(
-            0, 1_000_000, settings.post_idle_symbols
+        self._minimum_period_symbols = minimum_period_symbols(project)
+        self.period_spin = self._double_spin(
+            0.0, 1_000_000.0, effective_period_symbols(project), 3
         )
+        self.post_idle_value = QtWidgets.QLabel()
+        self.period_spin.valueChanged.connect(self._update_post_idle_reference)
+        self._update_post_idle_reference()
         self.rise_spin = self._double_spin(
             0.0, 1000.0, project.power_envelope.rise_symbols, 3
         )
@@ -512,7 +580,8 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             ("EDR SRRC Roll-off", self.edr_rolloff_spin),
             ("EDR Power rel. GFSK [dB]", self.edr_power_spin),
             ("Pre Idle [symbols]", self.pre_idle_spin),
-            ("Post Idle [symbols]", self.post_idle_spin),
+            ("Period [symbols]", self.period_spin),
+            ("Post Idle [symbols] (reference)", self.post_idle_value),
             ("Ramp Up [symbols]", self.rise_spin),
             ("Ramp Up Start rel. Packet [symbols]", self.rise_delay_spin),
             ("Ramp Down [symbols]", self.fall_spin),
@@ -548,11 +617,23 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.packet_type_combo.currentIndexChanged.connect(
             self._packet_type_changed
         )
+        for signal in (
+            self.payload_length_spin.valueChanged,
+            self.sps_spin.valueChanged,
+            self.pre_idle_spin.valueChanged,
+            self.rise_spin.valueChanged,
+            self.rise_delay_spin.valueChanged,
+            self.fall_spin.valueChanged,
+            self.fall_delay_spin.valueChanged,
+            self.edr_guard_spin.valueChanged,
+        ):
+            signal.connect(self._update_period_constraints)
         self._payload_source_changed()
         # Opening Settings must preserve the saved payload length. Only a
         # subsequent user-initiated packet-type change selects the new
         # packet type's maximum payload.
         self._packet_type_changed(reset_payload=False)
+        self._update_period_constraints()
         self._update_header_preview()
 
     @staticmethod
@@ -603,6 +684,36 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         )
         self.hec_value.setText(f"0x{header_error_check(header_bits, uap):02X} (auto)")
 
+    def _update_post_idle_reference(self) -> None:
+        post_idle = max(0.0, self.period_spin.value() - self._minimum_period_symbols)
+        self.post_idle_value.setText(f"{post_idle:.3f}")
+
+    def _update_period_constraints(self, _value=None) -> None:
+        settings = replace(
+            self._project.bluetooth_br,
+            packet_kind=BluetoothPacketKind(self.packet_type_combo.currentData()),
+            payload_length_bytes=self.payload_length_spin.value(),
+            edr_guard_symbols=self.edr_guard_spin.value(),
+            pre_idle_symbols=self.pre_idle_spin.value(),
+        )
+        candidate = replace(
+            self._project,
+            sample_rate_hz=self.sps_spin.value() * 1e6,
+            samples_per_symbol=self.sps_spin.value(),
+            fields=bluetooth_br_fields(settings),
+            bluetooth_br=settings,
+            power_envelope=replace(
+                self._project.power_envelope,
+                rise_symbols=self.rise_spin.value(),
+                rise_delay_symbols=self.rise_delay_spin.value(),
+                fall_symbols=self.fall_spin.value(),
+                fall_delay_symbols=self.fall_delay_spin.value(),
+            ),
+        )
+        self._minimum_period_symbols = minimum_period_symbols(candidate)
+        self.period_spin.setMinimum(self._minimum_period_symbols)
+        self._update_post_idle_reference()
+
     def _accept_settings(self) -> None:
         try:
             lap = int(self.lap_edit.text().strip(), 16)
@@ -640,7 +751,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             edr_rolloff=self.edr_rolloff_spin.value(),
             edr_relative_power_db=self.edr_power_spin.value(),
             pre_idle_symbols=self.pre_idle_spin.value(),
-            post_idle_symbols=self.post_idle_spin.value(),
+            post_idle_symbols=0,
         )
         project = replace(
             self._project,
@@ -649,6 +760,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             sample_rate_hz=self.sps_spin.value() * 1e6,
             samples_per_symbol=self.sps_spin.value(),
             repeat_count=self.repeat_spin.value(),
+            period_symbols=self.period_spin.value(),
             fields=bluetooth_br_fields(settings),
             bluetooth_br=settings,
             power_envelope=replace(
@@ -660,6 +772,12 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
                 shape=self.ramp_combo.currentText(),
             ),
         )
+        minimum_period = minimum_period_symbols(project)
+        if project.period_symbols is not None and project.period_symbols < minimum_period:
+            project = replace(project, period_symbols=minimum_period)
+            self.period_spin.setValue(minimum_period)
+            self._minimum_period_symbols = minimum_period
+            self._update_post_idle_reference()
         issues = validate_project(project)
         if issues:
             QtWidgets.QMessageBox.warning(
@@ -733,6 +851,21 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         return self._project
 
 
+_PLUTO_DEVICE_CACHE: tuple[object, ...] = ()
+
+
+class _VSGPlutoDiscoveryThread(QtCore.QThread):
+    discovery_ready = QtCore.Signal(object, str)
+
+    def run(self) -> None:
+        try:
+            self.discovery_ready.emit(
+                tuple(PlutoOutputBackend.discover_devices()), ""
+            )
+        except Exception as error:
+            self.discovery_ready.emit((), str(error))
+
+
 class _PlutoOutputDialog(QtWidgets.QDialog):
     def __init__(
         self,
@@ -747,27 +880,15 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         form = QtWidgets.QFormLayout()
         self.uri_combo = QtWidgets.QComboBox()
         self.uri_combo.setEditable(True)
-        self.uri_combo.addItem("Auto (USB preferred)", "")
-        devices = PlutoOutputBackend.discover_devices()
-        for device in devices:
-            self.uri_combo.addItem(device.label, device.selector)
-            self.uri_combo.setItemData(
-                self.uri_combo.count() - 1,
-                device.description,
-                QtCore.Qt.ItemDataRole.ToolTipRole,
-            )
-        configured_uri = settings.connection_uri or ""
-        index = self.uri_combo.findData(configured_uri)
-        if index < 0:
-            matching_device = next(
-                (device for device in devices if device.uri == configured_uri), None
-            )
-            if matching_device is not None:
-                index = self.uri_combo.findData(matching_device.selector)
-        if index < 0 and configured_uri:
-            self.uri_combo.addItem(configured_uri, configured_uri)
-            index = self.uri_combo.count() - 1
-        self.uri_combo.setCurrentIndex(max(0, index))
+        self._discovery_thread: _VSGPlutoDiscoveryThread | None = None
+        self.refresh_devices_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_devices_button.clicked.connect(self._refresh_devices)
+        selector_row = QtWidgets.QWidget()
+        selector_layout = QtWidgets.QHBoxLayout(selector_row)
+        selector_layout.setContentsMargins(0, 0, 0, 0)
+        selector_layout.addWidget(self.uri_combo, 1)
+        selector_layout.addWidget(self.refresh_devices_button)
+        self._populate_devices(_PLUTO_DEVICE_CACHE, settings.connection_uri or "")
         self.bandwidth_spin = QtWidgets.QDoubleSpinBox()
         self.bandwidth_spin.setRange(0.2, 56.0)
         self.bandwidth_spin.setDecimals(3)
@@ -818,7 +939,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.stop_guard_spin.setSuffix(" ms")
         self.stop_guard_spin.setValue(settings.stop_guard_s * 1e3)
         self.stop_guard_spin.setKeyboardTracking(False)
-        form.addRow("Connection URI", self.uri_combo)
+        form.addRow("Connection URI", selector_row)
         form.addRow(
             "Center Frequency",
             QtWidgets.QLabel(f"{settings.center_frequency_hz / 1e6:.6f} MHz (Project)"),
@@ -863,6 +984,68 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         layout.addWidget(warning)
         layout.addWidget(buttons)
         self.resize(600, 380)
+
+    def _populate_devices(self, devices: tuple[object, ...], selected: str) -> None:
+        self.uri_combo.blockSignals(True)
+        try:
+            self.uri_combo.clear()
+            self.uri_combo.addItem("Auto (USB preferred)", "")
+            for device in devices:
+                self.uri_combo.addItem(device.label, device.selector)
+                self.uri_combo.setItemData(
+                    self.uri_combo.count() - 1,
+                    device.description,
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                )
+            matching_device = next(
+                (device for device in devices if device.uri == selected), None
+            )
+            selector = matching_device.selector if matching_device is not None else selected
+            index = self.uri_combo.findData(selector)
+            if index < 0 and selector:
+                self.uri_combo.addItem(selector, selector)
+                index = self.uri_combo.count() - 1
+            self.uri_combo.setCurrentIndex(max(0, index))
+        finally:
+            self.uri_combo.blockSignals(False)
+
+    def _refresh_devices(self) -> None:
+        if self._discovery_thread is not None:
+            return
+        selected = self.uri_combo.currentData() or self.uri_combo.currentText().strip()
+        thread = _VSGPlutoDiscoveryThread(self)
+        self._discovery_thread = thread
+        self.refresh_devices_button.setEnabled(False)
+        self.refresh_devices_button.setText("Scanning...")
+        thread.discovery_ready.connect(
+            lambda devices, error: self._devices_discovered(selected, devices, error)
+        )
+        thread.finished.connect(self._device_discovery_finished)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+
+    def _devices_discovered(
+        self, selected: str, devices: object, error: str
+    ) -> None:
+        global _PLUTO_DEVICE_CACHE
+        self.refresh_devices_button.setEnabled(True)
+        self.refresh_devices_button.setText("Refresh")
+        if error:
+            self.refresh_devices_button.setToolTip(error)
+            return
+        _PLUTO_DEVICE_CACHE = tuple(devices)
+        self._populate_devices(_PLUTO_DEVICE_CACHE, selected)
+
+    def _device_discovery_finished(self) -> None:
+        self._discovery_thread = None
+
+    def done(self, result: int) -> None:
+        # libiio discovery itself is not cancellable. Keep the QThread wrapper
+        # alive until scan_contexts returns so closing the dialog cannot delete
+        # a running native thread.
+        if self._discovery_thread is not None and self._discovery_thread.isRunning():
+            self._discovery_thread.wait()
+        super().done(result)
 
     def _selected_backoff_db(self) -> float:
         return float(self.digital_backoff_combo.currentData())
@@ -1288,8 +1471,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             previews.addTab(widget, title)
         splitter.addWidget(upper)
         splitter.addWidget(_Panel("Generated IQ Preview", previews))
-        splitter.setStretchFactor(0, 2)
-        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([450, 450])
         self.setCentralWidget(splitter)
 
     @staticmethod
@@ -1474,6 +1658,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             ("Sample Rate", f"{self.project.sample_rate_hz / 1e6:.3f} MS/s"),
             ("Samples / Symbol", str(self.project.samples_per_symbol)),
             ("Repeat Count", str(self.project.repeat_count)),
+            ("Period", f"{effective_period_symbols(self.project):.3f} symbols"),
+            (
+                "Post Idle",
+                f"{effective_post_idle_symbols(self.project):.3f} symbols",
+            ),
         ]
         if settings is not None:
             parameters.extend(

@@ -20,6 +20,7 @@ from pluto_vsg.model import (
     BluetoothLEPhy,
     WaveformProject,
     bluetooth_le_payload_code,
+    waveform_timing_samples,
     validate_project,
 )
 
@@ -219,13 +220,16 @@ class BluetoothLEWaveformEngine:
             )
 
         prefix_count = int(settings.pre_idle_symbols) * sps
-        suffix_count = int(settings.post_idle_symbols) * sps
+        _, _, minimum_period_count, period_count = waveform_timing_samples(project)
+        if period_count < minimum_period_count:
+            raise ValueError("Packet period is shorter than the generated burst")
         nominal_packet_us = packet_bits.size / symbol_rate_hz * 1e6
         interval_us = None
-        if settings.rf_test_interval_enabled:
+        if settings.rf_test_interval_enabled and project.period_symbols is None:
             interval_us = math.ceil((nominal_packet_us + 249.0) / 625.0) * 625.0
             target_count = round(interval_us * 1e-6 * project.sample_rate_hz)
-            suffix_count = max(suffix_count, target_count - prefix_count - active_iq.size)
+            period_count = max(period_count, target_count)
+        suffix_count = period_count - prefix_count - active_iq.size
         single = np.concatenate(
             (
                 np.zeros(prefix_count, dtype=np.complex128),
@@ -275,6 +279,9 @@ class BluetoothLEWaveformEngine:
                 "whitening_bits": whitening_bits,
                 "packet_bits": packet_bits,
                 "packet_sample_count": data_sample_count,
+                "period_sample_count": single.size,
+                "period_symbols": single.size / sps,
+                "post_idle_sample_count": suffix_count,
                 "packet_ranges_samples": tuple(packet_ranges),
                 "data_start_sample": data_start,
                 "data_stop_sample": data_start + data_sample_count,

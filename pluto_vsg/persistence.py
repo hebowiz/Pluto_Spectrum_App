@@ -169,6 +169,11 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
         sample_rate_hz=float(payload["sample_rate_hz"]),
         samples_per_symbol=int(payload["samples_per_symbol"]),
         repeat_count=int(payload["repeat_count"]),
+        period_symbols=(
+            None
+            if payload.get("period_symbols") is None
+            else float(payload["period_symbols"])
+        ),
         center_frequency_hz=float(payload.get("center_frequency_hz", 0.0)),
         fields=tuple(fields),
         power_envelope=PowerEnvelopeDefinition(**envelope_payload),

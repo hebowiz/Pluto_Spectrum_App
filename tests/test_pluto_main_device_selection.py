@@ -15,6 +15,9 @@ class _FakeSettings:
     def setValue(self, key: str, value) -> None:
         self.values[key] = str(value)
 
+    def sync(self) -> None:
+        pass
+
 
 def test_environment_target_skips_device_prompt(monkeypatch) -> None:
     monkeypatch.setenv("PLUTO_SDR_URI", "serial:chosen")
@@ -54,4 +57,4 @@ def test_two_devices_prompt_for_and_remember_receiver_serial(monkeypatch) -> Non
 
     assert accepted is True
     assert selector == f"serial:{serial_b}"
-    assert _FakeSettings.values[main_module._RTSA_DEVICE_KEY] == selector
+    assert _FakeSettings.values[main_module.RTSA_DEVICE_KEY] == selector
