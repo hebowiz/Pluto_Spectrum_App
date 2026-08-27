@@ -13,6 +13,7 @@ venv/
 *.log
 
 *.bat
+!_Pluto_Runtime.bat
 !Pluto_RTSA.bat
 !Pluto_VSA.bat
 !Pluto_VSG.bat
