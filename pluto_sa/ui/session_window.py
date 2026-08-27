@@ -62,8 +62,10 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
 
     def _resize_for_system_frame(self) -> None:
         self.setFixedSize(WINDOW_WIDTH, SESSION_WINDOW_HEIGHT)
+        if hasattr(self, "left_panel"):
+            self.left_panel.setFixedHeight(SESSION_SIDE_PANEL_HEIGHT)
         if hasattr(self, "control_panel"):
-            self.control_panel.setFixedHeight(SESSION_WINDOW_HEIGHT - 24)
+            self.control_panel.setFixedHeight(SESSION_SIDE_PANEL_HEIGHT)
 
     def _apply_display_mode(self) -> None:
         """Keep the fixed-size plot geometry aligned with the taller window."""
