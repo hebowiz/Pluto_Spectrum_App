@@ -709,6 +709,13 @@ DMAへcommitする処理を追加した。libiio v0系では`_tx_stream`が存�
 DMA sampleへ追加せず、push後にcleanupを遅延するhost waitとして扱う。1 packet時のDMA bufferは
 約4.396 msまで短縮される。
 
+2026-08-28の実機観測では、複数packet送信時に最初のpacketだけ先頭側が短く見え、後続packetは
+完全に観測される事象が確認された。finite scheduleやPreviewへpacketを追加するのではなく、Plutoへ
+渡すnon-cyclic DMA bufferだけに適用する`DMA Pre-roll`を設定化した。初期値は10 msで、requested
+Gain適用後にzero IQを再生してDMA/DAC source-start transientを吸収してから第1 packetへ入る。
+この区間はpacket周期、packet数、WV export、Previewには含めない。従来の100 ms級prefixはUSB転送と
+再生開始を不安定にしたため復活させず、必要な場合だけPluto Output Settingsから調整する。
+
 ### 13.8 non-cyclic有限送信の実機確定（2026-08-26）
 
 TDD実験後にTX DMAが無音となった個体では、TDD engineをdisableし、全channelをneutralへ戻す

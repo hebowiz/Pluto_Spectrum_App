@@ -21,9 +21,9 @@ from pluto_vsg.engine import GenerationResult
 _PLUTO_DAC_FULL_SCALE = 2**15 - 1
 _PLUTO_MUTED_GAIN_DB = -89.75
 _DEFAULT_STARTUP_DELAY_S = 0.010
+_DEFAULT_DMA_PREROLL_S = 0.010
 _DEFAULT_COMPLETION_MARGIN_S = 0.100
 _MAX_BURST_COUNT = 1000
-_NONCYCLIC_PREFIX_GUARD_S = 0.002
 _NONCYCLIC_SUFFIX_GUARD_S = 0.002
 _SERIAL_PATTERN = re.compile(r"\bserial\s*[=:]\s*([^\s,;]+)", re.IGNORECASE)
 
@@ -132,6 +132,7 @@ class PlutoTransmitSettings:
     digital_backoff_db: float = 0.0
     connection_uri: str | None = None
     lead_in_guard_s: float = _DEFAULT_STARTUP_DELAY_S
+    dma_preroll_s: float = _DEFAULT_DMA_PREROLL_S
     stop_guard_s: float = _DEFAULT_COMPLETION_MARGIN_S
     burst_count: int = 1
     output_power_dbm: float | None = None
@@ -349,6 +350,8 @@ class PlutoOutputBackend:
             raise ValueError("Pluto TX attenuation must be between -89.75 dB and 0 dB")
         if settings.lead_in_guard_s < 0.0:
             raise ValueError("Pluto TX lead guard must not be negative")
+        if settings.dma_preroll_s < 0.0:
+            raise ValueError("Pluto TX DMA pre-roll must not be negative")
         if settings.stop_guard_s < 0.010:
             raise ValueError("Pluto TX completion guard must be at least 10 ms")
         if not 1 <= int(settings.burst_count) <= _MAX_BURST_COUNT:
@@ -406,7 +409,7 @@ class PlutoOutputBackend:
         self._dac_peak_code = float(np.max(np.abs(self._buffer)))
         self._sample_count = int(iq.size)
         self._frame_sample_count = int(iq.size // burst_count)
-        self._preload_guard_s = _NONCYCLIC_PREFIX_GUARD_S
+        self._preload_guard_s = self.settings.dma_preroll_s
         prefix_count = int(
             round(self._preload_guard_s * self.settings.sample_rate_hz)
         )

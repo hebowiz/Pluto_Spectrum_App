@@ -201,6 +201,7 @@ def _settings(**changes) -> PlutoTransmitSettings:
         "digital_backoff_db": 0.0,
         "connection_uri": "usb:test",
         "lead_in_guard_s": 0.0,
+        "dma_preroll_s": 0.002,
         "stop_guard_s": 0.010,
         "burst_count": 3,
     }
@@ -673,6 +674,7 @@ def test_pluto_transmit_rejects_unprepared_device_without_reconfiguring(
         {"digital_backoff_db": -6.0, "output_power_dbm": -1.0},
         {"output_power_dbm": float("nan")},
         {"lead_in_guard_s": -0.001},
+        {"dma_preroll_s": -0.001},
         {"stop_guard_s": 0.001},
         {"burst_count": 0},
         {"burst_count": 1001},

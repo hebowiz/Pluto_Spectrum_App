@@ -7,6 +7,7 @@
     "sample_rate_hz": 8000000.0,
     "samples_per_symbol": 8,
     "repeat_count": 1000,
+    "period_symbols": 625.0,
     "center_frequency_hz": 2440000000.0,
     "fields": [
       {
@@ -128,7 +129,7 @@
       "frequency_deviation_hz": 250000.0,
       "gaussian_bt": 0.5,
       "pre_idle_symbols": 8,
-      "post_idle_symbols": 241
+      "post_idle_symbols": 0
     }
   }
 }

@@ -933,6 +933,12 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.lead_in_guard_spin.setSuffix(" ms")
         self.lead_in_guard_spin.setValue(settings.lead_in_guard_s * 1e3)
         self.lead_in_guard_spin.setKeyboardTracking(False)
+        self.dma_preroll_spin = QtWidgets.QDoubleSpinBox()
+        self.dma_preroll_spin.setRange(0.0, 1000.0)
+        self.dma_preroll_spin.setDecimals(3)
+        self.dma_preroll_spin.setSuffix(" ms")
+        self.dma_preroll_spin.setValue(settings.dma_preroll_s * 1e3)
+        self.dma_preroll_spin.setKeyboardTracking(False)
         self.stop_guard_spin = QtWidgets.QDoubleSpinBox()
         self.stop_guard_spin.setRange(10.0, 5000.0)
         self.stop_guard_spin.setDecimals(3)
@@ -953,6 +959,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         form.addRow("Digital Backoff", self.digital_backoff_combo)
         form.addRow("Applied Tx Gain", self.applied_gain_label)
         form.addRow("Muted LO Settling Time", self.lead_in_guard_spin)
+        form.addRow("DMA Pre-roll", self.dma_preroll_spin)
         form.addRow("Completion Margin", self.stop_guard_spin)
         form.addRow("Packets per transmission", QtWidgets.QLabel(str(packet_count)))
         warning = QtWidgets.QLabel(
@@ -964,8 +971,9 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             "use -3 or -6 dB when additional linearity margin is required. "
             "Start with sufficient external attenuation and verify the output level. "
             "The complete requested packet schedule is submitted once in a "
-            "non-cyclic DMA buffer. A short zero prefix protects the first "
-            "packet from the DAC source transition and a short trailing zero "
+            "non-cyclic DMA buffer. DMA Pre-roll inserts zero-IQ samples after "
+            "the requested gain is applied and before the first packet, protecting "
+            "it from the DMA/DAC source-start transient. A short trailing zero "
             "section leaves the DAC at zero. Completion Margin controls how "
             "long cleanup is deferred after submission. The tx() call is the "
             "software start event; "
@@ -1095,6 +1103,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             ),
             digital_backoff_db=backoff_db,
             lead_in_guard_s=self.lead_in_guard_spin.value() * 1e-3,
+            dma_preroll_s=self.dma_preroll_spin.value() * 1e-3,
             stop_guard_s=self.stop_guard_spin.value() * 1e-3,
             burst_count=self._packet_count,
             output_power_dbm=output_power_dbm,
@@ -1251,6 +1260,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self._pluto_lead_in_guard_s = float(
             preferences.value("pluto_tx/lead_in_guard_s", 0.010)
+        )
+        self._pluto_dma_preroll_s = float(
+            preferences.value("pluto_tx/dma_preroll_s", 0.010)
         )
         self._pluto_stop_guard_s = float(
             preferences.value("pluto_tx/stop_guard_s", 0.100)
@@ -2085,6 +2097,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             digital_backoff_db=self._pluto_digital_backoff_db,
             connection_uri=self._pluto_uri or None,
             lead_in_guard_s=self._pluto_lead_in_guard_s,
+            dma_preroll_s=self._pluto_dma_preroll_s,
             stop_guard_s=self._pluto_stop_guard_s,
             burst_count=self.project.repeat_count,
             output_power_dbm=self._pluto_output_power_dbm,
@@ -2129,6 +2142,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_digital_backoff_db = settings.digital_backoff_db
         self._pluto_bandwidth_hz = settings.rf_bandwidth_hz
         self._pluto_lead_in_guard_s = settings.lead_in_guard_s
+        self._pluto_dma_preroll_s = settings.dma_preroll_s
         self._pluto_stop_guard_s = settings.stop_guard_s
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
         preferences.setValue("pluto_tx/uri", self._pluto_uri)
@@ -2145,6 +2159,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         preferences.setValue("pluto_tx/rf_bandwidth_hz", self._pluto_bandwidth_hz)
         preferences.setValue(
             "pluto_tx/lead_in_guard_s", self._pluto_lead_in_guard_s
+        )
+        preferences.setValue(
+            "pluto_tx/dma_preroll_s", self._pluto_dma_preroll_s
         )
         preferences.setValue("pluto_tx/stop_guard_s", self._pluto_stop_guard_s)
         configuration_changed = (
