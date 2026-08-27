@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions
 
 set "PROJECT_DIR=%~dp0"
 set "PYTHON_EXE=%PROJECT_DIR%.venv\Scripts\python.exe"
@@ -39,14 +39,32 @@ if not defined LIBIIO_DIR if exist "%ProgramFiles%\Analog Devices" (
     )
 )
 
-if not defined LIBIIO_DIR if defined ProgramFiles(x86) if exist "%ProgramFiles(x86)%\Analog Devices" (
+if not defined LIBIIO_DIR if exist "%ProgramFiles%\Analog Devices, Inc" (
+    for /f "delims=" %%F in ('where /r "%ProgramFiles%\Analog Devices, Inc" libiio.dll 2^>nul') do (
+        if not defined LIBIIO_DIR set "LIBIIO_DIR=%%~dpF"
+    )
+)
+
+if not defined LIBIIO_DIR if exist "%ProgramFiles(x86)%\Analog Devices" (
     for /f "delims=" %%F in ('where /r "%ProgramFiles(x86)%\Analog Devices" libiio.dll 2^>nul') do (
+        if not defined LIBIIO_DIR set "LIBIIO_DIR=%%~dpF"
+    )
+)
+
+if not defined LIBIIO_DIR if exist "%ProgramFiles(x86)%\Analog Devices, Inc" (
+    for /f "delims=" %%F in ('where /r "%ProgramFiles(x86)%\Analog Devices, Inc" libiio.dll 2^>nul') do (
         if not defined LIBIIO_DIR set "LIBIIO_DIR=%%~dpF"
     )
 )
 
 if not defined LIBIIO_DIR if exist "%ProgramFiles%\libiio" (
     for /f "delims=" %%F in ('where /r "%ProgramFiles%\libiio" libiio.dll 2^>nul') do (
+        if not defined LIBIIO_DIR set "LIBIIO_DIR=%%~dpF"
+    )
+)
+
+if not defined LIBIIO_DIR if exist "%ProgramFiles(x86)%\libiio" (
+    for /f "delims=" %%F in ('where /r "%ProgramFiles(x86)%\libiio" libiio.dll 2^>nul') do (
         if not defined LIBIIO_DIR set "LIBIIO_DIR=%%~dpF"
     )
 )
