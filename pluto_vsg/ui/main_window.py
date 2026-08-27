@@ -16,7 +16,13 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     install_measurement_plot_menu,
     make_measurement_plot,
 )
-from pluto_vsg.backends import PlutoOutputBackend, PlutoTransmitSettings
+from pluto_vsg.backends import (
+    PlutoOutputBackend,
+    PlutoTransmitSettings,
+    estimate_pluto_output_power_dbm,
+    pluto_hardware_gain_for_output_power_dbm,
+    pluto_output_power_range_dbm,
+)
 from pluto_vsg.composer import ComposerBlock, build_composer_graph
 from pluto_vsg.engine import (
     BluetoothBRWaveformEngine,
@@ -768,13 +774,11 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.bandwidth_spin.setSuffix(" MHz")
         self.bandwidth_spin.setValue(settings.rf_bandwidth_hz / 1e6)
         self.bandwidth_spin.setKeyboardTracking(False)
-        self.gain_spin = QtWidgets.QDoubleSpinBox()
-        self.gain_spin.setRange(-89.75, 0.0)
-        self.gain_spin.setDecimals(2)
-        self.gain_spin.setSingleStep(0.25)
-        self.gain_spin.setSuffix(" dB")
-        self.gain_spin.setValue(settings.hardware_gain_db)
-        self.gain_spin.setKeyboardTracking(False)
+        self.output_power_spin = QtWidgets.QDoubleSpinBox()
+        self.output_power_spin.setDecimals(2)
+        self.output_power_spin.setSingleStep(0.5)
+        self.output_power_spin.setSuffix(" dBm")
+        self.output_power_spin.setKeyboardTracking(False)
         self.digital_backoff_combo = QtWidgets.QComboBox()
         for label, value in (("0 dB (Full Scale)", 0.0), ("-3 dB", -3.0), ("-6 dB", -6.0)):
             self.digital_backoff_combo.addItem(label, value)
@@ -787,6 +791,21 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             )
             backoff_index = self.digital_backoff_combo.count() - 1
         self.digital_backoff_combo.setCurrentIndex(backoff_index)
+        initial_output_power_dbm = (
+            float(settings.output_power_dbm)
+            if settings.output_power_dbm is not None
+            else estimate_pluto_output_power_dbm(
+                settings.hardware_gain_db,
+                settings.digital_backoff_db,
+                settings.center_frequency_hz,
+            )
+        )
+        self.applied_gain_label = QtWidgets.QLabel()
+        self.digital_backoff_combo.currentIndexChanged.connect(
+            lambda _index: self._update_output_level_constraints()
+        )
+        self.output_power_spin.valueChanged.connect(self._update_applied_gain_label)
+        self._update_output_level_constraints(initial_output_power_dbm)
         self.lead_in_guard_spin = QtWidgets.QDoubleSpinBox()
         self.lead_in_guard_spin.setRange(0.0, 1000.0)
         self.lead_in_guard_spin.setDecimals(3)
@@ -809,13 +828,17 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             QtWidgets.QLabel(f"{settings.sample_rate_hz / 1e6:.3f} MS/s (Project)"),
         )
         form.addRow("TX RF Bandwidth", self.bandwidth_spin)
-        form.addRow("TX Attenuation", self.gain_spin)
+        form.addRow("RF Output Level", self.output_power_spin)
         form.addRow("Digital Backoff", self.digital_backoff_combo)
+        form.addRow("Applied Tx Gain", self.applied_gain_label)
         form.addRow("Muted LO Settling Time", self.lead_in_guard_spin)
         form.addRow("Completion Margin", self.stop_guard_spin)
         form.addRow("Packets per transmission", QtWidgets.QLabel(str(packet_count)))
         warning = QtWidgets.QLabel(
-            "TX Attenuation is a relative Pluto setting, not calibrated dBm. "
+            "RF Output Level uses a provisional 2440 MHz calibration measured "
+            "with this Pluto and a constant-envelope FSK packet. Frequency "
+            "response, device variation and residual nonlinearity are not yet "
+            "corrected. Verify the conducted level when accuracy matters. "
             "Digital Backoff 0 dB drives the DMA/DAC path at full scale; "
             "use -3 or -6 dB when additional linearity margin is required. "
             "Start with sufficient external attenuation and verify the output level. "
@@ -839,7 +862,36 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         layout.addLayout(form)
         layout.addWidget(warning)
         layout.addWidget(buttons)
-        self.resize(560, 330)
+        self.resize(600, 380)
+
+    def _selected_backoff_db(self) -> float:
+        return float(self.digital_backoff_combo.currentData())
+
+    def _update_output_level_constraints(self, requested_value=None) -> None:
+        backoff_db = self._selected_backoff_db()
+        minimum_dbm, maximum_dbm = pluto_output_power_range_dbm(
+            backoff_db,
+            self._settings.center_frequency_hz,
+        )
+        if isinstance(requested_value, (int, float)):
+            level_dbm = float(requested_value)
+        else:
+            level_dbm = self.output_power_spin.value()
+        self.output_power_spin.blockSignals(True)
+        self.output_power_spin.setRange(minimum_dbm, maximum_dbm)
+        self.output_power_spin.setValue(
+            min(maximum_dbm, max(minimum_dbm, level_dbm))
+        )
+        self.output_power_spin.blockSignals(False)
+        self._update_applied_gain_label()
+
+    def _update_applied_gain_label(self, _value=None) -> None:
+        gain_db = pluto_hardware_gain_for_output_power_dbm(
+            self.output_power_spin.value(),
+            self._selected_backoff_db(),
+            self._settings.center_frequency_hz,
+        )
+        self.applied_gain_label.setText(f"{gain_db:+.2f} dB (estimated)")
 
     def _accept_settings(self) -> None:
         uri = self.uri_combo.currentData()
@@ -847,15 +899,22 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             uri = self.uri_combo.currentText().strip()
             if uri == "Auto (USB preferred)":
                 uri = ""
+        backoff_db = self._selected_backoff_db()
+        output_power_dbm = self.output_power_spin.value()
         candidate = replace(
             self._settings,
             connection_uri=str(uri).strip() or None,
             rf_bandwidth_hz=self.bandwidth_spin.value() * 1e6,
-            hardware_gain_db=self.gain_spin.value(),
-            digital_backoff_db=float(self.digital_backoff_combo.currentData()),
+            hardware_gain_db=pluto_hardware_gain_for_output_power_dbm(
+                output_power_dbm,
+                backoff_db,
+                self._settings.center_frequency_hz,
+            ),
+            digital_backoff_db=backoff_db,
             lead_in_guard_s=self.lead_in_guard_spin.value() * 1e-3,
             stop_guard_s=self.stop_guard_spin.value() * 1e-3,
             burst_count=self._packet_count,
+            output_power_dbm=output_power_dbm,
         )
         try:
             PlutoOutputBackend(candidate)
@@ -988,12 +1047,22 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._selected_composer_block: ComposerBlock | None = None
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
         self._pluto_uri = str(preferences.value("pluto_tx/uri", "") or "")
-        self._pluto_gain_db = float(
-            preferences.value("pluto_tx/hardware_gain_db", -30.0)
-        )
         self._pluto_digital_backoff_db = float(
             preferences.value("pluto_tx/digital_backoff_db", 0.0)
         )
+        legacy_gain_db = float(
+            preferences.value("pluto_tx/hardware_gain_db", -30.0)
+        )
+        if preferences.contains("pluto_tx/output_power_dbm"):
+            self._pluto_output_power_dbm = float(
+                preferences.value("pluto_tx/output_power_dbm")
+            )
+        else:
+            self._pluto_output_power_dbm = estimate_pluto_output_power_dbm(
+                legacy_gain_db,
+                self._pluto_digital_backoff_db,
+                self.project.center_frequency_hz,
+            )
         self._pluto_bandwidth_hz = float(
             preferences.value("pluto_tx/rf_bandwidth_hz", 8_000_000.0)
         )
@@ -1814,16 +1883,22 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             56_000_000.0,
             max(200_000.0, self._pluto_bandwidth_hz),
         )
+        hardware_gain_db = pluto_hardware_gain_for_output_power_dbm(
+            self._pluto_output_power_dbm,
+            self._pluto_digital_backoff_db,
+            self.project.center_frequency_hz,
+        )
         return PlutoTransmitSettings(
             center_frequency_hz=self.project.center_frequency_hz,
             sample_rate_hz=self.project.sample_rate_hz,
             rf_bandwidth_hz=bandwidth_hz,
-            hardware_gain_db=self._pluto_gain_db,
+            hardware_gain_db=hardware_gain_db,
             digital_backoff_db=self._pluto_digital_backoff_db,
             connection_uri=self._pluto_uri or None,
             lead_in_guard_s=self._pluto_lead_in_guard_s,
             stop_guard_s=self._pluto_stop_guard_s,
             burst_count=self.project.repeat_count,
+            output_power_dbm=self._pluto_output_power_dbm,
         )
 
     def _pluto_configuration_signature(self) -> tuple[object, ...]:
@@ -1861,14 +1936,20 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return
         settings = dialog.settings
         self._pluto_uri = settings.connection_uri or ""
-        self._pluto_gain_db = settings.hardware_gain_db
+        self._pluto_output_power_dbm = float(settings.output_power_dbm)
         self._pluto_digital_backoff_db = settings.digital_backoff_db
         self._pluto_bandwidth_hz = settings.rf_bandwidth_hz
         self._pluto_lead_in_guard_s = settings.lead_in_guard_s
         self._pluto_stop_guard_s = settings.stop_guard_s
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
         preferences.setValue("pluto_tx/uri", self._pluto_uri)
-        preferences.setValue("pluto_tx/hardware_gain_db", self._pluto_gain_db)
+        preferences.setValue(
+            "pluto_tx/output_power_dbm", self._pluto_output_power_dbm
+        )
+        # Preserve the derived legacy value for older application versions.
+        preferences.setValue(
+            "pluto_tx/hardware_gain_db", settings.resolved_hardware_gain_db
+        )
         preferences.setValue(
             "pluto_tx/digital_backoff_db", self._pluto_digital_backoff_db
         )

@@ -6,7 +6,13 @@ import json
 import numpy as np
 import pytest
 
-from pluto_vsg.backends import PlutoOutputBackend, PlutoTransmitSettings
+from pluto_vsg.backends import (
+    PlutoOutputBackend,
+    PlutoTransmitSettings,
+    estimate_pluto_output_power_dbm,
+    pluto_hardware_gain_for_output_power_dbm,
+    pluto_output_power_range_dbm,
+)
 from pluto_vsg.engine import GenerationResult
 from pluto_vsg.model import validate_project
 from pluto_vsg.profiles import bluetooth_br_edr_project
@@ -469,6 +475,75 @@ def test_pluto_backend_applies_configured_digital_backoff() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("hardware_gain_db", "digital_backoff_db", "measured_power_dbm"),
+    (
+        (0.0, 0.0, -0.2),
+        (-5.0, 0.0, -4.8),
+        (-10.0, 0.0, -9.4),
+        (-20.0, 0.0, -19.0),
+        (0.0, -3.0, -3.1),
+        (-10.0, -3.0, -12.4),
+        (0.0, -6.0, -6.1),
+        (-10.0, -6.0, -15.4),
+    ),
+)
+def test_provisional_pluto_level_calibration_matches_measured_fsk_power(
+    hardware_gain_db: float,
+    digital_backoff_db: float,
+    measured_power_dbm: float,
+) -> None:
+    estimated_dbm = estimate_pluto_output_power_dbm(
+        hardware_gain_db,
+        digital_backoff_db,
+    )
+
+    assert estimated_dbm == pytest.approx(measured_power_dbm, abs=0.11)
+
+
+@pytest.mark.parametrize("backoff_db", (0.0, -3.0, -6.0))
+def test_provisional_pluto_level_conversion_round_trips(backoff_db: float) -> None:
+    for gain_db in (-89.75, -30.0, -20.0, -10.0, -5.0, 0.0):
+        output_dbm = estimate_pluto_output_power_dbm(gain_db, backoff_db)
+        recovered_gain_db = pluto_hardware_gain_for_output_power_dbm(
+            output_dbm,
+            backoff_db,
+        )
+        assert recovered_gain_db == pytest.approx(gain_db)
+
+
+def test_pluto_backend_converts_requested_dbm_to_hardware_gain(monkeypatch) -> None:
+    _install_fakes(monkeypatch)
+    backend = PlutoOutputBackend(
+        _settings(
+            burst_count=1,
+            hardware_gain_db=-30.0,
+            digital_backoff_db=-3.0,
+            output_power_dbm=-12.4,
+        )
+    )
+    backend.prepare()
+    backend.transfer(
+        GenerationResult(iq=np.ones(8, dtype=np.complex64), sample_rate_hz=8_000_000.0)
+    )
+
+    backend.start()
+
+    device = _FakePluto.instances[-1]
+    assert device.gain_history == [-89.75, -89.75, -10.0, -89.75]
+    report = backend.diagnostic_report()
+    assert report["settings"]["output_power_dbm"] == -12.4
+    assert report["resolved_hardware_gain_db"] == pytest.approx(-10.0)
+
+
+def test_provisional_pluto_output_range_respects_backoff() -> None:
+    zero_backoff = pluto_output_power_range_dbm(0.0)
+    six_db_backoff = pluto_output_power_range_dbm(-6.0)
+
+    assert six_db_backoff[0] == pytest.approx(zero_backoff[0] - 6.0)
+    assert six_db_backoff[1] == pytest.approx(zero_backoff[1] - 6.0)
+
+
 def test_pluto_backend_resolves_saved_serial_selector(monkeypatch) -> None:
     _install_fakes(monkeypatch)
     serial = "1044730c370e001004001200abcdef0123"
@@ -595,6 +670,8 @@ def test_pluto_transmit_rejects_unprepared_device_without_reconfiguring(
         {"hardware_gain_db": 1.0},
         {"digital_backoff_db": 0.1},
         {"digital_backoff_db": -60.1},
+        {"digital_backoff_db": -6.0, "output_power_dbm": -1.0},
+        {"output_power_dbm": float("nan")},
         {"lead_in_guard_s": -0.001},
         {"stop_guard_s": 0.001},
         {"burst_count": 0},

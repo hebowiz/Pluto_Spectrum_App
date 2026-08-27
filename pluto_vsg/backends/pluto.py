@@ -27,6 +27,87 @@ _NONCYCLIC_PREFIX_GUARD_S = 0.002
 _NONCYCLIC_SUFFIX_GUARD_S = 0.002
 _SERIAL_PATTERN = re.compile(r"\bserial\s*[=:]\s*([^\s,;]+)", re.IGNORECASE)
 
+# Provisional conducted-power calibration measured at 2440 MHz with a
+# constant-envelope FSK packet on 2026-08-27.  Keep this table isolated from
+# the transmit mechanics so it can later be replaced by per-device and
+# frequency-dependent calibration data without changing the UI contract.
+_PLUTO_LEVEL_CALIBRATION_FREQUENCY_HZ = 2_440_000_000.0
+_PLUTO_LEVEL_GAIN_POINTS_DB = np.asarray((-20.0, -10.0, -5.0, 0.0))
+_PLUTO_LEVEL_OUTPUT_POINTS_DBM = np.asarray((-19.0, -9.4, -4.8, -0.2))
+
+
+def _interpolate_with_linear_extrapolation(
+    value: float,
+    x_points: np.ndarray,
+    y_points: np.ndarray,
+) -> float:
+    """Interpolate a monotonic calibration table and extend its end slopes."""
+
+    x = float(value)
+    if x < float(x_points[0]):
+        start = 0
+    elif x > float(x_points[-1]):
+        start = x_points.size - 2
+    else:
+        return float(np.interp(x, x_points, y_points))
+    slope = float(
+        (y_points[start + 1] - y_points[start])
+        / (x_points[start + 1] - x_points[start])
+    )
+    return float(y_points[start] + (x - x_points[start]) * slope)
+
+
+def estimate_pluto_output_power_dbm(
+    hardware_gain_db: float,
+    digital_backoff_db: float,
+    center_frequency_hz: float = _PLUTO_LEVEL_CALIBRATION_FREQUENCY_HZ,
+) -> float:
+    """Estimate active FSK packet power using the provisional 2440 MHz data."""
+
+    del center_frequency_hz  # Reserved for the future frequency correction.
+    full_scale_power_dbm = _interpolate_with_linear_extrapolation(
+        hardware_gain_db,
+        _PLUTO_LEVEL_GAIN_POINTS_DB,
+        _PLUTO_LEVEL_OUTPUT_POINTS_DBM,
+    )
+    return full_scale_power_dbm + float(digital_backoff_db)
+
+
+def pluto_hardware_gain_for_output_power_dbm(
+    output_power_dbm: float,
+    digital_backoff_db: float,
+    center_frequency_hz: float = _PLUTO_LEVEL_CALIBRATION_FREQUENCY_HZ,
+) -> float:
+    """Return Tx Gain needed for a provisional conducted RF level target."""
+
+    del center_frequency_hz  # Reserved for the future frequency correction.
+    full_scale_target_dbm = float(output_power_dbm) - float(digital_backoff_db)
+    return _interpolate_with_linear_extrapolation(
+        full_scale_target_dbm,
+        _PLUTO_LEVEL_OUTPUT_POINTS_DBM,
+        _PLUTO_LEVEL_GAIN_POINTS_DB,
+    )
+
+
+def pluto_output_power_range_dbm(
+    digital_backoff_db: float,
+    center_frequency_hz: float = _PLUTO_LEVEL_CALIBRATION_FREQUENCY_HZ,
+) -> tuple[float, float]:
+    """Return the provisional RF-level range reachable by Pluto Tx Gain."""
+
+    return (
+        estimate_pluto_output_power_dbm(
+            _PLUTO_MUTED_GAIN_DB,
+            digital_backoff_db,
+            center_frequency_hz,
+        ),
+        estimate_pluto_output_power_dbm(
+            0.0,
+            digital_backoff_db,
+            center_frequency_hz,
+        ),
+    )
+
 
 def _package_version(distribution: str) -> str:
     try:
@@ -53,6 +134,19 @@ class PlutoTransmitSettings:
     lead_in_guard_s: float = _DEFAULT_STARTUP_DELAY_S
     stop_guard_s: float = _DEFAULT_COMPLETION_MARGIN_S
     burst_count: int = 1
+    output_power_dbm: float | None = None
+
+    @property
+    def resolved_hardware_gain_db(self) -> float:
+        """Tx Gain used by hardware, including provisional dBm conversion."""
+
+        if self.output_power_dbm is None:
+            return float(self.hardware_gain_db)
+        return pluto_hardware_gain_for_output_power_dbm(
+            self.output_power_dbm,
+            self.digital_backoff_db,
+            self.center_frequency_hz,
+        )
 
 
 class PlutoOutputBackend:
@@ -192,6 +286,7 @@ class PlutoOutputBackend:
             if self._firmware is None
             else f"v{self._firmware[0]}.{self._firmware[1]}",
             "settings": asdict(self.settings),
+            "resolved_hardware_gain_db": self.settings.resolved_hardware_gain_db,
             "sample_count": self._sample_count,
             "frame_sample_count": self._frame_sample_count,
             "waveform_peak": self._waveform_peak,
@@ -233,10 +328,25 @@ class PlutoOutputBackend:
             raise ValueError("Pluto TX center frequency must be positive")
         if not 200_000.0 <= settings.rf_bandwidth_hz <= 56_000_000.0:
             raise ValueError("Pluto TX RF bandwidth must be between 200 kHz and 56 MHz")
-        if not -89.75 <= settings.hardware_gain_db <= 0.0:
-            raise ValueError("Pluto TX attenuation must be between -89.75 dB and 0 dB")
+        if settings.output_power_dbm is not None and not np.isfinite(
+            settings.output_power_dbm
+        ):
+            raise ValueError("Pluto RF output level must be finite")
         if not -60.0 <= settings.digital_backoff_db <= 0.0:
             raise ValueError("Pluto digital backoff must be between -60 dB and 0 dB")
+        resolved_gain_db = settings.resolved_hardware_gain_db
+        if not -89.75 <= resolved_gain_db <= 0.0:
+            minimum_dbm, maximum_dbm = pluto_output_power_range_dbm(
+                settings.digital_backoff_db,
+                settings.center_frequency_hz,
+            )
+            if settings.output_power_dbm is not None:
+                raise ValueError(
+                    "Pluto RF output level must be between "
+                    f"{minimum_dbm:.2f} dBm and {maximum_dbm:.2f} dBm "
+                    f"at {settings.digital_backoff_db:+.0f} dB backoff"
+                )
+            raise ValueError("Pluto TX attenuation must be between -89.75 dB and 0 dB")
         if settings.lead_in_guard_s < 0.0:
             raise ValueError("Pluto TX lead guard must not be negative")
         if settings.stop_guard_s < 0.010:
@@ -649,7 +759,7 @@ class PlutoOutputBackend:
                 return
             self._record_event("muted_lo_settled")
 
-            sdr.tx_hardwaregain_chan0 = float(self.settings.hardware_gain_db)
+            sdr.tx_hardwaregain_chan0 = self.settings.resolved_hardware_gain_db
             self._record_event("requested_gain_applied")
             if self._stop_event.is_set():
                 return

@@ -43,6 +43,11 @@
 - Backoff -3/Tx Gain -10のときFSKパケット出力-12.4dBm
 - Backoff -6/Tx Gain 0のときFSKパケット出力-6.1dBm
 - Backoff -6/Tx Gain -10のときFSKパケット出力-15.4dBm
+- 2026-08-27: 上記8点を暫定校正へ取り込み、Pluto Output UIをRF Output Level [dBm]
+  指定へ変更した。2440MHz・測定個体・定包絡FSKに限定した推定値であり、周波数特性、
+  個体差、温度、波形依存性、低出力側の線形性は未補正。Digital Backoffを変更した場合も
+  到達可能範囲内では希望dBmを保つようTx Gainを逆算する。詳細は
+  `Pluto_VSG_RF_Level_RMS_Design.md`の22章を参照。
 - BLEパケットでCRC計算間違いあり。他フォーマットも含め見直しを
 - Visual ComposerのPowerは実際に出力している時間を表示すべきでは？現状有効パケット内のみ表示
 - 送信したパケットが不完全だったり等間隔ではなかったりするので要検証

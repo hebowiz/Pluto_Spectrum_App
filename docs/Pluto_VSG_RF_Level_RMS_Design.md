@@ -718,3 +718,59 @@ Full Scale駆動ではDAC/アナログチェーンの非線形性やスペクト
 
 この実装は相対デジタル駆動量の明示化であり、将来予定している
 周波数別0 dBFS校正やRF Level（dBm）閉ループ設定の代替ではない。
+
+---
+
+## 22. 暫定dBm出力設定（2026-08-27実装）
+
+### 目的と適用範囲
+
+Pluto Outputダイアログの主設定を`TX Attenuation`から`RF Output Level [dBm]`へ
+変更する。これは現時点でトレーサブルな絶対電力校正ではなく、次の条件で得た
+実測値を使う暫定推定である。
+
+- 周波数: 2440 MHz
+- 波形: 定包絡FSKパケット
+- 対象: 測定に使用したPluto個体
+- 基準面: 実測時のPluto RF出力端
+
+UIには暫定校正である旨を常時表示し、周波数特性、個体差、温度、変調波形の
+PAPR、残留非線形性をまだ補正していないことを明示する。
+
+### 暫定校正モデル
+
+Backoff 0 dBで得た次の4点を、Tx Gainに対する区分線形校正曲線として用いる。
+
+| Tx Gain | 実測FSK電力 |
+|---:|---:|
+| 0 dB | -0.2 dBm |
+| -5 dB | -4.8 dBm |
+| -10 dB | -9.4 dBm |
+| -20 dB | -19.0 dBm |
+
+Digital Backoffはこの曲線から独立したデジタル振幅差として加算する。
+実測したBackoff -3/-6 dBの4点を含め、現モデルとの残差は最大0.1 dBである。
+校正点の間は線形補間し、-20 dB未満は末端勾配による外挿とするため、低出力側は
+特に未検証の推定値として扱う。
+
+```text
+Pout_est = calibration(Tx Gain) + Digital Backoff
+Tx Gain  = inverse_calibration(Pout_target - Digital Backoff)
+```
+
+Backoffを変えても、Tx Gainの調整範囲内であれば希望RF Output Levelを維持する。
+Backoffによって最大到達電力は下がり、暫定値では0/-3/-6 dB時にそれぞれ
+約-0.2/-3.2/-6.2 dBmとなる。到達不能な組み合わせはUI範囲で制限し、
+バックエンドでも送信前に検証する。
+
+### 保存・互換性・診断
+
+- 希望値は`pluto_tx/output_power_dbm`へdBmで保存する。
+- 旧設定しかない場合は`hardware_gain_db`と`digital_backoff_db`からdBmへ移行する。
+- 旧版との互換用に、逆算した`hardware_gain_db`も引き続き保存する。
+- 送信診断には希望dBmと実際に適用したTx Gainの両方を記録する。
+- 出力設定の変更だけではRF/baseband再設定やTX Quad Calibrationを要求しない。
+
+将来はこの暫定関数を、Pluto serial、周波数、sample rate、RF bandwidth、温度、
+変調方式、Digital Backoffを軸にした校正データへ差し替える。UIと送信状態機械は
+そのまま維持し、校正層だけを交換できる構造とする。

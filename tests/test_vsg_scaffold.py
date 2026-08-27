@@ -31,6 +31,7 @@ from pluto_sa.vsa.pattern import (
     ResultRangeSettings,
 )
 from pluto_sa.vsa.ui.measurement_chrome import FixedInteractionViewBox
+from pluto_vsg.backends import PlutoOutputBackend, PlutoTransmitSettings
 from pluto_vsg.engine import BluetoothBRWaveformEngine, GenerationResult
 from pluto_vsg.export import save_iq_tar, save_npz, save_wv
 from pluto_vsg.model import create_default_project, validate_project
@@ -57,6 +58,7 @@ from pluto_vsg.ui.main_window import (
     PlutoVSGWindow,
     _BluetoothLESettingsDialog,
     _BluetoothSettingsDialog,
+    _PlutoOutputDialog,
     _instantaneous_frequency_khz,
 )
 
@@ -133,6 +135,43 @@ def test_vsg_window_starts_with_composer_shell() -> None:
         ]
     finally:
         window.close()
+
+
+def test_pluto_output_dialog_uses_dbm_and_preserves_target_across_backoff(
+    monkeypatch,
+) -> None:
+    pg.mkQApp("Pluto VSG dBm output dialog test")
+    monkeypatch.setattr(PlutoOutputBackend, "discover_devices", lambda: ())
+    parent = QtWidgets.QWidget()
+    dialog = _PlutoOutputDialog(
+        PlutoTransmitSettings(
+            center_frequency_hz=2_440_000_000.0,
+            sample_rate_hz=8_000_000.0,
+            rf_bandwidth_hz=8_000_000.0,
+            hardware_gain_db=-10.0,
+            digital_backoff_db=0.0,
+            output_power_dbm=-9.4,
+        ),
+        packet_count=1,
+        parent=parent,
+    )
+    try:
+        assert dialog.output_power_spin.suffix() == " dBm"
+        assert dialog.output_power_spin.value() == pytest.approx(-9.4)
+        assert dialog.applied_gain_label.text().startswith("-10.00 dB")
+
+        dialog.digital_backoff_combo.setCurrentIndex(
+            dialog.digital_backoff_combo.findData(-3.0)
+        )
+
+        assert dialog.output_power_spin.value() == pytest.approx(-9.4)
+        assert dialog.applied_gain_label.text().startswith("-6.74 dB")
+        dialog._accept_settings()
+        assert dialog.settings.output_power_dbm == pytest.approx(-9.4)
+        assert dialog.settings.resolved_hardware_gain_db == pytest.approx(-6.73913)
+    finally:
+        dialog.close()
+        parent.close()
 
 
 def test_vsg_preview_draws_only_first_packet_when_schedule_repeats() -> None:
