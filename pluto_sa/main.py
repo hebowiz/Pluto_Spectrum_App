@@ -9,16 +9,16 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_common import discover_pluto_devices
+from pluto_sa.config.session_state import (
+    RTSA_APPLICATION,
+    RTSA_DEVICE_KEY,
+    RTSA_ORGANIZATION,
+)
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
-from pluto_sa.ui.main_window import RealtimeSpectrumWindow
-
-
-_RTSA_ORGANIZATION = "PlutoSpectrumApp"
-_RTSA_APPLICATION = "PlutoRTSA"
-_RTSA_DEVICE_KEY = "pluto_rx/selector"
+from pluto_sa.ui.session_window import SessionRealtimeSpectrumWindow
 
 
 def _choose_pluto_target(parent=None) -> tuple[bool, str | None]:
@@ -34,8 +34,8 @@ def _choose_pluto_target(parent=None) -> tuple[bool, str | None]:
     if not devices:
         return True, None
 
-    settings = QtCore.QSettings(_RTSA_ORGANIZATION, _RTSA_APPLICATION)
-    saved = str(settings.value(_RTSA_DEVICE_KEY, "")).strip()
+    settings = QtCore.QSettings(RTSA_ORGANIZATION, RTSA_APPLICATION)
+    saved = str(settings.value(RTSA_DEVICE_KEY, "")).strip()
     if saved:
         saved_key = saved.casefold()
         for device in devices:
@@ -44,7 +44,7 @@ def _choose_pluto_target(parent=None) -> tuple[bool, str | None]:
 
     if len(devices) == 1:
         selector = devices[0].selector
-        settings.setValue(_RTSA_DEVICE_KEY, selector)
+        settings.setValue(RTSA_DEVICE_KEY, selector)
         settings.sync()
         return True, selector
 
@@ -61,7 +61,7 @@ def _choose_pluto_target(parent=None) -> tuple[bool, str | None]:
         return False, None
     index = labels.index(label)
     selector = devices[index].selector
-    settings.setValue(_RTSA_DEVICE_KEY, selector)
+    settings.setValue(RTSA_DEVICE_KEY, selector)
     settings.sync()
     return True, selector
 
@@ -71,13 +71,13 @@ def build_app_components(sdr_uri: str | None = None) -> tuple[
     PlutoReceiver,
     SpectrumProcessor,
     SweepController,
-    RealtimeSpectrumWindow,
+    SessionRealtimeSpectrumWindow,
 ]:
     config = SpectrumConfig(sdr_uri=sdr_uri)
     receiver = PlutoReceiver(config)
     processor = SpectrumProcessor(config)
     sweep_controller = SweepController(config, receiver)
-    window = RealtimeSpectrumWindow(
+    window = SessionRealtimeSpectrumWindow(
         config,
         receiver,
         processor,
@@ -93,7 +93,8 @@ def main() -> int:
     if not accepted:
         return 0
     try:
-        _, receiver, _, _, window = build_app_components(sdr_uri=sdr_uri)
+        _, _, _, _, window = build_app_components(sdr_uri=sdr_uri)
+        window.start_initial_acquisition()
     except Exception as error:
         QtWidgets.QMessageBox.critical(
             None,
@@ -101,7 +102,6 @@ def main() -> int:
             f"Could not open the selected receiver.\n\n{error}",
         )
         return 1
-    receiver.start()
     window.show()
     return app.exec()
 

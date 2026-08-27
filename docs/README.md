@@ -56,17 +56,21 @@ Windowsではリポジトリ直下のBATをダブルクリックして各アプ�
 `.venv`が存在しない場合、またはアプリが非zero codeで終了した場合は、原因を確認できるよう
 consoleを閉じずにメッセージを表示する。正常終了時はpauseしない。
 
-起動時に次のコンポーネントを生成し、PlutoSDRの連続受信を開始してからウィンドウを表示します。
+起動時に次のコンポーネントを生成し、選択・復元されたAnalyzer Modeに対応する取得経路を開始してからウィンドウを表示します。
 
 1. `SpectrumConfig`: 全モード共通の設定状態
 2. `PlutoReceiver`: PlutoSDR接続、設定、IQ取得
 3. `SpectrumProcessor`: FFT、RBW処理、表示帯域抽出
 4. `SweepController`: Sweep SAの点測定と進行管理
-5. `RealtimeSpectrumWindow`: UI、モード切替、描画、測定制御
+5. `SessionRealtimeSpectrumWindow`: UI、モード切替、描画、測定制御、前回セッションの保存・復元、Preset
 
 PlutoSDRへの接続は `PlutoReceiver` の生成時に行われます。URIを明示しない場合はdirect USBを優先し、`SpectrumConfig.sdr_uri`または環境変数`PLUTO_SDR_URI`で上書きできます。現時点では、実機なしでGUIだけを起動するシミュレーションモードはありません。
 
 RTSAは前回使用したPlutoのselectorを`QSettings`へ保存します。次回起動時に同じPlutoが検出できれば、複数台接続されていても選択ダイアログを表示せず自動接続します。前回のPlutoが見つからず、接続中のPlutoが1台だけならその1台を自動選択して保存し、複数台なら選択ダイアログを表示します。シリアル番号を取得できる個体は`serial:<id>`を保存するため、USB URIが変化しても同じ個体を再選択できます。環境変数`PLUTO_SDR_URI`が指定されている場合は従来どおりその指定を優先します。
+
+RTSA終了時には、Analyzer Mode、Frequency/Span、Amplitude/Input、RBW、FFT/Waterfall/Persistence、Sweep、High Speed TA/Triggerのユーザー設定に加え、Trace 1～4とMarker 1～4の設定を`QSettings`へ保存します。次回起動時は保存状態を復元して対応モードで取得を開始します。測定データ、TraceのAverage/Max Hold蓄積値、Waterfall履歴、Sweep進行位置などのruntimeデータは保存しません。Calibration中に終了した場合はCalibrationへ入る前の通常設定を保存し、次回起動時にその設定を基準としてCalibration固定profileを再適用します。
+
+Main Menuの`TRIGGER / MARKER`下には`SYSTEM`フレームがあり、`Preset`から`Restore Defaults`を実行できます。Presetは確認後、接続先Plutoのselectorを維持したまま、Analyzer Mode・各ユーザー設定・Trace・Marker・Display/Persistenceを現在のコードで定義された初期状態へ戻します。Preset後の状態は直ちに保存され、次回起動時も初期状態から開始します。SYSTEM配下も他の設定ページと同じstack/historyルールでBack操作します。SYSTEMフレーム追加に伴い、RTSAの固定ウィンドウ高さは従来より80 px拡大します。
 
 ## 更新方針
 
