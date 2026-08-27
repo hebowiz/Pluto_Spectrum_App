@@ -884,7 +884,35 @@ default presetはBR/EDRではPRBS9、LEでは現在選択中のRF test payload t
 
 CTE/CTEInfo、LE Coded PHY、HCI command生成は未実装である。CRCとWhiteningはPDU
 （Header、Length、Payload）およびCRCの正しい処理範囲を分離し、CRCはCore仕様のLFSR
-register-position図を直接写した独立テストと照合する。
+とBluetooth SIG公式sample packetの既知CRCを照合する。
+
+### C.2.1 LE CRC-24修正記録（2026-08-27）
+
+初期実装の`le_crc24_bits()`はLFSRのfeedback tap位置を誤っており、LE 1M/2Mの
+両方で不正なCRCを生成していた。実装とテストが同じ誤ったregister更新式を複製していたため、
+自己整合テストだけでは検出できなかった。
+
+修正後は、PDU bitを送信順に処理し、次の生成多項式を使用する。
+
+```text
+x^24 + x^10 + x^9 + x^6 + x^4 + x^3 + x + 1
+lower polynomial mask = 0x00065B
+CRC output order = register position 23 down to 0
+```
+
+Bluetooth Core Vol 6, Part Cのsample packetを固定回帰vectorとして追加した。
+
+```text
+PDU bytes (transmission order): 00 03 42 4C 45
+CRC bytes (transmission order): 29 0A CE
+CRCInit: 0x555555
+```
+
+同一PDUならLE 1M/2MでCRC値は同一であり、PHYによる違いはpreamble長とsymbol rateである。
+BR/EDRは別のCRC-16実装を使用する。Bluetooth SIG sample vector
+`4E 01 02 03 04 05 06 07 08 09`、UAP `0x47`に対するCRC `6D D2`との一致を再確認し、
+DH1/DH3/DH5、2-DHx、3-DHxの全生成経路がpayload headerとbody全体から同じCRC-16を
+構成する回帰テストを追加した。したがって今回の計算修正対象はLE 1M/2Mのみである。
 
 ## D.4 HDT
 

@@ -24,28 +24,6 @@ def _text(bits: np.ndarray) -> str:
     return "".join(str(int(bit)) for bit in bits)
 
 
-def _reference_crc(bits: np.ndarray, init: int = 0x555555) -> np.ndarray:
-    """Literal implementation of the Core LFSR register-position diagram."""
-
-    register = np.asarray([(init >> index) & 1 for index in range(24)], dtype=np.uint8)
-    for bit in bits:
-        feedback = int(bit) ^ int(register[23])
-        previous = register.copy()
-        register[0] = feedback
-        register[1] = previous[0]
-        register[2] = previous[1] ^ feedback
-        register[3] = previous[2] ^ feedback
-        register[4] = previous[3]
-        register[5] = previous[4] ^ feedback
-        register[6] = previous[5]
-        register[7] = previous[6]
-        register[8] = previous[7]
-        register[9] = previous[8] ^ feedback
-        register[10] = previous[9] ^ feedback
-        register[11:] = previous[10:23]
-    return register[::-1]
-
-
 def test_le_profiles_have_specified_rates_and_fields() -> None:
     le1m = bluetooth_le_test_project(BluetoothLEPhy.LE_1M)
     le2m = bluetooth_le_test_project(BluetoothLEPhy.LE_2M)
@@ -113,14 +91,56 @@ def test_le_payload_sources_match_defined_sequences() -> None:
     )
 
 
-def test_le_crc_matches_literal_core_lfsr() -> None:
-    bits = np.asarray([int(bit) for bit in "1000000010100100"], dtype=np.uint8)
-    bits = np.concatenate(
-        (bits, le_test_payload_bits(BluetoothLEPayloadType.F0, 37))
+def test_le_crc_matches_direct_test_mode_packet() -> None:
+    base = bluetooth_le_test_project(BluetoothLEPhy.LE_1M)
+    settings = apply_bluetooth_le_rf_test_preset(
+        base.bluetooth_le,
+        payload_type=BluetoothLEPayloadType.F0,
+        payload_length_bytes=37,
+    )
+    project = replace(base, bluetooth_le=settings, fields=bluetooth_le_fields(settings))
+
+    result = BluetoothLEWaveformEngine().generate(project)
+
+    assert _text(result.metadata["pdu_header_bits"]) == "10000000"
+    assert _text(result.metadata["pdu_length_bits"]) == "10100100"
+    assert _text(result.metadata["crc_bits"]) == "001001010011101001000101"
+
+
+def test_le_crc_matches_bluetooth_sig_reference_packet() -> None:
+    # Core Vol 6, Part C sample packet. Bytes are listed in transmission
+    # order and bits inside each byte are transmitted LSB first.
+    pdu = bytes.fromhex("0003424c45")
+    pdu_bits = np.asarray(
+        [(byte >> bit) & 1 for byte in pdu for bit in range(8)],
+        dtype=np.uint8,
     )
 
-    assert np.array_equal(le_crc24_bits(bits), _reference_crc(bits))
-    assert _text(le_crc24_bits(bits)) == "101111000111001011010110"
+    crc_bits = le_crc24_bits(pdu_bits, init=0x555555)
+    crc_bytes = bytes(
+        sum(int(crc_bits[start + bit]) << bit for bit in range(8))
+        for start in range(0, 24, 8)
+    )
+
+    assert crc_bytes == bytes.fromhex("290ace")
+
+
+def test_le1m_and_le2m_use_the_same_crc_for_the_same_pdu() -> None:
+    engine = BluetoothLEWaveformEngine()
+
+    le1m = engine.generate(bluetooth_le_test_project(BluetoothLEPhy.LE_1M))
+    le2m = engine.generate(bluetooth_le_test_project(BluetoothLEPhy.LE_2M))
+
+    np.testing.assert_array_equal(le1m.metadata["crc_bits"], le2m.metadata["crc_bits"])
+
+
+def test_le_crc_rejects_invalid_inputs() -> None:
+    with np.testing.assert_raises(ValueError):
+        le_crc24_bits(np.asarray([[0, 1]], dtype=np.uint8))
+    with np.testing.assert_raises(ValueError):
+        le_crc24_bits(np.asarray([0, 2], dtype=np.uint8))
+    with np.testing.assert_raises(ValueError):
+        le_crc24_bits(np.asarray([0, 1], dtype=np.uint8), init=0x1000000)
 
 
 def test_le_packet_interval_and_repeat_layout() -> None:

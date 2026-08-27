@@ -114,27 +114,28 @@ def le_whitening_sequence(channel_index: int, count: int) -> np.ndarray:
 def le_crc24_bits(bits: np.ndarray, init: int = 0x555555) -> np.ndarray:
     """Return the LE CRC in transmission order."""
 
-    register = np.asarray(
-        [(int(init) >> index) & 1 for index in range(24)], dtype=np.uint8
+    values = np.asarray(bits, dtype=np.uint8)
+    if values.ndim != 1 or np.any(values > 1):
+        raise ValueError("bits must be a one-dimensional binary array")
+    if not 0 <= int(init) <= 0xFFFFFF:
+        raise ValueError("init must be a 24-bit value")
+
+    # Core Vol 6, Part B, 3.1.1: process PDU bits in transmitted order with
+    # x^24 + x^10 + x^9 + x^6 + x^4 + x^3 + x + 1.  Position 23 supplies
+    # feedback, the register shifts toward the MSB and 0x00065B represents
+    # the polynomial terms below x^24.
+    register = int(init)
+    for bit in values:
+        feedback = int(bit) ^ ((register >> 23) & 1)
+        register = (register << 1) & 0xFFFFFF
+        if feedback:
+            register ^= 0x00065B
+
+    # CRC register positions 23 down to 0 are transmitted in this order.
+    return np.asarray(
+        [(register >> position) & 1 for position in range(23, -1, -1)],
+        dtype=np.uint8,
     )
-    for bit in np.asarray(bits, dtype=np.uint8):
-        feedback = int(bit) ^ int(register[23])
-        previous = register.copy()
-        register[0] = feedback
-        register[1] = previous[0]
-        register[2] = previous[1] ^ feedback
-        register[3] = previous[2] ^ feedback
-        register[4] = previous[3]
-        register[5] = previous[4] ^ feedback
-        register[6] = previous[5]
-        register[7] = previous[6]
-        register[8] = previous[7]
-        register[9] = previous[8] ^ feedback
-        register[10] = previous[9] ^ feedback
-        register[11:] = previous[10:23]
-    # CRC bits are the exception to the usual LE octet order: register
-    # positions 23 down to 0 are transmitted in that order.
-    return register[::-1].copy()
 
 
 class BluetoothLEWaveformEngine:

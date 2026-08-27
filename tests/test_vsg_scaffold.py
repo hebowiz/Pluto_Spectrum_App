@@ -14,6 +14,7 @@ from pluto_sa.vsa.profiles.bluetooth_br import (
     BluetoothBRProfile,
     access_code_bits,
     decode_dh1_payload,
+    payload_crc_bytes,
 )
 from pluto_sa.vsa.profiles.bluetooth_edr import generate_edr_dh1
 from pluto_sa.vsa.mapping import (
@@ -671,6 +672,17 @@ def test_vsg_all_dhx_packet_definitions_generate(
         0x1F if packet_kind == BluetoothPacketKind.DH1 else 0x3FF
     ) == payload_max
     assert result.metadata["payload_body_bits"].size == payload_max * 8
+    expected_crc = payload_crc_bytes(
+        np.concatenate((payload_header, result.metadata["payload_body_bits"])),
+        settings.uap,
+    )
+    expected_crc_bits = np.asarray(
+        [(byte >> bit) & 1 for byte in expected_crc for bit in range(8)],
+        dtype=np.uint8,
+    )
+    np.testing.assert_array_equal(
+        result.metadata["payload_crc_bits"], expected_crc_bits
+    )
     assert result.metadata["packet_name"] == packet_kind.value
     assert result.metadata["packet_sample_count"] > 0
     header_air = np.asarray(result.metadata["packet_bits"])[72:126]
