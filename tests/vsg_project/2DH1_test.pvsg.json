@@ -6,7 +6,7 @@
     "standard": "Bluetooth BR / EDR",
     "sample_rate_hz": 8000000.0,
     "samples_per_symbol": 8,
-    "repeat_count": 1,
+    "repeat_count": 100,
     "center_frequency_hz": 2440000000.0,
     "fields": [
       {
@@ -333,7 +333,7 @@
       "edr_rolloff": 0.4,
       "edr_relative_power_db": -2.0,
       "pre_idle_symbols": 8,
-      "post_idle_symbols": 8
+      "post_idle_symbols": 300
     },
     "bluetooth_le": null
   }

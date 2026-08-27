@@ -35,3 +35,14 @@
 - 2026-08-27: 従来の送信IQスケール16383はsigned 16 bit full scale 32767に対して約-6.02dBだった。
   バックエンドを32767基準へ変更し、Digital Backoff 0/-3/-6dBを送信設定へ追加した。
   実機で出力電力・EVM・イメージ・スプリアスの比較確認が必要。
+- Backoff 0/Tx Gain 0のときFSKパケット出力-0.2dBm
+- Backoff 0/Tx Gain -5のときFSKパケット出力-4.8dBm
+- Backoff 0/Tx Gain -10のときFSKパケット出力-9.4dBm
+- Backoff 0/Tx Gain -20のときFSKパケット出力-19.0dBm
+- Backoff -3/Tx Gain 0のときFSKパケット出力-3.1dBm
+- Backoff -3/Tx Gain -10のときFSKパケット出力-12.4dBm
+- Backoff -6/Tx Gain 0のときFSKパケット出力-6.1dBm
+- Backoff -6/Tx Gain -10のときFSKパケット出力-15.4dBm
+- BLEパケットでCRC計算間違いあり。他フォーマットも含め見直しを
+- Visual ComposerのPowerは実際に出力している時間を表示すべきでは？現状有効パケット内のみ表示
+- 送信したパケットが不完全だったり等間隔ではなかったりするので要検証

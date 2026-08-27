@@ -1,0 +1,134 @@
+{
+  "format": "pluto-vsg-project",
+  "version": 1,
+  "project": {
+    "name": "Bluetooth LE 1M Packet",
+    "standard": "Bluetooth LE",
+    "sample_rate_hz": 8000000.0,
+    "samples_per_symbol": 8,
+    "repeat_count": 1000,
+    "center_frequency_hz": 2440000000.0,
+    "fields": [
+      {
+        "name": "Preamble",
+        "symbol_count": 8,
+        "logical_bit_count": 8,
+        "data_source": "Computed",
+        "data": "10101010",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "Access Address / Sync Word",
+        "symbol_count": 32,
+        "logical_bit_count": 32,
+        "data_source": "Computed",
+        "data": "10010100100000100110111010001110",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "PDU Header",
+        "symbol_count": 8,
+        "logical_bit_count": 8,
+        "data_source": "Computed",
+        "data": "00000000",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "PDU Length",
+        "symbol_count": 8,
+        "logical_bit_count": 8,
+        "data_source": "Computed",
+        "data": "37 byte",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "PDU Payload",
+        "symbol_count": 296,
+        "logical_bit_count": 296,
+        "data_source": "PRBS",
+        "data": "PRBS9",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "CRC",
+        "symbol_count": 24,
+        "logical_bit_count": 24,
+        "data_source": "Computed",
+        "data": "CRC-24 / Init 0x555555",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      }
+    ],
+    "power_envelope": {
+      "enabled": true,
+      "on_level_db": 0.0,
+      "idle_level_db": -120.0,
+      "rise_symbols": 3.0,
+      "fall_symbols": 3.0,
+      "rise_delay_symbols": -4.0,
+      "fall_delay_symbols": 3.0,
+      "shape": "Cosine"
+    },
+    "bluetooth_br": null,
+    "bluetooth_le": {
+      "phy": "LE 1M",
+      "preamble_bits": "10101010",
+      "sync_word_bits": "10010100100000100110111010001110",
+      "pdu_header_bits": "00000000",
+      "payload_type": "PRBS9",
+      "payload_source": "PRBS9",
+      "payload_pattern": "",
+      "payload_length_bytes": 37,
+      "crc_enabled": true,
+      "crc_init": 5592405,
+      "whitening_enabled": false,
+      "whitening_channel_index": 37,
+      "rf_test_interval_enabled": true,
+      "frequency_deviation_hz": 250000.0,
+      "gaussian_bt": 0.5,
+      "pre_idle_symbols": 8,
+      "post_idle_symbols": 241
+    }
+  }
+}
