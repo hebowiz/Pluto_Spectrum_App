@@ -4,14 +4,13 @@ setlocal
 set "PROJECT_DIR=%~dp0"
 set "PYTHON_EXE=%PROJECT_DIR%.venv\Scripts\python.exe"
 
-if not exist "%PYTHON_EXE%" (
-    echo Virtual environment Python was not found:
-    echo   %PYTHON_EXE%
+call "%PROJECT_DIR%_Pluto_Runtime.bat"
+set "RUNTIME_EXIT=%ERRORLEVEL%"
+if not "%RUNTIME_EXIT%"=="0" (
     echo.
-    echo Create it first with:
-    echo   python -m venv .venv
+    echo Pluto runtime setup failed with code %RUNTIME_EXIT%.
     pause
-    exit /b 1
+    exit /b %RUNTIME_EXIT%
 )
 
 pushd "%PROJECT_DIR%"
