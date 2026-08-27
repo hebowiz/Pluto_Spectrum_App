@@ -22,7 +22,7 @@ _RTSA_DEVICE_KEY = "pluto_rx/selector"
 
 
 def _choose_pluto_target(parent=None) -> tuple[bool, str | None]:
-    """Choose one physical receiver when more than one Pluto is connected."""
+    """Choose a physical receiver, reusing the previous choice when possible."""
 
     environment_target = os.environ.get("PLUTO_SDR_URI", "").strip()
     if environment_target:
@@ -33,22 +33,28 @@ def _choose_pluto_target(parent=None) -> tuple[bool, str | None]:
         devices = ()
     if not devices:
         return True, None
-    if len(devices) == 1:
-        return True, devices[0].selector
 
     settings = QtCore.QSettings(_RTSA_ORGANIZATION, _RTSA_APPLICATION)
-    saved = str(settings.value(_RTSA_DEVICE_KEY, ""))
+    saved = str(settings.value(_RTSA_DEVICE_KEY, "")).strip()
+    if saved:
+        saved_key = saved.casefold()
+        for device in devices:
+            if device.selector.casefold() == saved_key:
+                return True, device.selector
+
+    if len(devices) == 1:
+        selector = devices[0].selector
+        settings.setValue(_RTSA_DEVICE_KEY, selector)
+        settings.sync()
+        return True, selector
+
     labels = [device.label for device in devices]
-    selected_index = next(
-        (index for index, device in enumerate(devices) if device.selector == saved),
-        0,
-    )
     label, accepted = QtWidgets.QInputDialog.getItem(
         parent,
         "Select ADALM-Pluto Receiver",
         "Two or more Pluto devices are connected. Select the RTSA receiver:",
         labels,
-        selected_index,
+        0,
         False,
     )
     if not accepted:
@@ -56,6 +62,7 @@ def _choose_pluto_target(parent=None) -> tuple[bool, str | None]:
     index = labels.index(label)
     selector = devices[index].selector
     settings.setValue(_RTSA_DEVICE_KEY, selector)
+    settings.sync()
     return True, selector
 
 
