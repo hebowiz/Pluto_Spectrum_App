@@ -13,7 +13,11 @@ import adi
 import iio
 import numpy as np
 
-from pluto_common import discover_pluto_devices, resolve_pluto_uri
+from pluto_common import (
+    PlutoDeviceLease,
+    discover_pluto_devices,
+    resolve_pluto_uri,
+)
 from pluto_vsg.backends.base import BackendCapabilities
 from pluto_vsg.engine import GenerationResult
 
@@ -367,6 +371,13 @@ class PlutoOutputBackend:
     def _open_pluto(cls, configured_uri: str | None):
         contexts = cls.discover()
         primary_uri = resolve_pluto_uri(configured_uri, contexts)
+        lease = PlutoDeviceLease.acquire(
+            configured_uri,
+            primary_uri,
+            contexts,
+            application="Pluto VSG",
+            role="TX",
+        )
         candidates = [primary_uri]
         target = str(configured_uri or "").strip()
         if target.lower().startswith("serial:"):
@@ -380,9 +391,10 @@ class PlutoOutputBackend:
         for uri in candidates:
             try:
                 sdr = adi.Pluto(uri=uri) if uri is not None else adi.Pluto()
-                return sdr, uri
+                return sdr, uri, lease
             except Exception as error:
                 errors.append(f"{uri or 'auto'}: {error}")
+        lease.release()
         detail = "; ".join(errors) or "no usable IIO context"
         raise RuntimeError(f"Unable to open selected ADALM-Pluto ({detail})")
 
@@ -572,7 +584,7 @@ class PlutoOutputBackend:
         explicit preparation step and never occurs inside finite transmission.
         """
 
-        sdr, uri = self._open_pluto(self.settings.connection_uri)
+        sdr, uri, lease = self._open_pluto(self.settings.connection_uri)
         self._opened_uri = uri
         self._sdr = sdr
         self._state = "CONFIGURE"
@@ -637,6 +649,7 @@ class PlutoOutputBackend:
             self._mute_and_stop(sdr)
             self._record_event("prepare_cleanup_completed")
             self._sdr = None
+            lease.release()
 
     @classmethod
     def _read_tx_lo_powerdown(cls, sdr):
@@ -717,7 +730,7 @@ class PlutoOutputBackend:
     def start(self) -> None:
         if self._buffer is None or self._superframe is None:
             raise RuntimeError("Transfer a waveform before starting Pluto TX")
-        sdr, uri = self._open_pluto(self.settings.connection_uri)
+        sdr, uri, lease = self._open_pluto(self.settings.connection_uri)
         self._opened_uri = uri
         self._sdr = sdr
         try:
@@ -798,6 +811,7 @@ class PlutoOutputBackend:
             if self._state != "ERROR":
                 self._state = "READY"
             self._sdr = None
+            lease.release()
 
     def stop(self) -> None:
         """Request cancellation; cleanup is performed by the TX owner thread."""

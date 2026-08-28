@@ -149,9 +149,13 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         self._session_acquisition_started = False
         self.config.sdr_uri = selector
         try:
-            new_receiver = PlutoReceiver(self.config)
+            new_receiver = PlutoReceiver(
+                self.config,
+                owner_application="Pluto RTSA",
+            )
         except Exception as error:
             self.config.sdr_uri = old_selector
+            self._update_device_window_title()
             self._session_settings.setValue(RTSA_DEVICE_KEY, old_selector or "")
             self._session_settings.sync()
             self.receiver = old_receiver
@@ -165,6 +169,7 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
             return
 
         self.receiver = new_receiver
+        self._update_device_window_title()
         self.sweep_controller.receiver = new_receiver
         self.sweep_controller.config = self.config
         old_receiver.close()

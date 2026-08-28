@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from pluto_common import short_pluto_identity
+
 from pluto_sa.standards.adsb1090.ui import ADSB1090Window
 from pluto_sa.vsa.pluto_source import PlutoLiveSource
 from pluto_sa.vsa.ui.main_window import VSAWindow
@@ -35,6 +37,10 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self._stack.addWidget(workspace)
             workspace.analysis_mode_requested.connect(self.set_analysis_mode)
             workspace.application_close_requested.connect(self.close)
+        self.generic_workspace.pluto_uri_edit.currentTextChanged.connect(
+            self._pluto_target_changed
+        )
+        self._pluto_target_changed(self.generic_workspace._selected_pluto_target())
         self.resize(1600, 960)
         self.set_analysis_mode("generic")
 
@@ -80,10 +86,21 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         self._update_window_title(target)
 
     def _update_window_title(self, target: QtWidgets.QWidget) -> None:
+        identity = short_pluto_identity(
+            self.generic_workspace._selected_pluto_target()
+        )
         if target is self.generic_workspace:
-            self.setWindowTitle("Pluto VSA - Generic FSK / PSK")
+            self.setWindowTitle(f"Pluto VSA - Generic FSK / PSK [RX: {identity}]")
         else:
-            self.setWindowTitle("Pluto VSA - ADS-B 1090ES")
+            self.setWindowTitle(f"Pluto VSA - ADS-B 1090ES [RX: {identity}]")
+
+    @QtCore.Slot(str)
+    def _pluto_target_changed(self, _text: str) -> None:
+        target = self.generic_workspace._selected_pluto_target()
+        self.adsb1090_workspace.set_pluto_target(target)
+        current = self._stack.currentWidget()
+        if current is not None:
+            self._update_window_title(current)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         busy = self._busy_reason()

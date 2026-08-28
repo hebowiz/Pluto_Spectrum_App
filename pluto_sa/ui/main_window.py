@@ -17,6 +17,8 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from pluto_common import short_pluto_identity
+
 from pluto_sa.config.spectrum_config import (
     MAX_DISPLAY_SPAN_HZ,
     MAX_INTERNAL_GAIN_DB,
@@ -505,7 +507,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._sweep_callback_sequence = 0
         self._sweep_like_suppress_progress_until_first_complete = False
 
-        self.setWindowTitle("PlutoSDR Real-Time Spectrum Prototype")
+        self._update_device_window_title()
         self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
 
         self.frame_count_total = 0
@@ -641,6 +643,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_trace_menu_buttons()
         self._update_marker_menu_buttons()
         self._refresh_status_label()
+
+    def _update_device_window_title(self) -> None:
+        identity = short_pluto_identity(
+            getattr(self.receiver, "device_selector", None) or self.config.sdr_uri
+        )
+        self.setWindowTitle(f"Pluto RTSA [RX: {identity}]")
 
     def _sync_amplitude_scale_from_config(self) -> None:
         self.y_max = self.config.y_max_dbm

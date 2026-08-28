@@ -96,7 +96,7 @@ def build_app_components(sdr_uri: str | None = None) -> tuple[
     SessionRealtimeSpectrumWindow,
 ]:
     config = SpectrumConfig(sdr_uri=sdr_uri)
-    receiver = PlutoReceiver(config)
+    receiver = PlutoReceiver(config, owner_application="Pluto RTSA")
     processor = SpectrumProcessor(config)
     sweep_controller = SweepController(config, receiver)
     window = SessionRealtimeSpectrumWindow(

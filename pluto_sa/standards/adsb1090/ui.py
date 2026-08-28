@@ -595,6 +595,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._analyzer = ADSB1090Analyzer()
         self._pluto_source = pluto_source or PlutoLiveSource()
         self._owns_pluto_source = bool(owns_pluto_source)
+        self._pluto_target = ""
         # ADS-B receiver settings intentionally use their own application
         # store.  They must not inherit the generic VSA Pluto frontend setup.
         self._preferences = preferences or QtCore.QSettings(
@@ -1365,12 +1366,18 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             samples_per_symbol=sample_rate_msps,
             capture_length_s=self.capture_length_spin.value() / 1e3,
             rf_bandwidth_hz=4_000_000.0,
+            sdr_uri=self._pluto_target or None,
             power_correction=InputPowerCorrection(
                 internal_gain_db=self.internal_gain_spin.value(),
                 external_attenuation_db=0.0,
                 external_gain_db=0.0,
             ),
         )
+
+    def set_pluto_target(self, target: str | None) -> None:
+        """Share the shell's selected physical receiver with ADS-B mode."""
+
+        self._pluto_target = str(target or "").strip()
 
     def _analysis_settings(self) -> ADSB1090Settings:
         return ADSB1090Settings(

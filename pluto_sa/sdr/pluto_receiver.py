@@ -10,7 +10,7 @@ import adi
 import iio
 import numpy as np
 
-from pluto_common import resolve_pluto_uri
+from pluto_common import PlutoDeviceLease, resolve_pluto_uri
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.sdr.iq_stream import (
     IQBlock,
@@ -24,14 +24,39 @@ from pluto_sa.sdr.iq_stream import (
 class PlutoReceiver:
     """Own PlutoSDR access, streaming, and IQ buffering."""
 
-    def __init__(self, config: SpectrumConfig) -> None:
+    def __init__(
+        self,
+        config: SpectrumConfig,
+        *,
+        owner_application: str = "Pluto RTSA/VSA",
+    ) -> None:
         self.config = config
-        self.connection_uri = self._resolve_connection_uri(config.sdr_uri)
-        self.sdr = (
-            adi.Pluto(uri=self.connection_uri)
-            if self.connection_uri is not None
-            else adi.Pluto()
+        try:
+            contexts = iio.scan_contexts()
+        except Exception:
+            contexts = {}
+        self.connection_uri = resolve_pluto_uri(config.sdr_uri, contexts)
+        self._device_lease = PlutoDeviceLease.acquire(
+            config.sdr_uri,
+            self.connection_uri,
+            contexts,
+            application=owner_application,
+            role="RX",
         )
+        self.device_selector = (
+            f"serial:{self._device_lease.owner.serial}"
+            if self._device_lease.owner.serial
+            else (config.sdr_uri or self.connection_uri)
+        )
+        try:
+            self.sdr = (
+                adi.Pluto(uri=self.connection_uri)
+                if self.connection_uri is not None
+                else adi.Pluto()
+            )
+        except Exception:
+            self._device_lease.release()
+            raise
         self._closed = False
         self._iq_lock = threading.Lock()
         self._sdr_lock = threading.Lock()
@@ -46,8 +71,12 @@ class PlutoReceiver:
         )
 
         self.received_samples_total = 0
-        self._configure_sdr(config)
-        self._allocate_capture_buffers(config)
+        try:
+            self._configure_sdr(config)
+            self._allocate_capture_buffers(config)
+        except Exception:
+            self._device_lease.release()
+            raise
 
     @staticmethod
     def _resolve_connection_uri(configured_uri: str | None) -> str | None:
@@ -348,6 +377,7 @@ class PlutoReceiver:
                 self.sdr.rx_destroy_buffer()
             except Exception:
                 pass
+            self._device_lease.release()
 
     def _rx_worker(self) -> None:
         published_blocks = 0

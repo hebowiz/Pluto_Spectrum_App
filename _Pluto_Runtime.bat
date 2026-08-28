@@ -2,6 +2,7 @@
 setlocal EnableExtensions
 
 set "PROJECT_DIR=%~dp0"
+set "VENV_DIR=%PROJECT_DIR%.venv"
 set "PYTHON_EXE=%PROJECT_DIR%.venv\Scripts\python.exe"
 
 if not exist "%PYTHON_EXE%" (
@@ -13,15 +14,30 @@ if not exist "%PYTHON_EXE%" (
     exit /b 1
 )
 
-rem If iio already imports successfully, keep the current environment unchanged.
+rem Match the DLL search environment produced by `.venv\Scripts\activate`.
+rem Calling the venv Python executable directly does not add these directories
+rem to PATH.  Some pylibiio Windows installations put libiio.dll (or one of
+rem its dependencies) in Scripts, while conda-style environments use Library\bin.
+set "PATH=%VENV_DIR%\Scripts;%VENV_DIR%\Library\bin;%PATH%"
+
+rem If iio imports successfully with the venv runtime, export that PATH to the
+rem caller.  This is the normal path for a self-contained virtual environment.
 "%PYTHON_EXE%" -c "import iio" >nul 2>nul
-if not errorlevel 1 exit /b 0
+if not errorlevel 1 goto :runtime_ready
 
 set "LIBIIO_DIR="
 
 rem Prefer an optional project-local portable runtime when present.
 if exist "%PROJECT_DIR%runtime\libiio\bin\libiio.dll" (
     set "LIBIIO_DIR=%PROJECT_DIR%runtime\libiio\bin"
+)
+
+rem Search the virtual environment explicitly.  This also covers layouts where
+rem pylibiio installed its native files outside Scripts.
+if not defined LIBIIO_DIR if exist "%VENV_DIR%" (
+    for /f "delims=" %%F in ('where /r "%VENV_DIR%" libiio.dll 2^>nul') do (
+        if not defined LIBIIO_DIR set "LIBIIO_DIR=%%~dpF"
+    )
 )
 
 rem Search PATH next.
@@ -96,5 +112,6 @@ if errorlevel 1 (
     exit /b 3
 )
 
+:runtime_ready
 rem Export the adjusted PATH back to the caller before ENDLOCAL restores it.
 endlocal & set "PATH=%PATH%" & exit /b 0

@@ -11,6 +11,8 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from pluto_common import short_pluto_identity
+
 from pluto_sa.vsa.profiles.bluetooth_br import header_error_check
 from pluto_sa.vsa.ui.measurement_chrome import (
     install_measurement_plot_menu,
@@ -1267,7 +1269,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_stop_guard_s = float(
             preferences.value("pluto_tx/stop_guard_s", 0.100)
         )
-        self.setWindowTitle("Pluto VSG - IQ Waveform Generator")
+        self._update_pluto_window_title()
         self.resize(1500, 900)
         self._build_actions()
         self._build_menus()
@@ -1275,6 +1277,12 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._configure_plot_interaction()
         self._refresh_project_view()
         self.generate_waveform()
+
+    def _update_pluto_window_title(self) -> None:
+        identity = short_pluto_identity(self._pluto_uri)
+        self.setWindowTitle(
+            f"Pluto VSG - IQ Waveform Generator [TX: {identity}]"
+        )
 
     def _build_actions(self) -> None:
         self.undo_action = self.undo_stack.createUndoAction(self, "Undo")
@@ -2138,6 +2146,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return
         settings = dialog.settings
         self._pluto_uri = settings.connection_uri or ""
+        self._update_pluto_window_title()
         self._pluto_output_power_dbm = float(settings.output_power_dbm)
         self._pluto_digital_backoff_db = settings.digital_backoff_db
         self._pluto_bandwidth_hz = settings.rf_bandwidth_hz

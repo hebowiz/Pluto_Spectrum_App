@@ -7,7 +7,10 @@ import re
 from typing import Mapping
 
 
-_SERIAL_PATTERN = re.compile(r"\bserial\s*[=:]\s*([^\s,;]+)", re.IGNORECASE)
+_SERIAL_PATTERN = re.compile(
+    r"\bserial\s*[=:]\s*([^\s,;)\]]+)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -32,7 +35,7 @@ class PlutoDeviceInfo:
         return f"ADALM-Pluto - {identity} ({self.transport}: {self.uri})"
 
 
-def _serial_from_description(description: str) -> str | None:
+def serial_from_description(description: str) -> str | None:
     match = _SERIAL_PATTERN.search(str(description))
     return match.group(1) if match else None
 
@@ -67,7 +70,7 @@ def discover_pluto_devices(contexts: Mapping[str, str]) -> tuple[PlutoDeviceInfo
         description = str(raw_description)
         if not _is_pluto_context(uri, description):
             continue
-        serial = _serial_from_description(description)
+        serial = serial_from_description(description)
         identity = f"serial:{serial.lower()}" if serial else f"uri:{uri}"
         candidate = PlutoDeviceInfo(uri=uri, description=description, serial=serial)
         existing = by_identity.get(identity)
@@ -107,3 +110,37 @@ def resolve_pluto_uri(
     if devices:
         return min(devices, key=lambda device: _transport_priority(device.uri)).uri
     return None
+
+
+def pluto_identity(
+    configured_target: str | None,
+    resolved_uri: str | None,
+    contexts: Mapping[str, str],
+) -> tuple[str, str | None]:
+    """Return a stable lock identity and optional hardware serial."""
+
+    target = str(configured_target or "").strip()
+    if target.lower().startswith("serial:"):
+        serial = target.split(":", 1)[1].strip()
+        if serial:
+            return f"serial:{serial.casefold()}", serial
+    uri = str(resolved_uri or target).strip()
+    if uri:
+        serial = serial_from_description(contexts.get(uri, ""))
+        if serial:
+            return f"serial:{serial.casefold()}", serial
+        return f"uri:{uri.casefold()}", None
+    return "auto:pluto", None
+
+
+def short_pluto_identity(target: str | None, *, width: int = 4) -> str:
+    """Format a compact serial/URI suffix suitable for a window title."""
+
+    value = str(target or "").strip()
+    if not value:
+        return "No Device"
+    if value.lower().startswith("serial:"):
+        value = value.split(":", 1)[1].strip()
+    compact = re.sub(r"[^0-9A-Za-z]", "", value) or value
+    suffix = compact[-max(1, int(width)) :]
+    return f"…{suffix}" if len(compact) > len(suffix) else suffix

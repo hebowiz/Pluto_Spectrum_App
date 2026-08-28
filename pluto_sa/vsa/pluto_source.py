@@ -129,9 +129,11 @@ class PlutoLiveSource:
 
     def __init__(
         self,
-        receiver_factory: Callable[[SpectrumConfig], PlutoReceiver] = PlutoReceiver,
+        receiver_factory: Callable[[SpectrumConfig], PlutoReceiver] | None = None,
     ) -> None:
-        self._receiver_factory = receiver_factory
+        self._receiver_factory = receiver_factory or (
+            lambda config: PlutoReceiver(config, owner_application="Pluto VSA")
+        )
         self._receiver: PlutoReceiver | None = None
         self._active_config: SpectrumConfig | None = None
 
