@@ -29,6 +29,11 @@ class _FakeReceiver:
         self.stream_fresh: list[bool] = []
         self.stream_block_sizes: list[int] = []
         self.stop_calls = 0
+        self.running = False
+        self.rx_kernel_buffers_requested = 8
+        self.rx_kernel_buffers_applied = 8
+        self._stream_source = "continuous"
+        self._stream_block_size = 0
         self.iq_stream = IQStreamBuffer(capacity_blocks=8)
         self.__class__.instances.append(self)
 
@@ -71,8 +76,17 @@ class _FakeReceiver:
         count = max(1, int(block_size or self.config.rx_buffer_size))
         self.stream_fresh.append(bool(fresh))
         self.stream_block_sizes.append(count)
+        self.running = True
+        self._stream_source = source
+        self._stream_block_size = count
         self.iq_stream.begin_stream(clear=True)
         cursor = self.iq_stream.create_cursor(start="latest")
+        self._publish_stream_blocks()
+        return cursor
+
+    def _publish_stream_blocks(self) -> None:
+        count = self._stream_block_size
+        source = self._stream_source
         self.iq_stream.publish(
             np.full(count, 100.0 + 0.0j, dtype=np.complex64),
             source=source,
@@ -81,13 +95,21 @@ class _FakeReceiver:
             np.full(count, 200.0 + 0.0j, dtype=np.complex64),
             source=source,
         )
+
+    def create_iq_stream_cursor(self, *, start: str = "latest"):
+        cursor = self.iq_stream.create_cursor(start=start)
+        self._publish_stream_blocks()
         return cursor
+
+    def is_streaming(self) -> bool:
+        return self.running
 
     def read_iq_stream(self, cursor, *, max_blocks: int | None = None):
         return self.iq_stream.read(cursor, max_blocks=max_blocks)
 
     def stop(self) -> bool:
         self.stop_calls += 1
+        self.running = False
         return True
 
     def close(self) -> None:
@@ -134,7 +156,8 @@ def test_pluto_single_capture_defaults_to_eight_samples_per_symbol() -> None:
     assert receiver.config.rx_gain_db == 30
     assert receiver.config.time_analyzer_sample_rate_hz == 8_000_000
     assert receiver.config.time_analyzer_rf_bandwidth_hz == 8_000_000
-    assert receiver.capture_fresh == [True]
+    assert receiver.capture_fresh == []
+    assert receiver.stream_fresh == [True]
 
     result = VSAAnalyzer().analyze(
         recording,
@@ -177,7 +200,11 @@ def test_pluto_capture_can_preserve_rx_buffer_between_continuous_blocks() -> Non
     source.capture_single(settings, fresh=True)
     source.capture_single(settings, fresh=False)
 
-    assert _FakeReceiver.instances[0].capture_fresh == [True, False]
+    receiver = _FakeReceiver.instances[0]
+    # A compatible producer is retained; re-arming creates a new cursor and
+    # does not destroy/recreate the libiio buffer.
+    assert receiver.stream_fresh == [True]
+    assert receiver.capture_fresh == []
 
 
 def test_pluto_experimental_lo_offset_preserves_requested_analysis_center() -> None:
@@ -290,12 +317,15 @@ def test_pluto_power_trigger_zero_offset_retains_default_prestore() -> None:
     assert recording.metadata["acquisition_trigger_offset_s"] == 0.0
     assert recording.metadata["acquisition_default_prestore_samples"] == 128
     receiver = _FakeReceiver.instances[0]
-    assert receiver.stream_block_sizes == [65_536]
+    assert receiver.stream_block_sizes == [262_000]
+    assert recording.metadata["continuous_rx_block_samples"] == 262_000
     assert receiver.stream_fresh == [True]
+    assert receiver.stop_calls == 0
+    source.close()
     assert receiver.stop_calls == 1
 
 
-def test_pluto_power_trigger_record_crosses_continuous_stream_blocks() -> None:
+def test_pluto_power_trigger_uses_hsta_style_buffer_island() -> None:
     _FakeReceiver.instances.clear()
     source = PlutoLiveSource(receiver_factory=_FakeReceiver)
     settings = PlutoCaptureSettings(
@@ -310,8 +340,32 @@ def test_pluto_power_trigger_record_crosses_continuous_stream_blocks() -> None:
 
     assert recording.sample_count == 80_000
     assert recording.trigger_sample_index - recording.start_sample_index == 128
-    np.testing.assert_array_equal(recording.iq[:65_536], 100.0 + 0.0j)
-    np.testing.assert_array_equal(recording.iq[65_536:], 200.0 + 0.0j)
+    np.testing.assert_array_equal(recording.iq, 100.0 + 0.0j)
+    receiver = _FakeReceiver.instances[0]
+    assert receiver.stream_block_sizes == [240_000]
+    assert recording.metadata["continuous_rx_block_samples"] == 240_000
+    assert recording.metadata["trigger_offset_in_rx_block"] == 128
+    assert recording.metadata["trigger_samples_to_rx_block_end"] == 239_872
+    assert recording.metadata["continuous_rx_observed_blocks"] == 1
+    assert recording.metadata["continuous_rx_kernel_buffers_applied"] == 8
+
+
+def test_pluto_reports_armed_only_after_first_stream_block_arrives() -> None:
+    _FakeReceiver.instances.clear()
+    source = PlutoLiveSource(receiver_factory=_FakeReceiver)
+    events: list[str] = []
+
+    recording = source.capture_single(
+        PlutoCaptureSettings(
+            capture_length_s=0.010,
+            trigger_source=TriggerKind.POWER_LEVEL,
+            trigger_level_dbm=-30.0,
+        ),
+        armed=lambda: events.append("armed"),
+    )
+
+    assert recording.sample_count == 80_000
+    assert events == ["armed"]
 
 
 def test_pluto_power_trigger_wait_can_be_cancelled() -> None:

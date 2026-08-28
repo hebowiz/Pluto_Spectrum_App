@@ -24,6 +24,8 @@ from pluto_sa.sdr.iq_stream import (
 class PlutoReceiver:
     """Own PlutoSDR access, streaming, and IQ buffering."""
 
+    RX_KERNEL_BUFFER_COUNT = 8
+
     def __init__(
         self,
         config: SpectrumConfig,
@@ -66,12 +68,15 @@ class PlutoReceiver:
         self._capture_max_blocks: int | None = None
         self._sweep_config_signature: tuple[int, int, int] | None = None
         self._stream_source = "continuous"
+        self.rx_kernel_buffers_requested = int(self.RX_KERNEL_BUFFER_COUNT)
+        self.rx_kernel_buffers_applied: int | None = None
         self.iq_stream = IQStreamBuffer(
             capacity_blocks=max(1, int(config.capture_buffer_blocks))
         )
 
         self.received_samples_total = 0
         try:
+            self._configure_rx_kernel_buffers()
             self._configure_sdr(config)
             self._allocate_capture_buffers(config)
         except Exception:
@@ -97,6 +102,25 @@ class PlutoReceiver:
             self.sdr.rx_buffer_size = config.rx_buffer_size
             self.sdr.gain_control_mode_chan0 = "manual"
             self.sdr.rx_hardwaregain_chan0 = config.rx_gain_db
+
+    def _configure_rx_kernel_buffers(self) -> None:
+        """Increase DMA queue depth before pyadi creates its first RX buffer.
+
+        libiio v0 refills a userspace buffer synchronously.  Extra kernel DMA
+        buffers keep the Pluto producer running while Python converts and
+        publishes the previous block.  Backends that do not expose this
+        control retain their driver default.
+        """
+
+        rx_device = getattr(self.sdr, "_rxadc", None)
+        setter = getattr(rx_device, "set_kernel_buffers_count", None)
+        if not callable(setter):
+            return
+        try:
+            setter(self.rx_kernel_buffers_requested)
+        except Exception:
+            return
+        self.rx_kernel_buffers_applied = self.rx_kernel_buffers_requested
 
     def _allocate_capture_buffers(self, config: SpectrumConfig) -> None:
         self._capture_block_size = config.rx_buffer_size
@@ -174,6 +198,15 @@ class PlutoReceiver:
                 return False
             self._rx_thread = None
             return True
+
+    def is_streaming(self) -> bool:
+        """Return whether the common IQ producer thread is actively running."""
+        with self._lifecycle_lock:
+            return bool(
+                self._rx_thread is not None
+                and self._rx_thread.is_alive()
+                and not self._stop_event.is_set()
+            )
 
     def get_latest_block(self) -> Optional[np.ndarray]:
         return self.iq_stream.latest_samples(self.config.fft_size)

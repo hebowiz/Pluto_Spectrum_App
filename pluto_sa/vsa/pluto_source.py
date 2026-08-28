@@ -12,6 +12,10 @@ from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
+from pluto_sa.sdr.continuous_acquisition import (
+    ContinuousIQAcquisition,
+    resolve_record_stream_block_samples,
+)
 from pluto_sa.sdr.trigger import (
     AcquisitionMetadata,
     TriggerConfig,
@@ -135,6 +139,7 @@ class PlutoLiveSource:
             lambda config: PlutoReceiver(config, owner_application="Pluto VSA")
         )
         self._receiver: PlutoReceiver | None = None
+        self._acquisition: ContinuousIQAcquisition | None = None
         self._active_config: SpectrumConfig | None = None
 
     def capture_single(
@@ -142,6 +147,7 @@ class PlutoLiveSource:
         settings: PlutoCaptureSettings,
         *,
         cancelled: Callable[[], bool] | None = None,
+        armed: Callable[[], None] | None = None,
         fresh: bool = True,
     ) -> IQRecording:
         cancelled = cancelled or (lambda: False)
@@ -150,7 +156,10 @@ class PlutoLiveSource:
         config = self._spectrum_config(settings)
         if self._receiver is None:
             self._receiver = self._receiver_factory(config)
+            self._acquisition = ContinuousIQAcquisition(self._receiver)
         elif self._active_config != config:
+            assert self._acquisition is not None
+            self._acquisition.stop()
             self._receiver.reconfigure(config)
         self._active_config = config
 
@@ -172,10 +181,16 @@ class PlutoLiveSource:
             gain_db=float(settings.power_correction.internal_gain_db),
             source=capture_source,
         )
-        record, output_start_offset = self._capture_record(
+        (
+            record,
+            output_start_offset,
+            stream_block_samples,
+            stream_diagnostics,
+        ) = self._capture_record(
             settings,
             metadata,
             cancelled=cancelled,
+            armed=armed,
             fresh=bool(fresh),
         )
         recording = recording_from_acquisition(
@@ -254,6 +269,12 @@ class PlutoLiveSource:
                     else 0
                 ),
                 "acquisition_trigger_sample_index": int(record.trigger_sample_index),
+                "continuous_rx_block_samples": int(stream_block_samples),
+                "trigger_offset_in_rx_block": int(record.trigger.offset_in_block),
+                "trigger_samples_to_rx_block_end": int(
+                    stream_block_samples - record.trigger.offset_in_block
+                ),
+                **stream_diagnostics,
             },
         )
 
@@ -263,94 +284,129 @@ class PlutoLiveSource:
         metadata: AcquisitionMetadata,
         *,
         cancelled: Callable[[], bool],
+        armed: Callable[[], None] | None,
         fresh: bool,
     ):
         assert self._receiver is not None
+        assert self._acquisition is not None
         if settings.trigger_source is TriggerKind.FREE_RUN:
-            block = self._receiver.capture_iq_block(
-                settings.capture_samples,
-                source="VSA Pluto Single",
-                fresh=fresh,
-            )
-            if cancelled():
-                raise CaptureCancelledError("Pluto capture cancelled")
             trigger = TriggerConfig(
                 kind=TriggerKind.FREE_RUN,
                 run_mode=TriggerRunMode.SINGLE,
                 rearm_mode=TriggerRearmMode.STOP_ON_TRIGGER,
                 pretrigger_samples=0,
-                posttrigger_samples=block.sample_count - 1,
+                posttrigger_samples=settings.capture_samples - 1,
             )
-            records = TriggerAcquisitionController(trigger, metadata).feed(block)
-            if len(records) != 1:
-                raise RuntimeError("Pluto single capture did not produce one complete record")
-            return records[0], 0
-
-        offset_samples = int(round(settings.trigger_offset_s * metadata.sample_rate_hz))
-        default_prestore_samples = (
-            settings.default_trigger_prestore_samples if offset_samples == 0 else 0
-        )
-        output_start_from_trigger = offset_samples - default_prestore_samples
-        pretrigger_samples = max(0, -output_start_from_trigger)
-        posttrigger_samples = max(
-            0,
-            settings.capture_samples + output_start_from_trigger - 1,
-        )
-        correction = settings.power_correction
-        trigger = TriggerConfig(
-            kind=TriggerKind.POWER_LEVEL,
-            run_mode=TriggerRunMode.SINGLE,
-            rearm_mode=TriggerRearmMode.STOP_ON_TRIGGER,
-            slope=settings.trigger_slope,
-            level_dbfs=power_trigger_display_dbm_to_dbfs(
-                settings.trigger_level_dbm,
-                calibration_offset_db=correction.calibration_offset_db,
-                frequency_dependent_offset_db=(
-                    correction.frequency_dependent_offset_db
+            output_start_offset = 0
+        else:
+            offset_samples = int(round(settings.trigger_offset_s * metadata.sample_rate_hz))
+            default_prestore_samples = (
+                settings.default_trigger_prestore_samples if offset_samples == 0 else 0
+            )
+            output_start_from_trigger = offset_samples - default_prestore_samples
+            pretrigger_samples = max(0, -output_start_from_trigger)
+            posttrigger_samples = max(
+                0,
+                settings.capture_samples + output_start_from_trigger - 1,
+            )
+            correction = settings.power_correction
+            trigger = TriggerConfig(
+                kind=TriggerKind.POWER_LEVEL,
+                run_mode=TriggerRunMode.SINGLE,
+                rearm_mode=TriggerRearmMode.STOP_ON_TRIGGER,
+                slope=settings.trigger_slope,
+                level_dbfs=power_trigger_display_dbm_to_dbfs(
+                    settings.trigger_level_dbm,
+                    calibration_offset_db=correction.calibration_offset_db,
+                    frequency_dependent_offset_db=(
+                        correction.frequency_dependent_offset_db
+                    ),
+                    input_correction_db=correction.input_correction_db,
                 ),
-                input_correction_db=correction.input_correction_db,
-            ),
-            hysteresis_db=settings.trigger_hysteresis_db,
-            pretrigger_samples=pretrigger_samples,
-            posttrigger_samples=posttrigger_samples,
-        )
+                hysteresis_db=settings.trigger_hysteresis_db,
+                pretrigger_samples=pretrigger_samples,
+                posttrigger_samples=posttrigger_samples,
+            )
+            output_start_offset = pretrigger_samples + output_start_from_trigger
+
         controller = TriggerAcquisitionController(trigger, metadata)
-        cursor = self._receiver.start(
-            block_size=self._STREAM_CAPTURE_BLOCK_SAMPLES,
-            source="VSA Pluto I/Q Power Trigger",
+        stream_block_samples = resolve_record_stream_block_samples(
+            settings.capture_samples,
+            base_block_samples=self._STREAM_CAPTURE_BLOCK_SAMPLES,
+        )
+        cursor = self._acquisition.start(
+            block_size=stream_block_samples,
+            source="vsa_continuous",
             fresh=fresh,
         )
-        try:
-            while True:
+        armed_reported = False
+        observed_blocks = 0
+        max_refill_ratio = 0.0
+        while True:
+            if cancelled():
+                raise CaptureCancelledError("Pluto capture cancelled")
+            read_result = self._acquisition.read(cursor, max_blocks=32)
+            cursor = read_result.cursor
+            if read_result.overrun:
+                raise RuntimeError(
+                    "VSA Pluto stream consumer overrun: "
+                    f"missed {read_result.missed_blocks} IQ block(s)"
+                )
+            if not read_result.blocks:
+                time.sleep(0.001)
+                continue
+            if not armed_reported:
+                # A running Python thread is not proof that libiio has queued
+                # and filled its first DMA buffer.  Only expose the armed state
+                # after the first actual IQ block arrives.
+                armed_reported = True
+                if armed is not None:
+                    armed()
+            for block in read_result.blocks:
                 if cancelled():
                     raise CaptureCancelledError("Pluto capture cancelled")
-                read_result = self._receiver.read_iq_stream(cursor, max_blocks=32)
-                cursor = read_result.cursor
-                if read_result.overrun:
-                    raise RuntimeError(
-                        "VSA Pluto stream consumer overrun: "
-                        f"missed {read_result.missed_blocks} IQ block(s)"
+                observed_blocks += 1
+                expected_refill_s = block.sample_count / metadata.sample_rate_hz
+                if expected_refill_s > 0.0:
+                    max_refill_ratio = max(
+                        max_refill_ratio,
+                        float(block.capture_elapsed_s) / expected_refill_s,
                     )
-                if not read_result.blocks:
-                    time.sleep(0.001)
-                    continue
-                for block in read_result.blocks:
-                    if cancelled():
-                        raise CaptureCancelledError("Pluto capture cancelled")
-                    records = controller.feed(block)
-                    if records:
-                        output_start_offset = (
-                            pretrigger_samples + output_start_from_trigger
-                        )
-                        return records[0], output_start_offset
-        finally:
-            if not self._receiver.stop():
-                raise RuntimeError("VSA Pluto receive worker did not stop")
+                # The hardware producer has one stable source name so Free
+                # Run and Power Trigger can share it without restarting.
+                # Records retain the user-facing acquisition source.
+                records = controller.feed(replace(block, source=metadata.source))
+                if records:
+                    return (
+                        records[0],
+                        output_start_offset,
+                        stream_block_samples,
+                        {
+                            "continuous_rx_observed_blocks": int(observed_blocks),
+                            "continuous_rx_max_refill_ratio": float(max_refill_ratio),
+                            "continuous_rx_kernel_buffers_requested": int(
+                                getattr(self._receiver, "rx_kernel_buffers_requested", 0)
+                            ),
+                            "continuous_rx_kernel_buffers_applied": (
+                                None
+                                if getattr(
+                                    self._receiver,
+                                    "rx_kernel_buffers_applied",
+                                    None,
+                                )
+                                is None
+                                else int(self._receiver.rx_kernel_buffers_applied)
+                            ),
+                        },
+                    )
 
     def close(self) -> None:
         if self._receiver is not None:
+            if self._acquisition is not None:
+                self._acquisition.stop()
             self._receiver.close()
             self._receiver = None
+            self._acquisition = None
             self._active_config = None
 
     @staticmethod

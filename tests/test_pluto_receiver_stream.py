@@ -22,6 +22,11 @@ class FakePluto:
         self.rx_hardwaregain_chan0 = 0
         self.destroy_count = 0
         self.next_sample = 0
+        self.kernel_buffer_counts: list[int] = []
+        self._rxadc = self
+
+    def set_kernel_buffers_count(self, count: int) -> None:
+        self.kernel_buffer_counts.append(int(count))
 
     def rx_destroy_buffer(self) -> None:
         self.destroy_count += 1
@@ -59,6 +64,13 @@ def test_synchronous_capture_publishes_common_iq_block(monkeypatch) -> None:
     assert block.source == "calibration"
     assert block.start_sample_index == 0
     assert block.discontinuity_before is True
+
+
+def test_receiver_increases_kernel_dma_queue_before_streaming(monkeypatch) -> None:
+    receiver = build_receiver(monkeypatch)
+
+    assert receiver.sdr.kernel_buffer_counts == [8]
+    assert receiver.rx_kernel_buffers_applied == 8
 
 
 def test_fresh_synchronous_capture_recreates_rx_buffer(monkeypatch) -> None:

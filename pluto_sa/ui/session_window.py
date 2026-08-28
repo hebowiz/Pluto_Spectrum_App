@@ -21,6 +21,7 @@ from pluto_sa.config.session_state import (
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
+from pluto_sa.sdr.continuous_acquisition import ContinuousIQAcquisition
 from pluto_sa.ui.main_window import (
     GRAPH_VIEW_BOTH,
     GRAPH_VIEW_OPTIONS,
@@ -133,7 +134,13 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         old_receiver = self.receiver
         old_selector = self.config.sdr_uri
         self.timer.stop()
-        if not old_receiver.stop():
+        old_acquisition = getattr(self, "iq_acquisition", None)
+        stopped = (
+            old_acquisition.stop()
+            if old_acquisition is not None
+            else old_receiver.stop()
+        )
+        if not stopped:
             self._restart_timer_for_current_mode()
             QtWidgets.QMessageBox.critical(
                 self,
@@ -159,6 +166,8 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
             self._session_settings.setValue(RTSA_DEVICE_KEY, old_selector or "")
             self._session_settings.sync()
             self.receiver = old_receiver
+            if old_acquisition is not None:
+                self.iq_acquisition = old_acquisition
             self.sweep_controller.receiver = old_receiver
             self.start_initial_acquisition(force=True)
             QtWidgets.QMessageBox.critical(
@@ -169,6 +178,7 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
             return
 
         self.receiver = new_receiver
+        self.iq_acquisition = ContinuousIQAcquisition(new_receiver)
         self._update_device_window_title()
         self.sweep_controller.receiver = new_receiver
         self.sweep_controller.config = self.config

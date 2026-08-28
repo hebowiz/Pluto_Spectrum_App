@@ -489,6 +489,7 @@ def _fsk_phase_difference_symbols(
 
 
 class _PlutoSingleCaptureThread(QtCore.QThread):
+    capture_armed = QtCore.Signal(str)
     capture_ready = QtCore.Signal(object)
     capture_failed = QtCore.Signal(str)
     capture_cancelled = QtCore.Signal()
@@ -497,17 +498,20 @@ class _PlutoSingleCaptureThread(QtCore.QThread):
         self,
         source: PlutoLiveSource,
         settings: PlutoCaptureSettings,
+        armed_message: str,
         parent: QtCore.QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._source = source
         self._settings = settings
+        self._armed_message = str(armed_message)
 
     def run(self) -> None:
         try:
             recording = self._source.capture_single(
                 self._settings,
                 cancelled=self.isInterruptionRequested,
+                armed=lambda: self.capture_armed.emit(self._armed_message),
             )
             if self.isInterruptionRequested():
                 self.capture_cancelled.emit()
@@ -520,6 +524,10 @@ class _PlutoSingleCaptureThread(QtCore.QThread):
 
     def cancel(self) -> None:
         self.requestInterruption()
+
+    @property
+    def sample_rate_hz(self) -> float:
+        return float(self._settings.requested_sample_rate_hz)
 
 
 class _AnalysisThread(QtCore.QThread):
@@ -3011,12 +3019,16 @@ class VSAWindow(QtWidgets.QMainWindow):
                 f"{settings.requested_sample_rate_hz / 1e6:.3f} MS/s, "
                 f"{settings.capture_samples:,} samples"
             )
-        self.statusBar().showMessage(capture_status)
+        self.statusBar().showMessage(
+            "Preparing Pluto receiver - waiting for the first continuous IQ block..."
+        )
         thread = _PlutoSingleCaptureThread(
             self._pluto_source,
             settings,
+            capture_status,
             self,
         )
+        thread.capture_armed.connect(self._pluto_capture_armed)
         thread.capture_ready.connect(self._pluto_capture_ready)
         thread.capture_failed.connect(self._pluto_capture_failed)
         thread.capture_cancelled.connect(self._pluto_capture_cancelled)
@@ -3025,6 +3037,20 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._pluto_capture_thread = thread
         self._pluto_capture_started_at = perf_counter()
         thread.start()
+
+    def _pluto_capture_armed(self, message: str) -> None:
+        """Report readiness only after libiio has delivered real IQ."""
+        thread = self._pluto_capture_thread
+        if thread is None or not thread.isRunning():
+            return
+        sample_rate_hz = thread.sample_rate_hz
+        transport_warning = (
+            " | GAP RISK: sample rate exceeds the stock Pluto USB "
+            "continuous-rate guideline"
+            if sample_rate_hz > 6_000_000.0
+            else ""
+        )
+        self.statusBar().showMessage(f"Armed - {message}{transport_warning}")
 
     def _pluto_capture_ready(self, recording: object) -> None:
         if not isinstance(recording, IQRecording):
@@ -3388,12 +3414,27 @@ class VSAWindow(QtWidgets.QMainWindow):
             return
         dsp_ms = self._last_analysis_timings_ms.get("total_dsp", 0.0)
         total_ms = float(capture_ms) + dsp_ms + display_ms
+        refill_ratio = float(
+            self.session.recording.metadata.get(
+                "continuous_rx_max_refill_ratio",
+                0.0,
+            )
+            or 0.0
+        )
+        transport_status = ""
+        if refill_ratio >= 1.0:
+            transport_status = (
+                f" | RX OVERFLOW RISK: refill {refill_ratio:.2f}x block duration"
+            )
+        elif self.session.recording.sample_rate_hz > 6_000_000.0:
+            transport_status = " | RX GAP RISK (>6 MS/s stock Pluto USB)"
         self.statusBar().showMessage(
             "Pluto Single complete - "
             f"{self.session.recording.sample_count:,} samples, "
             f"{self.session.recording.sample_rate_hz / 1e6:.3f} MS/s | "
             f"Capture {capture_ms:.0f} ms | DSP {dsp_ms:.0f} ms | "
             f"Display {display_ms:.0f} ms | Total {total_ms:.0f} ms"
+            f"{transport_status}"
         )
 
     def _analysis_failed(

@@ -26,6 +26,11 @@ from pluto_sa.sdr.trigger import (
 from pluto_sa.sdr.trigger_detector import PowerLevelTriggerDetector
 from pluto_sa.sdr.trigger_recorder import TriggeredIQRecorder
 from pluto_sa.sdr.trigger_acquisition import TriggerAcquisitionController
+from pluto_sa.sdr.continuous_acquisition import (
+    ContinuousIQAcquisition,
+    ContinuousIQStreamPlan,
+    resolve_record_stream_block_samples,
+)
 
 __all__ = [
     "IQBlock",
@@ -48,4 +53,7 @@ __all__ = [
     "PowerLevelTriggerDetector",
     "TriggeredIQRecorder",
     "TriggerAcquisitionController",
+    "ContinuousIQAcquisition",
+    "ContinuousIQStreamPlan",
+    "resolve_record_stream_block_samples",
 ]

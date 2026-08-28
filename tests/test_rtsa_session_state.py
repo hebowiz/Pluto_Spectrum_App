@@ -95,7 +95,7 @@ def test_device_change_replaces_receiver_and_restarts_current_mode(monkeypatch):
     events = []
 
     class Receiver:
-        def __init__(self, config, name="new"):
+        def __init__(self, config, name="new", **_kwargs):
             self.config = config
             self.name = name
 
@@ -134,6 +134,7 @@ def test_device_change_replaces_receiver_and_restarts_current_mode(monkeypatch):
         ("start", config.analyzer_mode, kwargs)
     )
     window._reset_plot_state = lambda: events.append("plot:reset")
+    window._update_device_window_title = lambda: events.append("title:update")
     window._show_control_page = lambda *args, **kwargs: events.append(
         ("page", args[0], kwargs)
     )

@@ -29,6 +29,10 @@ from pluto_sa.config.spectrum_config import (
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
+from pluto_sa.sdr.continuous_acquisition import (
+    ContinuousIQAcquisition,
+    resolve_record_stream_block_samples,
+)
 from pluto_sa.sdr.iq_stream import IQBlock, IQStreamCursor
 from pluto_sa.sdr.iq_window import resolve_time_window_samples
 from pluto_sa.sdr.trigger import (
@@ -460,6 +464,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.config = config
         self.receiver = receiver
+        self.iq_acquisition = ContinuousIQAcquisition(receiver)
         self.processor = processor
         self.sweep_controller = sweep_controller
         self.calibration_offset_db = calibration_offset_db
@@ -1151,7 +1156,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 message=f"samples={capture_block_samples}",
                 force=True,
             )
-        self._high_speed_ta_stream_cursor = self.receiver.start(
+        self._high_speed_ta_stream_cursor = self.iq_acquisition.start(
             block_size=capture_block_samples,
             source="high_speed_ta",
             max_blocks=(
@@ -1172,20 +1177,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._time_analyzer_time_span_s(),
                 max(1.0, float(self.config.sample_rate_hz)),
             )
-            if TriggerKind(self.config.hsta_trigger_kind) is TriggerKind.POWER_LEVEL:
-                records_per_block = max(
-                    1,
-                    int(HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_SAMPLES) // record_samples,
-                )
-            else:
-                records_per_block = min(
-                    int(HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_RECORDS),
-                    max(
-                        1,
-                        int(np.ceil(HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES / record_samples)),
-                    ),
-                )
-            return int(record_samples * records_per_block)
+            power_trigger = (
+                TriggerKind(self.config.hsta_trigger_kind)
+                is TriggerKind.POWER_LEVEL
+            )
+            return resolve_record_stream_block_samples(
+                record_samples,
+                base_block_samples=HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES,
+                island_max_samples=HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_SAMPLES,
+                max_records_per_block=(
+                    None if power_trigger else HIGH_SPEED_TA_CONTINUOUS_ISLAND_MAX_RECORDS
+                ),
+            )
         return int(
             resolve_time_window_samples(
                 self._time_analyzer_time_span_s(),
@@ -1242,7 +1245,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             message=f"stop_analysis={int(stop_analysis_thread)}",
             force=True,
         )
-        self.receiver.stop()
+        self.iq_acquisition.stop()
         self._high_speed_ta_stream_cursor = None
         if stop_analysis_thread:
             self._stop_high_speed_ta_analysis_thread()
@@ -1668,7 +1671,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     ) -> None:
         if stop_receiver and hasattr(self, "timer"):
             self.timer.stop()
-            self.receiver.stop()
+            self.iq_acquisition.stop()
         self._stop_high_speed_ta_stream()
 
         if stop_sweep:
@@ -3383,7 +3386,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._start_wideband_continuous()
             elif previous_state == SWEEP_STATE_SINGLE:
                 self.sweep_state = SWEEP_STATE_SINGLE
-                self.receiver.stop()
+                self.iq_acquisition.stop()
                 self._restart_timer_for_current_mode()
             else:
                 self.timer.stop()
@@ -3397,7 +3400,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._start_sweep_continuous()
         elif previous_state == SWEEP_STATE_SINGLE:
             self.sweep_state = SWEEP_STATE_SINGLE
-            self.receiver.stop()
+            self.iq_acquisition.stop()
             self.sweep_controller.request_single()
             self._restart_timer_for_current_mode()
         else:
@@ -3419,14 +3422,17 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _start_realtime_continuous(self) -> None:
         self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
-        self.receiver.start()
+        self.iq_acquisition.start(
+            block_size=self.config.rx_buffer_size,
+            source="realtime",
+        )
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
     def _start_time_analyzer_continuous(self) -> None:
         self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
-        self.receiver.stop()
+        self.iq_acquisition.stop()
         self._stop_high_speed_ta_stream()
         self._reset_time_analyzer_time_window(start_timestamp=time.perf_counter())
         self._restart_timer_for_current_mode()
@@ -3463,7 +3469,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _start_wideband_continuous(self) -> None:
         self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
-        self.receiver.stop()
+        self.iq_acquisition.stop()
         self._invalidate_wideband_runtime()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
@@ -4264,27 +4270,33 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         self._prepare_sweep_like_continuous_entry_state()
-        self.receiver.start()
+        self.iq_acquisition.start(
+            block_size=self.config.rx_buffer_size,
+            source="realtime",
+        )
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
     def _enter_single_realtime_mode(self) -> None:
         """Single entry for RealTime SA-style immediate capture path."""
-        self.receiver.start()
+        self.iq_acquisition.start(
+            block_size=self.config.rx_buffer_size,
+            source="realtime",
+        )
 
     def _enter_single_sweep_mode(self) -> None:
         """Single entry for Sweep SA sweep-controller driven path."""
-        self.receiver.stop()
+        self.iq_acquisition.stop()
         self.sweep_controller.request_single()
 
     def _enter_single_wideband_mode(self) -> None:
         """Single entry for WideBand sweep-like path with runtime reset."""
-        self.receiver.stop()
+        self.iq_acquisition.stop()
         self._invalidate_wideband_runtime()
 
     def _enter_single_time_analyzer_mode(self) -> None:
         """Single entry for TA fixed-window accumulation path."""
-        self.receiver.stop()
+        self.iq_acquisition.stop()
         self._reset_time_analyzer_time_window(start_timestamp=time.perf_counter())
 
     def _enter_single_high_speed_time_analyzer_mode(self) -> None:
@@ -4322,7 +4334,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _start_sweep_continuous(self) -> None:
         self._prepare_sweep_like_continuous_entry_state()
-        self.receiver.stop()
+        self.iq_acquisition.stop()
         self.sweep_controller.request_continuous()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
@@ -7571,7 +7583,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         acquisition = self._ensure_high_speed_ta_trigger_acquisition()
         for read_index in range(HIGH_SPEED_TA_STREAM_READ_BLOCKS):
-            stream_result = self.receiver.read_iq_stream(
+            stream_result = self.iq_acquisition.read(
                 self._high_speed_ta_stream_cursor,
                 max_blocks=1,
             )
@@ -7743,7 +7755,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.prev_frame_time = now_frame
 
-        iq = self.receiver.get_latest_block()
+        iq = self.iq_acquisition.latest_samples(self.config.fft_size)
         if iq is None:
             return
 
@@ -7790,7 +7802,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         if self.sweep_state == SWEEP_STATE_SINGLE:
             self.timer.stop()
-            self.receiver.stop()
+            self.iq_acquisition.stop()
             self.sweep_state = SWEEP_STATE_STOPPED
             self._update_continuous_button()
 
