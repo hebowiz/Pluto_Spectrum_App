@@ -34,6 +34,7 @@ PERSISTED_CONFIG_FIELDS = (
     "ext_gain_db",
     "remove_dc_offset",
     "fft_size",
+    "realtime_fft_parameter_mode",
     "waterfall_history",
     "persistence_decay_mode",
     "wideband_chunk_width_hz",

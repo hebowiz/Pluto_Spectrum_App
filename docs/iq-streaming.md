@@ -259,3 +259,19 @@ python -m pytest -q
 - Waterfallの測定レンジ下端15%を暗いNavyへ固定し、noise floorの色変化を抑制。15～80%だけをBlue→Cyan→Green→Yellow→Redへ展開。
 - WideBand RT SAのFrequencyメニューへChunk Width 10／20／30／40 MHzを追加。左右各5 MHzと外周4% guardを維持し、測定下端から可変幅chunkを配置。最大40 MHzをdirect USB、約54.35 MSPS、2 chunksで実機確認。
 - 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。
+# 2026-08-29 RTSA Span/RBW自動設計
+
+- 通常RTSAのFFT設定を`Auto`/`Advanced`へ分離し、通常利用はSpan/RBW主体とした。
+- Gaussian RBW FIRのsupportをWindow Lengthとして自動計算し、NFFTは窓収容と最低表示bin密度から独立に決定する。
+- overlap、Hop、時間被覆率をNFFTではなく非ゼロWindow Length基準へ修正した。
+- GUI FPSとは独立した連続FFT/Detector集約経路を維持し、処理上限による未観測区間は割合と警告で表示する。
+- RBW、Span、FFT mode変更時にRealtimeFFTAccumulatorを再構築し、古いprocessor/windowを保持しないようにした。
+
+### 2026-08-30: RTSAの時間ギャップ境界
+
+- RX ring overrun、producerの`discontinuity_before`、およびIQ blockの`start_sample_index`不連続をFFT境界として扱う。
+- 境界を検出した時点で、まだFFTされていないpartial/overlap IQを破棄する。ギャップ前後のIQを連結したFFTは生成しない。
+- ギャップ前に完結したFFT結果は有効なため、同じ表示期間のDetector集約には残す。ギャップ後は新しい連続区間だけでFFTを再開する。
+- `Analysis gaps`は処理上限によりHop SizeがWindow Lengthを超えた計画的な未観測区間であり、IQ欠落を連結する処理ではない。スキップ対象sampleはFFT窓へ混入しない。
+- この処理は既知の欠落による偽広帯域スペクトルを防ぐが、USB/DMA内で検出不能なsample欠落を復元・判定するものではない。
+- WB RTSAは今回の自動設計対象外とし、従来のchunk取得仕様を維持した。

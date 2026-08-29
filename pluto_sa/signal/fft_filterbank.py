@@ -25,6 +25,69 @@ class GaussianFFTFilterBankDesign:
     rbw_limited_by_fft_size: bool
 
 
+@dataclass(frozen=True)
+class AutomaticRTSAFFTDesign:
+    """FFT dimensions derived from the user-facing Span/RBW conditions."""
+
+    fft_size: int
+    window_length_samples: int
+    requested_display_bins: int
+    available_display_bins: int
+    limited_by_fft_size: bool
+
+
+def _next_power_of_two(value: int) -> int:
+    resolved = max(1, int(value))
+    return 1 << int(np.ceil(np.log2(resolved)))
+
+
+def resolve_automatic_rtsa_fft_design(
+    *,
+    sample_rate_hz: float,
+    rbw_hz: float,
+    guard_ratio: float,
+    minimum_display_bins: int = 1024,
+    maximum_fft_size: int = 16_384,
+) -> AutomaticRTSAFFTDesign:
+    """Choose NFFT from RBW support and useful on-screen bin density.
+
+    The RBW defines the non-zero analysis-window length. NFFT is independently
+    enlarged, by zero padding when necessary, so the guarded display span has
+    enough frequency bins. The maximum is a processing-policy ceiling rather
+    than a change to the requested Span/RBW measurement condition.
+    """
+    if not np.isfinite(sample_rate_hz) or float(sample_rate_hz) <= 0.0:
+        raise ValueError("sample_rate_hz must be positive")
+    if not np.isfinite(rbw_hz) or float(rbw_hz) <= 0.0:
+        raise ValueError("rbw_hz must be positive")
+    guard = float(guard_ratio)
+    if not 0.0 <= guard < 0.5:
+        raise ValueError("guard_ratio must be in [0, 0.5)")
+    requested_bins = max(16, int(minimum_display_bins))
+    maximum_size = max(16, int(maximum_fft_size))
+
+    coefficients, _design = design_iq_rbw_filter(
+        float(sample_rate_hz),
+        float(rbw_hz),
+        shape="gaussian",
+    )
+    window_length = int(len(coefficients))
+    display_fraction = 1.0 - 2.0 * guard
+    density_fft_size = _next_power_of_two(
+        int(np.ceil(float(requested_bins) / display_fraction))
+    )
+    required_size = _next_power_of_two(max(window_length, density_fft_size))
+    resolved_size = min(required_size, maximum_size)
+    available_bins = max(1, int(np.floor(resolved_size * display_fraction)))
+    return AutomaticRTSAFFTDesign(
+        fft_size=resolved_size,
+        window_length_samples=min(window_length, resolved_size),
+        requested_display_bins=requested_bins,
+        available_display_bins=available_bins,
+        limited_by_fft_size=required_size > maximum_size,
+    )
+
+
 def minimum_gaussian_rbw_hz(sample_rate_hz: float, fft_size: int) -> float:
     """Return the narrowest +/-4 sigma Gaussian FIR that fits one FFT frame."""
     if not np.isfinite(sample_rate_hz) or float(sample_rate_hz) <= 0.0:

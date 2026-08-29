@@ -34,7 +34,7 @@ PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリン�
 ## 信号処理
 
 1. 必要に応じてIQ平均値を減算
-2. 既定80% overlap（hopはFFT長の約20%）で連続IQを解析窓へ分割
+2. 既定80% overlap（hopはRBWから決まるWindow Lengthの約20%）で連続IQを解析窓へ分割
 3. Sweep SA／TAと同じGaussian complex IQ FIR係数をFFT長へゼロ埋めした解析窓を適用
 4. FFTとfftshift
 5. FFTサイズおよびcoherent gainで正規化
@@ -45,9 +45,9 @@ PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリン�
 
 各FFT binは、中心周波数だけが異なる同一Gaussian複素フィルターの出力に相当します。RBWは両側3 dB bandwidth、ENBWは約`1.0645 × RBW`です。従来のFFT電力化後のGaussian畳み込みはRBW経路から除外しました。
 
-指定RBWのGaussian係数が現在のFFT長へ収まらない場合は、FFT Sizeを最大16384まで自動拡張します。それでも収まらない場合は収まる最小RBWへ制限し、ステータスの`Eff RBW`へ実効値と`limited`を表示します。
+Autoでは、指定RBWのGaussian係数が収まるWindow Lengthとguard除外後の表示bin密度からNFFTを最大16384まで自動決定します。それでもWindow Lengthが収まらない場合は収まる最小RBWへ制限し、ステータスの`Eff RBW`へ実効値と`limited`を表示します。
 
-既定の目標overlapは80%、host側の処理量上限は10000 FFT/sです。目標を処理できない設定では、FFT Size、Span、Sample Rateを強制変更せずhopを広げます。ステータスへ実overlap、FFT rate、表示1 frame当たりのFFT数を表示し、overlap低下時は`Reduced overlap`、hopがFFT長を超えて未解析区間が生じる場合は`Analysis gaps`、時間被覆率と警告を表示します。この上限は2026-08-29時点の開発PCでcomplex64 batched FFTが約17000 FFT/sだった実測に対し、GUI処理の余力を残した値です。
+既定の目標overlapは80%、host側の処理量上限は10000 FFT/sです。目標を処理できない設定では、NFFT、Span、Sample Rate、RBWを強制変更せずhopを広げます。ステータスへWindow Length、実overlap、FFT rate、表示1 frame当たりのFFT数を表示し、overlap低下時は`Reduced overlap`、hopがWindow Lengthを超えて未解析区間が生じる場合は`Analysis gaps`、時間被覆率と警告を表示します。この上限は2026-08-29時点の開発PCでcomplex64 batched FFTが約17000 FFT/sだった実測に対し、GUI処理の余力を残した値です。
 
 DetectorはGUI更新間に得たFFT群へ適用します。
 
@@ -80,7 +80,7 @@ AverageとRMSは現段階では入力がFFT後のlinear powerなので同値で�
 |---|---:|
 | Center | 2.440 GHz |
 | Span | 20 MHz |
-| FFT Size | 4096 |
+| FFT Parameters | Auto（既定Span/RBWではNFFT 2048） |
 | RBW | 1 MHz |
 | Target Overlap | 80% |
 | FFT processing limit | 10000 FFT/s |
@@ -92,6 +92,19 @@ AverageとRMSは現段階では入力がFFT後のlinear powerなので同値で�
 
 - 55 MHzを超えるSpanはモード移行時または設定反映時に55 MHzへ制限されます。
 - RX ring overrunまたはUSB/DMA側の欠落データを再送・補間する機能はありません。
-- overlap FFTを実装しましたが、処理上限により`Analysis gaps`と表示された設定では全sampleを解析しません。`Real-time`または`Reduced overlap`かつ`Coverage: 100%`であっても、USB/DMA欠落がないことは別途`RX Discontinuity`と実機条件で確認します。
+- overlap FFTを実装しましたが、処理上限により`Analysis gaps`と表示された設定では全sampleを解析しません。`Real-time`または`Reduced overlap`かつ`Time Coverage: 100%`であっても、USB/DMA欠落がないことは別途`RX Discontinuity`と実機条件で確認します。
 - WB RTSAは今回のoverlap consumerの対象外で、従来のchunk取得方式を維持します。
 - 表示値は校正された相対的なFFT電力をdBmとして扱う実装で、絶対精度は校正条件に依存します。
+
+# 2026-08-29: Span / RBW 主体の自動FFT設計
+
+通常のRealTime SAでは、ユーザーが指定する主要な測定条件を`Span`と`RBW`に整理し、FFT内部パラメータの既定モードを`Auto`としました。WideBand RT SAのchunk処理は今回の対象外で、従来仕様を維持します。
+
+- RBWからGaussian解析窓の非ゼロ長（Window Length）を決定します。
+- NFFTはWindow Lengthとは独立に、解析窓が収まることと、guard除外後に最低1024表示binを確保することの両方から2のべき乗へ自動決定します。短い窓はzero paddingされます。
+- Hop SizeはWindow Lengthに対する目標80% overlapから求めます。FFT処理上限を超える場合はHopを広げ、Span/RBWを勝手に変更しません。
+- 時間被覆率は`min(1, Window Length / Hop Size)`で算出します。100%未満ではステータスに`WARNING: time-domain observation gaps`を表示します。
+- 連続IQからのFFT生成はGUI表示FPSと独立して進み、表示期間中に得られた複数FFTをDetectorで集約します。
+- `FFT Parameters > Advanced`を選ぶと従来のFFT Size個別設定を利用できます。手動NFFTが指定RBWの解析窓を収容できない場合だけ、安全のためNFFTを拡張します。
+
+ここでWindow Lengthは時間分解能・POI・overlapの基準、NFFTは周波数表示gridの基準です。zero paddingされたNFFT全長を時間観測窓として扱わないことが重要です。

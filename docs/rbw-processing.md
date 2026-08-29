@@ -148,3 +148,8 @@ raw trigger recordを正本として保持し、解析段でchannel selection fi
 1. 既知CW/noise/burstを実機入力し、3 dB bandwidth、ENBW、rise/fall time、校正差を検証する。
 2. TA UIの`RBW`と`RF BW`を`Measurement BW`と`Acquisition BW`へ整理する。
 3. 実装済みoverlap/hop処理について、既知burstで時間被覆率、POI、各Detectorと商用RTSAの差を実機検証する。
+# RTSA自動FFTにおけるRBWと時間被覆（2026-08-29）
+
+通常RTSAのRBWは、電力化後の周波数平滑化ではなく、複素IQへ適用するGaussian解析窓（FFT filter bank）の両側3 dB帯域幅です。RBWから得たFIR supportをWindow Length `L`、FFT周波数gridをNFFT `N`として分離します。`N > L`の部分はzero paddingであり、追加の時間観測データではありません。
+
+時間方向の実効overlapと被覆率はNFFTではなくWindow Lengthで評価します。Hop Sizeを`H`とすると、実効overlapは`max(0, 1 - H/L)`、時間被覆率は`min(1, L/H)`です。処理性能のため`H > L`となる場合、RBWを変更せず解析gapを明示します。DetectorはGUIの1表示期間に生成された各FFTのlinear powerをbinごとに集約します。

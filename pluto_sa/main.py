@@ -18,6 +18,7 @@ from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.sweep_controller import SweepController
 from pluto_sa.sdr.pluto_receiver import PlutoReceiver
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
+from pluto_sa.signal.fft_filterbank import resolve_automatic_rtsa_fft_design
 from pluto_sa.ui.session_window import SessionRealtimeSpectrumWindow
 
 
@@ -96,6 +97,14 @@ def build_app_components(sdr_uri: str | None = None) -> tuple[
     SessionRealtimeSpectrumWindow,
 ]:
     config = SpectrumConfig(sdr_uri=sdr_uri)
+    if config.rbw_hz is not None and config.realtime_fft_parameter_mode == "Auto":
+        automatic_fft = resolve_automatic_rtsa_fft_design(
+            sample_rate_hz=float(config.sample_rate_hz),
+            rbw_hz=float(config.rbw_hz),
+            guard_ratio=float(config.guard_ratio),
+            minimum_display_bins=int(config.realtime_min_display_bins),
+        )
+        config.fft_size = int(automatic_fft.fft_size)
     receiver = PlutoReceiver(config, owner_application="Pluto RTSA")
     processor = SpectrumProcessor(config)
     sweep_controller = SweepController(config, receiver)

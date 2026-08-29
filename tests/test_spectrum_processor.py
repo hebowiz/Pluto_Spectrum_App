@@ -8,6 +8,7 @@ from pluto_sa.modes.analyzer_mode import AnalyzerMode
 from pluto_sa.signal.fft_filterbank import (
     design_gaussian_fft_filterbank,
     required_gaussian_fft_size,
+    resolve_automatic_rtsa_fft_design,
 )
 from pluto_sa.signal.measurement_filter import design_iq_rbw_filter
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
@@ -129,6 +130,33 @@ def test_required_fft_size_contains_requested_gaussian_support() -> None:
     assert design.support_samples <= len(window)
 
 
+def test_automatic_rtsa_fft_separates_rbw_window_from_frequency_grid() -> None:
+    design = resolve_automatic_rtsa_fft_design(
+        sample_rate_hz=21_739_130.0,
+        rbw_hz=1_000_000.0,
+        guard_ratio=0.04,
+        minimum_display_bins=1024,
+    )
+
+    assert design.window_length_samples == 49
+    assert design.fft_size == 2048
+    assert design.available_display_bins >= design.requested_display_bins
+    assert design.limited_by_fft_size is False
+
+
+def test_automatic_rtsa_fft_grows_for_narrow_rbw_support() -> None:
+    design = resolve_automatic_rtsa_fft_design(
+        sample_rate_hz=21_739_130.0,
+        rbw_hz=10_000.0,
+        guard_ratio=0.04,
+        minimum_display_bins=1024,
+    )
+
+    assert design.window_length_samples == 4611
+    assert design.fft_size == 8192
+    assert design.limited_by_fft_size is False
+
+
 def test_wideband_chunk_uses_same_gaussian_filterbank_processor() -> None:
     config = SpectrumConfig(
         analyzer_mode=AnalyzerMode.REALTIME_SA,
@@ -190,6 +218,27 @@ def test_realtime_rbw_expansion_stops_at_supported_fft_limit() -> None:
     assert config.fft_size == MAX_REALTIME_FFT_SIZE
     processor = SpectrumProcessor(config)
     assert processor.filterbank_design.rbw_limited_by_fft_size is True
+
+
+def test_advanced_realtime_fft_does_not_shrink_manual_fft_size() -> None:
+    config = SpectrumConfig(
+        analyzer_mode=AnalyzerMode.REALTIME_SA,
+        display_span_hz=20_000_000,
+        fft_size=16_384,
+        rbw_hz=1_000_000.0,
+        realtime_fft_parameter_mode="Advanced",
+    )
+    owner = type(
+        "Owner",
+        (),
+        {
+            "config": config,
+            "_update_fft_menu_controls": lambda self: None,
+        },
+    )()
+
+    assert RealtimeSpectrumWindow._expand_realtime_fft_for_rbw(owner) is False
+    assert config.fft_size == 16_384
 
 
 def test_waterfall_reaches_red_at_80_percent_of_measurement_range() -> None:

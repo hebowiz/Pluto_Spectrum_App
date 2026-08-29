@@ -50,6 +50,8 @@ class SpectrumConfig:
     persistence_decay_mode: str = "Medium"
     waterfall_decimation: int = 4
     capture_buffer_blocks: int = 512
+    realtime_fft_parameter_mode: str = "Auto"
+    realtime_min_display_bins: int = 1024
     realtime_overlap_ratio: float = 0.8
     realtime_fft_rate_limit_hz: float = 10_000.0
     realtime_stream_read_blocks: int = 16
@@ -107,6 +109,11 @@ class SpectrumConfig:
             1,
             int(self.realtime_stream_read_blocks),
         )
+        normalized_fft_mode = str(self.realtime_fft_parameter_mode).strip().lower()
+        self.realtime_fft_parameter_mode = (
+            "Advanced" if normalized_fft_mode == "advanced" else "Auto"
+        )
+        self.realtime_min_display_bins = max(16, int(self.realtime_min_display_bins))
 
     @property
     def sample_rate_hz(self) -> int:

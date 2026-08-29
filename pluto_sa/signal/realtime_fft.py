@@ -14,6 +14,7 @@ from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 @dataclass(frozen=True)
 class RealtimeFFTPlan:
     fft_size: int
+    window_length_samples: int
     hop_samples: int
     target_overlap_ratio: float
     actual_overlap_ratio: float
@@ -36,33 +37,45 @@ def build_realtime_fft_plan(
     *,
     sample_rate_hz: float,
     fft_size: int,
+    window_length_samples: int | None = None,
     target_overlap_ratio: float = 0.8,
     max_fft_rate_hz: float = 10_000.0,
 ) -> RealtimeFFTPlan:
-    """Resolve a best-effort hop without changing user RF/FFT settings."""
+    """Resolve a best-effort hop for an RTSA analysis filter bank.
+
+    ``fft_size`` determines the frequency grid. ``window_length_samples`` is
+    the non-zero time support of the RBW analysis filter and therefore the
+    quantity that determines temporal overlap and observation coverage.
+    Keeping these concepts separate is essential when a short RBW window is
+    zero-padded to a larger FFT for display-bin density.
+    """
     rate = float(sample_rate_hz)
     size = int(fft_size)
+    window_length = size if window_length_samples is None else int(window_length_samples)
     overlap = float(target_overlap_ratio)
-    if rate <= 0.0 or size <= 0:
-        raise ValueError("sample_rate_hz and fft_size must be positive")
+    if rate <= 0.0 or size <= 0 or window_length <= 0:
+        raise ValueError("sample_rate_hz, fft_size, and window_length_samples must be positive")
+    if window_length > size:
+        raise ValueError("window_length_samples must not exceed fft_size")
     if not 0.0 <= overlap < 1.0:
         raise ValueError("target_overlap_ratio must be in [0, 1)")
     if float(max_fft_rate_hz) <= 0.0:
         raise ValueError("max_fft_rate_hz must be positive")
 
-    target_hop = max(1, int(round(size * (1.0 - overlap))))
+    target_hop = max(1, int(round(window_length * (1.0 - overlap))))
     rate_limited_hop = max(1, int(math.ceil(rate / float(max_fft_rate_hz))))
     hop = max(target_hop, rate_limited_hop)
-    actual_overlap = max(0.0, 1.0 - (float(hop) / float(size)))
-    coverage = min(1.0, float(size) / float(hop))
+    actual_overlap = max(0.0, 1.0 - (float(hop) / float(window_length)))
+    coverage = min(1.0, float(window_length) / float(hop))
     if hop <= target_hop:
         quality = "Real-time"
-    elif hop <= size:
+    elif hop <= window_length:
         quality = "Reduced overlap"
     else:
         quality = "Analysis gaps"
     return RealtimeFFTPlan(
         fft_size=size,
+        window_length_samples=window_length,
         hop_samples=hop,
         target_overlap_ratio=overlap,
         actual_overlap_ratio=actual_overlap,
@@ -89,6 +102,7 @@ class RealtimeFFTAccumulator:
         self.plan = build_realtime_fft_plan(
             sample_rate_hz=float(processor.config.sample_rate_hz),
             fft_size=int(processor.config.fft_size),
+            window_length_samples=int(processor.filterbank_design.support_samples),
             target_overlap_ratio=target_overlap_ratio,
             max_fft_rate_hz=max_fft_rate_hz,
         )
@@ -101,10 +115,16 @@ class RealtimeFFTAccumulator:
         self._input_samples = 0
         self._discontinuities = 0
         self._has_seen_input = False
+        self._expected_sample_index: int | None = None
 
     @property
     def has_seen_input(self) -> bool:
         return self._has_seen_input
+
+    @property
+    def expected_sample_index(self) -> int | None:
+        """Next stream sample index expected by this consumer, when known."""
+        return self._expected_sample_index
 
     def set_detector_mode(self, detector_mode: DetectorMode | str) -> None:
         resolved = DetectorMode(detector_mode)
@@ -119,15 +139,38 @@ class RealtimeFFTAccumulator:
             self._discontinuities += 1
         self._pending = np.empty(0, dtype=np.complex64)
         self._skip_samples = 0
+        self._expected_sample_index = None
 
-    def process(self, iq: np.ndarray, *, discontinuity_before: bool = False) -> int:
+    def process(
+        self,
+        iq: np.ndarray,
+        *,
+        discontinuity_before: bool = False,
+        start_sample_index: int | None = None,
+    ) -> int:
+        """Consume one contiguous IQ block.
+
+        A producer discontinuity flag or a jump in ``start_sample_index``
+        discards all partial FFT/overlap state.  Consequently, no FFT window
+        can contain samples from both sides of a known time gap.
+        """
         samples = np.asarray(iq)
         if samples.ndim != 1 or not np.issubdtype(samples.dtype, np.complexfloating):
             raise ValueError("iq must be one-dimensional complex samples")
-        if discontinuity_before:
+        resolved_start = (
+            None if start_sample_index is None else int(start_sample_index)
+        )
+        index_discontinuity = bool(
+            resolved_start is not None
+            and self._expected_sample_index is not None
+            and resolved_start != self._expected_sample_index
+        )
+        if discontinuity_before or index_discontinuity:
             self.mark_discontinuity()
         self._has_seen_input = True
         self._input_samples += int(len(samples))
+        if resolved_start is not None:
+            self._expected_sample_index = resolved_start + int(len(samples))
         if len(samples) == 0:
             return 0
         samples = samples.astype(np.complex64, copy=False)

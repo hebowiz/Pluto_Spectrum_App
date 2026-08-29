@@ -50,6 +50,7 @@ from pluto_sa.signal.detector import DetectorMode
 from pluto_sa.signal.fft_filterbank import (
     FFT_FILTERBANK_PROCESSING_SIGNATURE,
     required_gaussian_fft_size,
+    resolve_automatic_rtsa_fft_design,
 )
 from pluto_sa.signal.measurement_filter import (
     StatefulIQMeasurementFilter,
@@ -588,6 +589,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.trace_type_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
         self.marker_trace_option_buttons: list[dict[str, QtWidgets.QPushButton]] = []
         self.fft_size_option_buttons: dict[str, QtWidgets.QPushButton] = {}
+        self.fft_parameter_mode_option_buttons: dict[str, QtWidgets.QPushButton] = {}
         self.wideband_chunk_width_option_buttons: dict[int, QtWidgets.QPushButton] = {}
         self.sweep_detector_option_buttons: dict[DetectorMode, QtWidgets.QPushButton] = {}
         self.persistence_decay_option_buttons: dict[str, QtWidgets.QPushButton] = {}
@@ -2316,6 +2318,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._build_marker_detail_page(index) for index in range(len(self.marker_states))
         ]
         self.fft_size_page = self._build_fft_size_page()
+        self.fft_parameter_mode_page = self._build_fft_parameter_mode_page()
         self.marker_trace_pages = [
             self._build_marker_trace_page(index) for index in range(len(self.marker_states))
         ]
@@ -2344,6 +2347,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         for page in self.marker_detail_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.fft_size_page)
+        self.control_stack.addWidget(self.fft_parameter_mode_page)
         for page in self.marker_trace_pages:
             self.control_stack.addWidget(page)
         self.control_stack.addWidget(self.realtime_sa_page)
@@ -3006,15 +3010,38 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(10)
 
-        self.fft_size_button = self._make_control_button("FFT size")
+        self.fft_size_button = self._make_control_button("FFT Parameters")
 
         page_layout.addWidget(self.fft_size_button)
         page_layout.addStretch(1)
 
-        self.fft_size_button.clicked.connect(
-            lambda: self._show_control_page("FFT size", self.fft_size_page)
-        )
+        self.fft_size_button.clicked.connect(self._on_fft_parameters_clicked)
         self._update_fft_menu_controls()
+        return page
+
+    def _build_fft_parameter_mode_page(self) -> QtWidgets.QWidget:
+        page = QtWidgets.QWidget()
+        page_layout = QtWidgets.QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(10)
+
+        for mode in ("Auto", "Advanced"):
+            button = self._make_control_button(mode)
+            button.clicked.connect(
+                lambda _checked=False, selected_mode=mode: self._select_fft_parameter_mode(
+                    selected_mode
+                )
+            )
+            self.fft_parameter_mode_option_buttons[mode] = button
+            page_layout.addWidget(button)
+
+        self.advanced_fft_size_button = self._make_control_button("FFT size")
+        self.advanced_fft_size_button.clicked.connect(
+            lambda: self._show_control_page("Advanced FFT size", self.fft_size_page)
+        )
+        page_layout.addWidget(self.advanced_fft_size_button)
+        page_layout.addStretch(1)
+        self._update_fft_parameter_mode_page()
         return page
 
     def _build_calibration_menu_page(self) -> QtWidgets.QWidget:
@@ -3511,6 +3538,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _rebuild_realtime_runtime_after_mode_change(self) -> None:
         self.config.__post_init__()
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA:
+            self._expand_realtime_fft_for_rbw()
         self.receiver.reconfigure_span(self.config)
         self.receiver.retune_lo(self.config.center_freq_hz)
         self.processor.update_span_related(self.config)
@@ -3798,6 +3827,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._invalidate_wideband_runtime()
             self._reset_sweep_display_and_restore_state(previous_sweep_state)
         else:
+            self._expand_realtime_fft_for_rbw()
             self.receiver.reconfigure_span(self.config)
             self.receiver.retune_lo(self.config.center_freq_hz)
             self.processor.update_span_related(self.config)
@@ -3842,6 +3872,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._invalidate_wideband_runtime()
             self._reset_sweep_display_and_restore_state(previous_sweep_state)
         else:
+            self._expand_realtime_fft_for_rbw()
             self.receiver.reconfigure_span(self.config)
             self.processor.update_span_related(self.config)
             self._apply_span_update()
@@ -4076,9 +4107,26 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         return min(max(rbw_hz, 0.0), MAX_REALTIME_RBW_HZ)
 
     def _expand_realtime_fft_for_rbw(self) -> bool:
-        """Increase RTSA FFT size when needed to contain the Gaussian window."""
+        """Resolve RTSA NFFT from Span/RBW, or protect an Advanced NFFT."""
         if self.config.rbw_hz is None:
             return False
+        if (
+            self.config.analyzer_mode == AnalyzerMode.REALTIME_SA
+            and self.config.realtime_fft_parameter_mode == "Auto"
+        ):
+            design = resolve_automatic_rtsa_fft_design(
+                sample_rate_hz=float(self.config.sample_rate_hz),
+                rbw_hz=float(self.config.rbw_hz),
+                guard_ratio=float(self.config.guard_ratio),
+                minimum_display_bins=int(self.config.realtime_min_display_bins),
+                maximum_fft_size=int(MAX_REALTIME_FFT_SIZE),
+            )
+            resolved_size = int(design.fft_size)
+            if resolved_size == int(self.config.fft_size):
+                return False
+            self.config.fft_size = resolved_size
+            self._update_fft_menu_controls()
+            return True
         required_size = required_gaussian_fft_size(
             float(self.config.sample_rate_hz),
             float(self.config.rbw_hz),
@@ -4089,6 +4137,22 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.config.fft_size = resolved_size
         self._update_fft_menu_controls()
         return True
+
+    def _select_fft_parameter_mode(self, mode: str) -> None:
+        if self._is_wideband_mode() or self._is_time_analyzer_mode():
+            return
+        resolved_mode = "Advanced" if str(mode).strip().lower() == "advanced" else "Auto"
+        if resolved_mode == self.config.realtime_fft_parameter_mode:
+            self._update_fft_menu_controls()
+            return
+        self.config.realtime_fft_parameter_mode = resolved_mode
+        self._expand_realtime_fft_for_rbw()
+        self.receiver.reconfigure_span(self.config)
+        self.processor.update_span_related(self.config)
+        self._reset_realtime_fft_runtime()
+        self._apply_span_update()
+        self._update_realtime_sa_controls()
+        self._refresh_status_label()
 
     def _select_wideband_chunk_width(self, chunk_width_hz: int) -> None:
         if not self._is_wideband_mode():
@@ -4141,6 +4205,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
         previous_state = self._current_sweep_state()
         is_wideband_mode = self._is_wideband_mode()
+        if not is_wideband_mode and self.config.analyzer_mode == AnalyzerMode.REALTIME_SA:
+            self.config.realtime_fft_parameter_mode = "Advanced"
         if self.config.analyzer_mode in (
             AnalyzerMode.REALTIME_SA,
             AnalyzerMode.WIDEBAND_REALTIME_SA,
@@ -4728,8 +4794,35 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             button.setText(f"{prefix}{trace_type}")
 
     def _update_fft_menu_controls(self) -> None:
-        self.fft_size_button.setText(f"FFT size\n{self.config.fft_size}")
+        if self._is_wideband_mode():
+            button_text = f"FFT size\n{self.config.fft_size}"
+        else:
+            button_text = (
+                f"FFT Parameters\n{self.config.realtime_fft_parameter_mode}"
+                f" / {self.config.fft_size}"
+            )
+        self.fft_size_button.setText(button_text)
         self.fft_size_button.setEnabled(not self._is_time_analyzer_mode())
+        if hasattr(self, "advanced_fft_size_button"):
+            self.advanced_fft_size_button.setText(f"FFT size\n{self.config.fft_size}")
+            self.advanced_fft_size_button.setEnabled(
+                self.config.realtime_fft_parameter_mode == "Advanced"
+            )
+        self._update_fft_parameter_mode_page()
+
+    def _update_fft_parameter_mode_page(self) -> None:
+        if not hasattr(self, "fft_parameter_mode_option_buttons"):
+            return
+        current_mode = str(self.config.realtime_fft_parameter_mode)
+        for mode, button in self.fft_parameter_mode_option_buttons.items():
+            prefix = SELECTED_BUTTON_PREFIX if mode == current_mode else UNSELECTED_BUTTON_PREFIX
+            button.setText(f"{prefix}{mode}")
+
+    def _on_fft_parameters_clicked(self) -> None:
+        if self._is_wideband_mode():
+            self._show_control_page("FFT size", self.fft_size_page)
+            return
+        self._show_control_page("FFT Parameters", self.fft_parameter_mode_page)
 
     def _update_display_menu_controls(self) -> None:
         realtime_display_supported = self.config.analyzer_mode in (
@@ -5890,6 +5983,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _rebuild_processor_only(self) -> None:
         self.processor = SpectrumProcessor(self.config)
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA:
+            self._reset_realtime_fft_runtime()
         self._refresh_sweep_time_estimate()
 
     def _on_sweep_complete(self, frame_result) -> None:
@@ -6248,6 +6343,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _apply_span_update(self) -> None:
         self._last_received_samples_total = 0
         self.received_samples_interval = 0
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA:
+            self._reset_realtime_fft_runtime()
         self._reset_plot_state()
 
     def _format_sweep_point_profile(
@@ -6534,15 +6631,15 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         status = (
             f"   {plan.quality}"
+            f"   Window: {plan.window_length_samples} samples"
             f"   Overlap: {plan.actual_overlap_ratio * 100.0:.1f}%"
             f"/{plan.target_overlap_ratio * 100.0:.0f}%"
             f"   FFT Rate: {plan.actual_fft_rate_hz / 1000.0:.1f} k/s"
             f"   FFT/Frame: {frame_count}"
         )
+        status += f"   Time Coverage: {plan.analysis_coverage_ratio * 100.0:.1f}%"
         if plan.analysis_coverage_ratio < 1.0:
-            status += f"   Coverage: {plan.analysis_coverage_ratio * 100.0:.1f}%"
-        if plan.quality != "Real-time":
-            status += "   WARNING: reduced time-domain fidelity"
+            status += "   WARNING: time-domain observation gaps"
         if self._realtime_rx_discontinuities > 0:
             status += f"   RX Discontinuity: {self._realtime_rx_discontinuities}"
         return status
@@ -6571,6 +6668,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"RF BW: {self._format_frequency_value_hz_compact(rf_bandwidth_hz)}   "
             f"Samp Rate: {self._format_frequency_value_hz_compact(sample_rate_hz)}"
         )
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA:
+            base_text += f"   FFT Mode: {self.config.realtime_fft_parameter_mode}"
 
         if self.config.analyzer_mode not in (
             AnalyzerMode.REALTIME_SA,
@@ -7794,16 +7893,35 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             max_blocks=max(1, int(self.config.realtime_stream_read_blocks)),
         )
         self._realtime_stream_cursor = result.cursor
+        overrun_boundary_pending = bool(result.overrun)
         if result.overrun:
-            self._realtime_fft_accumulator.mark_discontinuity()
+            # Count lost ring blocks for diagnostics.  The first surviving
+            # block below is also marked discontinuous so partial FFT history
+            # from before the overrun can never be joined to it.
             self._realtime_rx_discontinuities += max(1, int(result.missed_blocks))
+            if not result.blocks:
+                self._realtime_fft_accumulator.mark_discontinuity()
         for block in result.blocks:
-            if block.discontinuity_before and self._realtime_fft_accumulator.has_seen_input:
+            expected_index = self._realtime_fft_accumulator.expected_sample_index
+            index_discontinuity = bool(
+                expected_index is not None
+                and int(block.start_sample_index) != int(expected_index)
+            )
+            block_discontinuity = bool(
+                block.discontinuity_before or overrun_boundary_pending
+            )
+            if (
+                (block.discontinuity_before or index_discontinuity)
+                and self._realtime_fft_accumulator.has_seen_input
+                and not overrun_boundary_pending
+            ):
                 self._realtime_rx_discontinuities += 1
             self._realtime_fft_accumulator.process(
                 block.iq,
-                discontinuity_before=bool(block.discontinuity_before),
+                discontinuity_before=block_discontinuity,
+                start_sample_index=int(block.start_sample_index),
             )
+            overrun_boundary_pending = False
         frame = self._realtime_fft_accumulator.take_frame()
         if frame is not None:
             self._realtime_last_detector_frame = frame

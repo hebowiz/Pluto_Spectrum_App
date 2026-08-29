@@ -37,6 +37,7 @@ def test_session_state_round_trip():
     config.center_freq_hz = 2_480_000_000
     config.rbw_hz = 250_000.0
     config.rx_gain_db = 12
+    config.realtime_fft_parameter_mode = "Advanced"
     state = RTSASessionState(
         analyzer_mode=AnalyzerMode.SWEEP_SA,
         config_values=capture_config_values(config),
@@ -51,6 +52,7 @@ def test_session_state_round_trip():
     assert restored.analyzer_mode == AnalyzerMode.SWEEP_SA
     assert restored.config_values["center_freq_hz"] == 2_480_000_000
     assert restored.config_values["rbw_hz"] == 250_000.0
+    assert restored.config_values["realtime_fft_parameter_mode"] == "Advanced"
     assert restored.realtime_graph_view_mode == "waterfall_only"
     assert restored.persistence_enabled is True
     assert restored.traces[0]["average_count"] == 32
