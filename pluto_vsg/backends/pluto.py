@@ -1,9 +1,10 @@
-"""Finite ADALM-Pluto transmit backend using a non-cyclic DMA buffer."""
+"""Finite and continuous ADALM-Pluto transmit backend."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from importlib import metadata
 import re
 import threading
@@ -38,6 +39,13 @@ _SERIAL_PATTERN = re.compile(r"\bserial\s*[=:]\s*([^\s,;]+)", re.IGNORECASE)
 _PLUTO_LEVEL_CALIBRATION_FREQUENCY_HZ = 2_440_000_000.0
 _PLUTO_LEVEL_GAIN_POINTS_DB = np.asarray((-20.0, -10.0, -5.0, 0.0))
 _PLUTO_LEVEL_OUTPUT_POINTS_DBM = np.asarray((-19.0, -9.4, -4.8, -0.2))
+
+
+class PlutoPlaybackMode(str, Enum):
+    """DMA playback policy used for an ADALM-Pluto transmission."""
+
+    FINITE = "finite"
+    CONTINUOUS = "continuous"
 
 
 def _interpolate_with_linear_extrapolation(
@@ -140,6 +148,7 @@ class PlutoTransmitSettings:
     stop_guard_s: float = _DEFAULT_COMPLETION_MARGIN_S
     burst_count: int = 1
     output_power_dbm: float | None = None
+    playback_mode: PlutoPlaybackMode = PlutoPlaybackMode.FINITE
 
     @property
     def resolved_hardware_gain_db(self) -> float:
@@ -155,12 +164,11 @@ class PlutoTransmitSettings:
 
 
 class PlutoOutputBackend:
-    """Transmit a finite schedule once through a non-cyclic DMA buffer.
+    """Transmit a finite schedule or continuously repeat one packet period.
 
-    The requested packet count is already represented in ``GenerationResult``.
-    A short zero prefix absorbs the DAC source transition and a trailing zero
-    guard leaves the converter at zero after the one-shot DMA transfer. No
-    host-timed cleanup is used to determine the packet count.
+    Finite mode preserves the complete generated packet schedule and its DMA
+    guards. Continuous mode extracts one generated period and hands it to the
+    Pluto cyclic DMA once; the host does not repeatedly submit buffers.
     """
 
     def __init__(self, settings: PlutoTransmitSettings) -> None:
@@ -187,7 +195,7 @@ class PlutoOutputBackend:
     @property
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            backend_name="ADALM-Pluto Non-Cyclic TX",
+            backend_name="ADALM-Pluto TX",
             supports_rf_output=True,
             maximum_sample_rate_hz=61_440_000.0,
         )
@@ -257,7 +265,7 @@ class PlutoOutputBackend:
         self._observations.append(observation)
 
     def diagnostic_report(self) -> dict[str, object]:
-        """Return a JSON-safe trace of one finite-transmit attempt."""
+        """Return a JSON-safe trace of one transmit attempt."""
 
         origin = self._events[0][1] if self._events else time.monotonic()
         previous = origin
@@ -277,12 +285,20 @@ class PlutoOutputBackend:
             timestamp = float(converted.pop("monotonic_s"))
             converted["relative_ms"] = round((timestamp - origin) * 1e3, 3)
             observations.append(converted)
+        playback_mode = PlutoPlaybackMode(self.settings.playback_mode)
+        settings = asdict(self.settings)
+        settings["playback_mode"] = playback_mode.value
         return {
             "started_utc": self._trace_started_utc,
             "connection_uri": self._opened_uri,
             "libiio_version": _libiio_version(),
             "pyadi_iio_version": _package_version("pyadi-iio"),
-            "tx_dma_mode": "non-cyclic finite buffer",
+            "playback_mode": playback_mode.value,
+            "tx_dma_mode": (
+                "cyclic continuous buffer"
+                if playback_mode is PlutoPlaybackMode.CONTINUOUS
+                else "non-cyclic finite buffer"
+            ),
             "tdd_policy": "not accessed; power-cycle after any prior TDD experiment",
             "state": self._state,
             "calibration_mode": self._calibration_mode,
@@ -290,10 +306,11 @@ class PlutoOutputBackend:
             "firmware": None
             if self._firmware is None
             else f"v{self._firmware[0]}.{self._firmware[1]}",
-            "settings": asdict(self.settings),
+            "settings": settings,
             "resolved_hardware_gain_db": self.settings.resolved_hardware_gain_db,
             "sample_count": self._sample_count,
             "frame_sample_count": self._frame_sample_count,
+            "period_sample_count": self._frame_sample_count,
             "waveform_peak": self._waveform_peak,
             "dac_full_scale": _PLUTO_DAC_FULL_SCALE,
             "dac_peak_code": self._dac_peak_code,
@@ -303,6 +320,7 @@ class PlutoOutputBackend:
             "preload_guard_ms": self._preload_guard_s * 1e3,
             "waveform_duration_ms": self.waveform_duration_s * 1e3,
             "frame_duration_ms": self.frame_duration_s * 1e3,
+            "period_duration_ms": self.frame_duration_s * 1e3,
             "dma_buffer_duration_ms": self.dma_buffer_duration_s * 1e3,
             "events": events,
             "hardware_observations": observations,
@@ -327,6 +345,12 @@ class PlutoOutputBackend:
 
     @staticmethod
     def _validate_settings(settings: PlutoTransmitSettings) -> None:
+        try:
+            PlutoPlaybackMode(settings.playback_mode)
+        except ValueError as error:
+            raise ValueError(
+                "Pluto playback mode must be 'finite' or 'continuous'"
+            ) from error
         if not 520_833.0 <= settings.sample_rate_hz <= 61_440_000.0:
             raise ValueError("Pluto sample rate must be between 520.833 kS/s and 61.44 MS/s")
         if settings.center_frequency_hz <= 0.0:
@@ -421,6 +445,16 @@ class PlutoOutputBackend:
         self._dac_peak_code = float(np.max(np.abs(self._buffer)))
         self._sample_count = int(iq.size)
         self._frame_sample_count = int(iq.size // burst_count)
+        playback_mode = PlutoPlaybackMode(self.settings.playback_mode)
+        if playback_mode is PlutoPlaybackMode.CONTINUOUS:
+            # GenerationResult contains the complete finite schedule. A cyclic
+            # DMA buffer must contain exactly one period, otherwise the project
+            # repeat count becomes part of the endlessly repeated cycle.
+            self._preload_guard_s = 0.0
+            self._superframe = self._buffer[: self._frame_sample_count].copy()
+            self._record_event("continuous_period_prepared")
+            self._record_event("host_frame_prepared")
+            return
         self._preload_guard_s = self.settings.dma_preroll_s
         prefix_count = int(
             round(self._preload_guard_s * self.settings.sample_rate_hz)
@@ -733,6 +767,7 @@ class PlutoOutputBackend:
         sdr, uri, lease = self._open_pluto(self.settings.connection_uri)
         self._opened_uri = uri
         self._sdr = sdr
+        playback_mode = PlutoPlaybackMode(self.settings.playback_mode)
         try:
             # TX LO powerdown is the hard mute. Gain attenuation remains a
             # second layer, but is not relied upon to suppress preparation.
@@ -747,11 +782,19 @@ class PlutoOutputBackend:
             # mismatch means Prepare was skipped or another application
             # changed the device, so fail muted instead of auto-calibrating.
             self._verify_prepared_configuration(sdr)
-            self._state = "TRANSMITTING"
+            self._state = (
+                "CONTINUOUS_TX"
+                if playback_mode is PlutoPlaybackMode.CONTINUOUS
+                else "FINITE_TX"
+            )
             self._record_event("prepared_configuration_verified")
             sdr.tx_enabled_channels = [0]
-            sdr.tx_cyclic_buffer = False
-            self._record_event("noncyclic_mode_selected")
+            sdr.tx_cyclic_buffer = playback_mode is PlutoPlaybackMode.CONTINUOUS
+            self._record_event(
+                "cyclic_mode_selected"
+                if playback_mode is PlutoPlaybackMode.CONTINUOUS
+                else "noncyclic_mode_selected"
+            )
 
             if self._stop_event.is_set():
                 return
@@ -780,24 +823,33 @@ class PlutoOutputBackend:
             if self._stop_event.is_set():
                 return
 
-            # Non-cyclic push starts from sample zero exactly once. The short
-            # zero prefix is intentionally part of the buffer so any DMA/DAC
-            # source transition cannot truncate the first packet.
-            self._observe_hardware("before_noncyclic_push", sdr)
-            self._record_event("noncyclic_push_started")
-            sdr.tx(self._superframe)
-            self._record_event("noncyclic_push_completed")
-            if self._commit_noncyclic_stream(sdr):
-                self._record_event("noncyclic_stream_committed")
-            self._record_event("packet_schedule_submitted")
-            # libiio implementations differ on whether push returns after
-            # queueing or after playback. Keep the user completion margin as
-            # a post-submit hold, but do not inflate the DMA buffer with a long
-            # zero tail: large one-shot USB buffers proved unreliable.
-            self._wait_precise(
-                max(self.dma_buffer_duration_s, self.settings.stop_guard_s)
-            )
-            self._record_event("finite_buffer_elapsed")
+            if playback_mode is PlutoPlaybackMode.CONTINUOUS:
+                self._observe_hardware("before_cyclic_push", sdr)
+                self._record_event("cyclic_push_started")
+                sdr.tx(self._superframe)
+                self._record_event("cyclic_push_completed")
+                self._record_event("continuous_playback_started")
+                self._stop_event.wait()
+                self._record_event("continuous_stop_received")
+            else:
+                # Non-cyclic push starts from sample zero exactly once. The
+                # short zero prefix is intentionally part of the buffer so any
+                # DMA/DAC source transition cannot truncate the first packet.
+                self._observe_hardware("before_noncyclic_push", sdr)
+                self._record_event("noncyclic_push_started")
+                sdr.tx(self._superframe)
+                self._record_event("noncyclic_push_completed")
+                if self._commit_noncyclic_stream(sdr):
+                    self._record_event("noncyclic_stream_committed")
+                self._record_event("packet_schedule_submitted")
+                # libiio implementations differ on whether push returns after
+                # queueing or after playback. Keep the user completion margin
+                # as a post-submit hold, but do not inflate the DMA buffer with
+                # a long zero tail: large one-shot USB buffers proved unreliable.
+                self._wait_precise(
+                    max(self.dma_buffer_duration_s, self.settings.stop_guard_s)
+                )
+                self._record_event("finite_buffer_elapsed")
         except Exception:
             self._state = "ERROR"
             raise
@@ -816,4 +868,10 @@ class PlutoOutputBackend:
     def stop(self) -> None:
         """Request cancellation; cleanup is performed by the TX owner thread."""
 
+        if (
+            PlutoPlaybackMode(self.settings.playback_mode)
+            is PlutoPlaybackMode.CONTINUOUS
+            and not self._stop_event.is_set()
+        ):
+            self._record_event("continuous_stop_requested")
         self._stop_event.set()

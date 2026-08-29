@@ -25,6 +25,7 @@ from pluto_sa.vsa.ui.main_window import (
     _decimation_indices_with_required_times,
     _fsk_phase_difference_symbols,
     _format_evm,
+    _limit_iq_power_display_dbm,
     _peak_decimate_xy,
     _prepare_fsk_display_frequency,
     _prepare_psk_display_waveform,
@@ -66,6 +67,14 @@ def test_peak_decimation_ignores_invalid_power_samples_for_extrema() -> None:
     assert finite.size > 0
     assert float(np.min(finite)) >= -70.0
     assert float(np.max(finite)) <= -20.0
+
+
+def test_iq_power_display_floor_replaces_invalid_and_extreme_values() -> None:
+    limited = _limit_iq_power_display_dbm(
+        np.asarray([-np.inf, np.nan, -1_000.0, -119.0, -20.0])
+    )
+
+    np.testing.assert_allclose(limited, [-120.0, -120.0, -120.0, -119.0, -20.0])
 
 
 def test_burst_search_initial_time_range_starts_before_trigger() -> None:
@@ -290,9 +299,14 @@ def test_iq_power_signal_switch_selects_raw_or_measured_trace(tmp_path) -> None:
     session.capture_power_dbm = np.full(
         session.capture_time_s.shape, -11.0, dtype=np.float64
     )
+    session.capture_power_dbm[0] = -1_000.0
+    measured_power_dbm = np.full(
+        session.result.time_s.shape, -22.0, dtype=np.float64
+    )
+    measured_power_dbm[0] = np.nan
     session.result = replace(
         session.result,
-        power_dbm=np.full(session.result.time_s.shape, -22.0, dtype=np.float64),
+        power_dbm=measured_power_dbm,
     )
     window = VSAWindow(
         preferences=_isolated_preferences(tmp_path, "iq-power-signal")
@@ -304,12 +318,19 @@ def test_iq_power_signal_switch_selects_raw_or_measured_trace(tmp_path) -> None:
 
         assert window.raw_iq_power_action.isChecked()
         _, raw_y = window.zero_span_plot.listDataItems()[0].getData()
-        np.testing.assert_allclose(raw_y, -11.0)
+        assert np.all(np.isfinite(raw_y))
+        assert float(np.min(raw_y)) == pytest.approx(-120.0)
+        np.testing.assert_allclose(raw_y[1:], -11.0)
 
         window.measured_iq_power_action.setChecked(True)
         window._refresh_display_only()
         _, measured_y = window.zero_span_plot.listDataItems()[0].getData()
-        np.testing.assert_allclose(measured_y, -22.0)
+        assert np.all(np.isfinite(measured_y))
+        assert float(np.min(measured_y)) == pytest.approx(-120.0)
+        np.testing.assert_allclose(measured_y[1:], -22.0)
+
+        window.zero_span_plot.setYRange(-1_000.0, -900.0, padding=0.0)
+        assert window.zero_span_plot.viewRange()[1][0] >= -120.0
     finally:
         window.close()
         window.deleteLater()
@@ -1769,6 +1790,10 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
         first._apply_result_summary_preset("measurement")
         first.constellation_density_action.setChecked(True)
         first._set_selected_pluto_target("serial:test-pluto")
+        assert preferences.value("pluto/selected_target", "", type=str) == (
+            "serial:test-pluto"
+        )
+        assert first._pluto_capture_settings().sdr_uri == "serial:test-pluto"
         expected_summary_items = set(first._selected_result_summary_ids)
     finally:
         first._meas_config_dialog.close()
@@ -1847,8 +1872,10 @@ def test_pluto_run_single_uses_async_capture_and_updates_session(tmp_path) -> No
             self.settings = None
             self.closed = False
 
-        def capture_single(self, settings, *, cancelled=None):
+        def capture_single(self, settings, *, cancelled=None, armed=None):
             self.settings = settings
+            if armed is not None:
+                armed()
             recording, _signal = GeneratedIQSource.fsk(
                 symbol_count=64,
                 symbol_rate_hz=settings.symbol_rate_hz,
@@ -1901,7 +1928,9 @@ def test_run_single_action_stops_pending_power_trigger_wait(tmp_path) -> None:
     started = threading.Event()
 
     class WaitingPlutoSource:
-        def capture_single(self, settings, *, cancelled=None):
+        def capture_single(self, settings, *, cancelled=None, armed=None):
+            if armed is not None:
+                armed()
             started.set()
             while cancelled is None or not cancelled():
                 threading.Event().wait(0.002)

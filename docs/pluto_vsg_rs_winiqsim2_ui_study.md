@@ -784,3 +784,33 @@ Settingsの時間設定は、直接編集する`Post Idle`から`Period [symbols
 packet長、Ramp端が全repeatで同一になる。Previewは引き続き先頭1周期だけを描画し、Plutoへの
 finite TX bufferには全repeatを格納する。Visual ComposerのPower trackも論理packetだけでなく、
 Ramp Up開始からRamp Down終了までをPower Envelope帯として表示する。
+
+### 13.9 Continuous cyclic送信の再導入設計（2026-08-29）
+
+有限送信で問題となったcyclic周回は、停止操作まで同じpacket periodを反復するContinuous送信では
+意図した動作になる。有限送信は実機で確定したnon-cyclic schedule方式を維持し、Continuousだけを
+別のcyclic経路として追加する。詳細設計は
+[`pluto-vsg-continuous-transmission.md`](pluto-vsg-continuous-transmission.md)を参照する。
+
+ContinuousはProjectの`Repeat Count`とは分離したPluto Output固有のPlayback Modeとする。
+Project、Preview、NPZ/IQ TAR/WV exportは従来仕様を維持し、Pluto backendだけが生成結果の先頭
+1周期を取り出してcyclic bufferへ1回転送する。1周期にはPre Idle、Ramp、packet、effective
+Post Idleを含める。Finite専用DMA Pre-rollとtrailing guardは周期を変えるためcycleへ追加しない。
+
+TDD engineは使用せず、Prepare済み設定のread-back後にcyclic DMAを開始する。Stopはgain mute、
+TX LO powerdown、buffer destroyをowner threadで実行する。packet境界での停止、外部同期、実行中の
+波形更新は対象外とし、必要なら将来custom HDLまたは別streaming backendで扱う。
+
+### 13.10 Continuous cyclic送信の実装（2026-08-29）
+
+上記設計を実装した。Pluto Output Settingsの`Playback Mode`で`Finite`と`Continuous`を切り替える。
+ContinuousはProjectのRepeat Countにかかわらず生成結果の先頭1周期だけをcyclic DMAへ1回渡し、
+Stopまたはwindow closeまで反復する。Finite経路は従来のnon-cyclic schedule方式を変更していない。
+
+Continuous周期にはProjectで定義したPre Idle、Ramp、packet、Post Idleを含む一方、Finite専用の
+DMA Pre-rollとtrailing guardは含めない。Stopはpacket境界同期ではなく即時要求であり、owner threadが
+gain mute、TX LO powerdown、buffer destroyを順に行う。Playback Modeはdevice-side preferenceとして
+QSettingsへ保存し、`.pvsg`やNPZ/IQ TAR/WVへは混入させない。
+
+mock Plutoを用いたbackend/UI testは97件passした。実機でのgapless長時間反復、周期精度、最初の
+packet完全性、Stop後のRF状態、Finiteへ戻した際の回帰確認は未実施である。

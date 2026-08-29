@@ -31,7 +31,11 @@ from pluto_sa.vsa.pattern import (
     ResultRangeSettings,
 )
 from pluto_sa.vsa.ui.measurement_chrome import FixedInteractionViewBox
-from pluto_vsg.backends import PlutoOutputBackend, PlutoTransmitSettings
+from pluto_vsg.backends import (
+    PlutoOutputBackend,
+    PlutoPlaybackMode,
+    PlutoTransmitSettings,
+)
 from pluto_vsg.engine import BluetoothBRWaveformEngine, GenerationResult
 from pluto_vsg.export import save_iq_tar, save_npz, save_wv
 from pluto_vsg.model import create_default_project, validate_project
@@ -197,6 +201,40 @@ def test_pluto_output_dialog_uses_dbm_and_preserves_target_across_backoff(
         dialog._accept_settings()
         assert dialog.settings.output_power_dbm == pytest.approx(-9.4)
         assert dialog.settings.resolved_hardware_gain_db == pytest.approx(-6.73913)
+    finally:
+        dialog.close()
+        parent.close()
+
+
+def test_pluto_output_dialog_selects_continuous_playback_without_changing_project_count(
+    monkeypatch,
+) -> None:
+    pg.mkQApp("Pluto VSG continuous output dialog test")
+    monkeypatch.setattr(PlutoOutputBackend, "discover_devices", lambda: ())
+    parent = QtWidgets.QWidget()
+    dialog = _PlutoOutputDialog(
+        PlutoTransmitSettings(
+            center_frequency_hz=2_440_000_000.0,
+            sample_rate_hz=8_000_000.0,
+            rf_bandwidth_hz=8_000_000.0,
+            output_power_dbm=-9.4,
+        ),
+        packet_count=10,
+        parent=parent,
+    )
+    try:
+        dialog.playback_mode_combo.setCurrentIndex(
+            dialog.playback_mode_combo.findData(
+                PlutoPlaybackMode.CONTINUOUS.value
+            )
+        )
+
+        assert dialog.packet_count_label.text().startswith("Ignored")
+        assert not dialog.dma_preroll_spin.isEnabled()
+        assert not dialog.stop_guard_spin.isEnabled()
+        dialog._accept_settings()
+        assert dialog.settings.playback_mode is PlutoPlaybackMode.CONTINUOUS
+        assert dialog.settings.burst_count == 10
     finally:
         dialog.close()
         parent.close()

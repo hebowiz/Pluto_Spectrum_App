@@ -20,6 +20,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
 )
 from pluto_vsg.backends import (
     PlutoOutputBackend,
+    PlutoPlaybackMode,
     PlutoTransmitSettings,
     estimate_pluto_output_power_dbm,
     pluto_hardware_gain_for_output_power_dbm,
@@ -880,6 +881,15 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self._settings = settings
         self._packet_count = int(packet_count)
         form = QtWidgets.QFormLayout()
+        self.playback_mode_combo = QtWidgets.QComboBox()
+        self.playback_mode_combo.addItem("Finite", PlutoPlaybackMode.FINITE.value)
+        self.playback_mode_combo.addItem(
+            "Continuous", PlutoPlaybackMode.CONTINUOUS.value
+        )
+        playback_mode = PlutoPlaybackMode(settings.playback_mode)
+        self.playback_mode_combo.setCurrentIndex(
+            self.playback_mode_combo.findData(playback_mode.value)
+        )
         self.uri_combo = QtWidgets.QComboBox()
         self.uri_combo.setEditable(True)
         self._discovery_thread: _VSGPlutoDiscoveryThread | None = None
@@ -947,6 +957,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.stop_guard_spin.setSuffix(" ms")
         self.stop_guard_spin.setValue(settings.stop_guard_s * 1e3)
         self.stop_guard_spin.setKeyboardTracking(False)
+        form.addRow("Playback Mode", self.playback_mode_combo)
         form.addRow("Connection URI", selector_row)
         form.addRow(
             "Center Frequency",
@@ -961,28 +972,19 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         form.addRow("Digital Backoff", self.digital_backoff_combo)
         form.addRow("Applied Tx Gain", self.applied_gain_label)
         form.addRow("Muted LO Settling Time", self.lead_in_guard_spin)
-        form.addRow("DMA Pre-roll", self.dma_preroll_spin)
-        form.addRow("Completion Margin", self.stop_guard_spin)
-        form.addRow("Packets per transmission", QtWidgets.QLabel(str(packet_count)))
-        warning = QtWidgets.QLabel(
-            "RF Output Level uses a provisional 2440 MHz calibration measured "
-            "with this Pluto and a constant-envelope FSK packet. Frequency "
-            "response, device variation and residual nonlinearity are not yet "
-            "corrected. Verify the conducted level when accuracy matters. "
-            "Digital Backoff 0 dB drives the DMA/DAC path at full scale; "
-            "use -3 or -6 dB when additional linearity margin is required. "
-            "Start with sufficient external attenuation and verify the output level. "
-            "The complete requested packet schedule is submitted once in a "
-            "non-cyclic DMA buffer. DMA Pre-roll inserts zero-IQ samples after "
-            "the requested gain is applied and before the first packet, protecting "
-            "it from the DMA/DAC source-start transient. A short trailing zero "
-            "section leaves the DAC at zero. Completion Margin controls how "
-            "long cleanup is deferred after submission. The tx() call is the "
-            "software start event; "
-            "residual LO leakage is not a calibrated RF-off state."
+        self.dma_preroll_label = QtWidgets.QLabel("DMA Pre-roll")
+        form.addRow(self.dma_preroll_label, self.dma_preroll_spin)
+        self.stop_guard_label = QtWidgets.QLabel("Completion Margin")
+        form.addRow(self.stop_guard_label, self.stop_guard_spin)
+        self.packet_count_label = QtWidgets.QLabel(str(packet_count))
+        form.addRow("Packets per transmission", self.packet_count_label)
+        self.warning = QtWidgets.QLabel()
+        self.warning.setWordWrap(True)
+        self.warning.setStyleSheet("color: #e0b050;")
+        self.playback_mode_combo.currentIndexChanged.connect(
+            self._update_playback_mode_ui
         )
-        warning.setWordWrap(True)
-        warning.setStyleSheet("color: #e0b050;")
+        self._update_playback_mode_ui()
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -991,9 +993,52 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(form)
-        layout.addWidget(warning)
+        layout.addWidget(self.warning)
         layout.addWidget(buttons)
-        self.resize(600, 380)
+        self.resize(620, 410)
+
+    def _selected_playback_mode(self) -> PlutoPlaybackMode:
+        return PlutoPlaybackMode(str(self.playback_mode_combo.currentData()))
+
+    def _update_playback_mode_ui(self, _index=None) -> None:
+        continuous = (
+            self._selected_playback_mode() is PlutoPlaybackMode.CONTINUOUS
+        )
+        self.dma_preroll_spin.setEnabled(not continuous)
+        self.stop_guard_spin.setEnabled(not continuous)
+        self.dma_preroll_label.setEnabled(not continuous)
+        self.stop_guard_label.setEnabled(not continuous)
+        self.packet_count_label.setEnabled(not continuous)
+        self.packet_count_label.setText(
+            "Ignored; first packet period repeats"
+            if continuous
+            else str(self._packet_count)
+        )
+        common = (
+            "RF Output Level uses a provisional 2440 MHz calibration measured "
+            "with this Pluto and a constant-envelope FSK packet. Frequency "
+            "response, device variation and residual nonlinearity are not yet "
+            "corrected. Verify the conducted level when accuracy matters. "
+            "Digital Backoff 0 dB drives the DMA/DAC path at full scale; use "
+            "-3 or -6 dB when additional linearity margin is required. "
+        )
+        if continuous:
+            detail = (
+                "Continuous repeats exactly the first generated packet period "
+                "with Pluto cyclic DMA until Stop is requested. Project Repeat "
+                "Count, DMA Pre-roll and Completion Margin do not alter the "
+                "continuous cycle. Stop may interrupt a packet. Residual LO "
+                "leakage is not a calibrated RF-off state."
+            )
+        else:
+            detail = (
+                "Finite submits the complete requested packet schedule once in "
+                "a non-cyclic DMA buffer. DMA Pre-roll protects the first packet "
+                "from the DMA/DAC source-start transient, and Completion Margin "
+                "defers cleanup after submission. Residual LO leakage is not a "
+                "calibrated RF-off state."
+            )
+        self.warning.setText(common + detail)
 
     def _populate_devices(self, devices: tuple[object, ...], selected: str) -> None:
         self.uri_combo.blockSignals(True)
@@ -1109,6 +1154,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             stop_guard_s=self.stop_guard_spin.value() * 1e-3,
             burst_count=self._packet_count,
             output_power_dbm=output_power_dbm,
+            playback_mode=self._selected_playback_mode(),
         )
         try:
             PlutoOutputBackend(candidate)
@@ -1143,8 +1189,14 @@ class _PlutoTransmitWorker(QtCore.QObject):
             message = str(error)
         else:
             success = True
+            continuous = (
+                PlutoPlaybackMode(self.backend.settings.playback_mode)
+                is PlutoPlaybackMode.CONTINUOUS
+            )
             message = (
-                "Pluto transmission stopped"
+                "Pluto continuous transmission stopped"
+                if self._cancel_requested and continuous
+                else "Pluto transmission stopped"
                 if self._cancel_requested
                 else "Pluto transmission complete"
             )
@@ -1270,6 +1322,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_stop_guard_s = float(
             preferences.value("pluto_tx/stop_guard_s", 0.100)
         )
+        try:
+            self._pluto_playback_mode = PlutoPlaybackMode(
+                str(
+                    preferences.value(
+                        "pluto_tx/playback_mode", PlutoPlaybackMode.FINITE.value
+                    )
+                )
+            )
+        except ValueError:
+            self._pluto_playback_mode = PlutoPlaybackMode.FINITE
         self._update_pluto_window_title()
         self.resize(1500, 900)
         self._build_actions()
@@ -2110,6 +2172,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             stop_guard_s=self._pluto_stop_guard_s,
             burst_count=self.project.repeat_count,
             output_power_dbm=self._pluto_output_power_dbm,
+            playback_mode=self._pluto_playback_mode,
         )
 
     def _pluto_configuration_signature(self) -> tuple[object, ...]:
@@ -2154,6 +2217,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_lead_in_guard_s = settings.lead_in_guard_s
         self._pluto_dma_preroll_s = settings.dma_preroll_s
         self._pluto_stop_guard_s = settings.stop_guard_s
+        self._pluto_playback_mode = PlutoPlaybackMode(settings.playback_mode)
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
         preferences.setValue("pluto_tx/uri", self._pluto_uri)
         preferences.setValue(
@@ -2174,6 +2238,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             "pluto_tx/dma_preroll_s", self._pluto_dma_preroll_s
         )
         preferences.setValue("pluto_tx/stop_guard_s", self._pluto_stop_guard_s)
+        preferences.setValue(
+            "pluto_tx/playback_mode", self._pluto_playback_mode.value
+        )
         configuration_changed = (
             previous_signature != self._pluto_configuration_signature()
         )
@@ -2283,11 +2350,21 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._tx_worker = worker
         self._tx_thread = thread
         self._set_pluto_busy(preparing=False, transmitting=True)
-        duration_ms = 1e3 * self.result.iq.size / self.result.sample_rate_hz
-        self.statusBar().showMessage(
-            f"Starting Pluto TX: {self.project.repeat_count} packet(s), "
-            f"{duration_ms:.3f} ms, {self.project.center_frequency_hz / 1e6:.6f} MHz"
-        )
+        if self._pluto_playback_mode is PlutoPlaybackMode.CONTINUOUS:
+            period_samples = self.result.iq.size // self.project.repeat_count
+            period_ms = 1e3 * period_samples / self.result.sample_rate_hz
+            self.statusBar().showMessage(
+                "Starting continuous Pluto TX: "
+                f"{period_ms:.3f} ms period, "
+                f"{self.project.center_frequency_hz / 1e6:.6f} MHz; use Stop to end"
+            )
+        else:
+            duration_ms = 1e3 * self.result.iq.size / self.result.sample_rate_hz
+            self.statusBar().showMessage(
+                f"Starting finite Pluto TX: {self.project.repeat_count} packet(s), "
+                f"{duration_ms:.3f} ms, "
+                f"{self.project.center_frequency_hz / 1e6:.6f} MHz"
+            )
         thread.start()
 
     def _stop_pluto_transmission(self) -> None:

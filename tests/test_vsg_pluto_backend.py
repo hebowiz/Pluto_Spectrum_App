@@ -8,6 +8,7 @@ import pytest
 
 from pluto_vsg.backends import (
     PlutoOutputBackend,
+    PlutoPlaybackMode,
     PlutoTransmitSettings,
     estimate_pluto_output_power_dbm,
     pluto_hardware_gain_for_output_power_dbm,
@@ -301,6 +302,55 @@ def test_pluto_backend_honors_stop_requested_during_buffer_transfer(monkeypatch)
     assert _FakeTddn.instances == []
     assert device.gain_history == [-89.75, -89.75, -30.0, -89.75]
     assert device.destroy_count == 1
+
+
+def test_pluto_backend_repeats_one_period_with_cyclic_dma_until_stopped(
+    monkeypatch,
+) -> None:
+    _install_fakes(monkeypatch)
+    frame = np.asarray([0.25, 1.0j, -0.5, -0.25j], dtype=np.complex64)
+    result = GenerationResult(iq=np.tile(frame, 3), sample_rate_hz=8_000_000.0)
+    backend = PlutoOutputBackend(
+        _settings(playback_mode=PlutoPlaybackMode.CONTINUOUS)
+    )
+    original_tx = _FakePluto.tx
+
+    def stop_after_cyclic_buffer_is_started(device, values=None):
+        original_tx(device, values)
+        if values is not None:
+            backend.stop()
+
+    monkeypatch.setattr(_FakePluto, "tx", stop_after_cyclic_buffer_is_started)
+    backend.prepare()
+    backend.transfer(result)
+
+    backend.start()
+
+    device = _FakePluto.instances[-1]
+    assert device.tx_cyclic_buffer is True
+    assert device.transmitted is not None
+    assert device.transmitted.size == frame.size
+    np.testing.assert_allclose(
+        device.transmitted,
+        frame * (2**15 - 1),
+        rtol=0.0,
+        atol=1e-3,
+    )
+    assert device.destroy_count == 1
+    assert device.tx_enabled_channels == []
+    report = backend.diagnostic_report()
+    json.dumps(report)
+    assert report["playback_mode"] == "continuous"
+    assert report["tx_dma_mode"] == "cyclic continuous buffer"
+    assert report["sample_count"] == frame.size * 3
+    assert report["period_sample_count"] == frame.size
+    assert report["superframe_sample_count"] == frame.size
+    names = [event["name"] for event in report["events"]]
+    assert "continuous_period_prepared" in names
+    assert "continuous_playback_started" in names
+    assert "continuous_stop_requested" in names
+    assert "continuous_stop_received" in names
+    assert "noncyclic_stream_committed" not in names
 
 
 def test_pluto_backend_diagnostic_report_is_json_safe(monkeypatch) -> None:
@@ -678,6 +728,7 @@ def test_pluto_transmit_rejects_unprepared_device_without_reconfiguring(
         {"stop_guard_s": 0.001},
         {"burst_count": 0},
         {"burst_count": 1001},
+        {"playback_mode": "unsupported"},
     ),
 )
 def test_pluto_backend_rejects_unsupported_output_settings(change) -> None:

@@ -86,11 +86,13 @@ _MAX_DISPLAY_POINTS = 30_000
 _MAX_IQ_TRAJECTORY_POINTS = 10_000
 _MAX_SYMBOL_TABLE_DISPLAY_SYMBOLS = 1_000
 _STARTUP_CONFIG_KEY = "startup/measurement_config"
+_PLUTO_SELECTED_TARGET_KEY = "pluto/selected_target"
 _STARTUP_CONFIG_SCHEMA = "pluto-vsa-startup-config"
 _STARTUP_CONFIG_VERSION = 1
 _SYMBOL_TABLE_EXPORT_SCHEMA = "pluto-vsa-symbol-table"
 _SYMBOL_TABLE_EXPORT_VERSION = 1
 _TRACE_COLOR = "y"
+_IQ_POWER_DISPLAY_FLOOR_DBM = -120.0
 _IQ_PLANE_LIMIT = 1.25
 _TRACE_SYMBOL_SIZE = 5.5
 _SYMBOL_PLOT_FLAT_SIZE = 6.0
@@ -115,6 +117,18 @@ def _format_evm(percent: float) -> str:
         return "—"
     db_text = "-inf" if value == 0.0 else f"{20.0 * np.log10(value / 100.0):.1f}"
     return f"{value:.2f} % / {db_text} dB"
+
+
+def _limit_iq_power_display_dbm(values: np.ndarray) -> np.ndarray:
+    """Return finite IQ-power display data constrained to the UI floor.
+
+    This is deliberately a display-only guard. Triggering, result summary
+    calculations, and exported IQ continue to use the original samples.
+    """
+    display = np.asarray(values, dtype=np.float64).copy()
+    display[~np.isfinite(display)] = _IQ_POWER_DISPLAY_FLOOR_DBM
+    np.maximum(display, _IQ_POWER_DISPLAY_FLOOR_DBM, out=display)
+    return display
 
 
 def _peak_decimate_xy(
@@ -621,7 +635,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._build_results()
         self._build_configuration()
         self._set_selected_pluto_target(
-            self._preferences.value("pluto/selected_target", "", type=str)
+            self._preferences.value(_PLUTO_SELECTED_TARGET_KEY, "", type=str)
         )
         restored = self._restore_startup_meas_config()
         self._update_summary()
@@ -847,6 +861,9 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _build_results(self) -> None:
         self.zero_span_plot = self._make_plot("Capture Power", "IQ Power (dBm)", "Time (ms)")
+        self.zero_span_plot.getViewBox().setLimits(
+            yMin=_IQ_POWER_DISPLAY_FLOOR_DBM
+        )
         self.zero_span_dock = self._dock("IQ Power", self.zero_span_plot)
         self.addDockWidget(
             QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.zero_span_dock
@@ -1005,6 +1022,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.pluto_uri_edit = QtWidgets.QComboBox()
         self.pluto_uri_edit.setEditable(True)
         self.pluto_uri_edit.addItem("Auto (USB preferred)", "")
+        self.pluto_uri_edit.currentIndexChanged.connect(
+            self._persist_selected_pluto_target
+        )
+        line_edit = self.pluto_uri_edit.lineEdit()
+        if line_edit is not None:
+            line_edit.editingFinished.connect(self._persist_selected_pluto_target)
         self.pluto_refresh_button = QtWidgets.QPushButton("Refresh Devices")
         self.pluto_refresh_button.clicked.connect(self._refresh_pluto_devices)
         pluto_selector = QtWidgets.QWidget()
@@ -2848,6 +2871,13 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.pluto_uri_edit.addItem(value, value)
         self.pluto_uri_edit.setCurrentIndex(self.pluto_uri_edit.count() - 1)
 
+    def _persist_selected_pluto_target(self, *_args: object) -> None:
+        """Persist the receiver selection as soon as the user changes it."""
+        self._preferences.setValue(
+            _PLUTO_SELECTED_TARGET_KEY, self._selected_pluto_target()
+        )
+        self._preferences.sync()
+
     def _refresh_pluto_devices(self) -> None:
         if self._pluto_discovery_thread is not None:
             return
@@ -2895,6 +2925,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._set_selected_pluto_target(selected)
         finally:
             self.pluto_uri_edit.blockSignals(False)
+        self._persist_selected_pluto_target()
         self.statusBar().showMessage(
             f"Detected {len(devices)} ADALM-Pluto device(s)"
         )
@@ -3344,7 +3375,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             return
         self._shutdown_finalized = True
         self._preferences.setValue(
-            "pluto/selected_target", self._selected_pluto_target()
+            _PLUTO_SELECTED_TARGET_KEY, self._selected_pluto_target()
         )
         self._save_startup_meas_config()
         if self._owns_pluto_source:
@@ -3861,6 +3892,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         ):
             capture_time_s = result.time_s
             capture_power_source_dbm = result.power_dbm
+        capture_power_source_dbm = _limit_iq_power_display_dbm(
+            capture_power_source_dbm
+        )
         symbol_power_dbm = (
             np.interp(symbol_times_s, capture_time_s, capture_power_source_dbm)
             if symbol_times_s.size
