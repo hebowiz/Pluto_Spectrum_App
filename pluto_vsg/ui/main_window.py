@@ -1237,6 +1237,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_prepared_signature: tuple[object, ...] | None = None
         self._preparing_signature: tuple[object, ...] | None = None
         self._close_after_tx = False
+        self._shutdown_stop_requested = False
         self.undo_stack = QtGui.QUndoStack(self)
         self._selected_composer_block: ComposerBlock | None = None
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
@@ -2228,7 +2229,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             if success:
                 message = "Configuration changed during preparation; prepare again"
             self.statusBar().showMessage(f"Pluto preparation failed: {message}")
-            QtWidgets.QMessageBox.critical(self, "Pluto Preparation", message)
+            if not self._close_after_tx:
+                QtWidgets.QMessageBox.critical(self, "Pluto Preparation", message)
         self._set_pluto_busy(preparing=False, transmitting=False)
 
     @QtCore.Slot()
@@ -2301,7 +2303,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(message)
         else:
             self.statusBar().showMessage(f"Pluto transmission failed: {message}")
-            QtWidgets.QMessageBox.critical(self, "Pluto Transmission", message)
+            if not self._close_after_tx:
+                QtWidgets.QMessageBox.critical(self, "Pluto Transmission", message)
         self._set_pluto_busy(preparing=False, transmitting=False)
 
     @QtCore.Slot()
@@ -2338,11 +2341,20 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if self._prepare_thread is not None:
             self._close_after_tx = True
+            self.statusBar().showMessage(
+                "Waiting for safe Pluto preparation/calibration completion before closing..."
+            )
             event.ignore()
             return
         if self._tx_thread is not None:
             self._close_after_tx = True
-            self._stop_pluto_transmission()
+            if not self._shutdown_stop_requested:
+                self._shutdown_stop_requested = True
+                self._stop_pluto_transmission()
+            self.statusBar().showMessage(
+                "Stopping Pluto transmission safely before closing..."
+            )
             event.ignore()
             return
+        self._shutdown_stop_requested = False
         super().closeEvent(event)

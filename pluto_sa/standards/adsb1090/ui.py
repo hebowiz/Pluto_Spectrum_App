@@ -579,6 +579,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
     analysis_mode_requested = QtCore.Signal(str)
     application_close_requested = QtCore.Signal()
+    shutdown_ready = QtCore.Signal()
 
     def __init__(
         self,
@@ -640,6 +641,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         ] = {}
         self._plot_context_actions: dict[str, dict[str, QtGui.QAction]] = {}
         self._closing = False
+        self._shutdown_finalized = False
+        self._shutdown_ready_emitted = False
         self._packet_selection_connected = False
         self._aircraft_selection_connected = False
         self._dock_resize_pending = False
@@ -1710,6 +1713,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self._capture_thread.requestInterruption()
         if self._analysis_stream_thread is not None:
             self._analysis_stream_thread.stop()
+        if self._closing:
+            return
         QtWidgets.QMessageBox.critical(self, "Pluto Capture", message)
 
     def _pluto_capture_stopped(self) -> None:
@@ -2644,6 +2649,21 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._pending_stream_views.clear()
         if self._route_lookup_thread is not None:
             self._route_lookup_thread.stop()
+        for thread in (
+            self._capture_thread,
+            self._analysis_stream_thread,
+            self._aircraft_metadata_thread,
+            self._route_lookup_thread,
+        ):
+            if thread is None or not thread.isRunning():
+                continue
+            try:
+                thread.finished.connect(
+                    self._shutdown_worker_finished,
+                    QtCore.Qt.ConnectionType.UniqueConnection,
+                )
+            except (RuntimeError, TypeError):
+                pass
         if self._packet_selection_connected:
             try:
                 self.packet_table.itemSelectionChanged.disconnect(
@@ -2670,28 +2690,63 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             pass
         self.aircraft_map.shutdown()
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+    def request_shutdown(self) -> None:
+        """Request worker termination without blocking the GUI thread."""
+
         self.prepare_for_shutdown()
-        if (
-            self._aircraft_metadata_thread is not None
-            and self._aircraft_metadata_thread.isRunning()
-        ):
-            self._aircraft_metadata_thread.wait()
-        if (
-            self._route_lookup_thread is not None
-            and self._route_lookup_thread.isRunning()
-        ):
-            self._route_lookup_thread.wait(3500)
-        self._route_lookup_thread = None
         if self._capture_thread is not None and self._capture_thread.isRunning():
             self._capture_thread.requestInterruption()
-            self._capture_thread.wait(1500)
         if (
             self._analysis_stream_thread is not None
             and self._analysis_stream_thread.isRunning()
         ):
             self._analysis_stream_thread.stop()
-            self._analysis_stream_thread.wait(1500)
+        if self._route_lookup_thread is not None:
+            self._route_lookup_thread.stop()
+
+    def shutdown_busy_reason(self) -> str | None:
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            return "ADS-B Pluto capture"
+        if (
+            self._analysis_stream_thread is not None
+            and self._analysis_stream_thread.isRunning()
+        ):
+            return "ADS-B stream analysis"
+        if (
+            self._aircraft_metadata_thread is not None
+            and self._aircraft_metadata_thread.isRunning()
+        ):
+            return "ADS-B aircraft database update"
+        if (
+            self._route_lookup_thread is not None
+            and self._route_lookup_thread.isRunning()
+        ):
+            return "ADS-B route lookup"
+        return None
+
+    def finalize_shutdown(self) -> None:
+        if self._shutdown_finalized:
+            return
+        self._shutdown_finalized = True
+        self._route_lookup_thread = None
         if self._owns_pluto_source:
             self._pluto_source.close()
+
+    def _shutdown_worker_finished(self) -> None:
+        if not self._closing or self.shutdown_busy_reason() is not None:
+            return
+        if not self._shutdown_ready_emitted:
+            self._shutdown_ready_emitted = True
+            self.shutdown_ready.emit()
+        if self._owns_pluto_source:
+            self.close()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self.request_shutdown()
+        busy = self.shutdown_busy_reason()
+        if busy is not None:
+            self.statusBar().showMessage(f"Stopping {busy} before closing...")
+            event.ignore()
+            return
+        self.finalize_shutdown()
         super().closeEvent(event)

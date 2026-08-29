@@ -80,6 +80,34 @@ def test_default_vsg_project_is_valid() -> None:
     assert bluetooth_project.power_envelope.shape == "Cosine"
 
 
+def test_vsg_close_stops_active_pluto_transmission_before_closing() -> None:
+    pg.mkQApp("Pluto VSG graceful-close test")
+    window = PlutoVSGWindow()
+
+    class _Worker:
+        cancel_count = 0
+
+        def cancel(self) -> None:
+            self.cancel_count += 1
+
+    worker = _Worker()
+    window._tx_worker = worker
+    window._tx_thread = object()
+    window.show()
+
+    assert window.close() is False
+    assert worker.cancel_count == 1
+    assert window._close_after_tx is True
+
+    # Repeated user close requests must not send duplicate stop commands.
+    assert window.close() is False
+    assert worker.cancel_count == 1
+
+    window._tx_worker = None
+    window._tx_thread = None
+    window.close()
+
+
 def test_invalid_vsg_project_reports_model_path() -> None:
     project = replace(create_default_project(), sample_rate_hz=0.0)
 

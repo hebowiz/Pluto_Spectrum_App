@@ -20,6 +20,8 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         preferences: QtCore.QSettings | None = None,
     ) -> None:
         super().__init__()
+        self._shutdown_requested = False
+        self._shutdown_finalized = False
         self._pluto_source = pluto_source or PlutoLiveSource()
         self._stack = QtWidgets.QStackedWidget()
         self.setCentralWidget(self._stack)
@@ -37,6 +39,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self._stack.addWidget(workspace)
             workspace.analysis_mode_requested.connect(self.set_analysis_mode)
             workspace.application_close_requested.connect(self.close)
+            workspace.shutdown_ready.connect(self._continue_shutdown)
         self.generic_workspace.pluto_uri_edit.currentTextChanged.connect(
             self._pluto_target_changed
         )
@@ -45,18 +48,12 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         self.set_analysis_mode("generic")
 
     def _busy_reason(self) -> str | None:
-        capture = self.generic_workspace._pluto_capture_thread
-        if capture is not None and capture.isRunning():
-            return "Generic VSA Pluto capture is running"
-        analysis = self.generic_workspace._analysis_thread
-        if analysis is not None and analysis.isRunning():
-            return "Generic VSA analysis is running"
-        adsb_capture = self.adsb1090_workspace._capture_thread
-        if adsb_capture is not None and adsb_capture.isRunning():
-            return "ADS-B Pluto capture is running"
-        adsb_analysis = self.adsb1090_workspace._analysis_stream_thread
-        if adsb_analysis is not None and adsb_analysis.isRunning():
-            return "ADS-B stream analysis is running"
+        generic = self.generic_workspace.shutdown_busy_reason()
+        if generic is not None:
+            return generic
+        adsb = self.adsb1090_workspace.shutdown_busy_reason()
+        if adsb is not None:
+            return adsb
         return None
 
     @QtCore.Slot(str)
@@ -103,13 +100,23 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self._update_window_title(current)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self._shutdown_requested = True
+        self.generic_workspace.request_shutdown()
+        self.adsb1090_workspace.request_shutdown()
         busy = self._busy_reason()
         if busy is not None:
-            self.statusBar().showMessage(f"{busy}; stop it before closing.")
+            self.statusBar().showMessage(f"Stopping {busy} before closing...")
             event.ignore()
             return
-        self.adsb1090_workspace.prepare_for_shutdown()
-        self.generic_workspace._save_startup_meas_config()
-        self._pluto_source.close()
+        if not self._shutdown_finalized:
+            self._shutdown_finalized = True
+            self.adsb1090_workspace.finalize_shutdown()
+            self.generic_workspace.finalize_shutdown()
+            self._pluto_source.close()
         event.accept()
         super().closeEvent(event)
+
+    @QtCore.Slot()
+    def _continue_shutdown(self) -> None:
+        if self._shutdown_requested:
+            self.close()

@@ -572,6 +572,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     analysis_mode_requested = QtCore.Signal(str)
     application_close_requested = QtCore.Signal()
+    shutdown_ready = QtCore.Signal()
 
     def __init__(
         self,
@@ -602,6 +603,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._selected_symbol_marker_index: int | None = None
         self._last_analysis_timings_ms: dict[str, float] = {}
         self._pluto_capture_started_at: float | None = None
+        self._shutdown_requested = False
+        self._shutdown_finalized = False
+        self._shutdown_ready_emitted = False
         self._symbol_marker_items: dict[
             str, tuple[pg.PlotDataItem, pg.TextItem]
         ] = {}
@@ -3053,6 +3057,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Armed - {message}{transport_warning}")
 
     def _pluto_capture_ready(self, recording: object) -> None:
+        if self._shutdown_requested:
+            return
         if not isinstance(recording, IQRecording):
             self._pluto_capture_failed("capture returned an invalid IQ record")
             return
@@ -3071,6 +3077,8 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _pluto_capture_failed(self, message: str) -> None:
         self._pluto_capture_started_at = None
         self.statusBar().showMessage(f"Pluto capture failed: {message}")
+        if self._shutdown_requested:
+            return
         QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", message)
 
     def _pluto_capture_cancelled(self) -> None:
@@ -3297,37 +3305,68 @@ class VSAWindow(QtWidgets.QMainWindow):
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "IQ Import Error", str(error))
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
-        if (
-            self._pluto_discovery_thread is not None
-            and self._pluto_discovery_thread.isRunning()
-        ):
-            self.statusBar().showMessage(
-                "Pluto device discovery is still running; close again after it completes."
-            )
-            event.ignore()
+    def request_shutdown(self) -> None:
+        """Stop cancellable work and prevent new analysis before window teardown."""
+
+        self._shutdown_requested = True
+        self._pending_analysis = None
+        capture = self._pluto_capture_thread
+        if capture is not None and capture.isRunning():
+            capture.cancel()
+        analysis = self._analysis_thread
+        if analysis is not None and analysis.isRunning():
+            analysis.requestInterruption()
+        for thread in (self._pluto_discovery_thread, capture, analysis):
+            if thread is None or not thread.isRunning():
+                continue
+            try:
+                thread.finished.connect(
+                    self._shutdown_worker_finished,
+                    QtCore.Qt.ConnectionType.UniqueConnection,
+                )
+            except (RuntimeError, TypeError):
+                pass
+
+    def shutdown_busy_reason(self) -> str | None:
+        discovery = self._pluto_discovery_thread
+        if discovery is not None and discovery.isRunning():
+            return "Pluto device discovery"
+        capture = self._pluto_capture_thread
+        if capture is not None and capture.isRunning():
+            return "Pluto capture"
+        analysis = self._analysis_thread
+        if analysis is not None and analysis.isRunning():
+            return "VSA analysis"
+        return None
+
+    def finalize_shutdown(self) -> None:
+        if self._shutdown_finalized:
             return
-        if (
-            self._pluto_capture_thread is not None
-            and self._pluto_capture_thread.isRunning()
-        ):
-            self.statusBar().showMessage(
-                "Pluto capture is still running; close again after it completes."
-            )
-            event.ignore()
-            return
-        if self._analysis_thread is not None:
-            self.statusBar().showMessage(
-                "Analysis is still running; close again after it completes."
-            )
-            event.ignore()
-            return
+        self._shutdown_finalized = True
         self._preferences.setValue(
             "pluto/selected_target", self._selected_pluto_target()
         )
         self._save_startup_meas_config()
         if self._owns_pluto_source:
             self._pluto_source.close()
+
+    def _shutdown_worker_finished(self) -> None:
+        if not self._shutdown_requested or self.shutdown_busy_reason() is not None:
+            return
+        if not self._shutdown_ready_emitted:
+            self._shutdown_ready_emitted = True
+            self.shutdown_ready.emit()
+        if self._owns_pluto_source:
+            self.close()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self.request_shutdown()
+        busy = self.shutdown_busy_reason()
+        if busy is not None:
+            self.statusBar().showMessage(f"Stopping {busy} before closing...")
+            event.ignore()
+            return
+        self.finalize_shutdown()
         super().closeEvent(event)
 
     def _request_analysis(
@@ -3337,6 +3376,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         analysis_context: dict[str, float] | None = None,
     ) -> bool:
         """Queue the newest configured analysis without blocking the GUI."""
+        if self._shutdown_requested:
+            return False
         if self.session.recording is None:
             return False
         self._selected_symbol_marker_index = None
@@ -3459,6 +3500,9 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _analysis_stopped(self) -> None:
         self._analysis_thread = None
         self._active_analysis_context = {}
+        if self._shutdown_requested:
+            self._pending_analysis = None
+            return
         if self._pending_analysis is None:
             return
         request = self._pending_analysis
