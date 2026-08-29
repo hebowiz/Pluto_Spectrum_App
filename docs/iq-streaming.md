@@ -56,7 +56,7 @@ LO、Sample Rate、RF bandwidth、buffer sizeの変更、明示的なバッフ�
 PlutoSDR/libiio
     ↓ 単一Producerが連続取得
 IQStreamBuffer
-    ├─ RealTime SA: latest-only consumer
+    ├─ RealTime SA: cursor-based overlap FFT consumer
     ├─ HighSpeed TA: lossless window consumer
     ├─ Time Analyzer: window consumer
     ├─ VSA: 将来のlossless/overlap consumer
@@ -103,7 +103,7 @@ IQStreamBuffer
 
 ### Phase 3: モード移行
 
-- [x] RealTime SAをlatest-only consumerへ移行
+- [x] RealTime SAをcursor-based overlap FFT consumerへ移行
 - [x] HighSpeed TAを解析中も停止しないconsumerへ移行
 - [x] 旧Time Analyzerの同期取得を共通ブロックAPIへ移行
 - [x] Sweep/WideBand/Calibrationの同期取得を共通ブロックAPIへ移行
@@ -253,7 +253,8 @@ python -m pytest -q
 - Power Trigger LevelをdBFS UIから最終表示と同じdBmへ変更。固定補正、Center Frequencyの周波数別補正、入出力補正、IQ full scaleを逆算して内部dBFS detectorへ渡し、HighSpeed TAのPower Level選択中はグラフへ黄色破線のTrigger levelを表示。
 - GUIスレッドを長時間占有していたPower Triggerのsample逐次走査を、minimum duration 1 sample時のNumPy threshold検索へ変更。256,000-sample判定を約88.5 msから約4.1 msへ短縮し、Rising/Falling/Eitherのevent同値性と16 MSPS実機GUI callback時間を確認。
 - Power Trigger判定をraw瞬時IQから表示と同じGaussian IQ RBW filter後へ変更し、raw IQ record保持と分離。Trigger Level dialog中はProducer/timerを停止してqueueを破棄し、未確定入力中の古いrecord表示を防止。
-- RealTime SA、WideBand RT SA、Calibrationを、FFT後power convolutionからSweep/TAと同じGaussian FIR係数を用いるFFT filter bankへ移行。狭RBW時のFFT自動拡張、実効RBW/ENBW表示、処理方式付き校正CSVを追加。overlap STFTは次段階。
+- RealTime SA、WideBand RT SA、Calibrationを、FFT後power convolutionからSweep/TAと同じGaussian FIR係数を用いるFFT filter bankへ移行。狭RBW時のFFT自動拡張、実効RBW/ENBW表示、処理方式付き校正CSVを追加。
+- 2026-08-29: 通常RTSAをlatest-only取得から連続cursor consumerへ変更し、既定80% overlap FFTとSample／Peak／Negative Peak／Average／RMS Detectorを追加。Detector出力後の既存Trace Modeは維持。処理量上限を超える設定はFFT Size／Span／Sample Rateを強制変更せず、実overlap、FFT rate、時間被覆率、`Reduced overlap`／`Analysis gaps`警告を表示する。WB RTSAは現状維持。
 - Waterfallの色スケール上限を測定レンジの80%へ変更し、80～100%をRedへ飽和表示。SpectrumのY軸範囲は従来どおり維持。
 - Waterfallの測定レンジ下端15%を暗いNavyへ固定し、noise floorの色変化を抑制。15～80%だけをBlue→Cyan→Green→Yellow→Redへ展開。
 - WideBand RT SAのFrequencyメニューへChunk Width 10／20／30／40 MHzを追加。左右各5 MHzと外周4% guardを維持し、測定下端から可変幅chunkを配置。最大40 MHzをdirect USB、約54.35 MSPS、2 chunksで実機確認。

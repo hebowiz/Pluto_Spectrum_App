@@ -81,6 +81,29 @@ def test_spectrum_processor_preserves_bin_center_cw_amplitude() -> None:
     assert power[center + half_rbw_bins] == pytest.approx(0.5, abs=0.01)
 
 
+def test_spectrum_processor_batch_matches_individual_frames() -> None:
+    config = SpectrumConfig(
+        analyzer_mode=AnalyzerMode.REALTIME_SA,
+        display_span_hz=4_000_000,
+        fft_size=64,
+        rbw_hz=400_000.0,
+    )
+    processor = SpectrumProcessor(config)
+    frames = np.stack(
+        (
+            _tone(config.fft_size, 0.0, config.sample_rate_hz),
+            _tone(config.fft_size, config.bin_width_hz, config.sample_rate_hz),
+        )
+    )
+
+    batch = processor.compute_filtered_power_batch(frames)
+    scalar = np.stack(
+        [processor.compute_filtered_power(frame) for frame in frames]
+    )
+
+    np.testing.assert_allclose(batch, scalar, rtol=1e-6, atol=1e-12)
+
+
 def test_too_narrow_rbw_is_limited_to_window_that_fits_fft() -> None:
     window, design = design_gaussian_fft_filterbank(
         4_000_000.0,

@@ -26,24 +26,38 @@ VSG/VSAのdevice設定とは共有しないため、送信機と受信機へ同�
 - サンプルレート: `display_span_hz / (1 - 2 × guard_ratio)`
 - 初期guard ratio: 0.04（FFT両端を各4%非表示）
 - RF bandwidth: サンプルレートと同値
-- RX buffer size: FFT size
+- 連続RX block size: 65536 samples以上（FFT sizeとは独立）
 - FFT size選択肢: 64～16384の2のべき乗
 
-PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリングへ連続発行します。GUIタイマーは現在のepochに属する最新のFFTサイズ分をコピーして描画します。初期保持容量は512ブロックです。
+PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリングへ連続発行します。RTSA consumerは独立cursorで全ブロックを順次読み、ブロック境界をまたいでoverlap FFTの位相（開始sample位置）を維持します。初期保持容量は512ブロックです。ring overrunまたはproducer discontinuityを検出した場合は、連続しないIQを同じFFT窓へ混ぜず、ステータスへ`RX Discontinuity`を表示します。
 
 ## 信号処理
 
 1. 必要に応じてIQ平均値を減算
-2. Sweep SA／TAと同じGaussian complex IQ FIR係数をFFT長へゼロ埋めした解析窓を適用
-3. FFTとfftshift
-4. FFTサイズおよびcoherent gainで正規化
-5. 絶対値二乗で電力化
-6. FFT両端のguard領域を除外
-7. dB変換と表示補正
+2. 既定80% overlap（hopはFFT長の約20%）で連続IQを解析窓へ分割
+3. Sweep SA／TAと同じGaussian complex IQ FIR係数をFFT長へゼロ埋めした解析窓を適用
+4. FFTとfftshift
+5. FFTサイズおよびcoherent gainで正規化
+6. 絶対値二乗で電力化
+7. GUI更新間に生成された全FFTをDetectorで周波数binごとに集約
+8. FFT両端のguard領域を除外
+9. dB変換、表示補正、既存Trace Mode処理
 
 各FFT binは、中心周波数だけが異なる同一Gaussian複素フィルターの出力に相当します。RBWは両側3 dB bandwidth、ENBWは約`1.0645 × RBW`です。従来のFFT電力化後のGaussian畳み込みはRBW経路から除外しました。
 
 指定RBWのGaussian係数が現在のFFT長へ収まらない場合は、FFT Sizeを最大16384まで自動拡張します。それでも収まらない場合は収まる最小RBWへ制限し、ステータスの`Eff RBW`へ実効値と`limited`を表示します。
+
+既定の目標overlapは80%、host側の処理量上限は10000 FFT/sです。目標を処理できない設定では、FFT Size、Span、Sample Rateを強制変更せずhopを広げます。ステータスへ実overlap、FFT rate、表示1 frame当たりのFFT数を表示し、overlap低下時は`Reduced overlap`、hopがFFT長を超えて未解析区間が生じる場合は`Analysis gaps`、時間被覆率と警告を表示します。この上限は2026-08-29時点の開発PCでcomplex64 batched FFTが約17000 FFT/sだった実測に対し、GUI処理の余力を残した値です。
+
+DetectorはGUI更新間に得たFFT群へ適用します。
+
+- Sample: 最後のFFT
+- Peak: binごとの最大linear power
+- Negative Peak: binごとの最小linear power
+- Average: binごとのlinear power平均
+- RMS: IQ電圧のRMS二乗に相当するlinear power平均
+
+AverageとRMSは現段階では入力がFFT後のlinear powerなので同値です。名称は将来の測定量定義と一般的な計測器UIとの対応のため分けています。Detector出力後のLive／Max Hold／Average等のTrace Modeは既存実装を変更していません。
 
 ## 表示
 
@@ -58,7 +72,7 @@ PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリン�
 ## Continuous / Single
 
 - Continuous: RXスレッドとGUIタイマーを継続動作させます。
-- Single: 最新FFTブロックを1回描画した後、タイマーとRXスレッドを停止します。
+- Single: 開始後に到着した連続IQからoverlap FFT群を生成し、最初の表示frameを1回描画した後、タイマーとRXスレッドを停止します。
 
 ## 初期値
 
@@ -68,13 +82,16 @@ PlutoReceiverの共通RX workerがメタデータ付きIQブロックをリン�
 | Span | 20 MHz |
 | FFT Size | 4096 |
 | RBW | 1 MHz |
-| Update Interval | 0 ms（Qtタイマー最短間隔） |
+| Target Overlap | 80% |
+| FFT processing limit | 10000 FFT/s |
+| Update Interval | 0 ms（RTSAではGUIを最大約60 FPSへ制限） |
 | Waterfall History | 300 |
 | Persistence Decay | Medium |
 
 ## 制限・注意事項
 
 - 55 MHzを超えるSpanはモード移行時または設定反映時に55 MHzへ制限されます。
-- フレーム落ち判定用の統計はありますが、取得データを再送・補間する機能ではありません。
-- 現段階ではGUI更新ごとに最新のFFTサイズ分を解析し、overlap STFTは未実装です。したがってGaussian filter bankの周波数特性は適用済みですが、一般的RTSA相当のPOIや全sampleの時間被覆はまだ保証しません。
+- RX ring overrunまたはUSB/DMA側の欠落データを再送・補間する機能はありません。
+- overlap FFTを実装しましたが、処理上限により`Analysis gaps`と表示された設定では全sampleを解析しません。`Real-time`または`Reduced overlap`かつ`Coverage: 100%`であっても、USB/DMA欠落がないことは別途`RX Discontinuity`と実機条件で確認します。
+- WB RTSAは今回のoverlap consumerの対象外で、従来のchunk取得方式を維持します。
 - 表示値は校正された相対的なFFT電力をdBmとして扱う実装で、絶対精度は校正条件に依存します。

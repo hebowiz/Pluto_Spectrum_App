@@ -57,6 +57,10 @@ from pluto_sa.signal.measurement_filter import (
     reduce_filtered_iq_power_buckets,
 )
 from pluto_sa.signal.spectrum_processor import SpectrumProcessor
+from pluto_sa.signal.realtime_fft import (
+    RealtimeDetectorFrame,
+    RealtimeFFTAccumulator,
+)
 from pluto_sa.ui.calibration_controller import CalibrationController
 from pluto_sa.ui import sweep_like_progress as slp
 from pluto_sa.utils.calibration import apply_display_power_correction
@@ -245,6 +249,8 @@ FFT_SIZE_OPTIONS = [str(2**power) for power in range(6, 15)]
 SWEEP_DETECTOR_OPTIONS = [
     DetectorMode.SAMPLE,
     DetectorMode.PEAK,
+    DetectorMode.NEGATIVE_PEAK,
+    DetectorMode.AVERAGE,
     DetectorMode.RMS,
 ]
 PERSISTENCE_AMPLITUDE_BINS = 256
@@ -480,6 +486,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._time_analyzer_sweep = TimeAnalyzerSweepState()
         self._high_speed_time_analyzer = HighSpeedTimeAnalyzerCaptureState()
         self._high_speed_ta_stream_cursor: IQStreamCursor | None = None
+        self._realtime_stream_cursor: IQStreamCursor | None = None
+        self._realtime_fft_accumulator: RealtimeFFTAccumulator | None = None
+        self._realtime_last_detector_frame: RealtimeDetectorFrame | None = None
+        self._realtime_rx_discontinuities = 0
         self._high_speed_ta_trigger_acquisition: TriggerAcquisitionController | None = None
         self._high_speed_ta_trigger_filter: StatefulIQMeasurementFilter | None = None
         self._high_speed_ta_trigger_filter_key: tuple[float, float] | None = None
@@ -1672,6 +1682,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if stop_receiver and hasattr(self, "timer"):
             self.timer.stop()
             self.iq_acquisition.stop()
+            self._realtime_stream_cursor = None
         self._stop_high_speed_ta_stream()
 
         if stop_sweep:
@@ -3422,12 +3433,27 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _start_realtime_continuous(self) -> None:
         self._prepare_sweep_like_continuous_entry_state()
         self.sweep_controller.stop()
-        self.iq_acquisition.start(
-            block_size=self.config.rx_buffer_size,
-            source="realtime",
-        )
+        self._start_realtime_fft_stream()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
+
+    def _reset_realtime_fft_runtime(self) -> None:
+        self._realtime_fft_accumulator = RealtimeFFTAccumulator(
+            self.processor,
+            self.config.sweep_detector_mode,
+            target_overlap_ratio=float(self.config.realtime_overlap_ratio),
+            max_fft_rate_hz=float(self.config.realtime_fft_rate_limit_hz),
+        )
+        self._realtime_last_detector_frame = None
+
+    def _start_realtime_fft_stream(self) -> None:
+        self._realtime_stream_cursor = self.iq_acquisition.start(
+            block_size=max(65_536, int(self.config.fft_size)),
+            source="realtime",
+            cursor_start="latest",
+        )
+        self._realtime_rx_discontinuities = 0
+        self._reset_realtime_fft_runtime()
 
     def _start_time_analyzer_continuous(self) -> None:
         self._prepare_sweep_like_continuous_entry_state()
@@ -4230,6 +4256,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         self.config.sweep_detector_mode = resolved_mode.value
+        if self._realtime_fft_accumulator is not None:
+            self._realtime_fft_accumulator.set_detector_mode(resolved_mode)
         self._update_sweep_controls()
         self._update_sweep_detector_selection_page()
         self._refresh_status_label()
@@ -4270,19 +4298,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
 
         self._prepare_sweep_like_continuous_entry_state()
-        self.iq_acquisition.start(
-            block_size=self.config.rx_buffer_size,
-            source="realtime",
-        )
+        self._start_realtime_fft_stream()
         self._restart_timer_for_current_mode()
         self._update_continuous_button()
 
     def _enter_single_realtime_mode(self) -> None:
         """Single entry for RealTime SA-style immediate capture path."""
-        self.iq_acquisition.start(
-            block_size=self.config.rx_buffer_size,
-            source="realtime",
-        )
+        self._start_realtime_fft_stream()
 
     def _enter_single_sweep_mode(self) -> None:
         """Single entry for Sweep SA sweep-controller driven path."""
@@ -6109,6 +6131,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.config.update_interval_ms > 0
             else 1.0 / 60.0
         )
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA:
+            self._reset_realtime_fft_runtime()
         if self._is_high_speed_time_analyzer_mode():
             minimum_s, maximum_s = self._high_speed_ta_time_span_limits_s()
             time_span_s = self._clamp_float(
@@ -6276,6 +6300,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.WIDEBAND_REALTIME_SA,
         ):
             return self.config.sweep_update_interval_ms
+        if (
+            self.config.analyzer_mode == AnalyzerMode.REALTIME_SA
+            and int(self.config.update_interval_ms) <= 0
+        ):
+            return 16
         return self.config.update_interval_ms
 
     def _restart_timer_for_current_mode(self) -> None:
@@ -6478,6 +6507,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
         line3 = self._make_fft_info_status_line()
         line4 = f"Detector: {self.config.sweep_detector_mode}"
+        if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA:
+            line4 += self._make_realtime_fft_status_text()
         if (
             self._is_high_speed_time_analyzer_mode()
             and self._high_speed_time_analyzer.island_blocks > 0
@@ -6490,6 +6521,31 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 f"   Blind: {state.island_blind_time_s * 1e3:.1f} ms"
             )
         return f"{line1}\n{line2}\n{line3}\n{line4}"
+
+    def _make_realtime_fft_status_text(self) -> str:
+        accumulator = self._realtime_fft_accumulator
+        if accumulator is None:
+            return "   FFT Analysis: waiting"
+        plan = accumulator.plan
+        frame_count = (
+            0
+            if self._realtime_last_detector_frame is None
+            else int(self._realtime_last_detector_frame.fft_frames)
+        )
+        status = (
+            f"   {plan.quality}"
+            f"   Overlap: {plan.actual_overlap_ratio * 100.0:.1f}%"
+            f"/{plan.target_overlap_ratio * 100.0:.0f}%"
+            f"   FFT Rate: {plan.actual_fft_rate_hz / 1000.0:.1f} k/s"
+            f"   FFT/Frame: {frame_count}"
+        )
+        if plan.analysis_coverage_ratio < 1.0:
+            status += f"   Coverage: {plan.analysis_coverage_ratio * 100.0:.1f}%"
+        if plan.quality != "Real-time":
+            status += "   WARNING: reduced time-domain fidelity"
+        if self._realtime_rx_discontinuities > 0:
+            status += f"   RX Discontinuity: {self._realtime_rx_discontinuities}"
+        return status
 
     def _make_correction_status_text(self) -> str:
         return "Correction: ON" if self.calibration_controller.correction_enabled else "Correction: OFF"
@@ -7725,6 +7781,34 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if single_shot:
                 return
 
+    def _read_realtime_detector_frame(self) -> RealtimeDetectorFrame | None:
+        if not self.iq_acquisition.is_running or self._realtime_stream_cursor is None:
+            self._start_realtime_fft_stream()
+        if self._realtime_fft_accumulator is None:
+            self._reset_realtime_fft_runtime()
+        assert self._realtime_stream_cursor is not None
+        assert self._realtime_fft_accumulator is not None
+
+        result = self.iq_acquisition.read(
+            self._realtime_stream_cursor,
+            max_blocks=max(1, int(self.config.realtime_stream_read_blocks)),
+        )
+        self._realtime_stream_cursor = result.cursor
+        if result.overrun:
+            self._realtime_fft_accumulator.mark_discontinuity()
+            self._realtime_rx_discontinuities += max(1, int(result.missed_blocks))
+        for block in result.blocks:
+            if block.discontinuity_before and self._realtime_fft_accumulator.has_seen_input:
+                self._realtime_rx_discontinuities += 1
+            self._realtime_fft_accumulator.process(
+                block.iq,
+                discontinuity_before=bool(block.discontinuity_before),
+            )
+        frame = self._realtime_fft_accumulator.take_frame()
+        if frame is not None:
+            self._realtime_last_detector_frame = frame
+        return frame
+
     def update_spectrum(self) -> None:
         if self._is_high_speed_time_analyzer_mode():
             self._update_high_speed_time_analyzer_spectrum()
@@ -7755,11 +7839,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.prev_frame_time = now_frame
 
-        iq = self.iq_acquisition.latest_samples(self.config.fft_size)
-        if iq is None:
+        detector_frame = self._read_realtime_detector_frame()
+        if detector_frame is None:
             return
 
-        power_linear_full = self.processor.compute_filtered_power(iq)
+        power_linear_full = detector_frame.power_linear
         power_linear_display = self.processor.extract_display_spectrum(power_linear_full)
         current_power_db_display = 10.0 * np.log10(power_linear_display + 1e-20)
         current_display_db = self._apply_display_power_correction_with_frequency(
@@ -7767,11 +7851,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             freq_axis_ghz=self.processor.get_display_freq_axis_ghz(),
         )
 
-        current_received_total = self.receiver.get_received_sample_count()
-        self.received_samples_interval = (
-            current_received_total - self._last_received_samples_total
-        )
-        self._last_received_samples_total = current_received_total
+        self.received_samples_interval = int(detector_frame.input_samples)
 
         self._append_waterfall_line(current_display_db)
 
@@ -7803,6 +7883,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self.sweep_state == SWEEP_STATE_SINGLE:
             self.timer.stop()
             self.iq_acquisition.stop()
+            self._realtime_stream_cursor = None
             self.sweep_state = SWEEP_STATE_STOPPED
             self._update_continuous_button()
 

@@ -12,6 +12,8 @@ class DetectorMode(str, Enum):
 
     SAMPLE = "Sample"
     PEAK = "Peak"
+    NEGATIVE_PEAK = "Negative Peak"
+    AVERAGE = "Average"
     RMS = "RMS"
 
 
@@ -26,7 +28,9 @@ def apply_detector(values: np.ndarray, mode: DetectorMode | str) -> float:
         return float(values[-1])
     if resolved_mode is DetectorMode.PEAK:
         return float(np.max(values))
-    if resolved_mode is DetectorMode.RMS:
+    if resolved_mode is DetectorMode.NEGATIVE_PEAK:
+        return float(np.min(values))
+    if resolved_mode in (DetectorMode.AVERAGE, DetectorMode.RMS):
         # Input is already squared voltage (linear power). An RMS voltage
         # detector therefore reports its arithmetic mean in power units.
         return float(np.mean(values))

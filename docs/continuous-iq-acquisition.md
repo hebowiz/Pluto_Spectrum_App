@@ -12,7 +12,7 @@ RTSA、HighSpeed TA、VSAが個別にPlutoのRXワーカーとlibiioバッファ
 ADALM-Pluto / libiio
   -> PlutoReceiver RX worker（1本だけ）
   -> IQStreamBuffer（sequence / stream_id / sample index付きring）
-       -> RTSA: 最新FFT窓を読む latest-only consumer
+       -> RTSA: cursorで順次読む overlap-FFT consumer
        -> HighSpeed TA: cursorで順次読む trigger/window consumer
        -> VSA: 解析開始ごとに新しいcursorを作る finite-record consumer
 ```
@@ -25,7 +25,7 @@ ADALM-Pluto / libiio
 
 ### RTSA
 
-Continuous中はproducerを動かし続け、表示周期ごとに最新のFFT sample数だけ読む。GUI更新が遅れても古い画面を順番に再生せず、最新状態へ追従する。
+Continuous中はproducerを動かし続け、consumer cursorでIQ blockを順次読む。FFT開始sample位置はblock境界をまたいで維持し、既定80% overlapの全FFTをDetectorへ渡す。GUIは約60 FPS以下で更新し、各表示frameにはその間に処理した複数FFTを集約する。consumerがring保持時間を超えて遅れた場合は古い画面を再生せず最古の保持blockへ追従するが、overrunを欠落として表示し、連続しないsampleを同じFFT窓へ混ぜない。
 
 ### HighSpeed TA
 

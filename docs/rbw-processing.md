@@ -1,6 +1,6 @@
 # RBW演算監査と改善方針
 
-最終更新: 2026-08-02
+最終更新: 2026-08-29
 
 ## 実装状況（2026-08-02）
 
@@ -9,7 +9,8 @@
 | Sweep SA | Gaussian FIR stateful complex IQ filterへ移行済み |
 | HighSpeed TA | Gaussian FIR stateful complex IQ filterへ移行済み |
 | 旧Time Analyzer | 同じIQ filterへ移行済み（UI非表示） |
-| RealTime SA / WideBand RT SA | 共通Gaussian FIR係数によるFFT filter bankへ移行済み。overlapは次段階 |
+| RealTime SA | 共通Gaussian FIR係数によるFFT filter bank、連続cursor、既定80% overlap、時間方向Detectorへ移行済み |
+| WideBand RT SA | 共通Gaussian FIR係数によるFFT filter bank。chunk取得と非overlap処理は現状維持 |
 | Calibration | RealTime SAと同じGaussian FFT filter bankへ移行済み |
 
 実装は`pluto_sa/signal/measurement_filter.py`へ集約しました。指定RBWはcomplex basebandの負周波数側から正周波数側までを含む「両側3 dB bandwidth」と定義し、内部low-pass cutoffは`RBW / 2`です。
@@ -20,7 +21,7 @@
 
 RealTime SA/WideBand RT SA/Calibrationは`pluto_sa/signal/fft_filterbank.py`で、同じFIR係数をFFT長へ中央配置してゼロ埋めした解析窓を生成します。窓をIQ frameへ乗算してFFTすることで、各binは中心周波数だけが異なる同一Gaussian複素filterの出力になります。tone coherent gainを補正し、電力化後のGaussian convolutionは行いません。
 
-狭いRBWではfilter supportが収まる最小の2のべき乗へFFT Sizeを自動拡張します。上限16384でも不足する場合は収まるRBWへ制限し、requested/effective RBW、ENBW、support samples、制限状態をmetadataと画面へ出します。現在は最新1 frameを処理する段階で、連続sampleをhopごとに全解析するoverlap STFTは未実装です。
+狭いRBWではfilter supportが収まる最小の2のべき乗へFFT Sizeを自動拡張します。上限16384でも不足する場合は収まるRBWへ制限し、requested/effective RBW、ENBW、support samples、制限状態をmetadataと画面へ出します。通常RTSAは連続sampleをhopごとに解析するoverlap STFTへ移行済みです。WB RTSAとCalibrationはこの変更の対象外です。
 
 以下は移行理由を残すための「旧実装」監査記録です。現行の測定経路では使いません。
 
@@ -78,9 +79,9 @@ Plutoの`rx_rf_bandwidth`はalias防止と粗いacquisition bandwidthに使用�
 
 各LO pointでcentered IQへ同じmeasurement filterを適用し、settling後の包絡線をdetectorへ渡す方式が従来Zero Span/Swept SAに近い実装です。LO retuneごとにfilter stateをresetし、RF/LO settleとは別にdigital filterのgroup delayとsettling samplesを破棄します。
 
-### RealTime SA / WideBand RT SA（第1段階実装済み）
+### RealTime SA / WideBand RT SA
 
-周波数軸全体を同時表示するため、単一のlow-pass IQ filterへ置換しません。第1段階ではGaussian FFT filter bankを採用し、次段階でoverlap STFTへ拡張します。選択肢は次のとおりです。
+周波数軸全体を同時表示するため、単一のlow-pass IQ filterへ置換しません。Gaussian FFT filter bankを採用し、通常RTSAはoverlap STFTへ拡張済みです。WB RTSAは現状維持です。将来の選択肢は次のとおりです。
 
 - overlap STFTのwindow shape・FFT長・ENBWで定義する。
 - 必要な場合はpolyphase filter bankを使用する。
@@ -109,15 +110,15 @@ continuous IQ at Fs
 
 KeysightもRTSAのPOIへsampling bandwidth、連続処理、FFT overlapが影響すると説明しています。NI RFmxはGaussian/Flat RBWをデジタルでemulateでき、速度面ではFFT-based RBWを推奨しています。このため商用機の内部実装は機種ごとに、windowed FFT、zero padding、digital RBW emulation、filter bankを組み合わせると考えるべきで、単一アルゴリズムへ一般化しません。
 
-#### Pluto向けRTSA案（第1段階を実装済み）
+#### Pluto向けRTSA実装
 
-第一候補のFFT-based RBWを実装しました。現時点で1～3と旧power convolution除去は完了し、4～5の連続frame化と時間方向detectorは未実装です。
+第一候補のFFT-based RBWを実装しました。通常RTSAでは1～5と旧power convolution除去が完了しています。
 
 1. `analysis_record_samples L`をrequested RBWとwindow ENBW/3 dB係数から決める。
 2. trace point数に必要な`Nfft >= L`を独立に決め、必要分をzero padする。
 3. Hann等のwindowを掛け、complex FFT後にtone coherent gainとnoise ENBWを別々に補正する。
-4. configurable hop/overlapで全IQ sampleを連続frame化する。
-5. detectorは同一frequency binの時間frame方向へ適用する。
+4. 既定80% overlapと処理量上限からhopを決め、連続IQをframe化する。処理不能設定は強制変更せずoverlap低下または解析gapを警告する。
+5. Sample／Peak／Negative Peak／Average／RMS detectorを同一frequency binの時間frame方向へ適用する。
 6. 現行Gaussian power convolutionはRBWから外し、必要なら`Frequency Smoothing`または`Channel Integration BW`として別設定にする。
 
 第二候補のpolyphase filter bankはfilter shape、channel isolation、decimationを明示しやすい一方、実装と計算量が大きいためFMT/POI要件でFFT方式が不足した場合に評価します。
@@ -146,4 +147,4 @@ raw trigger recordを正本として保持し、解析段でchannel selection fi
 
 1. 既知CW/noise/burstを実機入力し、3 dB bandwidth、ENBW、rise/fall time、校正差を検証する。
 2. TA UIの`RBW`と`RF BW`を`Measurement BW`と`Acquisition BW`へ整理する。
-3. RealTime SAのGaussian FFT filter bankへoverlap/hop処理を追加し、全IQ sampleの時間被覆率とPOIを検証する。
+3. 実装済みoverlap/hop処理について、既知burstで時間被覆率、POI、各Detectorと商用RTSAの差を実機検証する。

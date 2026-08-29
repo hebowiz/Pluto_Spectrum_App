@@ -22,7 +22,7 @@ WideBand RT SAのFrequencyメニューではChunk Widthを10／20／30／40 MHz�
 
 ## 2. 振幅処理
 
-RBW処理は全モードで同じGaussian complex IQ FIR特性を共有します。Sweep SAとTime Analyzer系はstateful FIRを電力化前に直接適用し、RealTime SA、WideBand RT SA、Calibrationは同じFIR係数を解析窓とするGaussian FFT filter bankを使います。指定RBWは両側3 dB bandwidth、ENBWは約1.0645倍です。RTSA系のoverlap FFTは次段階です。
+RBW処理は全モードで同じGaussian complex IQ FIR特性を共有します。Sweep SAとTime Analyzer系はstateful FIRを電力化前に直接適用し、RealTime SA、WideBand RT SA、Calibrationは同じFIR係数を解析窓とするGaussian FFT filter bankを使います。指定RBWは両側3 dB bandwidth、ENBWは約1.0645倍です。通常RTSAは連続IQ cursor、既定80% overlap FFT、時間方向Detectorを実装済みです。WB RTSAは従来のchunk取得方式を維持します。
 
 表示値には最終段で次の補正を加算します。
 

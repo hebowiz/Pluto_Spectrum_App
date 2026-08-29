@@ -50,6 +50,9 @@ class SpectrumConfig:
     persistence_decay_mode: str = "Medium"
     waterfall_decimation: int = 4
     capture_buffer_blocks: int = 512
+    realtime_overlap_ratio: float = 0.8
+    realtime_fft_rate_limit_hz: float = 10_000.0
+    realtime_stream_read_blocks: int = 16
     drop_threshold_factor: float = 2.5
     drop_judge_window: int = 30
     wideband_chunk_width_hz: int = 10_000_000
@@ -92,6 +95,18 @@ class SpectrumConfig:
             self.rx_gain_db = MAX_INTERNAL_GAIN_DB
         if int(self.wideband_chunk_width_hz) not in WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ:
             self.wideband_chunk_width_hz = WIDEBAND_CHUNK_WIDTH_OPTIONS_HZ[0]
+        self.realtime_overlap_ratio = min(
+            0.95,
+            max(0.0, float(self.realtime_overlap_ratio)),
+        )
+        self.realtime_fft_rate_limit_hz = max(
+            1.0,
+            float(self.realtime_fft_rate_limit_hz),
+        )
+        self.realtime_stream_read_blocks = max(
+            1,
+            int(self.realtime_stream_read_blocks),
+        )
 
     @property
     def sample_rate_hz(self) -> int:

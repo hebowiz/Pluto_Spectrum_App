@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy import fft as scipy_fft
 
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.signal.fft_filterbank import (
@@ -17,6 +18,8 @@ class SpectrumProcessor:
     def __init__(self, config: SpectrumConfig) -> None:
         self.config = config
         self.window, self.filterbank_design = self.make_analysis_window()
+        self._fft_window = np.asarray(self.window, dtype=np.float32)
+        self._fft_amplitude_scale = np.float32(1.0 / np.sum(self.window))
 
         self.freq_axis_hz = np.fft.fftshift(
             np.fft.fftfreq(config.fft_size, d=1.0 / config.sample_rate_hz)
@@ -30,13 +33,24 @@ class SpectrumProcessor:
     def compute_filtered_power(self, iq: np.ndarray) -> np.ndarray:
         if self.config.remove_dc_offset:
             iq = iq - np.mean(iq)
-        iq_windowed = iq * self.window
-        spectrum = np.fft.fftshift(np.fft.fft(iq_windowed))
-        n = self.config.fft_size
-        coherent_gain = np.sum(self.window) / n
-        spectrum = spectrum / n
-        spectrum = spectrum / coherent_gain
-        return np.abs(spectrum) ** 2
+        iq_windowed = np.asarray(iq, dtype=np.complex64) * self._fft_window
+        spectrum = scipy_fft.fft(iq_windowed, workers=1)
+        spectrum *= self._fft_amplitude_scale
+        power = spectrum.real * spectrum.real + spectrum.imag * spectrum.imag
+        return scipy_fft.fftshift(power)
+
+    def compute_filtered_power_batch(self, iq_frames: np.ndarray) -> np.ndarray:
+        """Return linear-power spectra for a batch of contiguous FFT frames."""
+        frames = np.asarray(iq_frames)
+        if frames.ndim != 2 or frames.shape[1] != int(self.config.fft_size):
+            raise ValueError("iq_frames must have shape (frame_count, fft_size)")
+        if self.config.remove_dc_offset:
+            frames = frames - np.mean(frames, axis=1, keepdims=True)
+        windowed = np.asarray(frames, dtype=np.complex64) * self._fft_window[np.newaxis, :]
+        spectrum = scipy_fft.fft(windowed, axis=1, workers=1)
+        spectrum *= self._fft_amplitude_scale
+        power = spectrum.real * spectrum.real + spectrum.imag * spectrum.imag
+        return scipy_fft.fftshift(power, axes=1)
 
     def compute_spectrum(self, iq: np.ndarray) -> np.ndarray:
         filtered_power = self.compute_filtered_power(iq)
@@ -64,6 +78,8 @@ class SpectrumProcessor:
     def update_span_related(self, config: SpectrumConfig) -> None:
         self.config = config
         self.window, self.filterbank_design = self.make_analysis_window()
+        self._fft_window = np.asarray(self.window, dtype=np.float32)
+        self._fft_amplitude_scale = np.float32(1.0 / np.sum(self.window))
         self.freq_axis_hz = np.fft.fftshift(
             np.fft.fftfreq(config.fft_size, d=1.0 / config.sample_rate_hz)
         )
