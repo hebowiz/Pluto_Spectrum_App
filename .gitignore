@@ -12,6 +12,12 @@ venv/
 
 *.log
 
+# PyInstaller / portable release outputs
+build/
+dist/
+release/
+.build-cache/
+
 *.bat
 !_Pluto_Runtime.bat
 !Pluto_RTSA.bat

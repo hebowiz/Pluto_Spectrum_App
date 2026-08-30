@@ -12,6 +12,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.runtime_paths import diagnostic_log_path
 
 from pluto_sa.vsa.profiles.bluetooth_br import header_error_check
 from pluto_sa.vsa.ui.measurement_chrome import (
@@ -1221,7 +1222,7 @@ class _PlutoTransmitWorker(QtCore.QObject):
         report = self.backend.diagnostic_report()
         report["success"] = success
         report["message"] = message
-        log_path = Path(__file__).resolve().parents[2] / "pluto_vsg_tx_trace.log"
+        log_path = diagnostic_log_path("PlutoVSG", "pluto_vsg_tx_trace.log")
         try:
             with log_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(report, ensure_ascii=False) + "\n")
@@ -1256,7 +1257,7 @@ class _PlutoPrepareWorker(QtCore.QObject):
         report["operation"] = "prepare"
         report["success"] = success
         report["message"] = message
-        log_path = Path(__file__).resolve().parents[2] / "pluto_vsg_tx_trace.log"
+        log_path = diagnostic_log_path("PlutoVSG", "pluto_vsg_tx_trace.log")
         try:
             with log_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(report, ensure_ascii=False) + "\n")

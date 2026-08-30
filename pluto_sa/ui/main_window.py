@@ -18,6 +18,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.runtime_paths import application_data_dir, is_frozen_application
 
 from pluto_sa.config.spectrum_config import (
     MAX_DISPLAY_SPAN_HZ,
@@ -477,7 +478,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.calibration_offset_db = calibration_offset_db
         self.calibration_controller = CalibrationController()
         self._app_root_dir = Path(__file__).resolve().parents[2]
-        self._data_dir = self._app_root_dir / "data"
+        self._data_dir = (
+            application_data_dir("PlutoRTSA")
+            if is_frozen_application()
+            else self._app_root_dir / "data"
+        )
         self._calibration_data_dir = self._data_dir / "calibration"
         self._settings_file_path = self._data_dir / "settings.json"
         self._last_correction_csv_path: str | None = None

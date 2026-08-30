@@ -1,0 +1,26 @@
+Pluto Spectrum App portable distribution - third-party notices
+================================================================
+
+The portable packages include open-source Python packages listed in
+requirements.txt. Their license metadata is included in the corresponding
+Python distribution metadata bundled by PyInstaller.
+
+libiio
+------
+Copyright (c) Analog Devices, Inc. and contributors.
+libiio is distributed under the GNU Lesser General Public License version 2.1.
+The unmodified Windows binaries are taken from the official libiio v0.25
+release. The complete license text is included as licenses/libiio-COPYING.txt
+in every portable package.
+
+Source and release:
+https://github.com/analogdevicesinc/libiio
+https://github.com/analogdevicesinc/libiio/releases/tag/v0.25
+
+The bundled libusb, libxml2 and libserialport runtime DLLs are the dependency
+copies shipped in that official libiio Windows release. Their upstream
+projects and licenses are:
+
+* libusb: https://github.com/libusb/libusb (LGPL-2.1-or-later)
+* libxml2: https://gitlab.gnome.org/GNOME/libxml2 (MIT)
+* libserialport: https://sigrok.org/wiki/Libserialport (LGPL-3.0-or-later)
