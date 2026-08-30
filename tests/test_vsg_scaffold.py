@@ -63,6 +63,7 @@ from pluto_vsg.ui.main_window import (
     _BluetoothLESettingsDialog,
     _BluetoothSettingsDialog,
     _PlutoOutputDialog,
+    _cw_generation_result,
     _instantaneous_frequency_khz,
 )
 
@@ -167,6 +168,17 @@ def test_vsg_window_starts_with_composer_shell() -> None:
         ]
     finally:
         window.close()
+
+
+def test_cw_generation_result_is_constant_normalized_zero_if() -> None:
+    result = _cw_generation_result(8_000_000.0, sample_count=1024)
+
+    assert result.sample_rate_hz == 8_000_000.0
+    assert result.iq.dtype == np.complex64
+    assert result.iq.size == 1024
+    np.testing.assert_array_equal(result.iq, np.ones(1024, dtype=np.complex64))
+    assert result.metadata["waveform_kind"] == "CW"
+    assert result.metadata["baseband_frequency_hz"] == 0.0
 
 
 def test_pluto_output_dialog_uses_dbm_and_preserves_target_across_backoff(

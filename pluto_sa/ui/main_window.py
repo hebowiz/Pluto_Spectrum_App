@@ -656,6 +656,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.sweep_controller.set_sweep_complete_callback(self._on_sweep_complete)
         self._refresh_sweep_time_estimate()
         self._apply_analyzer_mode_ui_constraints()
+        self._sync_config_backed_controls()
         self._update_continuous_button()
         self._update_trace_menu_buttons()
         self._update_marker_menu_buttons()
@@ -1765,6 +1766,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if hasattr(self, "sweep_time_button") and hasattr(self, "sweep_points_button"):
             self._update_sweep_controls()
         self._update_hsta_trigger_level_line()
+
+    def _sync_config_backed_controls(self) -> None:
+        """Synchronize config-backed buttons and option-page selections."""
+        self._update_analyzer_mode_controls()
+        self._update_realtime_sa_controls()
+        self._update_sweep_controls()
+        self._update_sweep_detector_selection_page()
+        self._update_wideband_chunk_width_selection_page()
+        self._update_graph_view_controls()
+        self._update_persistence_controls()
+        self._update_trigger_controls()
+        self._update_control_button_value_labels()
 
     def _apply_calibration_fixed_profile(self) -> None:
         self.config.display_span_hz = int(CALIBRATION_FIXED_SPAN_HZ)
@@ -5278,11 +5291,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             not (is_sweep_sa or is_high_speed_ta)
         )
 
-    def _update_sweep_detector_selection_page(self) -> None:
-        for detector_mode, button in self.sweep_detector_option_buttons.items():
-            prefix = "笨・" if detector_mode.value == self.config.sweep_detector_mode else "  "
-            button.setText(f"{prefix}{detector_mode.value}")
-
     def _update_continuous_button(self) -> None:
         label = "Continuous"
         if self.sweep_state == SWEEP_STATE_RUNNING:
@@ -7921,6 +7929,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 discontinuity_before=block_discontinuity,
                 start_sample_index=int(block.start_sample_index),
             )
+            # Never bridge separate libiio refills with one FFT. Software
+            # indices cannot reveal a hidden USB/DMA loss at this boundary.
+            self._realtime_fft_accumulator.seal_contiguous_region()
             overrun_boundary_pending = False
         frame = self._realtime_fft_accumulator.take_frame()
         if frame is not None:

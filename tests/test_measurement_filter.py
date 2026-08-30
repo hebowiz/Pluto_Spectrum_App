@@ -70,7 +70,7 @@ def test_default_gaussian_filter_has_symmetric_unit_gain_taps() -> None:
 
     np.testing.assert_allclose(taps, taps[::-1], rtol=0.0, atol=0.0)
     assert np.sum(taps) == pytest.approx(1.0)
-    assert design.tap_count == 11
+    assert design.tap_count == 15
 
 
 def test_narrow_gaussian_fft_filter_is_continuous_across_blocks() -> None:

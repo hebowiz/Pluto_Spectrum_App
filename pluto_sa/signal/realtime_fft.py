@@ -141,6 +141,22 @@ class RealtimeFFTAccumulator:
         self._skip_samples = 0
         self._expected_sample_index = None
 
+    def seal_contiguous_region(self) -> None:
+        """Prevent a future FFT from crossing the current input boundary.
+
+        Pluto/libiio does not provide a hardware sample timestamp for every
+        returned RX buffer. A software-contiguous sample index proves ordering,
+        but cannot prove that no DMA/USB samples were lost between two refills.
+        Discard the partial FFT tail at that boundary so a possible phase jump
+        cannot be converted into a broadband spectrum.
+
+        This is a conservative analysis boundary rather than evidence of a
+        confirmed loss, so it does not increment the discontinuity counter.
+        """
+        self._pending = np.empty(0, dtype=np.complex64)
+        self._skip_samples = 0
+        self._expected_sample_index = None
+
     def process(
         self,
         iq: np.ndarray,

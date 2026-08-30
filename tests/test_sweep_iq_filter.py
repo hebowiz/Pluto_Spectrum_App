@@ -39,4 +39,7 @@ def test_sweep_capture_includes_filter_settling_and_observation() -> None:
     controller.config.sweep_sample_rate_hz = 521_000
     controller.config.sweep_capture_samples_override = 16_384
 
-    assert controller._resolve_capture_samples() == 32_768
+    # The shared Gaussian RBW filter now retains +/-6 sigma so its far-out
+    # coherent sidelobes remain below the Pluto dynamic range.  Sweep capture
+    # must include the correspondingly longer settling interval.
+    assert controller._resolve_capture_samples() == 65_536

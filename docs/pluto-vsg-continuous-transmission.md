@@ -6,6 +6,21 @@ Pluto VSGへ、現在の有限長non-cyclic送信を維持したまま、1周期
 
 Continuous送信は固定波形のgapless反復を目的とする。周期ごとに内容を変更するstreaming送信、packet境界に同期した厳密な停止、外部trigger同期は本設計の対象外とする。
 
+### CW output added 2026-08-30
+
+The Output menu and toolbar provide `Start CW with ADALM-Pluto (Current
+Frequency / Level)` for RTSA/VSA verification. It sends a normalized constant
+`1+0j` period through the existing cyclic-DMA continuous path. The RF carrier
+is therefore at the configured TX LO/center frequency and uses the current
+target output dBm. Device leasing, READY/configuration verification, Stop, and
+safe application shutdown are shared with packet transmission. Starting CW
+does not alter RF/baseband properties or launch calibration; after changing
+frequency, sample rate, RF bandwidth, or device, Prepare must be run first.
+
+Because this is a zero-IF CW, receiver-side LO leakage/DC effects can overlap
+the wanted signal if both instruments use the same center frequency. For that
+test, offset the receiver center while leaving the VSG CW frequency unchanged.
+
 ## 2. Existing behavior that must remain unchanged
 
 - Finite送信は、指定packet数を含む全scheduleを1本のnon-cyclic DMA bufferとして1回だけ送信する。

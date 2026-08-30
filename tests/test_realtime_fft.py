@@ -195,3 +195,27 @@ def test_contiguous_sample_indices_keep_overlap_history() -> None:
         result.power_linear,
         processor.compute_filtered_power(np.concatenate((first, second))),
     )
+
+
+def test_sealed_contiguous_regions_never_form_cross_boundary_fft() -> None:
+    processor = _processor()
+    accumulator = RealtimeFFTAccumulator(
+        processor,
+        "Peak",
+        target_overlap_ratio=0.5,
+        max_fft_rate_hz=1_000_000.0,
+    )
+    first = np.ones(40, dtype=np.complex64)
+    second = np.full(64, -1.0 + 0.0j, dtype=np.complex64)
+
+    assert accumulator.process(first, start_sample_index=0) == 0
+    accumulator.seal_contiguous_region()
+    assert accumulator.process(second, start_sample_index=40) == 1
+    result = accumulator.take_frame()
+
+    assert result is not None
+    assert result.discontinuities == 0
+    np.testing.assert_allclose(
+        result.power_linear,
+        processor.compute_filtered_power(second),
+    )

@@ -64,6 +64,54 @@ def test_gaussian_fft_filterbank_has_two_sided_3db_rbw() -> None:
     assert offset_gain / center_gain == pytest.approx(0.5, abs=0.003)
 
 
+def test_gaussian_fft_filterbank_rejects_far_out_cw_without_rbw_squared_skirt() -> None:
+    sample_rate_hz = 10_000_000.0 / 0.92
+    offset_hz = 4_000_000.0
+    responses_db: list[float] = []
+
+    for rbw_hz in (10_000.0, 20_000.0, 100_000.0):
+        automatic = resolve_automatic_rtsa_fft_design(
+            sample_rate_hz=sample_rate_hz,
+            rbw_hz=rbw_hz,
+            guard_ratio=0.04,
+        )
+        window, _design = design_gaussian_fft_filterbank(
+            sample_rate_hz,
+            automatic.fft_size,
+            rbw_hz,
+        )
+        indices = np.arange(len(window), dtype=np.float64)
+        response = abs(
+            np.sum(window * np.exp(-2j * np.pi * offset_hz * indices / sample_rate_hz))
+            / np.sum(window)
+        )
+        responses_db.append(20.0 * np.log10(max(response, 1e-300)))
+
+    # Numerical leakage from the finite Gaussian support must remain far below
+    # the Pluto dynamic range for every practical RBW in this comparison.
+    assert max(responses_db) < -180.0
+
+
+def test_gaussian_fft_filterbank_white_noise_enbw_is_three_db_per_octave() -> None:
+    sample_rate_hz = 10_000_000.0 / 0.92
+    _narrow_window, narrow = design_gaussian_fft_filterbank(
+        sample_rate_hz,
+        8192,
+        10_000.0,
+    )
+    _wide_window, wide = design_gaussian_fft_filterbank(
+        sample_rate_hz,
+        8192,
+        20_000.0,
+    )
+
+    ratio_db = 10.0 * np.log10(
+        wide.noise_equivalent_bandwidth_hz
+        / narrow.noise_equivalent_bandwidth_hz
+    )
+    assert ratio_db == pytest.approx(10.0 * np.log10(2.0), abs=0.01)
+
+
 def test_spectrum_processor_preserves_bin_center_cw_amplitude() -> None:
     config = SpectrumConfig(
         analyzer_mode=AnalyzerMode.REALTIME_SA,
@@ -125,7 +173,7 @@ def test_required_fft_size_contains_requested_gaussian_support() -> None:
         10_000.0,
     )
 
-    assert required_size == 1024
+    assert required_size == 2048
     assert design.rbw_limited_by_fft_size is False
     assert design.support_samples <= len(window)
 
@@ -138,7 +186,7 @@ def test_automatic_rtsa_fft_separates_rbw_window_from_frequency_grid() -> None:
         minimum_display_bins=1024,
     )
 
-    assert design.window_length_samples == 49
+    assert design.window_length_samples == 71
     assert design.fft_size == 2048
     assert design.available_display_bins >= design.requested_display_bins
     assert design.limited_by_fft_size is False
@@ -152,7 +200,7 @@ def test_automatic_rtsa_fft_grows_for_narrow_rbw_support() -> None:
         minimum_display_bins=1024,
     )
 
-    assert design.window_length_samples == 4611
+    assert design.window_length_samples == 6915
     assert design.fft_size == 8192
     assert design.limited_by_fft_size is False
 

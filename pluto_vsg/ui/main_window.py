@@ -88,6 +88,24 @@ def _instantaneous_frequency_khz(
     return frequency
 
 
+def _cw_generation_result(
+    sample_rate_hz: float, sample_count: int = 4096
+) -> GenerationResult:
+    """Build a normalized zero-IF period for continuous CW playback."""
+
+    rate_hz = float(sample_rate_hz)
+    count = int(sample_count)
+    if not np.isfinite(rate_hz) or rate_hz <= 0.0:
+        raise ValueError("CW sample rate must be positive and finite")
+    if count < 4:
+        raise ValueError("CW period must contain at least four samples")
+    return GenerationResult(
+        iq=np.ones(count, dtype=np.complex64),
+        sample_rate_hz=rate_hz,
+        metadata={"waveform_kind": "CW", "baseband_frequency_hz": 0.0},
+    )
+
+
 class _Panel(QtWidgets.QGroupBox):
     def __init__(self, title: str, child: QtWidgets.QWidget) -> None:
         super().__init__(title)
@@ -1392,6 +1410,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.pluto_transmit_action = QtGui.QAction("Transmit with ADALM-Pluto", self)
         self.pluto_transmit_action.setShortcut(QtGui.QKeySequence("Ctrl+T"))
         self.pluto_transmit_action.triggered.connect(self._start_pluto_transmission)
+        self.pluto_cw_action = QtGui.QAction(
+            "Start CW with ADALM-Pluto (Current Frequency / Level)", self
+        )
+        self.pluto_cw_action.triggered.connect(self._start_pluto_cw)
         self.pluto_stop_action = QtGui.QAction("Stop Pluto Transmission", self)
         self.pluto_stop_action.setEnabled(False)
         self.pluto_stop_action.triggered.connect(self._stop_pluto_transmission)
@@ -1457,6 +1479,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         output_menu.addSeparator()
         output_menu.addAction(self.pluto_prepare_action)
         output_menu.addAction(self.pluto_transmit_action)
+        output_menu.addAction(self.pluto_cw_action)
         output_menu.addAction(self.pluto_stop_action)
         output_toolbar = self.addToolBar("Output")
         output_toolbar.setObjectName("PlutoVSGOutputToolbar")
@@ -1464,6 +1487,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         output_toolbar.addSeparator()
         output_toolbar.addAction(self.pluto_prepare_action)
         output_toolbar.addAction(self.pluto_transmit_action)
+        output_toolbar.addAction(self.pluto_cw_action)
         output_toolbar.addAction(self.pluto_stop_action)
         tools_menu = menu_bar.addMenu("Tools")
         tools_menu.addAction(self.validate_action)
@@ -2367,6 +2391,51 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             )
         thread.start()
 
+    def _start_pluto_cw(self) -> None:
+        """Start a carrier at the current Pluto frequency and output level."""
+
+        if self._tx_thread is not None or self._prepare_thread is not None:
+            return
+        if self._pluto_prepared_signature != self._pluto_configuration_signature():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Pluto CW",
+                "ADALM-Pluto is not READY for the current RF/baseband settings. "
+                "Run 'Prepare / Calibrate ADALM-Pluto' first. CW start never "
+                "changes RF/baseband settings or launches calibration.",
+            )
+            return
+        try:
+            settings = replace(
+                self._current_pluto_settings(),
+                burst_count=1,
+                playback_mode=PlutoPlaybackMode.CONTINUOUS,
+            )
+            result = _cw_generation_result(settings.sample_rate_hz)
+            backend = PlutoOutputBackend(settings)
+        except ValueError as error:
+            QtWidgets.QMessageBox.warning(self, "Pluto CW", str(error))
+            return
+
+        worker = _PlutoTransmitWorker(backend, result)
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._pluto_transmission_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._pluto_thread_finished)
+        self._tx_worker = worker
+        self._tx_thread = thread
+        self._set_pluto_busy(preparing=False, transmitting=True)
+        self.statusBar().showMessage(
+            "Starting Pluto CW: "
+            f"{settings.center_frequency_hz / 1e6:.6f} MHz, "
+            f"target {float(settings.output_power_dbm):+.2f} dBm; use Stop to end"
+        )
+        thread.start()
+
     def _stop_pluto_transmission(self) -> None:
         if self._tx_worker is None:
             return
@@ -2402,6 +2471,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.pluto_settings_action,
             self.pluto_prepare_action,
             self.pluto_transmit_action,
+            self.pluto_cw_action,
         ):
             action.setEnabled(not active)
         self.pluto_stop_action.setEnabled(transmitting)

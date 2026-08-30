@@ -6,7 +6,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pluto_sa.signal.measurement_filter import design_iq_rbw_filter
+from pluto_sa.signal.measurement_filter import (
+    GAUSSIAN_TRUNCATION_SIGMA,
+    design_iq_rbw_filter,
+)
 
 FFT_FILTERBANK_PROCESSING_SIGNATURE = "gaussian_fft_filterbank_v1"
 
@@ -89,18 +92,22 @@ def resolve_automatic_rtsa_fft_design(
 
 
 def minimum_gaussian_rbw_hz(sample_rate_hz: float, fft_size: int) -> float:
-    """Return the narrowest +/-4 sigma Gaussian FIR that fits one FFT frame."""
+    """Return the narrowest configured Gaussian FIR that fits one FFT frame."""
     if not np.isfinite(sample_rate_hz) or float(sample_rate_hz) <= 0.0:
         raise ValueError("sample_rate_hz must be positive")
     if int(fft_size) < 3:
         raise ValueError("fft_size must be at least 3")
     max_half_width = (int(fft_size) - 1) // 2
-    return float(
-        4.0
+    minimum_rbw_hz = float(
+        GAUSSIAN_TRUNCATION_SIGMA
         * np.sqrt(np.log(2.0))
         * float(sample_rate_hz)
         / (np.pi * float(max_half_width))
     )
+    # The FIR designer uses ceil(truncation * sigma).  Move the boundary one
+    # representable value upward so floating-point round-off cannot create one
+    # extra tap beyond the available FFT frame.
+    return float(np.nextafter(minimum_rbw_hz, np.inf))
 
 
 def required_gaussian_fft_size(sample_rate_hz: float, rbw_hz: float) -> int:
@@ -112,7 +119,10 @@ def required_gaussian_fft_size(sample_rate_hz: float, rbw_hz: float) -> int:
         * float(sample_rate_hz)
         / (np.pi * float(rbw_hz))
     )
-    support_samples = 2 * max(1, int(np.ceil(4.0 * sigma_samples))) + 1
+    support_samples = 2 * max(
+        1,
+        int(np.ceil(GAUSSIAN_TRUNCATION_SIGMA * sigma_samples)),
+    ) + 1
     return max(4, 1 << int(np.ceil(np.log2(support_samples))))
 
 

@@ -275,3 +275,15 @@ python -m pytest -q
 - `Analysis gaps`は処理上限によりHop SizeがWindow Lengthを超えた計画的な未観測区間であり、IQ欠落を連結する処理ではない。スキップ対象sampleはFFT窓へ混入しない。
 - この処理は既知の欠落による偽広帯域スペクトルを防ぐが、USB/DMA内で検出不能なsample欠落を復元・判定するものではない。
 - WB RTSAは今回の自動設計対象外とし、従来のchunk取得仕様を維持した。
+
+### 2026-08-30: libiio refill境界の保守的な隔離
+
+- CW実測で、短いRBW窓かつ`Time Coverage < 100%`のときだけ断続的な広帯域裾野が強く現れた。Gaussian RBWのENBW補正だけでは説明できず、短い窓ほど時間波形の不連続成分が相対的に大きくなる挙動と整合する。
+- Pluto/libiioのRX blockに付与しているsample indexはソフトウェア上の連番であり、USB/DMA内部で失われた物理sampleを証明できるhardware timestampではない。
+- 通常RTSAでは、既知のgapに加えて各libiio refill block末尾でもpartial FFT状態を破棄する。別refillのIQを同じFFT窓へ入れず、隠れた位相不連続を広帯域スペクトルへ変換しない。
+- refill境界の隔離は欠落を確認したことを意味しないため、`RX Discontinuity`には加算しない。代償はblock末尾の最大1 FFT未満の解析sampleを保守的に除外することである。
+
+### 2026-08-30: 設定復元後のUI同期
+
+- Detectorの保存値が`Peak`でも選択ページが`Sample`表示のままになる経路を修正した。
+- 起動時およびsession/config復元後に、Analyzer Mode、FFT mode/size、Detector、Chunk Width、Graph View、Persistence、Triggerと各メインボタン表示を単一の同期処理で更新する。

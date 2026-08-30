@@ -14,7 +14,13 @@ from pluto_sa.signal.detector import DetectorMode
 DEFAULT_IQ_FILTER_ORDER = 4
 DEFAULT_IQ_FILTER_SHAPE = "gaussian"
 _MAX_TWO_SIDED_RBW_RATIO = 0.98
-_GAUSSIAN_TRUNCATION_SIGMA = 4.0
+# A four-sigma truncation is adequate for ordinary pass-band work, but its
+# abrupt (albeit small) end samples form coherent far-out sidelobes when a
+# strong CW is measured.  Those sidelobes change approximately with the square
+# of RBW in power and can therefore look like an artificial 6 dB/octave noise
+# skirt.  Six sigma places the end samples below -150 dB in voltage while
+# retaining the Gaussian 3 dB bandwidth and ENBW definition.
+GAUSSIAN_TRUNCATION_SIGMA = 6.0
 _DIRECT_FIR_MAX_TAPS = 256
 
 
@@ -62,8 +68,9 @@ def _design_cached(
     cutoff_hz = effective_rbw_hz / 2.0
     if shape == "gaussian":
         # A Gaussian impulse with this standard deviation has a power response
-        # of -3.0103 dB at +/- RBW/2. Truncating at +/-4 sigma keeps the error
-        # negligible while bounding processing cost.
+        # of -3.0103 dB at +/- RBW/2.  Use a long truncation because this FIR is
+        # also the RTSA analysis window: a short truncation produces coherent
+        # far-out CW sidelobes even though its pass-band error is negligible.
         sigma_samples = (
             np.sqrt(np.log(2.0))
             * float(sample_rate_hz)
@@ -71,7 +78,7 @@ def _design_cached(
         )
         half_width = max(
             1,
-            int(np.ceil(_GAUSSIAN_TRUNCATION_SIGMA * sigma_samples)),
+            int(np.ceil(GAUSSIAN_TRUNCATION_SIGMA * sigma_samples)),
         )
         sample_indices = np.arange(-half_width, half_width + 1, dtype=np.float64)
         coefficients = np.exp(-0.5 * (sample_indices / sigma_samples) ** 2)

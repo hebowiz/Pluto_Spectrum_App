@@ -160,3 +160,27 @@ def test_device_change_replaces_receiver_and_restarts_current_mode(monkeypatch):
     assert "close:old" in events
     assert ("start", AnalyzerMode.HIGH_SPEED_TIME_ANALYZER, {"force": True}) in events
     assert window._page_history == []
+
+
+def test_config_control_sync_updates_all_config_backed_selection_groups():
+    events = []
+    window = type("WindowHarness", (), {})()
+    method_names = (
+        "_update_analyzer_mode_controls",
+        "_update_realtime_sa_controls",
+        "_update_sweep_controls",
+        "_update_sweep_detector_selection_page",
+        "_update_wideband_chunk_width_selection_page",
+        "_update_graph_view_controls",
+        "_update_persistence_controls",
+        "_update_trigger_controls",
+        "_update_control_button_value_labels",
+    )
+    for method_name in method_names:
+        setattr(window, method_name, lambda name=method_name: events.append(name))
+
+    from pluto_sa.ui.main_window import RealtimeSpectrumWindow
+
+    RealtimeSpectrumWindow._sync_config_backed_controls(window)
+
+    assert events == list(method_names)

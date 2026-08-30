@@ -327,6 +327,7 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         self._restore_trace_state(state.traces)
         self._restore_marker_state(state.markers)
         self._restore_persistence_state(bool(state.persistence_enabled))
+        self._sync_config_backed_controls()
         self._refresh_status_label()
         self._update_trace_menu_buttons()
         self._update_marker_menu_buttons()
