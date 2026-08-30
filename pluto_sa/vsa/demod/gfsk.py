@@ -51,6 +51,7 @@ class GFSKDemodulationResult:
     selected_match_index: int
     eligible_match_count: int
     detected_match_count: int
+    eligible_match_start_samples: tuple[int, ...]
 
     def __post_init__(self) -> None:
         arrays = {
@@ -773,6 +774,14 @@ def demodulate_gfsk(
         best = max(ordered, key=lambda item: (abs(item[0]), -item[5]))
     selected_match_index = ordered.index(best) + 1
     eligible_match_count = len(ordered)
+    eligible_match_start_samples = tuple(
+        int(
+            round(
+                candidate[5] * float(sample_rate_hz) / analysis_rate_hz
+            )
+        )
+        for candidate in ordered
+    )
 
     score, _, phase, access_index, all_symbol_frequency, _ = best
     access_frequency = all_symbol_frequency[
@@ -1038,4 +1047,5 @@ def demodulate_gfsk(
         selected_match_index=selected_match_index,
         eligible_match_count=eligible_match_count,
         detected_match_count=detected_match_count,
+        eligible_match_start_samples=eligible_match_start_samples,
     )

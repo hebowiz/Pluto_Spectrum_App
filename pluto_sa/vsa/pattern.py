@@ -1416,6 +1416,9 @@ class PatternAnalyzer:
                 "selected_match_index": requested,
                 "eligible_match_count": len(matches),
                 "detected_match_count": len(matches),
+                "eligible_match_start_samples": tuple(
+                    int(item.pattern_start_sample) for _, item in matches
+                ),
                 "power_trigger_event_count": len(events),
                 "power_trigger_matched_event_count": len(matches),
                 "selected_power_trigger_event_index": event_index,
@@ -1550,6 +1553,9 @@ class PatternAnalyzer:
                 "selected_match_index": demodulation.selected_match_index,
                 "eligible_match_count": demodulation.eligible_match_count,
                 "detected_match_count": demodulation.detected_match_count,
+                "eligible_match_start_samples": (
+                    demodulation.eligible_match_start_samples
+                ),
                 "exclude_incomplete_result": (
                     result_range.exclude_incomplete_result
                 ),
@@ -1860,6 +1866,16 @@ class PatternAnalyzer:
             score_key=lambda item: item[0],
         )
         score, phase, index, waveform_symbols, centers, _ = best
+        eligible_match_start_samples = tuple(
+            int(
+                round(
+                    float(candidate[5])
+                    / analysis_rate_hz
+                    * recording.sample_rate_hz
+                )
+            )
+            for candidate in sorted(eligible_candidates, key=lambda item: item[5])
+        )
         phase_model_residual_rms_rad: float | None = None
         phase_drift_estimate_accepted: bool | None = None
         phase_no_drift_residual_rms_rad: float | None = None
@@ -2363,6 +2379,7 @@ class PatternAnalyzer:
                 "selected_match_index": selected_match_index,
                 "eligible_match_count": eligible_match_count,
                 "detected_match_count": detected_match_count,
+                "eligible_match_start_samples": eligible_match_start_samples,
                 "exclude_incomplete_result": (
                     result_range.exclude_incomplete_result
                 ),

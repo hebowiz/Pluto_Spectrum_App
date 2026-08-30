@@ -525,6 +525,7 @@ class BluetoothBRProfile:
         uap: int | None = None,
         whitening_enabled: bool = True,
         minimum_correlation: float = 0.65,
+        match_index: int = 1,
     ) -> BluetoothBRPacketResult:
         demodulation = demodulate_gfsk(
             recording.iq,
@@ -532,6 +533,7 @@ class BluetoothBRProfile:
             access_bits=self.access_bits,
             symbol_rate_hz=BLUETOOTH_BR_SYMBOL_RATE_HZ,
             minimum_correlation=minimum_correlation,
+            match_index=match_index,
         )
         packet_bits = demodulation.bits
         access_stop = self.access_bits.size

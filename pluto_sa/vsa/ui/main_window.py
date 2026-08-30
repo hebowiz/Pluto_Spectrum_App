@@ -23,7 +23,6 @@ from pluto_sa.vsa.mapping import (
     psk_constellation,
     reverse_symbol_bits,
 )
-from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
 from pluto_sa.vsa.dc import apply_robust_dc_removal
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
@@ -40,7 +39,6 @@ from pluto_sa.vsa.pattern import (
     ResultRangeReference,
     ResultRangeSettings,
     SynchronizationSource,
-    prepare_psk_iq,
 )
 from pluto_sa.vsa.persistence import (
     load_meas_config,
@@ -65,12 +63,24 @@ from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 from pluto_sa.vsa.ui.measurement_chrome import (
     CenteredLabelAxisItem as _CenteredLabelAxisItem,
     FixedInteractionViewBox as _FixedInteractionViewBox,
+    add_result_range_overlay,
     install_measurement_plot_menu,
     make_measurement_dock,
     make_measurement_plot,
     padded_range,
+    plot_complex_symbol_distribution,
+    plot_frequency_symbol_distribution,
+    plot_trace_symbol_points,
+    set_frequency_constellation_x_lock,
     trace_bounds,
     view_all_traces,
+)
+from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
+from pluto_sa.vsa.ui.display_processing import (
+    constellation_display_symbols as _shared_constellation_display_symbols,
+    physical_constellation_display_symbols as _shared_physical_constellation_display_symbols,
+    prepare_fsk_display_frequency as _shared_prepare_fsk_display_frequency,
+    prepare_psk_display_waveform as _shared_prepare_psk_display_waveform,
 )
 
 
@@ -239,36 +249,16 @@ def _prepare_psk_display_waveform(
     result_start_time_s: float | None = None,
     result_stop_time_s: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Prepare only the visible PSK range, including receive-filter guards."""
-    values = np.asarray(iq)
-    start_sample = 0
-    stop_sample = values.size
-    if result_start_time_s is not None and result_stop_time_s is not None:
-        # The SRRC filter spans ten symbols. Sixteen symbols on either side
-        # also cover scipy's polyphase-resampler transient for normal VSA
-        # sample-rate ratios, keeping the visible Result Range unchanged.
-        guard_s = 16.0 / float(symbol_rate_hz)
-        start_sample = max(
-            0,
-            int(np.floor((float(result_start_time_s) - guard_s) * sample_rate_hz)),
-        )
-        stop_sample = min(
-            values.size,
-            int(np.ceil((float(result_stop_time_s) + guard_s) * sample_rate_hz)),
-        )
-    prepared, prepared_rate_hz = prepare_psk_iq(
-        values[start_sample:stop_sample],
+    return _shared_prepare_psk_display_waveform(
+        iq,
         sample_rate_hz=sample_rate_hz,
         symbol_rate_hz=symbol_rate_hz,
         tx_filter=tx_filter,
         filter_parameter=filter_parameter,
         apply_measurement_filter=apply_measurement_filter,
+        result_start_time_s=result_start_time_s,
+        result_stop_time_s=result_stop_time_s,
     )
-    time_offset_s = start_sample / float(sample_rate_hz)
-    time_s = time_offset_s + np.arange(prepared.size, dtype=np.float64) / float(
-        prepared_rate_hz
-    )
-    return prepared, time_s
 
 
 def _initial_result_time_range_ms(
@@ -311,60 +301,26 @@ def _prepare_fsk_display_frequency(
     result_start_time_s: float | None = None,
     result_stop_time_s: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Prepare visible FSK frequency using the demodulator's Measured path."""
-    values = np.asarray(iq)
-    start_sample = 0
-    stop_sample = values.size
-    if result_start_time_s is not None and result_stop_time_s is not None:
-        # Gaussian filtering is effectively short, while this guard also
-        # covers polyphase-resampler settling for normal capture-rate ratios.
-        guard_s = 16.0 / float(symbol_rate_hz)
-        start_sample = max(
-            0,
-            int(np.floor((float(result_start_time_s) - guard_s) * sample_rate_hz)),
-        )
-        stop_sample = min(
-            values.size,
-            int(np.ceil((float(result_stop_time_s) + guard_s) * sample_rate_hz)),
-        )
-    frequency_hz, prepared_rate_hz = prepare_fsk_frequency(
-        values[start_sample:stop_sample],
+    return _shared_prepare_fsk_display_frequency(
+        iq,
         sample_rate_hz=sample_rate_hz,
         symbol_rate_hz=symbol_rate_hz,
         gaussian_bt=gaussian_bt,
+        result_start_time_s=result_start_time_s,
+        result_stop_time_s=result_stop_time_s,
     )
-    time_offset_s = start_sample / float(sample_rate_hz)
-    time_s = time_offset_s + np.arange(
-        frequency_hz.size, dtype=np.float64
-    ) / float(prepared_rate_hz)
-    return frequency_hz, time_s
 
 
 def _constellation_display_symbols(
     modulation: ModulationKind, symbols: np.ndarray
 ) -> np.ndarray:
-    """Apply the R&S-style display reference without changing decisions."""
-    values = np.asarray(symbols, dtype=np.complex128)
-    if modulation in {
-        ModulationKind.QPSK,
-        ModulationKind.OQPSK,
-        ModulationKind.PI4_DQPSK,
-    }:
-        values = values * np.exp(-1j * np.pi / 4.0)
-    return values
+    return _shared_constellation_display_symbols(modulation, symbols)
 
 
 def _physical_constellation_display_symbols(
     modulation: ModulationKind, symbols: np.ndarray
 ) -> np.ndarray:
-    """Apply R&S physical-constellation derotation to absolute IQ symbols."""
-    values = np.asarray(symbols, dtype=np.complex128)
-    if modulation is ModulationKind.PI4_DQPSK:
-        rotation = (np.arange(values.size, dtype=np.float64) + 1.0) * np.pi / 4.0
-        return values * np.exp(-1j * rotation)
-    if modulation in {ModulationKind.QPSK, ModulationKind.OQPSK}:
-        return values * np.exp(-1j * np.pi / 4.0)
-    return values
+    return _shared_physical_constellation_display_symbols(modulation, symbols)
 
 
 def _constellation_density(
@@ -502,46 +458,7 @@ def _fsk_phase_difference_symbols(
     return normalized_magnitude * np.exp(1j * phase_rad)
 
 
-class _PlutoSingleCaptureThread(QtCore.QThread):
-    capture_armed = QtCore.Signal(str)
-    capture_ready = QtCore.Signal(object)
-    capture_failed = QtCore.Signal(str)
-    capture_cancelled = QtCore.Signal()
-
-    def __init__(
-        self,
-        source: PlutoLiveSource,
-        settings: PlutoCaptureSettings,
-        armed_message: str,
-        parent: QtCore.QObject | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self._source = source
-        self._settings = settings
-        self._armed_message = str(armed_message)
-
-    def run(self) -> None:
-        try:
-            recording = self._source.capture_single(
-                self._settings,
-                cancelled=self.isInterruptionRequested,
-                armed=lambda: self.capture_armed.emit(self._armed_message),
-            )
-            if self.isInterruptionRequested():
-                self.capture_cancelled.emit()
-            else:
-                self.capture_ready.emit(recording)
-        except CaptureCancelledError:
-            self.capture_cancelled.emit()
-        except Exception as error:
-            self.capture_failed.emit(str(error))
-
-    def cancel(self) -> None:
-        self.requestInterruption()
-
-    @property
-    def sample_rate_hz(self) -> float:
-        return float(self._settings.requested_sample_rate_hz)
+from pluto_sa.vsa.ui.capture_thread import PlutoSingleCaptureThread
 
 
 class _AnalysisThread(QtCore.QThread):
@@ -585,6 +502,7 @@ class VSAWindow(QtWidgets.QMainWindow):
     """One VSA measurement session with detachable result windows."""
 
     analysis_mode_requested = QtCore.Signal(str)
+    analysis_published = QtCore.Signal(object)
     application_close_requested = QtCore.Signal()
     shutdown_ready = QtCore.Signal()
 
@@ -826,6 +744,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         generic_action.setChecked(True)
         generic_action.setEnabled(False)
         mode_menu.addSeparator()
+        bluetooth_action = mode_menu.addAction("Bluetooth Dedicated Analyzer...")
+        bluetooth_action.triggered.connect(
+            lambda: self.analysis_mode_requested.emit("bluetooth")
+        )
         adsb_action = mode_menu.addAction("ADS-B 1090ES...")
         adsb_action.triggered.connect(
             lambda: self.analysis_mode_requested.emit("adsb1090")
@@ -1521,65 +1443,18 @@ class VSAWindow(QtWidgets.QMainWindow):
         run_layout.addStretch(1)
         config_pages.append(("Sweep / Run", run_page))
 
-        self._meas_config_dialog = QtWidgets.QDialog(self)
-        self._meas_config_dialog.setWindowTitle("Meas Config")
-        self._meas_config_dialog.setModal(True)
-        self._meas_config_dialog.setWindowModality(
-            QtCore.Qt.WindowModality.WindowModal
+        self._meas_config_dialog = HierarchicalMeasConfigDialog(
+            self,
+            config_pages,
+            window_title="Meas Config",
+            size=(620, 520),
         )
-        self._meas_config_dialog.resize(620, 520)
-        dialog_layout = QtWidgets.QVBoxLayout(self._meas_config_dialog)
-
-        navigation_layout = QtWidgets.QHBoxLayout()
-        self._config_back_button = QtWidgets.QPushButton("< Config Top")
-        self._config_back_button.clicked.connect(self._show_config_top)
-        self._config_page_title = QtWidgets.QLabel()
-        title_font = self._config_page_title.font()
-        title_font.setBold(True)
-        title_font.setPointSize(title_font.pointSize() + 2)
-        self._config_page_title.setFont(title_font)
-        navigation_layout.addWidget(self._config_back_button)
-        navigation_layout.addWidget(self._config_page_title)
-        navigation_layout.addStretch(1)
-        dialog_layout.addLayout(navigation_layout)
-
-        self._config_stack = QtWidgets.QStackedWidget()
-        config_top = QtWidgets.QWidget()
-        config_top_layout = QtWidgets.QVBoxLayout(config_top)
-        self._config_top_title = QtWidgets.QLabel("Config Top Menu")
-        top_title_font = self._config_top_title.font()
-        top_title_font.setBold(True)
-        top_title_font.setPointSizeF(max(16.0, top_title_font.pointSizeF() + 6.0))
-        self._config_top_title.setFont(top_title_font)
-        config_top_layout.addWidget(self._config_top_title)
-        config_button_grid = QtWidgets.QGridLayout()
-        config_button_grid.setHorizontalSpacing(14)
-        config_button_grid.setVerticalSpacing(14)
-        self._config_top_buttons: dict[str, QtWidgets.QPushButton] = {}
-        for index, (name, page) in enumerate(config_pages, start=1):
-            button = QtWidgets.QPushButton(name)
-            button_font = button.font()
-            button_font.setPointSizeF(max(18.0, button_font.pointSizeF() * 2.0))
-            button_font.setBold(True)
-            button.setFont(button_font)
-            button.setMinimumHeight(84)
-            button.setProperty("configPageIndex", index)
-            button.clicked.connect(self._show_selected_config_page)
-            config_button_grid.addWidget(button, (index - 1) // 2, (index - 1) % 2)
-            self._config_top_buttons[name] = button
-            self._config_stack.addWidget(page)
-        config_top_layout.addLayout(config_button_grid)
-        config_top_layout.addStretch(1)
-        self._config_stack.insertWidget(0, config_top)
-        self._config_page_names = ("Config Top Menu",) + tuple(
-            name for name, _page in config_pages
-        )
-        dialog_layout.addWidget(self._config_stack, 1)
-        close_buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Close
-        )
-        close_buttons.rejected.connect(self._meas_config_dialog.reject)
-        dialog_layout.addWidget(close_buttons)
+        self._config_stack = self._meas_config_dialog.stack
+        self._config_back_button = self._meas_config_dialog.back_button
+        self._config_page_title = self._meas_config_dialog.page_title
+        self._config_top_title = self._meas_config_dialog.top_title
+        self._config_top_buttons = self._meas_config_dialog.top_buttons
+        self._config_page_names = self._meas_config_dialog.page_names
         self._show_config_page(0)
 
     def _populate_result_summary_item_tree(self) -> None:
@@ -2702,25 +2577,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _set_frequency_constellation_x_lock(self, locked: bool) -> None:
         """Keep the display-only horizontal coordinate fixed when requested."""
-        view_box = self.symbol_plot.getViewBox()
-        if locked:
-            x_limit = _FREQUENCY_CONSTELLATION_X_LIMIT
-            view_box.setMouseEnabled(x=False, y=True)
-            view_box.setLimits(
-                xMin=-x_limit,
-                xMax=x_limit,
-                minXRange=2.0 * x_limit,
-                maxXRange=2.0 * x_limit,
-            )
-            self.symbol_plot.setXRange(-x_limit, x_limit, padding=0.0)
-            return
-        view_box.setLimits(
-            xMin=None,
-            xMax=None,
-            minXRange=None,
-            maxXRange=None,
-        )
-        view_box.setMouseEnabled(x=True, y=True)
+        set_frequency_constellation_x_lock(self.symbol_plot, locked)
 
     def _plot_widgets(self) -> tuple[tuple[str, pg.PlotWidget], ...]:
         if not hasattr(self, "zero_span_plot"):
@@ -3057,7 +2914,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "Preparing Pluto receiver - waiting for the first continuous IQ block..."
         )
-        thread = _PlutoSingleCaptureThread(
+        thread = PlutoSingleCaptureThread(
             self._pluto_source,
             settings,
             capture_status,
@@ -3476,6 +3333,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.session.pattern_result.metadata.get("selected_match_index", 1)
             )
         self._update_match_navigation_actions()
+        self.analysis_published.emit(self.session)
         capture_ms = self._active_analysis_context.get("capture_ms")
         if capture_ms is None:
             self.statusBar().showMessage(
@@ -3575,6 +3433,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                 self.session.pattern_result.metadata.get("selected_match_index", 1)
             )
         self._update_match_navigation_actions()
+        self.analysis_published.emit(self.session)
         self.statusBar().showMessage(
             f"Analysis complete - {self.session.recording.sample_count:,} samples | "
             f"DSP {self._last_analysis_timings_ms.get('total_dsp', 0.0):.0f} ms | "
@@ -4582,15 +4441,7 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _plot_symbol_points(
         plot: pg.PlotWidget, x_values: np.ndarray, y_values: np.ndarray
     ) -> None:
-        plot.plot(
-            np.asarray(x_values),
-            np.asarray(y_values),
-            pen=None,
-            symbol="o",
-            symbolSize=_TRACE_SYMBOL_SIZE,
-            symbolBrush=pg.mkBrush(70, 255, 145, 230),
-            symbolPen=pg.mkPen(10, 35, 20, 230, width=1),
-        )
+        plot_trace_symbol_points(plot, x_values, y_values)
 
     @staticmethod
     def _plot_unit_circle(plot: pg.PlotWidget) -> None:
@@ -4608,47 +4459,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         y_limit_khz: float,
     ) -> None:
         """Draw symbol-decision frequencies on a single vertical axis."""
-        values = np.asarray(frequency_khz, dtype=np.float64)
-        values = values[np.isfinite(values)]
-        horizontal = np.zeros(values.size, dtype=np.float64)
-        if not self.constellation_density_action.isChecked():
-            self.symbol_plot.plot(
-                horizontal,
-                values,
-                pen=None,
-                symbol="o",
-                symbolSize=_SYMBOL_PLOT_FLAT_SIZE,
-                symbolBrush=pg.mkBrush(_TRACE_COLOR),
-                symbolPen=pg.mkPen(_TRACE_COLOR),
-            )
-            return
-
-        density = _frequency_constellation_density(
-            values,
-            limit_khz=y_limit_khz,
+        self._constellation_density_item = plot_frequency_symbol_distribution(
+            self.symbol_plot,
+            frequency_khz,
+            y_limit_khz=y_limit_khz,
+            density=self.constellation_density_action.isChecked(),
         )
-        density_item = pg.ImageItem(axisOrder="row-major")
-        lookup_table = np.array(
-            pg.colormap.get("turbo").getLookupTable(nPts=256, alpha=True),
-            copy=True,
-        )
-        lookup_table[0, 3] = 0
-        density_item.setLookupTable(lookup_table)
-        density_item.setImage(
-            density,
-            levels=_constellation_density_color_levels(density),
-        )
-        density_item.setRect(
-            QtCore.QRectF(
-                -_FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH,
-                -float(y_limit_khz),
-                2.0 * _FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH,
-                2.0 * float(y_limit_khz),
-            )
-        )
-        self.symbol_plot.addItem(density_item)
-        self._constellation_density_item = density_item
-        self.symbol_plot.plot(horizontal, values, pen=None, symbol=None)
 
     def _plot_symbol_distribution(
         self,
@@ -4657,44 +4473,11 @@ class VSAWindow(QtWidgets.QMainWindow):
         density_limit: float,
     ) -> None:
         """Draw the current PSK or FSK symbol vectors as flat points or density."""
-        values = np.asarray(symbols, dtype=np.complex128)
-        if not self.constellation_density_action.isChecked():
-            self.symbol_plot.plot(
-                values.real,
-                values.imag,
-                pen=None,
-                symbol="o",
-                symbolSize=_SYMBOL_PLOT_FLAT_SIZE,
-                symbolBrush=pg.mkBrush(_TRACE_COLOR),
-                symbolPen=pg.mkPen(_TRACE_COLOR),
-            )
-            return
-
-        limit = _constellation_density_extent(values, minimum=density_limit)
-        density = _constellation_density(values, limit=limit)
-        density_item = pg.ImageItem(axisOrder="row-major")
-        lookup_table = np.array(
-            pg.colormap.get("turbo").getLookupTable(nPts=256, alpha=True),
-            copy=True,
-        )
-        lookup_table[0, 3] = 0
-        density_item.setLookupTable(lookup_table)
-        density_item.setImage(
-            density,
-            levels=_constellation_density_color_levels(density),
-        )
-        density_item.setRect(
-            QtCore.QRectF(-limit, -limit, 2.0 * limit, 2.0 * limit)
-        )
-        self.symbol_plot.addItem(density_item)
-        self._constellation_density_item = density_item
-        # Keep a non-rendering data trace so View All uses the finite symbol
-        # bounds instead of the density image rectangle.
-        self.symbol_plot.plot(
-            values.real,
-            values.imag,
-            pen=None,
-            symbol=None,
+        self._constellation_density_item = plot_complex_symbol_distribution(
+            self.symbol_plot,
+            symbols,
+            density=self.constellation_density_action.isChecked(),
+            minimum_limit=density_limit,
         )
 
     def _set_result_summary(self, values: dict[str, str]) -> None:
@@ -4736,41 +4519,21 @@ class VSAWindow(QtWidgets.QMainWindow):
         pattern = self.session.pattern_result
         if pattern is None:
             return
-        result_region = pg.LinearRegionItem(
-            values=(
-                pattern.result_start_time_s * 1e3,
-                pattern.result_stop_time_s * 1e3,
-            ),
-            movable=False,
-            brush=pg.mkBrush(60, 130, 255, 35),
-            pen=pg.mkPen(80, 150, 255, 150),
-        )
-        result_region.setZValue(-5)
-        plot.addItem(result_region)
         pattern_match_valid = bool(
             pattern.metadata.get("pattern_match_valid", True)
         )
-        if pattern_match_valid:
-            pattern_region = pg.LinearRegionItem(
-                values=(
-                    pattern.pattern_start_time_s * 1e3,
-                    pattern.pattern_stop_time_s * 1e3,
-                ),
-                movable=False,
-                brush=pg.mkBrush(40, 220, 100, 65),
-                pen=pg.mkPen(40, 240, 120, 190),
-            )
-            pattern_region.setZValue(-4)
-            plot.addItem(pattern_region)
-        marker = pg.InfiniteLine(
-            pos=pattern.pattern_start_time_s * 1e3,
-            angle=90,
-            movable=False,
-            pen=pg.mkPen(80, 255, 130, 220, width=2),
+        add_result_range_overlay(
+            plot,
+            result_start_ms=pattern.result_start_time_s * 1e3,
+            result_stop_ms=pattern.result_stop_time_s * 1e3,
+            pattern_start_ms=pattern.pattern_start_time_s * 1e3,
+            pattern_stop_ms=(
+                pattern.pattern_stop_time_s * 1e3
+                if pattern_match_valid
+                else None
+            ),
             label=("Pattern Start" if pattern_match_valid else "Detected Data Start"),
-            labelOpts={"position": 0.08, "color": (120, 255, 160)},
         )
-        plot.addItem(marker)
         if fit_range:
             range_start_ms, range_stop_ms = _initial_result_time_range_ms(pattern)
             plot.setXRange(

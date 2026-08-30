@@ -94,9 +94,20 @@ class BluetoothBREDRDecoder:
         hec = bits_to_int_msb(header[10:18])
         uap = context.get("uap")
         hec_valid = None if uap is None else header_error_check(data, int(uap)) == hec
+        phy = packet.phy_hint or str(context.get("phy", "BR"))
+        packet_kind = context.get("packet_kind")
+        bits_per_symbol = 3 if "3" in phy.upper() or str(packet_kind).startswith("3-") else 2 if "2" in phy.upper() or str(packet_kind).startswith("2-") else 1
+        packet_name = str(packet_kind) if packet_kind else _TYPE_NAMES.get((bits_per_symbol, packet_type), f"TYPE 0x{packet_type:X}")
         header_children = (
             _field("lt_addr", "LT_ADDR", ACCESS_BITS, data[:3], lt_addr),
-            _field("type", "TYPE", ACCESS_BITS + 3, data[3:7], packet_type),
+            _field(
+                "type",
+                "TYPE",
+                ACCESS_BITS + 3,
+                data[3:7],
+                packet_type,
+                packet_name,
+            ),
             _field("flow", "FLOW", ACCESS_BITS + 7, data[7:8], flow),
             _field("arqn", "ARQN", ACCESS_BITS + 8, data[8:9], arqn),
             _field("seqn", "SEQN", ACCESS_BITS + 9, data[9:10], seqn),
@@ -105,11 +116,6 @@ class BluetoothBREDRDecoder:
         fields.append(_field("header", "Header", ACCESS_BITS, header_air, meaning=f"1/3 FEC; {corrected} corrected triplet(s)", children=header_children))
         if hec_valid is False:
             issues.append(_issue("hec_mismatch", "Header Error Check does not match", ACCESS_BITS + 30))
-
-        phy = packet.phy_hint or str(context.get("phy", "BR"))
-        packet_kind = context.get("packet_kind")
-        bits_per_symbol = 3 if "3" in phy.upper() or str(packet_kind).startswith("3-") else 2 if "2" in phy.upper() or str(packet_kind).startswith("2-") else 1
-        packet_name = str(packet_kind) if packet_kind else _TYPE_NAMES.get((bits_per_symbol, packet_type), f"TYPE 0x{packet_type:X}")
 
         payload_start = ACCESS_BITS + HEADER_AIR_BITS
         if bits_per_symbol > 1:

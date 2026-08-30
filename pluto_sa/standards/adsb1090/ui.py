@@ -696,6 +696,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         generic_action.triggered.connect(
             lambda: self.analysis_mode_requested.emit("generic")
         )
+        bluetooth_action = mode_menu.addAction("Bluetooth Dedicated Analyzer...")
+        bluetooth_action.triggered.connect(
+            lambda: self.analysis_mode_requested.emit("bluetooth")
+        )
         mode_menu.addSeparator()
         adsb_action = mode_menu.addAction("ADS-B 1090ES")
         adsb_action.setCheckable(True)

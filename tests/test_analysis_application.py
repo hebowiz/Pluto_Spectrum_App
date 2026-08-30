@@ -44,6 +44,11 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
         assert "Generic" in window.windowTitle()
         assert window.generic_workspace._pluto_source is source
         assert window.adsb1090_workspace._pluto_source is source
+        assert window.bluetooth_workspace._pluto_source is source
+
+        window.set_analysis_mode("bluetooth")
+        assert window._stack.currentWidget() is window.bluetooth_workspace
+        assert "Bluetooth Dedicated" in window.windowTitle()
 
         window.set_analysis_mode("adsb1090")
         assert window._stack.currentWidget() is window.adsb1090_workspace

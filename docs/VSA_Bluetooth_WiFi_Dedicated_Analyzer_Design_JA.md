@@ -3,7 +3,7 @@
 作成日: 2026-08-29  
 対象: **Pluto VSA**  
 実装優先順: **Bluetooth / BLE → Wi-Fi**  
-ステータス: 設計案
+ステータス: Bluetooth初期実装中
 
 ## 0. 結論
 
@@ -1209,3 +1209,127 @@ Wi-Fi は Bluetooth framework の上位 result / UI / packet list / semantic ana
 9. **semantic decode 不能でも復元済み bit / byte と測定値を失わない**
 
 この構成なら、Bluetooth の RF / PHY test と実 packet 解析を同一の専用 analyzer framework 上で両立し、その後 Wi-Fi、将来は ADS-B 等へ拡張できる。
+
+## 24. Bluetooth専用解析モード 初期実装（2026-08-30）
+
+Bluetooth専用解析モードの最初のUI統合を実施した。
+
+- `Analysis Mode > Bluetooth Dedicated Analyzer` を追加
+- Generic VSAと同一トップレベルウィンドウ内でワークスペースを切り替える
+- Pluto接続はトップレベルアプリが一つだけ所有し、Generic / Bluetooth / ADS-Bで共有する
+- 6等分レイアウトを採用
+  - 左上: IQ Power
+  - 中上: Spectrum
+  - 右上: Result Summary
+  - 左下: RF / Modulation
+  - 中下: Symbol
+  - 右下: Packet Analysis
+- Analysis Profileとして`RF / PHY Test`と`General Packet`を用意
+- Packet AnalysisにDecode / Payload Hex / Packet List / Issues / Air Bitsタブを実装
+- BR/EDRとLE、各PHY、whitening、UAP/CLK6-1、LE Channel/CRC Initを指定可能
+- Semantic decodeにはVSA/VSG共通の`pluto_protocol`を使用
+- Generic VSAの新しい解析結果はsignalでBluetoothワークスペースへ公開する
+
+初期MVPのGeneric VSA結果再利用に加え、Bluetooth画面からの直接IQ取得と専用解析を
+実装した。Classic BR/EDRはaccess code同期後にBR/EDR PHYを自動評価し、LE 1M/2Mは
+Access Addressを使って同期、whitening解除、PDU長によるpacket切り出し、CRC検証まで
+行う。LE preambleはAccess Addressの先頭air bitから正しい極性を決め、復調bitを自動反転
+しない。未知packetの完全なPHY分類、BRからEDRへの複合区間抽出、規格判定値、
+multi-packet統計は引き続き次段階とする。
+
+---
+
+## 25. Generic VSA準拠UI・複数パケット表示（2026-08-30）
+
+Bluetooth専用解析画面は、解析方式だけを規格専用とし、操作体系と測定表示はGeneric VSAへ揃える。
+
+- メインウィンドウ上部には解析設定ツールバーを置かない。
+- `Meas Config` はGeneric VSAと同じモーダル・階層型の操作とし、Bluetooth Analysis / Input / Signal Description / Display / Sweepのページを持つ。
+- PHYから一意に決まる変調方式、Symbol Rate、TX Filter、Result Rangeは読み取り専用とする。
+- 測定開始・停止は `Sweep / Run` メニューおよびF6で行う。
+- 同一IQ内で検出したpacketはすべて解析し、Packet Listと左右矢印キーで選択する。
+- PlotのRect Zoom、3-button mouse、Reset/View All等は共通measurement chromeを使用する。
+
+BR + EDR PSKでは、IQ PowerをBR部からEDR部まで同一時間軸で表示し、SpectrumへFSKを黄色、PSKをシアンで重ねる。ModulationはFSK Instantaneous Frequency / PSK Vector、Symbol PlotはFSK / PSKをタブで切り替える。FSKはConstellation Frequency / Phase Difference、PSKはPhysical IQ / Differential IQを切替可能とし、Flat / Densityとsymbol-point表示もGeneric VSAへ揃える。
+
+共有decoder検証では生成2-DH1について、Header TYPEのMeaning=`2-DH1`、EDR Length=54 byte、CRC=Validを確認した。TYPEはraw nibbleだけでなく実際のpacket形式をMeaningへ表示する。
+
+---
+
+## 26. Bluetooth Triggerと解析停止条件（2026-08-30）
+
+Bluetooth専用解析モードの`Meas Config > Trigger`はGeneric VSAと同じ二段構成とする。
+
+- Acquisition Trigger: Free RunまたはI/Q Power、Level、Slope、Offset、Hysteresisを設定する。
+- Post-capture Burst Search: 取得済みIQ内の複数バーストを抽出し、各バースト直後から同期パターンを探索する。
+- Burst SearchにはLevel、Hysteresis、Envelope Average、Drop-Out、Holdoff、Search Start Offset、active interval制限を持たせる。
+
+I/Q Power acquisition triggerはPluto取得の開始位置を揃える機能であり、取得済みIQ内に含まれる複数packetの探索はPost-capture Burst Searchが担当する。両者は独立してON/OFFできる。
+
+無信号や設定不一致時に弱い相関候補を大量に再解析してUI上終了不能に見えることを防ぐため、複数packet解析には以下の停止条件を設ける。
+
+- F6または同じRun操作で解析停止を要求できる。
+- 候補間の再解析ごとに停止要求を確認する。
+- 1 captureあたりの候補再解析数に安全上限を設ける。
+- Burst Search有効時はtrigger-gated candidateを同期・header decode双方の基準とし、無信号区間の候補をheader decodeへ渡さない。
+
+---
+
+## 27. 測定プロット共通化とEDR PHY境界（2026-08-30）
+
+Bluetooth専用解析画面のプロット操作・配色・密度表示をGeneric VSAと同じ共有部品へ統合した。
+
+- 全プロットでRect Zoom、中央ボタンドラッグPan、Reset、View Allを共通化する。
+- IQ PowerのResult RangeはGeneric VSAと同じ青、Pattern Rangeは緑で表示する。
+- FSK Constellation FrequencyとPSK Symbol Plotは、Flat/DensityともGeneric VSAと同一の描画関数を使う。
+- SpectrumはFSKを黄色、PSKをシアンで重ね、凡例を表示する。
+- Packet Analysisの長いPayload Hexは32文字単位で折り返し、値・Meaning列をウィンドウ幅へ追従させる。
+
+BR/EDRのPHY切替位置は、Access Code開始位置を基準に次式で決定する。
+
+```text
+EDR sync search origin = Access Code start
+                       + 72 BR symbols (Access Code)
+                       + 54 BR symbols (Header)
+                       + 5 BR-symbol periods (Guard)
+                       = Access Code start + 131 BR symbols
+```
+
+EDR同期語の探索はこの理論位置近傍だけに制限し、後続packetのPSK部を誤って現在packetへ結合しない。PSKのIQ Power、Spectrum、Vector、Symbol Plotは、検出したEDR同期位置を含む同一の局所解析範囲から生成する。
+
+---
+
+## 28. EDR Length終端と専用Config永続化（2026-08-30）
+
+EDR同期の初回解析では、ユーザーのResult Rangeをpacket探索用の十分広い上限として使う。Enhanced Payload Headerをdecodeできた後は、そのLengthとPayload CRC位置からpacketの正確なPSK symbol数を計算し、同じEDR同期位置を基準に再解析する。2-DH1では次の構成になる。
+
+```text
+PSK Result Symbols = 10 symbol EDR Sync
+                   + ceil((Enhanced Header + Payload + Payload CRC) / 2 bit)
+                   + 2 symbol Trailer
+```
+
+これにより、Post Idle、後続packet、ユーザーが余裕を持って指定したResult RangeをPSK Vector、Constellation、EVM、Spectrumへ混入させない。表示側も再解析フィルタの端部ではなく、pattern同期で確定したsymbol列と時刻を基準にする。
+
+FSK Constellation FrequencyはGeneric VSAと同じ横軸`-1.0..+1.0`へ固定し、横方向のPan/Zoomを無効にする。中心周波数の初期値は2440 MHzとする。
+
+Bluetooth専用モードのMeas ConfigはGeneric VSAと共通ファイルへ保存しない。Bluetooth専用のQSettings名前空間とschema/version付きJSONへ、Bluetooth Analysis、Input / Frontend、Trigger、Burst Search、Display設定を自動保存し、次回起動時に復元する。設定ダイアログのOK時にも保存し、アプリ終了時に最終状態を再保存する。
+
+---
+
+## 29. Generic VSA共通解析・表示パイプライン（2026-08-30）
+
+Bluetooth専用モードは別の変調解析器を持たない。専用モード固有の責務は、Protocol / PHY / packet typeの判定、PHYから一意に決まるSignal Descriptionの設定、packet境界の決定、およびprotocol fieldのdecodeに限定する。境界が決まったFSK部とPSK部はGeneric VSAと同じ`VSASession` / pattern解析器へ入力する。
+
+次の処理はGeneric VSAと専用モードで共通モジュールを使用する。
+
+- FSKのRaw / Measured表示、Gaussian measurement filter、復元symbol周波数
+- PSKのTX filter / measurement filter、symbol timing、carrier補正、振幅正規化、pi/4-DQPSKの表示基準
+- Physical / Differential constellation、EVM / Differential Symbol EVM / Bluetooth DEVM
+- Symbol PlotのFlat / Density表示、FSK周波数プロットの固定横軸
+- IQ Power / Modulation上のsymbol点、Result Range / Pattern Range表示
+- 軸、Rect Zoom、middle-button Pan、Reset / View All等のplot操作
+
+`Show Symbol Points`は時間軸trace上の同期symbol点だけをON/OFFする。Symbol Plotそのものを非表示にはしない。
+
+EDR 2M / 3Mのsymbol rateはいずれも1 MSym/sであり、2 Mbit/s / 3 Mbit/sは1 symbolあたりのbit数で決まる。専用モードのPSK範囲計算と表示フィルタもこのsymbol rateを使う。EDRのDEVMは専用UIで再計算せず、Generic VSA解析結果のmetadataを表示する。

@@ -1275,3 +1275,39 @@ UIへの組み込みはこのMVP完成後に検討します。
 
 現段階では共通coreとsource adapterまでです。専用解析modeのUI統合、packet
 selectionとの接続、実packet向けpayload hex表示は次の実装段階で行います。
+---
+
+## 27. VSA Bluetooth UI integration（2026-08-30）
+
+`pluto_protocol`の最初の実利用先としてBluetooth専用VSAワークスペースを追加した。
+VSAの復調結果は`pluto_sa.vsa.protocol.analyze_demodulated_packet_bits()`を経由して
+共通`PacketAnalysisResult`へ変換される。専用UIはfield tree、summary、payload hex、
+issues、air bitsをこの共通結果だけから描画し、VSA固有のdecoderを持たない。
+
+自動テストではVSGが生成したLE 1M air bitsをVSA専用解析モデルへ入力し、同じ共通
+decoderでCRC成立まで確認する。これにより、今後専用同期器へ置き換えてもVSG/VSA間の
+field semanticsとintegrity計算が分岐しない構造を維持する。
+
+---
+
+## 28. Bluetooth専用IQ解析との接続（2026-08-30）
+
+Bluetooth専用VSAはGeneric VSAのdemodulation結果だけに依存せず、共有Pluto接続または
+既存`IQRecording`からClassic BR/EDRおよびLE 1M/2Mを直接解析できる。PHY処理は同期、
+復調、packet範囲抽出までを担当し、抽出したair-order bitsと受信contextだけを
+`pluto_protocol`へ渡す。Access Address、HEC、CRC、payload等の意味解析は引き続き
+VSGと同じdecoderを使うため、PHY解析とprotocol semanticsを分離した設計を維持する。
+
+---
+
+## 29. Bluetooth EDR air-bit契約と専用VSA統合（2026-08-30）
+
+EDRのPHY復調結果とprotocol decoderの境界では、次の契約を固定する。
+
+- decoder入力は常に送信順のair-order bitsとする。
+- VSAのSymbol Table用Bit Orderingは表示上の設定であり、protocol bit列を反転してはならない。
+- EDR syncの物理差動位相indexはBluetooth EDR mappingでlogical symbolへ変換してからpattern matchingへ渡す。
+- BR Access Code/HeaderとEDR payloadを結合し、共有BR/EDR decoderへ一度だけ渡す。
+- TYPE Meaningのpacket名、payload Length、CRCは同じair-bit列から計算する。
+
+生成2-DH1、payload 54 byteによる自動検証で、TYPE Meaning=`2-DH1`、Length=`54`、CRC=`Valid`を確認した。専用VSAは複数packetの各候補へこの処理を独立に実行し、全結果を時系列のPacket Listとして保持する。

@@ -8,6 +8,7 @@ from pluto_common import short_pluto_identity
 
 from pluto_sa.standards.adsb1090.ui import ADSB1090Window
 from pluto_sa.vsa.pluto_source import PlutoLiveSource
+from pluto_sa.vsa.protocol_modes.bluetooth import BluetoothAnalyzerWindow
 from pluto_sa.vsa.ui.main_window import VSAWindow
 
 
@@ -34,12 +35,23 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             pluto_source=self._pluto_source,
             owns_pluto_source=False,
         )
-        for workspace in (self.generic_workspace, self.adsb1090_workspace):
+        self.bluetooth_workspace = BluetoothAnalyzerWindow(
+            pluto_source=self._pluto_source,
+        )
+        for workspace in (
+            self.generic_workspace,
+            self.bluetooth_workspace,
+            self.adsb1090_workspace,
+        ):
             workspace.setWindowFlags(QtCore.Qt.WindowType.Widget)
             self._stack.addWidget(workspace)
             workspace.analysis_mode_requested.connect(self.set_analysis_mode)
             workspace.application_close_requested.connect(self.close)
-            workspace.shutdown_ready.connect(self._continue_shutdown)
+            if hasattr(workspace, "shutdown_ready"):
+                workspace.shutdown_ready.connect(self._continue_shutdown)
+        self.generic_workspace.analysis_published.connect(
+            self._generic_analysis_published
+        )
         self.generic_workspace.pluto_uri_edit.currentTextChanged.connect(
             self._pluto_target_changed
         )
@@ -54,12 +66,16 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         adsb = self.adsb1090_workspace.shutdown_busy_reason()
         if adsb is not None:
             return adsb
+        bluetooth = self.bluetooth_workspace.shutdown_busy_reason()
+        if bluetooth is not None:
+            return bluetooth
         return None
 
     @QtCore.Slot(str)
     def set_analysis_mode(self, mode: str) -> None:
         target = {
             "generic": self.generic_workspace,
+            "bluetooth": self.bluetooth_workspace,
             "adsb1090": self.adsb1090_workspace,
         }.get(str(mode))
         if target is None:
@@ -79,6 +95,8 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             recording = self.generic_workspace.session.recording
             if recording is not None and recording is not target.recording:
                 target.analyze_recording(recording)
+        elif target is self.bluetooth_workspace:
+            target.set_session(self.generic_workspace.session)
         self._stack.setCurrentWidget(target)
         self._update_window_title(target)
 
@@ -88,6 +106,10 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         )
         if target is self.generic_workspace:
             self.setWindowTitle(f"Pluto VSA - Generic FSK / PSK [RX: {identity}]")
+        elif target is self.bluetooth_workspace:
+            self.setWindowTitle(
+                f"Pluto VSA - Bluetooth Dedicated Analyzer [RX: {identity}]"
+            )
         else:
             self.setWindowTitle(f"Pluto VSA - ADS-B 1090ES [RX: {identity}]")
 
@@ -95,13 +117,23 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
     def _pluto_target_changed(self, _text: str) -> None:
         target = self.generic_workspace._selected_pluto_target()
         self.adsb1090_workspace.set_pluto_target(target)
+        self.bluetooth_workspace.set_pluto_target(target)
         current = self._stack.currentWidget()
         if current is not None:
             self._update_window_title(current)
 
+    @QtCore.Slot(object)
+    def _generic_analysis_published(self, session: object) -> None:
+        if isinstance(session, type(self.generic_workspace.session)):
+            if self._stack.currentWidget() is self.bluetooth_workspace:
+                self.bluetooth_workspace.set_session(session)
+            else:
+                self.bluetooth_workspace.stage_session(session)
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._shutdown_requested = True
         self.generic_workspace.request_shutdown()
+        self.bluetooth_workspace.request_shutdown()
         self.adsb1090_workspace.request_shutdown()
         busy = self._busy_reason()
         if busy is not None:
@@ -111,6 +143,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         if not self._shutdown_finalized:
             self._shutdown_finalized = True
             self.adsb1090_workspace.finalize_shutdown()
+            self.bluetooth_workspace.finalize_shutdown()
             self.generic_workspace.finalize_shutdown()
             self._pluto_source.close()
         event.accept()

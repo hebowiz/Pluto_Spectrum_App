@@ -105,6 +105,19 @@ def _phase_indices(bits: np.ndarray, bits_per_symbol: int) -> np.ndarray:
     return np.asarray([mapping[tuple(map(int, group))] for group in groups], dtype=np.int16)
 
 
+def edr_sync_symbols(bits_per_symbol: int) -> np.ndarray:
+    """Return Bluetooth EDR sync phase indices in transmitted symbol order."""
+
+    width = int(bits_per_symbol)
+    if width == 2:
+        bits = EDR_SYNC_BITS_2MBPS
+    elif width == 3:
+        bits = EDR_SYNC_BITS_3MBPS
+    else:
+        raise ValueError("bits_per_symbol must be 2 or 3")
+    return _phase_indices(bits, width)
+
+
 def _rrc_taps(samples_per_symbol: int, beta: float = 0.4, span_symbols: int = 10) -> np.ndarray:
     sps = int(samples_per_symbol)
     time = np.arange(-span_symbols * sps / 2, span_symbols * sps / 2 + 1) / sps
