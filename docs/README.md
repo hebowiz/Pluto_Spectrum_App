@@ -68,7 +68,7 @@ PlutoSDRへの接続は `PlutoReceiver` の生成時に行われます。URIを�
 
 RTSAは前回使用したPlutoのselectorを`QSettings`へ保存します。次回起動時に同じPlutoが検出できれば、複数台接続されていても選択ダイアログを表示せず自動接続します。前回のPlutoが見つからず、接続中のPlutoが1台だけならその1台を自動選択して保存し、複数台なら選択ダイアログを表示します。シリアル番号を取得できる個体は`serial:<id>`を保存するため、USB URIが変化しても同じ個体を再選択できます。環境変数`PLUTO_SDR_URI`が指定されている場合は従来どおりその指定を優先します。
 
-RTSA終了時には、Analyzer Mode、Frequency/Span、Amplitude/Input、RBW、FFT/Waterfall/Persistence、Sweep、High Speed TA/Triggerのユーザー設定に加え、Trace 1～4とMarker 1～4の設定を`QSettings`へ保存します。次回起動時は保存状態を復元して対応モードで取得を開始します。測定データ、TraceのAverage/Max Hold蓄積値、Waterfall履歴、Sweep進行位置などのruntimeデータは保存しません。Calibration中に終了した場合はCalibrationへ入る前の通常設定を保存し、次回起動時にその設定を基準としてCalibration固定profileを再適用します。
+RTSA終了時には、Analyzer Mode、Frequency/Span、Amplitude/Input、RBW、FFT/Waterfall/Persistence、Sweep、High Speed TA/Triggerのユーザー設定に加え、Trace 1～4とMarker 1～4の設定を`QSettings`へ保存します。RTSA / WB RTSA / Sweep SA / High Speed TAは独立したmode profileとしてmode切替時にも保存され、再びそのmodeへ入る際に復元されます。mode間で共有する設定はCenter Frequencyだけです。次回起動時は最後のmodeと各profileを復元して取得を開始します。測定データ、TraceのAverage/Max Hold蓄積値、Waterfall履歴、Sweep進行位置などのruntimeデータは保存しません。Calibration中に終了した場合はCalibrationへ入る前の通常設定を保存し、次回起動時にCalibration固定profileを再適用します。
 
 Main Menuの`TRIGGER / MARKER`下には`SYSTEM`フレームがあり、`System`ページから`Preset`または`Device`を実行できます。Presetは確認後、接続先Plutoのselectorを維持したまま、Analyzer Mode・各ユーザー設定・Trace・Marker・Display/Persistenceを現在のコードで定義された初期状態へ戻します。Deviceは接続中のPluto一覧を表示し、選択変更後に旧受信を停止、新Plutoの初期設定、現在Analyzer ModeのContinuous再始動を行います。新Plutoを初期化できなかった場合は旧selectorと旧Receiverへ戻して測定を再開します。SYSTEM配下も他の設定ページと同じstack/historyルールでBack操作します。SYSTEMフレーム追加に伴い、RTSAの固定ウィンドウ高さは従来より80 px拡大します。
 

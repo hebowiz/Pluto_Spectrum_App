@@ -11,9 +11,12 @@ from pluto_sa.config.session_state import (
     RTSA_APPLICATION,
     RTSA_DEVICE_KEY,
     RTSA_ORGANIZATION,
+    PROFILED_ANALYZER_MODES,
     RTSASessionState,
     apply_config_values,
+    apply_mode_config_values,
     capture_config_values,
+    capture_mode_config_values,
     clear_session_state,
     load_session_state,
     save_session_state,
@@ -57,6 +60,10 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
     def __init__(self, *args, **kwargs) -> None:
         self._session_settings = QtCore.QSettings(RTSA_ORGANIZATION, RTSA_APPLICATION)
         self._session_acquisition_started = False
+        self._mode_session_states: dict[AnalyzerMode, RTSASessionState] = {}
+        self._shared_center_freq_hz: int | None = None
+        self._mode_profile_restore_in_progress = False
+        self._last_profiled_analyzer_mode = AnalyzerMode.REALTIME_SA
         super().__init__(*args, **kwargs)
         self._resize_for_system_frame()
         self._install_system_frame()
@@ -192,16 +199,109 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
     def _restore_saved_session_on_startup(self) -> None:
         state = load_session_state(self._session_settings)
         if state is None:
+            self._shared_center_freq_hz = int(self.config.center_freq_hz)
+            self._mode_session_states[self.config.analyzer_mode] = self._capture_mode_session_state()
             return
         try:
-            self._apply_session_state(state, start_if_needed=False)
+            self._load_mode_session_states(state)
+            target_mode = self._normalize_profiled_mode(
+                state.profiled_analyzer_mode or state.analyzer_mode
+            )
+            target_state = self._mode_session_states.get(target_mode)
+            if target_state is None:
+                target_state = self._legacy_mode_state(state, target_mode)
+                self._mode_session_states[target_mode] = target_state
+            active_state = self._state_with_shared_center(target_state)
+            if state.analyzer_mode == AnalyzerMode.CALIBRATION:
+                active_state = RTSASessionState(
+                    analyzer_mode=AnalyzerMode.CALIBRATION,
+                    config_values=active_state.config_values,
+                    realtime_graph_view_mode=active_state.realtime_graph_view_mode,
+                    persistence_enabled=active_state.persistence_enabled,
+                    traces=active_state.traces,
+                    markers=active_state.markers,
+                )
+            self._mode_profile_restore_in_progress = True
+            try:
+                self._apply_session_state(active_state, start_if_needed=False)
+            finally:
+                self._mode_profile_restore_in_progress = False
+            self._last_profiled_analyzer_mode = target_mode
         except Exception as exc:
             print(f"[RTSA] Saved session restore failed; using defaults: {exc}")
             clear_session_state(self._session_settings)
-            self._apply_session_state(self._make_default_session_state(), start_if_needed=False)
+            self._mode_session_states.clear()
+            default_state = self._make_default_session_state()
+            self._shared_center_freq_hz = int(
+                default_state.config_values["center_freq_hz"]
+            )
+            self._mode_session_states[AnalyzerMode.REALTIME_SA] = (
+                self._state_as_mode_profile(default_state)
+            )
+            self._mode_profile_restore_in_progress = True
+            try:
+                self._apply_session_state(default_state, start_if_needed=False)
+            finally:
+                self._mode_profile_restore_in_progress = False
 
-    def _make_default_session_state(self) -> RTSASessionState:
-        defaults = SpectrumConfig(sdr_uri=self.config.sdr_uri)
+    @staticmethod
+    def _normalize_profiled_mode(mode: AnalyzerMode) -> AnalyzerMode:
+        if mode == AnalyzerMode.TIME_ANALYZER:
+            return AnalyzerMode.HIGH_SPEED_TIME_ANALYZER
+        if mode not in PROFILED_ANALYZER_MODES:
+            return AnalyzerMode.REALTIME_SA
+        return mode
+
+    def _load_mode_session_states(self, state: RTSASessionState) -> None:
+        shared_center = state.shared_center_freq_hz
+        if shared_center is None:
+            shared_center = state.config_values.get(
+                "center_freq_hz",
+                self.config.center_freq_hz,
+            )
+        self._shared_center_freq_hz = int(shared_center)
+        self._mode_session_states = {
+            self._normalize_profiled_mode(mode_state.analyzer_mode): mode_state
+            for mode_state in state.mode_states
+            if self._normalize_profiled_mode(mode_state.analyzer_mode)
+            in PROFILED_ANALYZER_MODES
+        }
+        if not self._mode_session_states:
+            target_mode = self._normalize_profiled_mode(state.analyzer_mode)
+            self._mode_session_states[target_mode] = self._legacy_mode_state(
+                state,
+                target_mode,
+            )
+
+    def _legacy_mode_state(
+        self,
+        state: RTSASessionState,
+        target_mode: AnalyzerMode,
+    ) -> RTSASessionState:
+        return RTSASessionState(
+            analyzer_mode=target_mode,
+            config_values={
+                key: value
+                for key, value in state.config_values.items()
+                if key != "center_freq_hz"
+            },
+            realtime_graph_view_mode=state.realtime_graph_view_mode,
+            persistence_enabled=state.persistence_enabled,
+            traces=state.traces,
+            markers=state.markers,
+        )
+
+    def _make_default_session_state(
+        self,
+        analyzer_mode: AnalyzerMode = AnalyzerMode.REALTIME_SA,
+    ) -> RTSASessionState:
+        analyzer_mode = self._normalize_profiled_mode(analyzer_mode)
+        defaults = SpectrumConfig(
+            analyzer_mode=analyzer_mode,
+            sdr_uri=self.config.sdr_uri,
+        )
+        if self._shared_center_freq_hz is not None:
+            defaults.center_freq_hz = int(self._shared_center_freq_hz)
         traces = tuple(
             {
                 "is_visible": index == 0,
@@ -224,7 +324,7 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
             for _index in range(4)
         )
         return RTSASessionState(
-            analyzer_mode=AnalyzerMode.REALTIME_SA,
+            analyzer_mode=analyzer_mode,
             config_values=capture_config_values(defaults),
             realtime_graph_view_mode=GRAPH_VIEW_BOTH,
             persistence_enabled=False,
@@ -232,21 +332,17 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
             markers=markers,
         )
 
-    def _capture_session_state(self) -> RTSASessionState:
-        target_mode = self.config.analyzer_mode
-        if target_mode == AnalyzerMode.CALIBRATION and self._calibration_mode_saved_config is not None:
-            config_for_save = deepcopy(self._calibration_mode_saved_config)
-        else:
-            config_for_save = self.config
-
-        if self.config.analyzer_mode in (
-            AnalyzerMode.SWEEP_SA,
-            AnalyzerMode.TIME_ANALYZER,
-            AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
-        ):
-            graph_view_mode = self._saved_realtime_graph_view_mode
-        else:
-            graph_view_mode = self.graph_view_mode
+    def _capture_mode_session_state(
+        self,
+        *,
+        analyzer_mode: AnalyzerMode | None = None,
+        config_for_save: SpectrumConfig | None = None,
+    ) -> RTSASessionState:
+        target_mode = self._normalize_profiled_mode(
+            analyzer_mode or self.config.analyzer_mode
+        )
+        config_for_save = config_for_save or self.config
+        graph_view_mode = self.graph_view_mode
         if graph_view_mode not in GRAPH_VIEW_OPTIONS:
             graph_view_mode = GRAPH_VIEW_BOTH
 
@@ -273,12 +369,182 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         )
         return RTSASessionState(
             analyzer_mode=target_mode,
-            config_values=capture_config_values(config_for_save),
+            config_values=capture_mode_config_values(config_for_save),
             realtime_graph_view_mode=graph_view_mode,
             persistence_enabled=bool(self.persistence_enabled),
             traces=traces,
             markers=markers,
         )
+
+    @staticmethod
+    def _state_as_mode_profile(state: RTSASessionState) -> RTSASessionState:
+        return RTSASessionState(
+            analyzer_mode=state.analyzer_mode,
+            config_values={
+                key: value
+                for key, value in state.config_values.items()
+                if key != "center_freq_hz"
+            },
+            realtime_graph_view_mode=state.realtime_graph_view_mode,
+            persistence_enabled=state.persistence_enabled,
+            traces=state.traces,
+            markers=state.markers,
+        )
+
+    def _state_with_shared_center(self, state: RTSASessionState) -> RTSASessionState:
+        center_freq_hz = (
+            int(self.config.center_freq_hz)
+            if self._shared_center_freq_hz is None
+            else int(self._shared_center_freq_hz)
+        )
+        return RTSASessionState(
+            analyzer_mode=state.analyzer_mode,
+            config_values={**state.config_values, "center_freq_hz": center_freq_hz},
+            realtime_graph_view_mode=state.realtime_graph_view_mode,
+            persistence_enabled=state.persistence_enabled,
+            traces=state.traces,
+            markers=state.markers,
+        )
+
+    def _capture_session_state(self) -> RTSASessionState:
+        active_mode = self.config.analyzer_mode
+        current_mode = active_mode
+        config_for_save = self.config
+        if (
+            current_mode == AnalyzerMode.CALIBRATION
+            and self._calibration_mode_saved_config is not None
+        ):
+            config_for_save = self._calibration_mode_saved_config
+            current_mode = self._normalize_profiled_mode(
+                config_for_save.analyzer_mode
+            )
+            self._shared_center_freq_hz = int(config_for_save.center_freq_hz)
+            current_state = self._mode_session_states.get(current_mode)
+            if current_state is None:
+                current_state = self._capture_mode_session_state(
+                    analyzer_mode=current_mode,
+                    config_for_save=config_for_save,
+                )
+                self._mode_session_states[current_mode] = current_state
+        else:
+            current_mode = self._normalize_profiled_mode(current_mode)
+            self._shared_center_freq_hz = int(config_for_save.center_freq_hz)
+            current_state = self._capture_mode_session_state(
+                analyzer_mode=current_mode,
+                config_for_save=config_for_save,
+            )
+            self._mode_session_states[current_mode] = current_state
+        active_state = self._state_with_shared_center(current_state)
+        return RTSASessionState(
+            analyzer_mode=active_mode,
+            config_values=active_state.config_values,
+            realtime_graph_view_mode=active_state.realtime_graph_view_mode,
+            persistence_enabled=active_state.persistence_enabled,
+            traces=active_state.traces,
+            markers=active_state.markers,
+            shared_center_freq_hz=self._shared_center_freq_hz,
+            mode_states=tuple(
+                self._mode_session_states[mode]
+                for mode in PROFILED_ANALYZER_MODES
+                if mode in self._mode_session_states
+            ),
+            profiled_analyzer_mode=current_mode,
+        )
+
+    def _apply_shared_center_to_config(self, center_freq_hz: int) -> None:
+        """Move a mode-local start/stop window to the one shared center."""
+
+        center_freq_hz = int(center_freq_hz)
+        self.config.center_freq_hz = center_freq_hz
+        if (
+            self.config.use_start_stop_freq
+            and self.config.display_start_freq_hz is not None
+            and self.config.display_stop_freq_hz is not None
+        ):
+            width_hz = max(
+                1,
+                int(self.config.display_stop_freq_hz)
+                - int(self.config.display_start_freq_hz),
+            )
+            self.config.display_span_hz = width_hz
+            self.config.display_start_freq_hz = center_freq_hz - width_hz // 2
+            self.config.display_stop_freq_hz = (
+                self.config.display_start_freq_hz + width_hz
+            )
+
+    def _apply_mode_profile_before_switch(self, state: RTSASessionState) -> None:
+        current_selector = self.config.sdr_uri
+        apply_mode_config_values(self.config, state.config_values)
+        self.config.sdr_uri = current_selector
+        center_freq_hz = (
+            self.config.center_freq_hz
+            if self._shared_center_freq_hz is None
+            else self._shared_center_freq_hz
+        )
+        self._apply_shared_center_to_config(int(center_freq_hz))
+        graph_view_mode = str(state.realtime_graph_view_mode)
+        if graph_view_mode not in GRAPH_VIEW_OPTIONS:
+            graph_view_mode = GRAPH_VIEW_BOTH
+        self.graph_view_mode = graph_view_mode
+        self._saved_realtime_graph_view_mode = graph_view_mode
+        self._sync_amplitude_scale_from_config()
+        self.receiver.set_gain_db(int(self.config.rx_gain_db))
+
+    def _restore_mode_profile_after_switch(self, state: RTSASessionState) -> None:
+        self._restore_trace_state(state.traces)
+        self._restore_marker_state(state.markers)
+        self._restore_persistence_state(bool(state.persistence_enabled))
+        self._sync_config_backed_controls()
+        self._refresh_status_label()
+        self._update_trace_menu_buttons()
+        self._update_marker_menu_buttons()
+        self._update_graph_view_controls()
+        self._update_persistence_controls()
+        self._apply_display_mode()
+
+    def _change_analyzer_mode(self, analyzer_mode: AnalyzerMode) -> None:
+        """Switch modes through independent profiles with one shared center."""
+
+        if self._mode_profile_restore_in_progress:
+            super()._change_analyzer_mode(analyzer_mode)
+            return
+        if analyzer_mode == AnalyzerMode.TIME_ANALYZER:
+            analyzer_mode = AnalyzerMode.HIGH_SPEED_TIME_ANALYZER
+        previous_mode = self.config.analyzer_mode
+        if previous_mode == analyzer_mode:
+            return
+
+        if previous_mode in PROFILED_ANALYZER_MODES:
+            self._shared_center_freq_hz = int(self.config.center_freq_hz)
+            self._mode_session_states[previous_mode] = (
+                self._capture_mode_session_state(analyzer_mode=previous_mode)
+            )
+            self._last_profiled_analyzer_mode = previous_mode
+
+        target_state: RTSASessionState | None = None
+        if analyzer_mode in PROFILED_ANALYZER_MODES:
+            target_state = self._mode_session_states.get(analyzer_mode)
+            if target_state is None:
+                target_state = self._state_as_mode_profile(
+                    self._make_default_session_state(analyzer_mode)
+                )
+                self._mode_session_states[analyzer_mode] = target_state
+            self._apply_mode_profile_before_switch(target_state)
+            if previous_mode == AnalyzerMode.CALIBRATION:
+                # The selected mode profile supersedes Calibration's temporary
+                # return snapshot. The snapshot's mode was already saved on entry.
+                self._calibration_mode_saved_config = None
+
+        if analyzer_mode == AnalyzerMode.CALIBRATION:
+            save_session_state(self._session_settings, self._capture_session_state())
+
+        super()._change_analyzer_mode(analyzer_mode)
+        self._session_acquisition_started = True
+
+        if target_state is not None:
+            self._last_profiled_analyzer_mode = analyzer_mode
+            self._restore_mode_profile_after_switch(target_state)
+            save_session_state(self._session_settings, self._capture_session_state())
 
     def _apply_session_state(
         self,
@@ -305,6 +571,14 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
 
         apply_config_values(self.config, state.config_values)
         self.config.sdr_uri = current_selector
+        self._apply_shared_center_to_config(
+            int(
+                state.config_values.get(
+                    "center_freq_hz",
+                    self._shared_center_freq_hz or self.config.center_freq_hz,
+                )
+            )
+        )
         self._sync_amplitude_scale_from_config()
         self.receiver.set_gain_db(int(self.config.rx_gain_db))
 
@@ -432,8 +706,18 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         )
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
+        self._mode_session_states.clear()
+        self._shared_center_freq_hz = None
         state = self._make_default_session_state()
-        self._apply_session_state(state, start_if_needed=True)
+        self._shared_center_freq_hz = int(state.config_values["center_freq_hz"])
+        self._mode_session_states[state.analyzer_mode] = self._state_as_mode_profile(
+            state
+        )
+        self._mode_profile_restore_in_progress = True
+        try:
+            self._apply_session_state(state, start_if_needed=True)
+        finally:
+            self._mode_profile_restore_in_progress = False
         save_session_state(self._session_settings, self._capture_session_state())
 
     def closeEvent(self, event) -> None:

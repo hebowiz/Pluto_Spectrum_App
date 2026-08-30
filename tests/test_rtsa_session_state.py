@@ -2,7 +2,9 @@ from pluto_sa.config.session_state import (
     RTSA_SESSION_KEY,
     RTSASessionState,
     apply_config_values,
+    apply_mode_config_values,
     capture_config_values,
+    capture_mode_config_values,
     decode_session_state,
     encode_session_state,
     load_session_state,
@@ -57,6 +59,91 @@ def test_session_state_round_trip():
     assert restored.persistence_enabled is True
     assert restored.traces[0]["average_count"] == 32
     assert restored.markers[0]["is_enabled"] is True
+
+
+def test_session_state_round_trip_preserves_independent_mode_profiles():
+    realtime = SpectrumConfig(analyzer_mode=AnalyzerMode.REALTIME_SA)
+    realtime.rbw_hz = 10_000.0
+    sweep = SpectrumConfig(analyzer_mode=AnalyzerMode.SWEEP_SA)
+    sweep.rbw_hz = 250_000.0
+    sweep.sweep_time_ms = 345.0
+    state = RTSASessionState(
+        analyzer_mode=AnalyzerMode.SWEEP_SA,
+        config_values={
+            **capture_mode_config_values(sweep),
+            "center_freq_hz": 915_000_000,
+        },
+        shared_center_freq_hz=915_000_000,
+        mode_states=(
+            RTSASessionState(
+                analyzer_mode=AnalyzerMode.REALTIME_SA,
+                config_values=capture_mode_config_values(realtime),
+            ),
+            RTSASessionState(
+                analyzer_mode=AnalyzerMode.SWEEP_SA,
+                config_values=capture_mode_config_values(sweep),
+            ),
+        ),
+    )
+
+    restored = decode_session_state(encode_session_state(state))
+    profiles = {item.analyzer_mode: item for item in restored.mode_states}
+
+    assert restored.shared_center_freq_hz == 915_000_000
+    assert profiles[AnalyzerMode.REALTIME_SA].config_values["rbw_hz"] == 10_000.0
+    assert profiles[AnalyzerMode.SWEEP_SA].config_values["rbw_hz"] == 250_000.0
+    assert profiles[AnalyzerMode.SWEEP_SA].config_values["sweep_time_ms"] == 345.0
+    assert all("center_freq_hz" not in item.config_values for item in profiles.values())
+
+
+def test_schema_one_session_remains_loadable_for_profile_migration():
+    restored = decode_session_state(
+        '{"schema_version":1,"analyzer_mode":"Sweep SA",'
+        '"config":{"center_freq_hz":915000000,"rbw_hz":250000},'
+        '"realtime_graph_view_mode":"spectrum_only",'
+        '"persistence_enabled":false,"traces":[],"markers":[]}'
+    )
+
+    assert restored.analyzer_mode == AnalyzerMode.SWEEP_SA
+    assert restored.shared_center_freq_hz == 915_000_000
+    assert restored.config_values["rbw_hz"] == 250_000
+    assert restored.mode_states == ()
+
+
+def test_mode_config_restore_keeps_shared_center_and_device():
+    saved = SpectrumConfig(analyzer_mode=AnalyzerMode.WIDEBAND_REALTIME_SA)
+    saved.center_freq_hz = 915_000_000
+    saved.rbw_hz = 100_000.0
+    saved.rx_gain_db = 13
+    values = capture_mode_config_values(saved)
+
+    target = SpectrumConfig(sdr_uri="serial:RX01")
+    target.center_freq_hz = 2_440_000_000
+    apply_mode_config_values(target, values)
+
+    assert "center_freq_hz" not in values
+    assert target.center_freq_hz == 2_440_000_000
+    assert target.sdr_uri == "serial:RX01"
+    assert target.rbw_hz == 100_000.0
+    assert target.rx_gain_db == 13
+
+
+def test_shared_center_moves_start_stop_window_without_changing_span():
+    config = SpectrumConfig()
+    config.use_start_stop_freq = True
+    config.display_start_freq_hz = 2_400_000_000
+    config.display_stop_freq_hz = 2_420_000_000
+    window = type("WindowHarness", (), {"config": config})()
+
+    session_window_module.SessionRealtimeSpectrumWindow._apply_shared_center_to_config(
+        window,
+        2_450_000_000,
+    )
+
+    assert config.center_freq_hz == 2_450_000_000
+    assert config.display_span_hz == 20_000_000
+    assert config.display_start_freq_hz == 2_440_000_000
+    assert config.display_stop_freq_hz == 2_460_000_000
 
 
 def test_config_restore_does_not_change_device_or_internal_defaults():
