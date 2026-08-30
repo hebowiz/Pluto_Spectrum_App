@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from pluto_protocol.model import GeneratedPacketBits
 from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
 from pluto_sa.vsa.profiles.bluetooth_br import (
     access_code_bits,
@@ -554,6 +555,22 @@ class BluetoothBRWaveformEngine:
             iq=iq,
             sample_rate_hz=project.sample_rate_hz,
             field_boundaries=tuple(boundaries),
+            packet_bits=GeneratedPacketBits(
+                bits=packet_bits,
+                protocol_id="bluetooth.br_edr",
+                phy_name=(
+                    "EDR 3M" if bits_per_symbol == 3 else
+                    "EDR 2M" if bits_per_symbol == 2 else "BR"
+                ),
+                context={
+                    "packet_kind": packet_kind.value,
+                    "lap": int(settings.lap),
+                    "uap": int(settings.uap),
+                    "clock_6_1": int(settings.clock_6_1),
+                    "whitening_enabled": bool(settings.whitening_enabled),
+                    "edr_padding_bits": int((-payload.size) % bits_per_symbol) if is_edr else 0,
+                },
+            ),
             metadata={
                 "project_name": project.name,
                 "standard": project.standard.value,

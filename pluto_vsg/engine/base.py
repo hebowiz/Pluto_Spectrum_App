@@ -8,6 +8,7 @@ from typing import Protocol
 import numpy as np
 import numpy.typing as npt
 
+from pluto_protocol.model import GeneratedPacketBits
 from pluto_vsg.model import WaveformProject
 
 
@@ -29,6 +30,7 @@ class GenerationResult:
     sample_rate_hz: float
     field_boundaries: tuple[FieldBoundary, ...] = ()
     metadata: dict[str, object] = field(default_factory=dict)
+    packet_bits: GeneratedPacketBits | None = None
 
 
 class WaveformEngine(Protocol):

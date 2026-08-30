@@ -1254,3 +1254,24 @@ UIへの組み込みはこのMVP完成後に検討します。
 - 将来Wi-Fi / ADS-B等へ同じframeworkを拡張できるようにする
 
 この構造にしておけば、最初は Bluetooth の「bit列を読めるpacket viewer」から始めながら、将来的には複数protocolを同じ表示体系で扱う汎用 packet analyzer へ拡張できます。
+
+---
+
+## 26. 実装状況（2026-08-30）
+
+初回の共通解析基盤を実装しました。
+
+- `pluto_protocol` をVSA/VSG/Qt非依存packageとして追加
+- canonical入力をair-order bitsとする `PacketDecodeInput` を追加
+- immutableなfield tree、summary、issue、integrity、source modelを追加
+- protocol decoder registryを追加
+- BR/EDR DH1/DH3/DH5系のHeader、HEC、ACL payload、CRC解析を追加
+- LE 1M/2MのPreamble、Access Address、PDU、Length、Payload、CRC解析を追加
+- 途中で切れたpacketも例外にせずpartial resultとして保持
+- 階層field treeから共通table rowを生成するformatterを追加
+- VSG `GenerationResult` に `GeneratedPacketBits` を追加
+- VSGは設定値から再構築せず、実際に生成したair bitsを共通解析器へ渡す
+- VSA復調bit列を同じ解析器へ渡すadapterを追加
+
+現段階では共通coreとsource adapterまでです。専用解析modeのUI統合、packet
+selectionとの接続、実packet向けpayload hex表示は次の実装段階で行います。

@@ -6,6 +6,7 @@ import math
 
 import numpy as np
 
+from pluto_protocol.model import GeneratedPacketBits
 from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
 from pluto_vsg.engine.base import FieldBoundary, GenerationResult
 from pluto_vsg.engine.bluetooth_br import (
@@ -257,6 +258,18 @@ class BluetoothLEWaveformEngine:
             iq=iq,
             sample_rate_hz=project.sample_rate_hz,
             field_boundaries=tuple(boundaries),
+            packet_bits=GeneratedPacketBits(
+                bits=packet_bits,
+                protocol_id="bluetooth.le",
+                phy_name=phy.value,
+                context={
+                    "phy": phy.value,
+                    "whitening_enabled": bool(settings.whitening_enabled),
+                    "whitening_channel_index": int(settings.whitening_channel_index),
+                    "crc_enabled": bool(settings.crc_enabled),
+                    "crc_init": int(settings.crc_init),
+                },
+            ),
             metadata={
                 "project_name": project.name,
                 "standard": project.standard.value,
