@@ -145,6 +145,24 @@ class MetricResult:
     limit_high: float | None = None
 ```
 
+`PacketMeasurementResult` は RF test packet だけでなく任意の実 packet を保持できなければならない。既知 payload pattern との一致を result 成立条件にせず、復調できたデータを少なくとも以下の段階に分けて保持する。
+
+```text
+Air Bits
+  復調直後の無線上の bit 列
+
+Recovered Bytes
+  byte 境界へ整列した byte 列
+
+Payload Bytes / Payload Hex
+  packet header 等を除いた payload 本体
+
+Decoded Fields
+  Shared Protocol Packet Analyzer による意味解析結果
+```
+
+暗号化、接続 context 不足、未知 packet type 等により semantic decode できない場合でも、復元済み bit / byte / payload は破棄しない。packet が capture 端で途切れた場合も取得できた範囲を保持し、欠損 byte は valid mask または `??` 表示で明示する。
+
 `MetricResult` の limit は解析アルゴリズムに埋め込まず、後述する versioned rule profile から与える。
 
 ---
@@ -232,7 +250,7 @@ Pane 5 Symbol / PHY Plot
     [Vector] [Constellation]
 
 Pane 6 Packet Analysis
-    [Decode] [Packet List] [Issues] [Raw]
+    [Decode] [Payload Hex] [Packet List] [Issues] [Air Bits]
 ```
 
 PHY に存在しない tab は表示しない。
@@ -353,11 +371,12 @@ Bluetooth 専用 mode は、BR / EDR / LE の RF test packet を主対象とし�
 
 ```text
 Protocol        Bluetooth
-Analysis Preset RF Test / General
+Analysis Profile RF / PHY Test / General Packet
 PHY             Auto / BR / EDR 2M / EDR 3M / LE 1M / LE 2M / HDT
 Channel/Freq    RF channel または Center Frequency
 Packet Type     Auto / optional hint
-Payload Pattern Auto / PRBS9 / 1010 / 11110000 / ...
+Expected Payload None / Auto Detect / PRBS9 / 1010 / 11110000 / Custom
+Payload Display Hex / Bits
 Packet Count    Single / N / Continuous
 Spec Profile    None / Bluetooth RF Test <version>
 ```
@@ -365,6 +384,86 @@ Spec Profile    None / Bluetooth RF Test <version>
 MVP では PHY の完全自動識別を必須としない。
 
 まず PHY hint を与えたうえで packet synchronization と packet type decode を自動化する方が堅牢。
+
+### 6.1 Analysis Profile
+
+Bluetooth 専用 Analyzer の内部に、用途に応じた 2 種類の analysis profile を設ける。
+
+```text
+Bluetooth Analyzer
+├─ RF / PHY Test
+└─ General Packet
+```
+
+両 profile は別々の復調器を持たず、packet detection、同期、PHY 判別、field segmentation、RF / modulation measurement、bit recovery までを共通化する。その後の payload 解釈、規格集計、limit 判定、表示上の重点だけを切り替える。
+
+```text
+Packet Detection / Segmentation
+              ↓
+Common RF / PHY Measurement
+Power / CFO / Drift / Timing / Deviation / EVM / DEVM / Relative Power
+              ↓
+┌────────────────────────┬────────────────────────┐
+│ RF / PHY Test          │ General Packet         │
+│ pattern comparison     │ payload hex / decode   │
+│ standard aggregation   │ general statistics     │
+│ rule-based limits      │ informational metrics  │
+└────────────────────────┴────────────────────────┘
+```
+
+#### RF / PHY Test
+
+- PRBS9 等の既知 payload pattern の選択または自動推定
+- 規格で定義された evaluation interval
+- 規格固有の複数 packet aggregation
+- versioned rule profile による PASS / FAIL
+- expected data と recovered data の bit comparison
+
+#### General Packet
+
+- test packet に限定しない任意の実 packet
+- payload pattern 一致を解析成立条件にしない
+- Payload Hex / Air Bits / semantic field decode
+- 暗号化 payload も復元済み byte 列として表示
+- 未知 packet type や不完全 packet も解析可能範囲を保持
+- measurement result は原則 INFO とし、正式な規格 limit 判定を強制しない
+
+Analysis Profile は RF / modulation measurement の ON / OFF ではない。General Packet でも packet structure と PHY が判別できる限り、test packet と同じ基礎測定を行う。
+
+| Measurement / Function | RF / PHY Test | General Packet |
+|---|---:|---:|
+| Packet / Peak Power | Yes | Yes |
+| CFO / Carrier Drift | Yes | Yes |
+| Symbol Rate Error / Timing | Yes | Yes |
+| FSK Frequency Deviation | Yes | Yes |
+| EVM / DEVM | Yes | Yes |
+| EDR GFSK / PSK Relative Power | Yes | Yes |
+| Guard / transition timing | Yes | Yes |
+| Payload Hex / Air Bits | Yes | Yes |
+| Known pattern comparison | Primary | Optional |
+| Standard-defined aggregation | Yes | No（一般統計） |
+| Rule Profile PASS / FAIL | Optional | 原則 No |
+
+例えば通常の EDR 実 packet でも、GFSK Access / Header 区間の平均 power、PSK Payload 区間の平均 power、両者の Relative Power、Payload DEVM を測定する。payload が PRBS9 等であることをこれらの測定成立条件にしない。
+
+測定区間を確定できない、packet が途中で欠けている、PHY 判別に失敗した等の場合は値を推測して出さず、metric を `UNKNOWN` とし、`PSK payload boundary unknown` のような測定不能理由を `issues` に記録する。
+
+### 6.2 Payload 表示と pattern 判定の分離
+
+`Expected Payload` は RF test pattern の照合・推定に使う optional hint であり、表示対象 payload を選別する設定ではない。`None` の場合も packet detection、同期、復調、RF measurement、Payload Hex 表示、可能な範囲の semantic decode を実行する。
+
+Pane 6 の Packet Analysis は以下を基本 tab とする。
+
+```text
+Packet Analysis
+├─ Decode
+├─ Payload Hex
+├─ Packet List
+├─ Issues
+└─ Air Bits
+```
+
+Payload Hex は byte offset とともに表示する。Bluetooth の LSB-first air bit order と通常の byte-oriented hex 表記を混同しないよう、bit order、whitening / dewhitening、復号等の適用状態を metadata として併記する。表示・export は実 packet と RF test packet で同一形式を使用する。
 
 ---
 
@@ -430,6 +529,8 @@ Trailer
 7. GFSK と PSK の power を個別計測
 8. bit stream を semantic analyzer へ渡す
 
+上記 RF / modulation measurement は `Analysis Profile` にかかわらず実施する。RF / PHY Test では規格指定の評価区間と aggregation を適用し、General Packet では decode された packet structure から同等の評価区間を自動生成する。
+
 現行 Generic VSA の `CompositeSignalDescription` / segment analysis の考え方を再利用する。
 
 ---
@@ -450,7 +551,9 @@ Trailer
 | Packet Duration | packet start - stop |
 | Decode Integrity | HEC / CRC / FCS 等 |
 | Packet Type | decode 結果 |
-| Payload Pattern | RF test payload pattern 推定 |
+| Payload Length / Hex | 復元できた payload 長と byte 列。実 packet でも常時保持 |
+| Expected Payload Match | RF / PHY Test 時の既知 pattern 照合結果。General Packet では optional |
+| Decode Status | semantic decode、暗号化、context 不足、不完全 capture 等の状態 |
 
 ### 8.2 BR / LE GFSK metrics
 
@@ -543,7 +646,7 @@ Bluetooth EDR Packet
    └─ CRC
 ```
 
-RF test packet では payload pattern も summary に表示する。
+RF / PHY Test では expected payload pattern と一致率を summary に表示する。General Packet では payload を既知 pattern に分類できなくても、復元済み Payload Hex、Air Bits、decode 済み field、および RF / modulation measurement を表示する。
 
 ---
 
@@ -1071,18 +1174,20 @@ tests/data/protocol_vsa/
 推奨順序:
 
 ```text
-1. Shared Protocol Packet Analyzer の Bluetooth MVP
-2. Bluetooth EDR Dedicated Analyzer
-3. Bluetooth BR / LE Dedicated Analyzer
-4. Bluetooth multi-packet statistics
-5. Bluetooth versioned RF Test rule profile
-6. HDT extension
-7. Wi-Fi Non-HT OFDM packet detector / synchronizer
-8. L-SIG + DATA decoder
-9. OFDM EVM / subcarrier analysis
-10. Wi-Fi MAC semantic decode
-11. 802.11b DSSS / CCK
-12. HT20
+1. Bluetooth Dedicated Analyzer shell と Analysis Profile 切り替え
+2. Shared Protocol Packet Analyzer の Bluetooth MVP
+3. Bluetooth EDR Dedicated Analyzer（RF / PHY Test + General Packet）
+4. Bluetooth BR / LE Dedicated Analyzer（RF / PHY Test + General Packet）
+5. Payload Hex / Air Bits / partial packet 共通 result と export
+6. Bluetooth multi-packet statistics
+7. Bluetooth versioned RF Test rule profile
+8. HDT extension
+9. Wi-Fi Non-HT OFDM packet detector / synchronizer
+10. L-SIG + DATA decoder
+11. OFDM EVM / subcarrier analysis
+12. Wi-Fi MAC semantic decode
+13. 802.11b DSSS / CCK
+14. HT20
 ```
 
 最初に EDR を選ぶ理由は、現行 VSA に BR / EDR profile、composite modulation、PSK VSA、DEVM に近い解析資産がすでにあり、専用 mode framework の検証対象として最も距離が近いため。
@@ -1100,5 +1205,7 @@ Wi-Fi は Bluetooth framework の上位 result / UI / packet list / semantic ana
 5. **Bluetooth で framework を固めてから Wi-Fi へ広げる**
 6. **Wi-Fi の logical field と waveform time region を混同しない**
 7. **VSG と VSA だけで閉じた自己検証にせず、独立 reference で相関確認する**
+8. **既知 payload pattern の一致を RF / modulation measurement の成立条件にしない**
+9. **semantic decode 不能でも復元済み bit / byte と測定値を失わない**
 
-この構成なら、Bluetooth RF test 用の専用 analyzer から始めて、Wi-Fi、将来は ADS-B 等まで同じ VSA framework 上に追加できる。
+この構成なら、Bluetooth の RF / PHY test と実 packet 解析を同一の専用 analyzer framework 上で両立し、その後 Wi-Fi、将来は ADS-B 等へ拡張できる。
