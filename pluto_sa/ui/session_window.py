@@ -521,6 +521,12 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
             )
             self._last_profiled_analyzer_mode = previous_mode
 
+        # Stop the old mode before restoring the target profile.  In
+        # particular, _apply_mode_profile_before_switch writes Internal Gain;
+        # doing that while an RTSA/HSTA refill is outstanding can block mode
+        # switching for seconds or leave stale IQ queued for the new mode.
+        self._quiesce_acquisition_for_mode_switch()
+
         target_state: RTSASessionState | None = None
         if analyzer_mode in PROFILED_ANALYZER_MODES:
             target_state = self._mode_session_states.get(analyzer_mode)

@@ -308,10 +308,12 @@ def _analyze_known_pattern(
 
 
 def _edr_candidate_for_type(packet_type: int) -> BluetoothClassicPhy | None:
-    """Resolve unambiguous TYPE values and the allowed EDR family.
+    """Return the EDR PHY which *could* use a Classic TYPE value.
 
-    TYPE 0x4, 0xB and 0xF are shared with BR packets.  The returned EDR
-    candidate must therefore still pass the EDR synchronization correlation.
+    Classic TYPE is not a unique BR/EDR discriminator.  Every value returned
+    here is only a candidate: the packet is promoted to EDR only when the
+    corresponding PSK synchronization word is present immediately after the
+    BR header and guard interval.  Otherwise it remains a BR packet.
     """
 
     if int(packet_type) in {0x4, 0xA, 0xE}:
@@ -319,6 +321,103 @@ def _edr_candidate_for_type(packet_type: int) -> BluetoothClassicPhy | None:
     if int(packet_type) in {0x8, 0xB, 0xF}:
         return BluetoothClassicPhy.EDR_3M
     return None
+
+
+def _edr_sync_search_bounds(
+    *,
+    expected_start_sample: int,
+    sync_symbol_count: int,
+    recording_sample_count: int,
+    samples_per_br_symbol: float,
+    samples_per_psk_symbol: float,
+) -> tuple[int, int, int]:
+    """Return a local EDR-sync search window and its timing tolerance.
+
+    The pre-roll is deliberately wider than the accepted timing error so the
+    matched filter can settle.  The stop is limited to the EDR synchronization
+    word plus a short post-roll.  This prevents a later packet's PSK sync from
+    changing the PHY decision for the current BR header.
+    """
+
+    # The nominal guard is five BR symbol periods, but a real capture also
+    # carries RX/TX filter group delay, fractional timing error and power-ramp
+    # transients around the PHY switch.  Two symbols proved too narrow for
+    # Pluto captures even though ideal generated IQ passed.  Eight symbols is
+    # still a strictly local boundary test (and therefore cannot reach the
+    # next packet), while covering the practical acquisition uncertainty.
+    timing_tolerance = max(1, int(round(8.0 * samples_per_br_symbol)))
+    filter_preroll = max(
+        timing_tolerance,
+        int(round(8.0 * samples_per_psk_symbol)),
+    )
+    postroll = max(
+        timing_tolerance,
+        int(round(8.0 * samples_per_psk_symbol)),
+    )
+    start = max(0, int(expected_start_sample - filter_preroll))
+    stop = min(
+        int(recording_sample_count),
+        int(
+            expected_start_sample
+            + sync_symbol_count * samples_per_psk_symbol
+            + postroll
+        ),
+    )
+    return start, stop, timing_tolerance
+
+
+def _analyze_edr_payload_at_sync(
+    recording: IQRecording,
+    signal: SignalDescription,
+    sync: np.ndarray,
+    *,
+    result_length: int,
+    expected_sync_sample: int,
+    minimum_correlation: float = 0.72,
+) -> VSASession:
+    """Analyze the EDR payload match nearest an already-confirmed sync.
+
+    A 10-symbol EDR synchronization word is short enough that a long random
+    payload can contain a stronger accidental correlation.  Selecting the
+    strongest match over the whole payload therefore occasionally attached
+    the analysis to the wrong location (or rejected the packet as BR).  The
+    narrow boundary pass has already confirmed the physical sync, so the long
+    pass must select the eligible match closest to that position.
+    """
+
+    session = _analyze_known_pattern(
+        recording,
+        signal,
+        sync,
+        result_length=result_length,
+        minimum_correlation=minimum_correlation,
+        match_index=1,
+        match_selection=MatchSelectionPolicy.STRONGEST,
+    )
+    starts = tuple(
+        int(value)
+        for value in session.pattern_result.metadata.get(
+            "eligible_match_start_samples", ()
+        )
+    )
+    if not starts:
+        return session
+    nearest_index = min(
+        range(len(starts)),
+        key=lambda index: abs(starts[index] - int(expected_sync_sample)),
+    )
+    selected_start = int(session.pattern_result.pattern_start_sample)
+    if selected_start == starts[nearest_index]:
+        return session
+    return _analyze_known_pattern(
+        recording,
+        signal,
+        sync,
+        result_length=result_length,
+        minimum_correlation=minimum_correlation,
+        match_index=nearest_index + 1,
+        match_selection=MatchSelectionPolicy.INDEX,
+    )
 
 
 def _symbols_to_air_bits(symbols: np.ndarray, order: int) -> np.ndarray:
@@ -373,6 +472,27 @@ def _exact_edr_result_symbols(
     if edr_air_bits <= 0:
         return None
     return int(np.ceil(edr_air_bits / float(bits_per_symbol)))
+
+
+def _exact_br_result_symbols(packet: PacketAnalysisResult) -> int | None:
+    """Return the decoded BR packet length in one-bit GFSK symbols.
+
+    TYPE selects the payload-header format and slot family, but the decoded
+    ACL Length field determines the actual end of the packet.  The payload
+    field's stop bit includes its header, body and CRC, so it is also the
+    exact BR result-symbol count measured from the access-code start.
+    """
+
+    payload = _packet_field_by_id(packet.root_fields, "payload")
+    length = _packet_field_by_id(packet.root_fields, "length")
+    if payload is None or length is None or not packet.integrity.complete:
+        return None
+    try:
+        int(length.value)
+    except (TypeError, ValueError):
+        return None
+    stop_bit = int(payload.stop_bit)
+    return stop_bit if stop_bit > 0 else None
 
 
 def analyze_bluetooth_classic_recording(
@@ -487,18 +607,58 @@ def analyze_bluetooth_classic_recording(
                 + br_frontend.demodulation.access_start_sample
                 + int(round(131.0 * samples_per_br_symbol))
             )
-            search_guard = max(
-                int(round(2.0 * samples_per_br_symbol)),
-                int(round(8.0 * samples_per_psk_symbol)),
+            sync_search_start, sync_search_stop, sync_timing_tolerance = (
+                _edr_sync_search_bounds(
+                    expected_start_sample=edr_sync_start,
+                    sync_symbol_count=int(sync.size),
+                    recording_sample_count=recording.sample_count,
+                    samples_per_br_symbol=samples_per_br_symbol,
+                    samples_per_psk_symbol=samples_per_psk_symbol,
+                )
             )
-            crop_start = max(
-                0,
-                int(edr_sync_start - search_guard),
+            sync_recording = replace(
+                recording,
+                iq=recording.iq[sync_search_start:sync_search_stop],
+                start_sample_index=(
+                    recording.start_sample_index + sync_search_start
+                ),
+                trigger_sample_index=None,
             )
+            sync_session = _analyze_known_pattern(
+                sync_recording,
+                edr_signal,
+                sync,
+                result_length=int(sync.size) + 2,
+                minimum_correlation=0.72,
+                match_index=1,
+                # Guard/ramp transients can produce an earlier, merely
+                # acceptable 10-symbol correlation.  FIRST then rejects a
+                # valid EDR packet as BR before reaching the true sync.  This
+                # recording is already restricted to the deterministic PHY
+                # boundary, so STRONGEST is safe and is the correct local
+                # maximum-likelihood decision.
+                match_selection=MatchSelectionPolicy.STRONGEST,
+            )
+            detected_sync_start = (
+                sync_search_start
+                + int(sync_session.pattern_result.pattern_start_sample)
+            )
+            sync_timing_error = detected_sync_start - int(edr_sync_start)
+            if abs(sync_timing_error) > sync_timing_tolerance:
+                raise RuntimeError(
+                    "EDR synchronization was not found at the expected "
+                    f"post-header boundary (timing error {sync_timing_error} samples)"
+                )
+
+            # The narrow pass above decides BR versus EDR. Only after that
+            # decision do we open a longer range for payload demodulation.
+            # Anchor it to the confirmed sync so a later packet cannot be
+            # associated with the current header.
+            crop_start = sync_search_start
             crop_stop = min(
                 recording.sample_count,
                 int(
-                    edr_sync_start
+                    detected_sync_start
                     + (sync.size + result_length + 8) * samples_per_psk_symbol
                 ),
             )
@@ -508,15 +668,23 @@ def analyze_bluetooth_classic_recording(
                 start_sample_index=recording.start_sample_index + crop_start,
                 trigger_sample_index=None,
             )
-            candidate_session = _analyze_known_pattern(
+            candidate_session = _analyze_edr_payload_at_sync(
                 edr_recording,
                 edr_signal,
                 sync,
                 result_length=result_length,
+                expected_sync_sample=detected_sync_start - crop_start,
                 minimum_correlation=0.72,
-                match_index=1,
-                match_selection=MatchSelectionPolicy.FIRST,
             )
+            payload_sync_start = (
+                crop_start
+                + int(candidate_session.pattern_result.pattern_start_sample)
+            )
+            if abs(payload_sync_start - detected_sync_start) > sync_timing_tolerance:
+                raise RuntimeError(
+                    "EDR payload analysis did not remain anchored to the "
+                    "post-header synchronization word"
+                )
             correlation = float(candidate_session.pattern_result.correlation)
             if correlation >= 0.72:
                 # First pass establishes EDR sync and decodes the enhanced
@@ -553,14 +721,13 @@ def analyze_bluetooth_classic_recording(
                     provisional_packet, bits_per_symbol=width
                 )
                 if exact_result_symbols is not None:
-                    candidate_session = _analyze_known_pattern(
+                    candidate_session = _analyze_edr_payload_at_sync(
                         edr_recording,
                         edr_signal,
                         sync,
                         result_length=exact_result_symbols,
+                        expected_sync_sample=detected_sync_start - crop_start,
                         minimum_correlation=0.72,
-                        match_index=1,
-                        match_selection=MatchSelectionPolicy.FIRST,
                     )
                 phy = edr_candidate
                 analysis_session = candidate_session
@@ -569,7 +736,48 @@ def analyze_bluetooth_classic_recording(
             edr_error = str(error)
 
     if analysis_session is None:
-        analysis_session = br_analysis_session
+        # No EDR synchronization word was present at the deterministic PHY
+        # switch boundary, so this is a BR packet even when TYPE is shared
+        # with an EDR family.  Decode a generous first pass to obtain the ACL
+        # Length, then repeat with the exact packet range.  TYPE/slot capacity
+        # must never be used as the observed packet length.
+        br_packet_session = _analyze_known_pattern(
+            recording,
+            _classic_signal(BluetoothClassicPhy.BR),
+            access,
+            result_length=result_length,
+            minimum_correlation=0.60,
+            match_index=match_index,
+            iq_power_trigger=iq_power_trigger,
+        )
+        provisional_pattern = br_packet_session.pattern_result
+        provisional_packet = analyze_demodulated_packet_bits(
+            provisional_pattern.decoded_bits,
+            protocol_id="bluetooth.br_edr",
+            phy_name=BluetoothClassicPhy.BR.value,
+            context={
+                "uap": int(uap) & 0xFF,
+                "clock_6_1": int(clock_6_1),
+                "whitening_enabled": bool(whitening_enabled),
+                "phy": BluetoothClassicPhy.BR.value,
+            },
+            packet_index=0,
+            center_frequency_hz=recording.center_frequency_hz,
+            start_sample=provisional_pattern.result_start_sample,
+            stop_sample=provisional_pattern.result_stop_sample,
+        )
+        exact_result_symbols = _exact_br_result_symbols(provisional_packet)
+        if exact_result_symbols is not None:
+            br_packet_session = _analyze_known_pattern(
+                recording,
+                _classic_signal(BluetoothClassicPhy.BR),
+                access,
+                result_length=exact_result_symbols,
+                minimum_correlation=0.60,
+                match_index=match_index,
+                iq_power_trigger=iq_power_trigger,
+            )
+        analysis_session = br_packet_session
 
     pattern = analysis_session.pattern_result
     if phy is BluetoothClassicPhy.BR:

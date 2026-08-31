@@ -1297,6 +1297,8 @@ EDR sync search origin = Access Code start
 
 EDR同期語の探索はこの理論位置近傍だけに制限し、後続packetのPSK部を誤って現在packetへ結合しない。PSKのIQ Power、Spectrum、Vector、Symbol Plotは、検出したEDR同期位置を含む同一の局所解析範囲から生成する。
 
+Classic HeaderのTYPEはBR/EDRを一意に決定する情報として扱わない。TYPEから得るのはBR packet形式と、対応し得るEDR 2M/3Mの候補だけとする。Header直後の理論位置で対応するEDR同期語が成立した場合だけEDRへ昇格し、成立しなければBRとして解析する。この判定はDH1/2-DH1だけでなく、DH3/3-DH3、DH5/3-DH5を含む全TYPE候補へ同じ手順を適用する。
+
 ---
 
 ## 28. EDR Length終端と専用Config永続化（2026-08-30）
@@ -1309,7 +1311,9 @@ PSK Result Symbols = 10 symbol EDR Sync
                    + 2 symbol Trailer
 ```
 
-これにより、Post Idle、後続packet、ユーザーが余裕を持って指定したResult RangeをPSK Vector、Constellation、EVM、Spectrumへ混入させない。表示側も再解析フィルタの端部ではなく、pattern同期で確定したsymbol列と時刻を基準にする。
+BRも同様に、TYPEが示すslot容量をResult Rangeとして採用しない。最初の広い解析でACL Payload HeaderのLengthをdecodeし、Access Code、Header、Payload Header、Length分のPayload Body、Payload CRCを含む実packet終端を計算して正確な範囲で再解析する。
+
+これにより、BR/EDRの双方でPost Idle、slotの未使用部分、後続packet、ユーザーが余裕を持って指定したResult Rangeを各プロットと測定値へ混入させない。表示側も再解析フィルタの端部ではなく、pattern同期とdecode済みLengthで確定したsymbol列と時刻を基準にする。
 
 FSK Constellation FrequencyはGeneric VSAと同じ横軸`-1.0..+1.0`へ固定し、横方向のPan/Zoomを無効にする。中心周波数の初期値は2440 MHzとする。
 
@@ -1333,3 +1337,15 @@ Bluetooth専用モードは別の変調解析器を持たない。専用モー�
 `Show Symbol Points`は時間軸trace上の同期symbol点だけをON/OFFする。Symbol Plotそのものを非表示にはしない。
 
 EDR 2M / 3Mのsymbol rateはいずれも1 MSym/sであり、2 Mbit/s / 3 Mbit/sは1 symbolあたりのbit数で決まる。専用モードのPSK範囲計算と表示フィルタもこのsymbol rateを使う。EDRのDEVMは専用UIで再計算せず、Generic VSA解析結果のmetadataを表示する。
+
+---
+
+## 30. 長尺3-DHxのEDR同期アンカー（2026-08-31）
+
+実機の3-DH3 / 3-DH5をDH3 / DH5と誤判定する事象に対応した。Classic HeaderのTYPEは従来どおりPHY候補としてのみ使用し、Header + Guard直後の局所範囲で3 Mbps EDR Syncが成立した場合に3-DHxへ確定する。
+
+実IQでは送受信フィルタの群遅延、fractional timing、Guard付近のramp transientが重なるため、局所Sync探索の許容幅を8 BR symbolへ拡張する。ただし探索範囲は境界付近に限定し、後続packetへ到達させない。局所判定は範囲内の最大相関を使う。
+
+10 symbolのEDR Syncは長い3-DH3 / 3-DH5 payload内で偶然再出現し得る。このためLength取得用およびLength確定後のPSK再解析は、payload全域の最大相関ではなく、局所探索で確定したSync位置に最も近い候補へアンカーする。これによりpayload中の疑似Syncへ解析位置が移動してBRへfallbackする問題を防ぐ。
+
+回帰試験は3-DH3と3-DH5の双方について、PHY切替境界へ4 usの遅延を加えたIQでもpacket type、Length終端、CRCが成立することを確認する。

@@ -227,10 +227,11 @@ def reduce_filtered_iq_power(
     *,
     axis: int | None = None,
 ) -> np.ndarray | float:
-    """Detect filtered IQ using spectrum-analyzer power semantics.
+    """Detect filtered IQ using spectrum-analyzer voltage/power semantics.
 
-    RMS means mean-square voltage, so in linear power units it is the mean of
-    ``abs(iq)**2`` rather than the RMS of already-squared power values.
+    ``Average`` is the square of the arithmetic mean envelope voltage, while
+    ``RMS`` is mean-square voltage.  Keeping those operations in the IQ domain
+    avoids making the two user-selectable detectors accidental aliases.
     """
     values = np.asarray(filtered_iq)
     if values.size == 0:
@@ -241,6 +242,10 @@ def reduce_filtered_iq_power(
         result = np.take(power, indices=-1, axis=axis)
     elif resolved_mode is DetectorMode.PEAK:
         result = np.max(power, axis=axis)
+    elif resolved_mode is DetectorMode.NEGATIVE_PEAK:
+        result = np.min(power, axis=axis)
+    elif resolved_mode is DetectorMode.AVERAGE:
+        result = np.mean(np.abs(values), axis=axis) ** 2
     else:
         result = np.mean(power, axis=axis)
     if np.ndim(result) == 0:
@@ -284,6 +289,13 @@ def reduce_filtered_iq_power_buckets(
         detector_values = power[ends - 1]
     elif resolved_mode is DetectorMode.PEAK:
         detector_values = np.maximum.reduceat(power, starts)
+    elif resolved_mode is DetectorMode.NEGATIVE_PEAK:
+        detector_values = np.minimum.reduceat(power, starts)
+    elif resolved_mode is DetectorMode.AVERAGE:
+        envelope = np.asarray(np.abs(values), dtype=np.float64)
+        detector_values = (
+            np.add.reduceat(envelope, starts) / lengths
+        ) ** 2
     else:
         detector_values = np.add.reduceat(power, starts) / lengths
 

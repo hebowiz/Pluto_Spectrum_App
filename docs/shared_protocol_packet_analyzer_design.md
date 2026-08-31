@@ -1309,5 +1309,9 @@ EDRのPHY復調結果とprotocol decoderの境界では、次の契約を固定�
 - EDR syncの物理差動位相indexはBluetooth EDR mappingでlogical symbolへ変換してからpattern matchingへ渡す。
 - BR Access Code/HeaderとEDR payloadを結合し、共有BR/EDR decoderへ一度だけ渡す。
 - TYPE Meaningのpacket名、payload Length、CRCは同じair-bit列から計算する。
+- Classic TYPEはBR/EDRの確定値ではなくPHY候補として扱う。Header直後の所定位置に対応するEDR同期語がある場合だけEDRとし、後続packetを含む広いResult Rangeから同期語を拾ってはならない。
+- Result RangeはTYPEや最大slot長だけで決めず、BRではACL Length、EDRではEnhanced ACL Lengthをdecodeした後、header/body/CRC（EDRはsync/trailerも含む）の実終端へ縮めて再解析する。
 
 生成2-DH1、payload 54 byteによる自動検証で、TYPE Meaning=`2-DH1`、Length=`54`、CRC=`Valid`を確認した。専用VSAは複数packetの各候補へこの処理を独立に実行し、全結果を時系列のPacket Listとして保持する。
+
+長尺EDR packetでは短い10-symbol Syncと同じ並びがpayload内に偶然現れる可能性がある。PHY境界の局所探索でEDR Syncを確定した後、Length取得用および確定Lengthでの再解析は、その確定位置に最も近いeligible matchへ固定する。payload全域の最大相関へ移動してはならない。3-DH3 / 3-DH5について、Guard境界に実機相当のtiming delayを加えた回帰試験を維持する。

@@ -106,7 +106,7 @@ Systemページは他の右ペイン設定ページと同じstack/historyへ入�
 - 起動時にそのCSVが存在すれば自動読込してCalibrationをONにします。
 - パスが存在しない場合はエラーをコンソールへ表示し、Calibration OFFで起動します。
 - RTSAの接続先Pluto selectorと前回セッションは、PCローカルの`QSettings(PlutoSpectrumApp, PlutoRTSA)`へ保存します。
-- セッション保存対象はAnalyzer Mode、Frequency/Span、Amplitude/Input、RBW、FFT/Waterfall/Persistence、Sweep、High Speed TA/Trigger、Trace 1～4、Marker 1～4です。2026-08-30以降、RTSA / WB RTSA / Sweep SA / High Speed TAは個別のmode profileを持ち、mode切替直前とアプリ終了時に保存し、mode進入時と次回起動時に復元します。mode間で共有する測定設定はCenter Frequencyだけです。Start/Stop表示を使うprofileは、保存したSpanを維持したまま共通Centerへ周波数窓を平行移動します。Pluto selectorは従来どおりmode profileへ含めません。
+- セッション保存対象はAnalyzer Mode、Frequency/Span、Amplitude/Input、RBW、FFT/Waterfall/Persistence、Sweep、High Speed TA/Trigger、Trace 1～4、Marker 1～4です。2026-08-30以降、RTSA / WB RTSA / Sweep SA / High Speed TAは個別のmode profileを持ち、mode切替直前とアプリ終了時に保存し、mode進入時と次回起動時に復元します。mode間で共有する測定設定はCenter Frequencyだけです。Start/Stop表示を使うprofileは、保存したSpanを維持したまま共通Centerへ周波数窓を平行移動します。Pluto selectorは従来どおりmode profileへ含めません。mode切替時は、旧modeのGUI timer、IQ stream、HSTA cursor、stepped sweepを先に停止してから、対象profileのInternal Gain / Sample Rate / RF Bandwidth / LO設定を適用し、新modeの取得だけを開始します。
 - TraceのAverage/Max Hold蓄積値、Waterfall履歴、Sweep進行位置、Trigger待機中のruntime状態、IQ/測定結果は保存しません。
 - Calibration中に終了した場合はCalibrationへ入る前の通常設定を保存し、次回起動時にCalibration固定profileを再適用します。
 - Preset実行時は保存済みセッションも初期状態へ即時更新しますが、接続先Pluto selectorは削除・変更しません。

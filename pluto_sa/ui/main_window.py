@@ -1270,6 +1270,40 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if self.config.sweep_profile_logging:
             print("HighSpeedTAThread stop")
 
+    def _pause_hsta_stream_for_receiver_change(self) -> tuple[bool, bool]:
+        """Quiesce HSTA before changing an SDR receive-path attribute.
+
+        libiio/AD936x configuration writes can contend with an outstanding RX
+        refill. Remember whether Continuous or an armed Single acquisition was
+        active so the caller can restore that exact run state afterwards.
+        """
+        if not self._is_high_speed_time_analyzer_mode():
+            return False, False
+        resume_continuous = self.sweep_state == SWEEP_STATE_RUNNING
+        resume_single = (
+            self.sweep_state == SWEEP_STATE_SINGLE
+            and self._high_speed_ta_stream_cursor is not None
+        )
+        if not (resume_continuous or resume_single):
+            return False, False
+        self.timer.stop()
+        self._high_speed_ta_generation += 1
+        self._stop_high_speed_ta_stream(stop_analysis_thread=False)
+        self._clear_high_speed_ta_analysis_queues()
+        return resume_continuous, resume_single
+
+    def _resume_hsta_stream_after_receiver_change(
+        self,
+        resume_state: tuple[bool, bool],
+    ) -> None:
+        """Restore the HSTA run state saved by the matching pause helper."""
+        resume_continuous, resume_single = resume_state
+        if resume_continuous:
+            self._start_high_speed_time_analyzer_continuous()
+        elif resume_single:
+            self._enter_single_high_speed_time_analyzer_mode()
+            self._restart_timer_for_current_mode()
+
     def _finalize_time_analyzer_sweep_stats(self) -> None:
         count = int(self._time_analyzer_sweep_sample_count)
         if count <= 0:
@@ -1729,6 +1763,23 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if hasattr(self, "waterfall_plot"):
             self._reset_plot_state()
 
+    def _quiesce_acquisition_for_mode_switch(self) -> None:
+        """Stop every acquisition path before applying another mode profile.
+
+        A mode profile can change AD936x attributes such as gain, sample rate,
+        RF bandwidth, and LO frequency.  Those writes must not overlap a
+        pending libiio refill from RTSA/HSTA or an active stepped sweep.
+        Keep this operation limited to acquisition state; the caller still
+        captures/restores mode-specific UI state separately.
+        """
+        if hasattr(self, "timer"):
+            self.timer.stop()
+        self.sweep_controller.stop()
+        self._realtime_stream_cursor = None
+        # The HSTA lifecycle helper owns the shared ContinuousIQAcquisition
+        # stop operation for every mode, so do not stop the same worker twice.
+        self._stop_high_speed_ta_stream(stop_analysis_thread=False)
+
     def _reset_measurement_state_for_mode_change(self) -> None:
         self._reset_all_measurement_state(
             stop_receiver=True,
@@ -1823,6 +1874,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._set_left_display_updates_enabled(False)
         try:
             previous_mode = self.config.analyzer_mode
+            # Direct users of the base window do not pass through the session
+            # profile wrapper.  Quiesce here as well, before any target-mode
+            # configuration is calculated or written to the receiver.
+            self._quiesce_acquisition_for_mode_switch()
             if (
                 analyzer_mode == AnalyzerMode.CALIBRATION
                 and previous_mode != AnalyzerMode.CALIBRATION
@@ -3749,13 +3804,13 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._invalidate_wideband_runtime()
             self._reset_sweep_display_and_restore_state(previous_sweep_state)
         elif self._is_time_analyzer_mode():
+            hsta_resume_state = self._pause_hsta_stream_for_receiver_change()
             self.receiver.retune_lo(self.config.center_freq_hz)
             self._reset_plot_state()
-            if self.sweep_state == SWEEP_STATE_RUNNING:
-                if self._is_high_speed_time_analyzer_mode():
-                    self._start_high_speed_time_analyzer_continuous()
-                else:
-                    self._start_time_analyzer_continuous()
+            if self._is_high_speed_time_analyzer_mode():
+                self._resume_hsta_stream_after_receiver_change(hsta_resume_state)
+            elif self.sweep_state == SWEEP_STATE_RUNNING:
+                self._start_time_analyzer_continuous()
         else:
             self.receiver.retune_lo(self.config.center_freq_hz)
             self.processor.update_center_frequency(self.config.center_freq_hz)
@@ -3961,7 +4016,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
         self.config.rx_gain_db = value
         self.config.__post_init__()
+        hsta_resume_state = self._pause_hsta_stream_for_receiver_change()
         self.receiver.set_gain_db(self.config.rx_gain_db)
+        self._resume_hsta_stream_after_receiver_change(hsta_resume_state)
         self._refresh_status_label()
 
     def _on_ext_att_clicked(self) -> None:
@@ -4038,6 +4095,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             rbw_hz = self._clip_sweep_rbw(rbw_hz)
         else:
             rbw_hz = self._clip_realtime_rbw(rbw_hz)
+
+        # Sample-rate/RF-bandwidth writes must not race an outstanding HSTA RX
+        # refill. This also preserves an armed Single trigger, not only
+        # Continuous operation.
+        hsta_resume_state = self._pause_hsta_stream_for_receiver_change()
+
         self.config.rbw_hz = rbw_hz
         realtime_fft_changed = False
         if self.config.analyzer_mode in (
@@ -4051,9 +4114,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._apply_time_analyzer_rbw_driven_capture_settings()
             self._initialize_high_speed_time_analyzer_runtime()
             self._reset_plot_state()
-            if previous_state == SWEEP_STATE_RUNNING:
-                self._start_high_speed_time_analyzer_continuous()
-            elif previous_state == SWEEP_STATE_SINGLE:
+            self._resume_hsta_stream_after_receiver_change(hsta_resume_state)
+            if previous_state == SWEEP_STATE_SINGLE and not any(hsta_resume_state):
                 self.sweep_state = SWEEP_STATE_STOPPED
                 self.timer.stop()
                 self._update_continuous_button()

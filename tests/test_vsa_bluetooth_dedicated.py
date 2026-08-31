@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import numpy as np
 import pyqtgraph as pg
+import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSAAnalysisResult
@@ -201,6 +202,177 @@ def test_dedicated_edr_length_crc_and_type_meaning_use_air_bit_order() -> None:
         result.metadata["br_analysis_session"].demodulation.measurement_filter
         is MeasurementFilterMode.NONE
     )
+
+
+@pytest.mark.parametrize(
+    ("packet_kind", "expected_phy", "expected_result_symbols"),
+    (
+        # BR: Access + Header + ACL header + 12-byte body + CRC.
+        (BluetoothPacketKind.DH1, "BR", 72 + 54 + 8 + 12 * 8 + 16),
+        (BluetoothPacketKind.DH3, "BR", 72 + 54 + 16 + 12 * 8 + 16),
+        (BluetoothPacketKind.DH5, "BR", 72 + 54 + 16 + 12 * 8 + 16),
+        # EDR: Sync + ceil((enhanced header + body + CRC) / modulation width)
+        # + two trailer symbols.
+        (BluetoothPacketKind.DH1_2, "EDR 2M", 10 + (16 + 12 * 8 + 16) // 2 + 2),
+        (BluetoothPacketKind.DH3_2, "EDR 2M", 10 + (16 + 12 * 8 + 16) // 2 + 2),
+        (BluetoothPacketKind.DH5_2, "EDR 2M", 10 + (16 + 12 * 8 + 16) // 2 + 2),
+        (BluetoothPacketKind.DH1_3, "EDR 3M", 10 + 43 + 2),
+        (BluetoothPacketKind.DH3_3, "EDR 3M", 10 + 43 + 2),
+        (BluetoothPacketKind.DH5_3, "EDR 3M", 10 + 43 + 2),
+    ),
+)
+def test_classic_type_is_only_a_phy_candidate_and_length_sets_result_range(
+    packet_kind: BluetoothPacketKind,
+    expected_phy: str,
+    expected_result_symbols: int,
+) -> None:
+    base = bluetooth_br_edr_project()
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=packet_kind,
+        payload_length_bytes=12,
+    )
+    generated = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+    )
+    result = analyze_bluetooth_classic_recording(
+        IQRecording(
+            iq=generated.iq,
+            sample_rate_hz=generated.sample_rate_hz,
+            center_frequency_hz=base.center_frequency_hz,
+            source=f"generated {packet_kind.value}",
+        ),
+        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+        lap=settings.lap,
+        uap=settings.uap,
+        clock_6_1=settings.clock_6_1,
+        whitening_enabled=settings.whitening_enabled,
+        result_length=4096,
+    )
+
+    metrics = {metric.metric_id: metric.display for metric in result.metrics}
+    assert metrics["detected_phy"] == expected_phy
+    assert result.packet.packet_type == packet_kind.value
+    assert result.packet.integrity.crc_valid is True
+    assert result.packet.integrity.complete is True
+    assert (
+        result.metadata["analysis_session"].pattern_result.decoded_symbols.size
+        == expected_result_symbols
+    )
+
+
+def test_br_packet_is_not_promoted_by_a_later_edr_sync() -> None:
+    base = bluetooth_br_edr_project()
+    br_settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH1,
+        payload_length_bytes=12,
+    )
+    edr_settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH1_2,
+        payload_length_bytes=12,
+    )
+    br = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=br_settings, fields=bluetooth_br_fields(br_settings))
+    )
+    edr = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=edr_settings, fields=bluetooth_br_fields(edr_settings))
+    )
+    spacer = np.zeros(256, dtype=np.complex64)
+    recording = IQRecording(
+        iq=np.concatenate((spacer, br.iq, spacer, edr.iq, spacer)),
+        sample_rate_hz=br.sample_rate_hz,
+        center_frequency_hz=base.center_frequency_hz,
+        source="generated DH1 followed by 2-DH1",
+    )
+
+    results = analyze_bluetooth_classic_recordings(
+        recording,
+        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+        lap=br_settings.lap,
+        uap=br_settings.uap,
+        clock_6_1=br_settings.clock_6_1,
+        whitening_enabled=br_settings.whitening_enabled,
+        result_length=4096,
+    )
+
+    assert [result.packet.packet_type for result in results] == ["DH1", "2-DH1"]
+    assert [
+        {metric.metric_id: metric.display for metric in result.metrics}["detected_phy"]
+        for result in results
+    ] == ["BR", "EDR 2M"]
+    assert all(result.packet.integrity.crc_valid is True for result in results)
+
+
+@pytest.mark.parametrize(
+    "packet_kind",
+    (BluetoothPacketKind.DH3_3, BluetoothPacketKind.DH5_3),
+)
+def test_3m_edr_phy_detection_tolerates_realistic_sync_boundary_delay(
+    packet_kind: BluetoothPacketKind,
+) -> None:
+    """A guard/ramp timing offset must not turn 3-DHx into BR DHx."""
+
+    base = bluetooth_br_edr_project()
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=packet_kind,
+        payload_length_bytes=12,
+    )
+    generated = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+    )
+    recording = IQRecording(
+        iq=generated.iq,
+        sample_rate_hz=generated.sample_rate_hz,
+        center_frequency_hz=base.center_frequency_hz,
+        source=f"delayed {packet_kind.value}",
+    )
+    initial = analyze_bluetooth_classic_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+        lap=settings.lap,
+        uap=settings.uap,
+        clock_6_1=settings.clock_6_1,
+        whitening_enabled=settings.whitening_enabled,
+        result_length=4096,
+    )
+    access_start = int(
+        initial.metadata["br_analysis_session"].pattern_result.pattern_start_sample
+    )
+    switch_boundary = int(
+        round(
+            access_start
+            + 131.0 * generated.sample_rate_hz / 1_000_000.0
+        )
+    )
+    delay_samples = int(round(4.0e-6 * generated.sample_rate_hz))
+    delayed = replace(
+        recording,
+        iq=np.concatenate(
+            (
+                generated.iq[:switch_boundary],
+                np.zeros(delay_samples, dtype=np.complex64),
+                generated.iq[switch_boundary:],
+            )
+        ),
+    )
+
+    result = analyze_bluetooth_classic_recording(
+        delayed,
+        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+        lap=settings.lap,
+        uap=settings.uap,
+        clock_6_1=settings.clock_6_1,
+        whitening_enabled=settings.whitening_enabled,
+        result_length=4096,
+    )
+
+    assert result.packet.packet_type == packet_kind.value
+    assert result.packet.integrity.complete is True
+    assert result.packet.integrity.crc_valid is True
+    assert result.metadata["edr_candidate_error"] is None
 
 
 def test_dedicated_edr_multi_packet_analysis_uses_local_ranges_and_reports_relative_power() -> None:

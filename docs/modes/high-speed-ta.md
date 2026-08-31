@@ -100,7 +100,9 @@ Main Menuの`Trigger`から次を設定できます。現時点ではHighSpeed T
 
 record全体へGaussian complex IQ FIR low-passを適用してから`I² + Q²`へ変換します。指定RBWは両側3 dB bandwidthであり、中心から±`RBW / 2`で電力が約-3.0103 dB、ENBWは約`1.0645 × RBW`です。FIRはlinear phaseで、群遅延は`(tap数 - 1) / 2 samples`です。Free Run等で前recordの終了sampleと次recordの開始sampleが連続している場合はfilter stateを引き継ぎ、overrun、設定変更、trigger recordの重複・空白がある場合はresetします。
 
-filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落なく分配し、各bucketへDetectorを適用します。Sampleは最後のpower、Peakは最大power、RMSはIQの平均二乗powerです。bucketの時間位置は中央sampleです。
+filter後の全sampleを最大1000個の連続時間bucketへ重複・欠落なく分配し、各bucketへDetectorを適用します。Sampleは最後のpower、Peakは最大power、Negative Peakは最小power、Averageは平均包絡線電圧の二乗、RMSはIQの平均二乗powerです。bucketの時間位置は中央sampleです。
+
+Center Frequency、Internal Gain、RBW（Sample Rate / RF bandwidthを含む）のようにPlutoの受信条件を書き換える場合は、受信workerのblocking readとSDR再設定のlock競合を避けるため、HSTA streamをいったん停止して未処理解析queueを破棄します。設定反映後は新しいstreamとして元の運転状態を復元します。Continuous動作中はContinuousを再開し、Power Trigger等でSingle待受中だった場合はSingle待受を再開します。表示Scale、External ATT/Gain、Detector等、Plutoハードウェアへ書き込まない設定では受信を止めません。
 
 表示間隔は概ね`Time Span / display points`です。初期10 ms、1000 pointsでは約10 µsとなり、FFT sizeを変えても表示間隔は変化しません。recordが1000 samples未満の場合は1 sampleを1 pointとして表示します。
 

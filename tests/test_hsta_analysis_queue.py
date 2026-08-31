@@ -378,3 +378,236 @@ def test_trigger_level_dialog_pauses_and_resumes_continuous_capture(
 
     assert calls[-1] == "resume"
     assert owner.config.hsta_trigger_level_dbm == -20.0
+
+
+def test_hsta_rbw_change_stops_stream_before_receiver_reconfiguration(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeTimer:
+        def stop(self) -> None:
+            calls.append("timer_stop")
+
+    owner = SimpleNamespace(
+        config=SimpleNamespace(
+            analyzer_mode=main_window_module.AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
+            rbw_hz=1_000_000.0,
+        ),
+        timer=FakeTimer(),
+        sweep_state=SWEEP_STATE_RUNNING,
+        _high_speed_ta_stream_cursor=object(),
+        _high_speed_ta_generation=7,
+        _current_sweep_state=lambda: SWEEP_STATE_RUNNING,
+        _is_calibration_mode=lambda: False,
+        _is_wideband_mode=lambda: False,
+        _is_high_speed_time_analyzer_mode=lambda: True,
+        _is_time_analyzer_mode=lambda: True,
+        _clip_sweep_rbw=lambda value: value,
+        _clip_realtime_rbw=lambda value: value,
+        _stop_high_speed_ta_stream=lambda **kwargs: calls.append("stream_stop"),
+        _clear_high_speed_ta_analysis_queues=lambda: calls.append("queues_clear"),
+        _apply_time_analyzer_rbw_driven_capture_settings=lambda: calls.append(
+            "reconfigure"
+        ),
+        _initialize_high_speed_time_analyzer_runtime=lambda: calls.append(
+            "runtime_init"
+        ),
+        _reset_plot_state=lambda: calls.append("plot_reset"),
+        _start_high_speed_time_analyzer_continuous=lambda: calls.append("resume"),
+        _refresh_sweep_time_estimate=lambda: None,
+        _refresh_status_label=lambda: None,
+    )
+    owner._pause_hsta_stream_for_receiver_change = MethodType(
+        RealtimeSpectrumWindow._pause_hsta_stream_for_receiver_change,
+        owner,
+    )
+    owner._resume_hsta_stream_after_receiver_change = MethodType(
+        RealtimeSpectrumWindow._resume_hsta_stream_after_receiver_change,
+        owner,
+    )
+
+    monkeypatch.setattr(
+        main_window_module.QtWidgets.QInputDialog,
+        "getDouble",
+        lambda *args, **kwargs: (100.0, True),
+    )
+
+    RealtimeSpectrumWindow._on_rbw_clicked(owner)
+
+    assert calls == [
+        "timer_stop",
+        "stream_stop",
+        "queues_clear",
+        "reconfigure",
+        "runtime_init",
+        "plot_reset",
+        "resume",
+    ]
+    assert owner._high_speed_ta_generation == 8
+    assert owner.config.rbw_hz == pytest.approx(100_000.0)
+
+
+def test_hsta_internal_gain_change_pauses_receiver_before_gain_write(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class FakeTimer:
+        def stop(self) -> None:
+            calls.append("timer_stop")
+
+    class FakeReceiver:
+        def set_gain_db(self, value: int) -> None:
+            calls.append(f"gain={value}")
+
+    owner = SimpleNamespace(
+        sweep_state=SWEEP_STATE_RUNNING,
+        _high_speed_ta_stream_cursor=object(),
+        _high_speed_ta_generation=2,
+        timer=FakeTimer(),
+        receiver=FakeReceiver(),
+        config=SimpleNamespace(rx_gain_db=10, __post_init__=lambda: None),
+        _is_calibration_mode=lambda: False,
+        _is_high_speed_time_analyzer_mode=lambda: True,
+        _stop_high_speed_ta_stream=lambda **kwargs: calls.append("stream_stop"),
+        _clear_high_speed_ta_analysis_queues=lambda: calls.append("queues_clear"),
+        _start_high_speed_time_analyzer_continuous=lambda: calls.append("resume"),
+        _refresh_status_label=lambda: None,
+    )
+    owner._pause_hsta_stream_for_receiver_change = MethodType(
+        RealtimeSpectrumWindow._pause_hsta_stream_for_receiver_change,
+        owner,
+    )
+    owner._resume_hsta_stream_after_receiver_change = MethodType(
+        RealtimeSpectrumWindow._resume_hsta_stream_after_receiver_change,
+        owner,
+    )
+    monkeypatch.setattr(
+        main_window_module.QtWidgets.QInputDialog,
+        "getInt",
+        lambda *args, **kwargs: (25, True),
+    )
+
+    RealtimeSpectrumWindow._on_int_gain_clicked(owner)
+
+    assert calls == [
+        "timer_stop",
+        "stream_stop",
+        "queues_clear",
+        "gain=25",
+        "resume",
+    ]
+    assert owner.config.rx_gain_db == 25
+
+
+def test_hsta_center_frequency_change_pauses_receiver_before_retune() -> None:
+    calls: list[str] = []
+
+    class FakeTimer:
+        def stop(self) -> None:
+            calls.append("timer_stop")
+
+    class FakeReceiver:
+        def retune_lo(self, value: int) -> None:
+            calls.append(f"retune={value}")
+
+    config = SimpleNamespace(
+        analyzer_mode=main_window_module.AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
+        center_freq_hz=2_440_000_000,
+        display_span_hz=4_000_000,
+    )
+    owner = SimpleNamespace(
+        config=config,
+        sweep_state=SWEEP_STATE_RUNNING,
+        _high_speed_ta_stream_cursor=object(),
+        _high_speed_ta_generation=3,
+        timer=FakeTimer(),
+        receiver=FakeReceiver(),
+        _apply_frequency_window=lambda start, stop, **kwargs: setattr(
+            config, "center_freq_hz", (start + stop) // 2
+        ),
+        _is_wideband_mode=lambda: False,
+        _is_time_analyzer_mode=lambda: True,
+        _is_high_speed_time_analyzer_mode=lambda: True,
+        _stop_high_speed_ta_stream=lambda **kwargs: calls.append("stream_stop"),
+        _clear_high_speed_ta_analysis_queues=lambda: calls.append("queues_clear"),
+        _reset_plot_state=lambda: calls.append("plot_reset"),
+        _start_high_speed_time_analyzer_continuous=lambda: calls.append("resume"),
+        _refresh_status_label=lambda: None,
+    )
+    owner._pause_hsta_stream_for_receiver_change = MethodType(
+        RealtimeSpectrumWindow._pause_hsta_stream_for_receiver_change,
+        owner,
+    )
+    owner._resume_hsta_stream_after_receiver_change = MethodType(
+        RealtimeSpectrumWindow._resume_hsta_stream_after_receiver_change,
+        owner,
+    )
+
+    RealtimeSpectrumWindow._apply_center_frequency_change(owner, 2_441_000_000)
+
+    assert calls == [
+        "timer_stop",
+        "stream_stop",
+        "queues_clear",
+        "retune=2441000000",
+        "plot_reset",
+        "resume",
+    ]
+
+
+def test_hsta_receiver_change_restores_armed_single_capture() -> None:
+    calls: list[str] = []
+
+    class FakeTimer:
+        def stop(self) -> None:
+            calls.append("timer_stop")
+
+    owner = SimpleNamespace(
+        sweep_state=SWEEP_STATE_SINGLE,
+        _high_speed_ta_stream_cursor=object(),
+        _high_speed_ta_generation=1,
+        timer=FakeTimer(),
+        _is_high_speed_time_analyzer_mode=lambda: True,
+        _stop_high_speed_ta_stream=lambda **kwargs: calls.append("stream_stop"),
+        _clear_high_speed_ta_analysis_queues=lambda: calls.append("queues_clear"),
+        _enter_single_high_speed_time_analyzer_mode=lambda: calls.append("single_resume"),
+        _restart_timer_for_current_mode=lambda: calls.append("timer_resume"),
+    )
+
+    resume_state = RealtimeSpectrumWindow._pause_hsta_stream_for_receiver_change(owner)
+    RealtimeSpectrumWindow._resume_hsta_stream_after_receiver_change(owner, resume_state)
+
+    assert resume_state == (False, True)
+    assert calls == [
+        "timer_stop",
+        "stream_stop",
+        "queues_clear",
+        "single_resume",
+        "timer_resume",
+    ]
+
+
+def test_mode_switch_quiesces_all_acquisition_paths_before_profile_apply() -> None:
+    calls: list[str] = []
+
+    class FakeTimer:
+        def stop(self) -> None:
+            calls.append("timer_stop")
+
+    class FakeSweepController:
+        def stop(self) -> None:
+            calls.append("sweep_stop")
+
+    owner = SimpleNamespace(
+        timer=FakeTimer(),
+        sweep_controller=FakeSweepController(),
+        _realtime_stream_cursor=object(),
+        _stop_high_speed_ta_stream=lambda **kwargs: calls.append("iq_stream_stop"),
+    )
+
+    RealtimeSpectrumWindow._quiesce_acquisition_for_mode_switch(owner)
+
+    assert calls == ["timer_stop", "sweep_stop", "iq_stream_stop"]
+    assert owner._realtime_stream_cursor is None
