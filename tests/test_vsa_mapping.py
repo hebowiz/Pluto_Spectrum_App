@@ -3,9 +3,11 @@ import pytest
 
 from pluto_sa.vsa.mapping import (
     BLUETOOTH_EDR_MAPPING,
+    BLUETOOTH_HDT_MAPPING,
     GRAY_MAPPING,
     logical_to_phase_indices,
     phase_indices_to_logical_symbols,
+    psk_constellation,
     reverse_symbol_bits,
 )
 from pluto_sa.vsa.model import ModulationKind, SignalDescription
@@ -61,3 +63,14 @@ def test_symbol_bit_reversal_matches_rs_lsb_display_numbering():
     np.testing.assert_array_equal(
         reverse_symbol_bits(reverse_symbol_bits(values, 8), 8), values
     )
+
+
+def test_bluetooth_hdt_16qam_constellation_uses_spec_scale():
+    constellation = psk_constellation(
+        ModulationKind.QAM16, BLUETOOTH_HDT_MAPPING
+    )
+
+    assert constellation.shape == (16,)
+    assert np.unique(constellation.real).size == 4
+    assert np.unique(constellation.imag).size == 4
+    assert np.mean(np.abs(constellation) ** 2) == pytest.approx(0.1)

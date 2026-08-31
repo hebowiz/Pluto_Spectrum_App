@@ -255,7 +255,7 @@ class VSASession:
         self.pattern_error = None
         detected_data_without_pattern = (
             self.pattern_search is None
-            and self.signal.modulation.family is ModulationFamily.PSK
+            and self.signal.modulation.family.uses_iq_constellation
             and self.demodulation.coarse_synchronization
             in {SynchronizationSource.AUTO, SynchronizationSource.DETECTED_DATA}
         )
@@ -301,7 +301,7 @@ class VSASession:
                 self.pattern_error = str(error)
                 allow_detected_fallback = (
                     self.pattern_search is not None
-                    and self.signal.modulation.family is ModulationFamily.PSK
+                    and self.signal.modulation.family.uses_iq_constellation
                     and self.demodulation.coarse_synchronization
                     is SynchronizationSource.AUTO
                 )

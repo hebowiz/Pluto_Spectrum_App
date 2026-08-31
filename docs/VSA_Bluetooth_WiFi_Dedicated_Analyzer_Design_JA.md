@@ -1349,3 +1349,29 @@ EDR 2M / 3Mのsymbol rateはいずれも1 MSym/sであり、2 Mbit/s / 3 Mbit/s�
 10 symbolのEDR Syncは長い3-DH3 / 3-DH5 payload内で偶然再出現し得る。このためLength取得用およびLength確定後のPSK再解析は、payload全域の最大相関ではなく、局所探索で確定したSync位置に最も近い候補へアンカーする。これによりpayload中の疑似Syncへ解析位置が移動してBRへfallbackする問題を防ぐ。
 
 回帰試験は3-DH3と3-DH5の双方について、PHY切替境界へ4 usの遅延を加えたIQでもpacket type、Length終端、CRCが成立することを確認する。
+
+---
+
+## 31. Generic VSA 16QAM / HDT mapping初期実装（2026-09-01）
+
+Generic VSAのSignal Descriptionへ`16QAM`を追加した。表示内容はPSK系を基本とし、既存の6分割layoutを
+そのまま使う。
+
+- IQ Power
+- Spectrum
+- Result Summary
+- Modulation: matched-filter通過後のIQ trajectory
+- Symbol Plot: absolute IQ constellation（Flat / Density）
+- Symbol Table
+
+ただし16QAMは差動PSKではないため、前symbolとの差動位相へ変換しない。symbol timing、carrier補正、
+measurement filter、複素gain補正、marker、plot操作はPSKと共通pipelineを使い、振幅情報を保持した
+absolute I/Q判定を行う。
+
+Mappingには`Bluetooth HDT`を追加した。HDT6 / HDT7.5のreference constellationは仕様bit tuple順と
+`S_k / 10`のscaleを使う。GenericのNatural / Gray 16QAMは従来どおりunit-mean-power scaleを使い、
+Bluetooth HDT mappingとは明確に分離する。
+
+この段階ではGeneric VSAでの16QAM同期・constellation・symbol decode基盤までを対象とする。
+HDT Preamble / Control Header decode、packet segmentation、rate別RMS EVM evaluation region、規格limit判定は
+Bluetooth専用解析modeの後続実装とする。

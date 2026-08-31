@@ -12,6 +12,7 @@ from pluto_sa.sdr.trigger import IQAcquisitionRecord
 from pluto_sa.vsa.iqtar import load_iq_tar
 from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_sa.vsa.mapping import NATURAL_MAPPING, psk_constellation
 
 
 _FIFTY_OHM_VOLTAGE_TO_DBM = 10.0 * np.log10(1000.0 / 50.0)
@@ -99,20 +100,15 @@ class GeneratedIQSource:
         samples_per_symbol: int = 8,
         seed: int = 1,
     ) -> tuple[IQRecording, SignalDescription]:
-        if modulation.family.value != "PSK":
-            raise ValueError("modulation must be a PSK kind")
+        if not modulation.family.uses_iq_constellation:
+            raise ValueError("modulation must use an IQ constellation")
         if int(symbol_count) <= 0:
             raise ValueError("symbol_count must be positive")
         if int(samples_per_symbol) < 2:
             raise ValueError("samples_per_symbol must be at least 2")
         rng = np.random.default_rng(int(seed))
         symbols = rng.integers(0, modulation.order, size=int(symbol_count), dtype=np.int16)
-        if modulation is ModulationKind.BPSK:
-            alphabet = np.exp(1j * np.array([0.0, np.pi]))
-        elif modulation in {ModulationKind.QPSK, ModulationKind.OQPSK, ModulationKind.PI4_DQPSK}:
-            alphabet = np.exp(1j * (np.pi / 4.0 + np.arange(4) * np.pi / 2.0))
-        else:
-            alphabet = np.exp(1j * np.arange(8) * np.pi / 4.0)
+        alphabet = psk_constellation(modulation, NATURAL_MAPPING)
         if modulation.differential:
             waveform_symbols = np.cumprod(alphabet[symbols])
         else:

@@ -18,6 +18,7 @@ from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.mapping import (
     BLUETOOTH_EDR_MAPPING,
+    BLUETOOTH_HDT_MAPPING,
     GRAY_MAPPING,
     NATURAL_MAPPING,
     psk_constellation,
@@ -91,6 +92,9 @@ _MODULATIONS = (
     ModulationKind.OQPSK,
     ModulationKind.PI4_DQPSK,
     ModulationKind.DPSK8,
+    ModulationKind.PI4_QPSK,
+    ModulationKind.PSK8,
+    ModulationKind.QAM16,
 )
 _MAX_DISPLAY_POINTS = 30_000
 _MAX_IQ_TRAJECTORY_POINTS = 10_000
@@ -1054,7 +1058,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.deviation_spin.setSuffix(" Hz")
         self.mapping_combo = QtWidgets.QComboBox()
         self.mapping_combo.addItems(
-            (NATURAL_MAPPING, GRAY_MAPPING, BLUETOOTH_EDR_MAPPING)
+            (
+                NATURAL_MAPPING,
+                GRAY_MAPPING,
+                BLUETOOTH_EDR_MAPPING,
+                BLUETOOTH_HDT_MAPPING,
+            )
         )
         self.tx_filter_combo = QtWidgets.QComboBox()
         self.tx_filter_combo.addItems(("None", "Gaussian", "Root Raised Cosine"))
@@ -2534,7 +2543,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         if resolved is None and hasattr(self, "modulation_combo"):
             resolved = self._selected_modulation()
         title = "Symbol Plot"
-        if resolved is not None and resolved.family is ModulationFamily.PSK:
+        if resolved is not None and resolved.family.uses_iq_constellation:
             mode = (
                 "Differential"
                 if self.differential_iq_symbol_plot_action.isChecked()
@@ -2660,13 +2669,23 @@ class VSAWindow(QtWidgets.QMainWindow):
         modulation = self._selected_modulation()
         self._update_symbol_plot_dock_title(modulation)
         self.deviation_spin.setEnabled(modulation.family is ModulationFamily.FSK)
-        mapping_enabled = modulation.family is ModulationFamily.PSK
+        mapping_enabled = modulation.family.uses_iq_constellation
         self.mapping_combo.setEnabled(mapping_enabled)
         if not mapping_enabled:
             self.mapping_combo.setCurrentText(NATURAL_MAPPING)
         elif (
             self.mapping_combo.currentText() == BLUETOOTH_EDR_MAPPING
             and modulation not in {ModulationKind.PI4_DQPSK, ModulationKind.DPSK8}
+        ):
+            self.mapping_combo.setCurrentText(NATURAL_MAPPING)
+        elif (
+            self.mapping_combo.currentText() == BLUETOOTH_HDT_MAPPING
+            and modulation
+            not in {
+                ModulationKind.PI4_QPSK,
+                ModulationKind.PSK8,
+                ModulationKind.QAM16,
+            }
         ):
             self.mapping_combo.setCurrentText(NATURAL_MAPPING)
         if hasattr(self, "pattern_allow_inverted_fsk_check"):
@@ -4172,7 +4191,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             mean_mw = float(np.mean(10.0 ** (finite_power_dbm / 10.0)))
             if mean_mw > 0.0:
                 summary_values["power"] = f"{10.0 * np.log10(mean_mw):+.2f} dBm"
-        if signal.modulation.family is ModulationFamily.PSK:
+        if signal.modulation.family.uses_iq_constellation:
             if pattern_result is not None:
                 physical_evm = pattern_result.metadata.get(
                     "physical_evm_rms_percent"
@@ -4265,7 +4284,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             if not pattern_match_valid and self.session.pattern_error:
                 summary_values["pattern_error"] = self.session.pattern_error
-            if signal.modulation.family is ModulationFamily.PSK:
+            if signal.modulation.family.uses_iq_constellation:
                 rate_error_ppm = pattern_result.metadata.get("symbol_rate_error_ppm")
                 sync_evm = pattern_result.metadata.get("synchronization_evm_rms")
                 if rate_error_ppm is not None:

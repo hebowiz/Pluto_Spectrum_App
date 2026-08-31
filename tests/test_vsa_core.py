@@ -122,6 +122,21 @@ def test_generated_differential_psk_decodes_phase_changes() -> None:
     assert result.evm_rms_percent == pytest.approx(0.0, abs=1e-5)
 
 
+def test_generated_16qam_uses_absolute_iq_decisions() -> None:
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.QAM16,
+        symbol_count=4096,
+        seed=19,
+    )
+    result = VSAAnalyzer().analyze(recording, signal, VSASettings(remove_dc=False))
+
+    np.testing.assert_array_equal(
+        result.decoded_symbols, recording.metadata["generated_symbols"]
+    )
+    assert result.metadata["differential"] is False
+    assert result.evm_rms_percent == pytest.approx(0.0, abs=0.35)
+
+
 def test_session_invalidates_result_when_signal_changes() -> None:
     recording, signal = GeneratedIQSource.psk(symbol_count=32)
     session = VSASession(recording=recording, signal=signal)

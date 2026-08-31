@@ -30,11 +30,13 @@ from pluto_vsg.backends import (
 from pluto_vsg.composer import ComposerBlock, build_composer_graph
 from pluto_vsg.engine import (
     BluetoothBRWaveformEngine,
+    BluetoothHDTWaveformEngine,
     BluetoothLEWaveformEngine,
     GenerationResult,
 )
 from pluto_vsg.export import save_iq_tar, save_npz, save_wv
 from pluto_vsg.model import (
+    BluetoothHDTSettings,
     BluetoothLEPayloadType,
     BluetoothLEPayloadSourceKind,
     BluetoothLEPhy,
@@ -57,7 +59,10 @@ from pluto_vsg.profiles import (
     bluetooth_le_project,
     bluetooth_le_test_project,
     apply_bluetooth_le_rf_test_preset,
+    bluetooth_hdt_fields,
+    bluetooth_hdt_project,
 )
+from pluto_protocol.bluetooth.hdt import HDTRate, hdt_definition
 from pluto_vsg.ui.style import (
     ACCENT_COLOR,
     FIELD_BOUNDARY_COLOR,
@@ -420,6 +425,57 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             )
             return
         self._project = project
+        self.accept()
+
+    @property
+    def project(self) -> WaveformProject:
+        return self._project
+
+
+class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
+    """Compact HDT test-packet editor backed by the shared PHY definitions."""
+
+    def __init__(self, project: WaveformProject, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Bluetooth HDT Settings")
+        self._project = project
+        settings = project.bluetooth_hdt
+        if settings is None:
+            raise ValueError("Bluetooth HDT settings are required")
+        form = QtWidgets.QFormLayout(self)
+        self.rate_combo = QtWidgets.QComboBox()
+        for rate in HDTRate:
+            definition = hdt_definition(rate)
+            self.rate_combo.addItem(f"{rate.value} / {definition.modulation} / code {definition.payload_code_rate}", rate)
+        self.rate_combo.setCurrentIndex(self.rate_combo.findData(HDTRate(settings.rate)))
+        self.length_spin = QtWidgets.QSpinBox(); self.length_spin.setRange(0, 4095); self.length_spin.setValue(settings.payload_length_bytes)
+        self.source_combo = QtWidgets.QComboBox()
+        for source in PayloadSourceKind:
+            self.source_combo.addItem(source.value, source)
+        self.source_combo.setCurrentIndex(self.source_combo.findData(PayloadSourceKind(settings.payload_source)))
+        self.pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern)
+        self.rolloff_spin = QtWidgets.QDoubleSpinBox(); self.rolloff_spin.setRange(0.01, 1.0); self.rolloff_spin.setDecimals(3); self.rolloff_spin.setValue(settings.rrc_rolloff)
+        self.repeat_spin = QtWidgets.QSpinBox(); self.repeat_spin.setRange(1, 1000); self.repeat_spin.setValue(project.repeat_count)
+        self.pre_idle_spin = QtWidgets.QSpinBox(); self.pre_idle_spin.setRange(0, 100000); self.pre_idle_spin.setValue(settings.pre_idle_symbols)
+        self.post_idle_spin = QtWidgets.QSpinBox(); self.post_idle_spin.setRange(0, 100000); self.post_idle_spin.setValue(settings.post_idle_symbols)
+        form.addRow("HDT Rate", self.rate_combo); form.addRow("Payload Length (byte)", self.length_spin)
+        form.addRow("Payload Source", self.source_combo); form.addRow("Payload Pattern", self.pattern_edit)
+        form.addRow("SRRC Roll-off", self.rolloff_spin); form.addRow("Repeat Count", self.repeat_spin)
+        form.addRow("Pre Idle (symbols)", self.pre_idle_spin); form.addRow("Post Idle (symbols)", self.post_idle_spin)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._accept_settings); buttons.rejected.connect(self.reject); form.addRow(buttons)
+
+    def _accept_settings(self) -> None:
+        settings = BluetoothHDTSettings(
+            rate=HDTRate(self.rate_combo.currentData()), payload_length_bytes=self.length_spin.value(),
+            payload_source=PayloadSourceKind(self.source_combo.currentData()), payload_pattern=self.pattern_edit.text(),
+            rrc_rolloff=self.rolloff_spin.value(), pre_idle_symbols=self.pre_idle_spin.value(),
+            post_idle_symbols=self.post_idle_spin.value(),
+        )
+        self._project = replace(self._project, name=f"Bluetooth {settings.rate.value} RF Test Packet", repeat_count=self.repeat_spin.value(), fields=bluetooth_hdt_fields(settings), bluetooth_hdt=settings)
+        issues = validate_project(self._project)
+        if issues:
+            QtWidgets.QMessageBox.warning(self, "Bluetooth HDT Settings", "\n".join(f"{i.path}: {i.message}" for i in issues)); return
         self.accept()
 
     @property
@@ -1381,6 +1437,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.new_le2m_action.triggered.connect(
             lambda: self._new_bluetooth_le_project(BluetoothLEPhy.LE_2M)
         )
+        self.new_hdt_action = QtGui.QAction("New Bluetooth HDT Test Packet", self)
+        self.new_hdt_action.triggered.connect(self._new_bluetooth_hdt_project)
         self.open_action = QtGui.QAction("Open...", self)
         self.open_action.triggered.connect(self._open_project)
         self.save_action = QtGui.QAction("Save", self)
@@ -1442,7 +1500,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         file_menu = menu_bar.addMenu("File")
         new_menu = file_menu.addMenu("New")
         new_menu.addActions(
-            [self.new_action, self.new_le1m_action, self.new_le2m_action]
+            [self.new_action, self.new_le1m_action, self.new_le2m_action, self.new_hdt_action]
         )
         file_menu.addActions([self.open_action, self.save_action, self.save_as_action])
         file_menu.addSeparator()
@@ -1642,8 +1700,32 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.generate_waveform()
         self._configuration_maybe_changed(previous_signature)
 
+    def _new_bluetooth_hdt_project(self) -> None:
+        previous_signature = self._pluto_configuration_signature()
+        self.project = bluetooth_hdt_project()
+        self.project_path = None
+        self.undo_stack.clear()
+        self._refresh_project_view()
+        self.generate_waveform()
+        self._configuration_maybe_changed(previous_signature)
+
     def _apply_rf_test_preset(self) -> None:
-        if self.project.standard == StandardProfile.BLUETOOTH_LE:
+        if self.project.standard == StandardProfile.BLUETOOTH_HDT:
+            current = self.project.bluetooth_hdt
+            if current is None:
+                return
+            settings = replace(
+                current,
+                payload_source=PayloadSourceKind.PRBS9,
+                payload_pattern="11111111100000111101",
+            )
+            updated_project = replace(
+                self.project,
+                name=f"Bluetooth {settings.rate.value} RF Test Packet",
+                fields=bluetooth_hdt_fields(settings),
+                bluetooth_hdt=settings,
+            )
+        elif self.project.standard == StandardProfile.BLUETOOTH_LE:
             current = self.project.bluetooth_le
             if current is None:
                 return
@@ -1676,7 +1758,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._commit_project_change(updated_project, "Apply RF test packet preset")
 
     def _edit_project_settings(self) -> None:
-        if self.project.standard == StandardProfile.BLUETOOTH_LE:
+        if self.project.standard == StandardProfile.BLUETOOTH_HDT:
+            dialog = _BluetoothHDTSettingsDialog(self.project, self)
+            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                self._commit_project_change(dialog.project, "Edit Bluetooth HDT settings")
+        elif self.project.standard == StandardProfile.BLUETOOTH_LE:
             self._edit_bluetooth_le_settings()
         else:
             self._edit_bluetooth_settings()
@@ -1759,6 +1845,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.composer_view.set_graph(build_composer_graph(self.project))
         settings = self.project.bluetooth_br
         le_settings = self.project.bluetooth_le
+        hdt_settings = self.project.bluetooth_hdt
         parameters = [
             ("Project", self.project.name),
             ("Standard", self.project.standard.value),
@@ -1830,12 +1917,18 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                     ("Gaussian B*T", f"{le_settings.gaussian_bt:.3f}"),
                 ]
             )
-        is_le = self.project.standard == StandardProfile.BLUETOOTH_LE
-        settings_label = (
-            "Bluetooth LE Packet Settings..."
-            if is_le
-            else "Bluetooth BR / EDR Settings..."
-        )
+        elif hdt_settings is not None:
+            definition = hdt_definition(hdt_settings.rate)
+            parameters.extend([
+                ("PHY", hdt_settings.rate.value), ("Modulation", definition.modulation),
+                ("Code Rate", definition.payload_code_rate),
+                ("Payload", f"{hdt_settings.payload_length_bytes} byte / {hdt_settings.payload_source.value}"),
+                ("SRRC Roll-off", f"{hdt_settings.rrc_rolloff:.3f}"),
+            ])
+        settings_label = ({
+            StandardProfile.BLUETOOTH_LE: "Bluetooth LE Packet Settings...",
+            StandardProfile.BLUETOOTH_HDT: "Bluetooth HDT Settings...",
+        }).get(self.project.standard, "Bluetooth BR / EDR Settings...")
         self.settings_action.setText(settings_label)
         self.edit_settings_button.setText(f"Edit {settings_label}")
         self._project_inspector_parameters = parameters
@@ -1891,11 +1984,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
 
     def generate_waveform(self) -> None:
         try:
-            engine = (
-                BluetoothLEWaveformEngine()
-                if self.project.standard == StandardProfile.BLUETOOTH_LE
-                else BluetoothBRWaveformEngine()
-            )
+            engine = {
+                StandardProfile.BLUETOOTH_LE: BluetoothLEWaveformEngine,
+                StandardProfile.BLUETOOTH_HDT: BluetoothHDTWaveformEngine,
+            }.get(self.project.standard, BluetoothBRWaveformEngine)()
             self.result = engine.generate(self.project)
         except ValueError as error:
             self.result = None

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from pluto_vsg.model import (
     BluetoothBRSettings,
+    BluetoothHDTSettings,
     BluetoothLEPayloadType,
     BluetoothLEPayloadSourceKind,
     BluetoothLEPhy,
@@ -24,6 +25,7 @@ from pluto_vsg.model import (
     WaveformProject,
     validate_project,
 )
+from pluto_protocol.bluetooth.hdt import HDTRate
 
 
 PROJECT_FORMAT = "pluto-vsg-project"
@@ -93,6 +95,12 @@ def project_to_dict(project: WaveformProject) -> dict[str, object]:
                 project.bluetooth_le.payload_source
             ).value,
         }
+    if project.bluetooth_hdt is not None:
+        payload["bluetooth_hdt"] = {
+            **asdict(project.bluetooth_hdt),
+            "rate": HDTRate(project.bluetooth_hdt.rate).value,
+            "payload_source": PayloadSourceKind(project.bluetooth_hdt.payload_source).value,
+        }
     return {
         "format": PROJECT_FORMAT,
         "version": PROJECT_VERSION,
@@ -152,6 +160,16 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
                 ),
             }
         )
+    bluetooth_hdt_payload = payload.get("bluetooth_hdt")
+    bluetooth_hdt = None
+    if bluetooth_hdt_payload is not None:
+        if not isinstance(bluetooth_hdt_payload, dict):
+            raise ValueError("Invalid Bluetooth HDT settings")
+        bluetooth_hdt = BluetoothHDTSettings(**{
+            **bluetooth_hdt_payload,
+            "rate": HDTRate(str(bluetooth_hdt_payload["rate"])),
+            "payload_source": PayloadSourceKind(str(bluetooth_hdt_payload["payload_source"])),
+        })
     standard = StandardProfile(str(payload["standard"]))
     if (
         standard == StandardProfile.BLUETOOTH_BR_EDR
@@ -179,6 +197,7 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
         power_envelope=PowerEnvelopeDefinition(**envelope_payload),
         bluetooth_br=bluetooth,
         bluetooth_le=bluetooth_le,
+        bluetooth_hdt=bluetooth_hdt,
     )
     issues = validate_project(project)
     if issues:

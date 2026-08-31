@@ -7,6 +7,7 @@ from pluto_vsg.profiles.bluetooth_le import (
     bluetooth_le_project,
     bluetooth_le_test_project,
 )
+from pluto_vsg.profiles.bluetooth_hdt import bluetooth_hdt_fields, bluetooth_hdt_project
 
 __all__ = [
     "bluetooth_br_edr_project",
@@ -15,4 +16,6 @@ __all__ = [
     "bluetooth_le_project",
     "bluetooth_le_test_project",
     "apply_bluetooth_le_rf_test_preset",
+    "bluetooth_hdt_fields",
+    "bluetooth_hdt_project",
 ]

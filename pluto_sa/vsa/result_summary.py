@@ -29,8 +29,10 @@ class ResultSummaryItem:
         return family in self.families
 
 
-_BOTH = frozenset((ModulationFamily.FSK, ModulationFamily.PSK))
-_PSK = frozenset((ModulationFamily.PSK,))
+_BOTH = frozenset(
+    (ModulationFamily.FSK, ModulationFamily.PSK, ModulationFamily.QAM)
+)
+_PSK = frozenset((ModulationFamily.PSK, ModulationFamily.QAM))
 _FSK = frozenset((ModulationFamily.FSK,))
 
 

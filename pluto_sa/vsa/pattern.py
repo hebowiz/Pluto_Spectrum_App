@@ -906,8 +906,10 @@ class PatternAnalyzer:
         present.  It deliberately remains separate from ``search`` so a blind
         synchronization result can never be counted as a pattern match.
         """
-        if signal.modulation.family is not ModulationFamily.PSK:
-            raise ValueError("detected-data synchronization currently supports PSK")
+        if not signal.modulation.family.uses_iq_constellation:
+            raise ValueError(
+                "detected-data synchronization currently supports PSK/QAM"
+            )
         return self._detect_psk_data(
             recording,
             signal,

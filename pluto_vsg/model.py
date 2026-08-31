@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from pluto_protocol.bluetooth.hdt import HDTRate
+
 
 class StandardProfile(StrEnum):
     USER = "User"
     BLUETOOTH_BR_EDR = "Bluetooth BR / EDR"
     BLUETOOTH_LE = "Bluetooth LE"
+    BLUETOOTH_HDT = "Bluetooth HDT"
 
 
 class DataSourceKind(StrEnum):
@@ -23,6 +26,9 @@ class ModulationKind(StrEnum):
     GFSK = "GFSK"
     PI_4_DQPSK = "pi/4-DQPSK"
     DPSK8 = "8DPSK"
+    PI_4_QPSK = "pi/4-QPSK"
+    PSK8 = "8PSK"
+    QAM16 = "16QAM"
 
 
 class FilterKind(StrEnum):
@@ -201,6 +207,20 @@ class BluetoothLESettings:
 
 
 @dataclass(frozen=True)
+class BluetoothHDTSettings:
+    """Editable Bluetooth-derived HDT RF test waveform settings."""
+
+    rate: HDTRate = HDTRate.HDT6
+    payload_length_bytes: int = 255
+    payload_source: PayloadSourceKind = PayloadSourceKind.PRBS9
+    payload_pattern: str = "10101010"
+    training_enabled: bool = True
+    rrc_rolloff: float = 0.4
+    pre_idle_symbols: int = 16
+    post_idle_symbols: int = 16
+
+
+@dataclass(frozen=True)
 class WaveformProject:
     name: str = "Untitled Waveform"
     standard: StandardProfile = StandardProfile.USER
@@ -217,6 +237,7 @@ class WaveformProject:
     )
     bluetooth_br: BluetoothBRSettings | None = None
     bluetooth_le: BluetoothLESettings | None = None
+    bluetooth_hdt: BluetoothHDTSettings | None = None
 
 
 @dataclass(frozen=True)
@@ -244,7 +265,7 @@ def waveform_timing_samples(project: WaveformProject) -> tuple[int, int, int, in
         active_stop = max(packet_samples, fall_start + fall_count)
     else:
         active_start, active_stop = 0, packet_samples
-    settings = project.bluetooth_br or project.bluetooth_le
+    settings = project.bluetooth_br or project.bluetooth_le or project.bluetooth_hdt
     pre_idle = int(getattr(settings, "pre_idle_symbols", 0)) * sps
     post_idle = int(getattr(settings, "post_idle_symbols", 0)) * sps
     minimum_period = pre_idle + active_stop - active_start
@@ -560,6 +581,41 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 issues.append(
                     ValidationIssue(
                         "bluetooth_le.payload_pattern",
+                        "Fixed and pattern payloads require a binary pattern.",
+                    )
+                )
+    hdt_settings = project.bluetooth_hdt
+    if hdt_settings is not None:
+        if not 0 <= int(hdt_settings.payload_length_bytes) <= 4095:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_hdt.payload_length_bytes",
+                    "HDT payload length must be between 0 and 4095 bytes.",
+                )
+            )
+        if not 0.0 < float(hdt_settings.rrc_rolloff) <= 1.0:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_hdt.rrc_rolloff",
+                    "HDT SRRC roll-off must be greater than 0 and at most 1.",
+                )
+            )
+        if hdt_settings.pre_idle_symbols < 0 or hdt_settings.post_idle_symbols < 0:
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_hdt.idle_symbols",
+                    "HDT idle symbol counts must not be negative.",
+                )
+            )
+        if hdt_settings.payload_source in {
+            PayloadSourceKind.FIXED,
+            PayloadSourceKind.PATTERN,
+        }:
+            pattern = hdt_settings.payload_pattern.strip().replace(" ", "")
+            if not pattern or any(bit not in "01" for bit in pattern):
+                issues.append(
+                    ValidationIssue(
+                        "bluetooth_hdt.payload_pattern",
                         "Fixed and pattern payloads require a binary pattern.",
                     )
                 )

@@ -1269,3 +1269,29 @@ R&Sが示すlevel definitionと対応付ける。R&S設定値と外部実測値�
 - calibration reference planeと外部ATT / Gainを送信前確認画面へ表示する
 - Stop、例外、window終了時に既存の送信state machineでRF停止を試みる
 - zero IQはPlutoの完全なRF muteを保証しないことをUIとdocsに明記する
+
+---
+
+## 45. Bluetooth HDT初期実装（2026-09-01）
+
+VSGへ`Bluetooth HDT Test Packet` profileを追加し、HDT2 / HDT3 / HDT4 / HDT6 / HDT7.5の
+rate選択、payload source、payload length、SRRC roll-off、Pre/Post Idleをprojectとして保存・復元できるようにした。
+symbol rateは2 MSym/s、既定sample rateは16 MS/s（8 sample/symbol）とする。
+
+PHY共通定義は`pluto_protocol.bluetooth.hdt`へ置き、VSGとVSAが同じrate indicator、変調方式、FEC code rate、
+puncturing、symbol mappingを参照する。実装済みのbaseband処理は次のとおり。
+
+- K=6、rate 1/2 convolutional encoderと5 zero termination bits
+- 1/2、2/3、3/4、15/16 puncturing
+- HDT2 / HDT3の交互constellationを持つpi/4-QPSK mapping
+- HDT4の仕様bit tuple順8PSK mapping
+- HDT6 / HDT7.5の仕様bit tuple順16QAM mapping
+- repeat、packet period、power envelopeを含む既存VSG送信pipelineへの接続
+
+HDT 16QAMの座標は一般的なunit-mean-power正規化`1/sqrt(10)`ではなく、仕様表の`S_k x 10`に従って
+`(-3, -1, +3, +1) / 10`を使う。波形全体のRF level合わせ込みは既存VSGのwaveform RMS / backoff処理が
+別段で担当するため、air-interface symbol mappingと送信level正規化を混同しない。
+
+現段階はPHY波形pipelineの初期実装である。Preamble、Control Header、HEC-C / HEC-P、32-bit CRC、
+PDU Header Zone、packet format 1 schedulingを含む完全なHDT RF PHY test packet bit列は未完成であり、
+R&S VSA等とのbit-level相互検証前に規格準拠packet generatorとは扱わない。

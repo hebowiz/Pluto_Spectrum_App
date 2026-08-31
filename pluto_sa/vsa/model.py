@@ -15,6 +15,11 @@ class ModulationFamily(str, Enum):
     PSK = "PSK"
     QAM = "QAM"
 
+    @property
+    def uses_iq_constellation(self) -> bool:
+        """Whether the modulation uses the common complex-symbol analysis path."""
+        return self in {ModulationFamily.PSK, ModulationFamily.QAM}
+
 
 class ModulationKind(str, Enum):
     FSK = "FSK"
@@ -29,6 +34,9 @@ class ModulationKind(str, Enum):
     OQPSK = "OQPSK"
     PI4_DQPSK = "pi/4-DQPSK"
     DPSK8 = "8DPSK"
+    PI4_QPSK = "pi/4-QPSK"
+    PSK8 = "8PSK"
+    QAM16 = "16QAM"
 
     @classmethod
     def _missing_(cls, value: object) -> "ModulationKind | None":
@@ -40,6 +48,8 @@ class ModulationKind(str, Enum):
     def family(self) -> ModulationFamily:
         if self in {ModulationKind.FSK, ModulationKind.GFSK}:
             return ModulationFamily.FSK
+        if self is ModulationKind.QAM16:
+            return ModulationFamily.QAM
         return ModulationFamily.PSK
 
     @property
@@ -52,6 +62,9 @@ class ModulationKind(str, Enum):
             ModulationKind.OQPSK: 4,
             ModulationKind.PI4_DQPSK: 4,
             ModulationKind.DPSK8: 8,
+            ModulationKind.PI4_QPSK: 4,
+            ModulationKind.PSK8: 8,
+            ModulationKind.QAM16: 16,
         }[self]
 
     @property
@@ -166,6 +179,7 @@ class SignalDescription:
         object.__setattr__(self, "tx_filter", normalized_filter)
         from pluto_sa.vsa.mapping import (
             BLUETOOTH_EDR_MAPPING,
+            BLUETOOTH_HDT_MAPPING,
             NATURAL_MAPPING,
             normalize_symbol_mapping,
         )
@@ -182,6 +196,14 @@ class SignalDescription:
         }:
             raise ValueError(
                 "Bluetooth EDR mapping requires pi/4-DQPSK or 8DPSK"
+            )
+        if normalized_mapping == BLUETOOTH_HDT_MAPPING and self.modulation not in {
+            ModulationKind.PI4_QPSK,
+            ModulationKind.PSK8,
+            ModulationKind.QAM16,
+        }:
+            raise ValueError(
+                "Bluetooth HDT mapping requires pi/4-QPSK, 8PSK or 16QAM"
             )
         object.__setattr__(self, "symbol_mapping", normalized_mapping)
 
