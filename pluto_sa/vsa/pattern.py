@@ -2375,6 +2375,34 @@ class PatternAnalyzer:
             phase_error = np.unwrap(np.angle(fit_window * np.conj(expected)))
             relative = np.arange(phase_error.size, dtype=np.float64)
             slope, intercept = np.polyfit(relative, phase_error, 1)
+            if signal.modulation is ModulationKind.QAM16:
+                selected_start = int(selection.start or 0)
+                fitted_phase, fitted_step, synchronization_evm_rms = (
+                    _fit_qam_carrier(available[selection], alphabet)
+                )
+                base_intercept = fitted_phase - fitted_step * selected_start
+                ambiguity = np.pi / 2.0
+                training_axis = np.arange(fit_window.size, dtype=np.float64)
+
+                def training_phase_cost(candidate_intercept: float) -> float:
+                    residual = np.angle(
+                        fit_window
+                        * np.conj(expected)
+                        * np.exp(
+                            -1j
+                            * (
+                                candidate_intercept
+                                + fitted_step * training_axis
+                            )
+                        )
+                    )
+                    return float(np.mean(residual**2))
+
+                intercept = min(
+                    (base_intercept + ambiguity * rotation for rotation in range(4)),
+                    key=training_phase_cost,
+                )
+                slope = fitted_step
             all_relative = np.arange(available.size, dtype=np.float64)
             corrected_available = available * np.exp(
                 -1j * (intercept + slope * all_relative)
@@ -2501,7 +2529,11 @@ class PatternAnalyzer:
                 "phase_estimation_method": (
                     "joint ideal-reference waveform complex-EVM synchronization"
                     if signal.modulation.differential
-                    else "known-pattern phase fit"
+                    else (
+                        "known-pattern ambiguity with result-range QAM carrier fit"
+                        if signal.modulation is ModulationKind.QAM16
+                        else "known-pattern phase fit"
+                    )
                 ),
                 "phase_model_residual_rms_rad": phase_model_residual_rms_rad,
                 "phase_drift_estimate_accepted": phase_drift_estimate_accepted,

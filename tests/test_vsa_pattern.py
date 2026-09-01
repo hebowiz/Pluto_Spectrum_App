@@ -263,6 +263,74 @@ def test_known_hdt_qam_pattern_uses_the_published_symbol_sample_times() -> None:
     assert display_evm_percent < 4.0
 
 
+def test_known_hdt_qam_pattern_refines_carrier_over_the_result_range() -> None:
+    path = Path(__file__).with_name("fixtures") / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    recording = FileIQSource.load(path)
+    carrier_offset_hz = 100_000.0
+    sample_index = np.arange(recording.sample_count, dtype=np.float64)
+    rng = np.random.default_rng(130)
+    signal_power = float(np.mean(np.abs(recording.iq) ** 2))
+    noise_power = signal_power / 1_000.0
+    noise = np.sqrt(noise_power / 2.0) * (
+        rng.standard_normal(recording.sample_count)
+        + 1j * rng.standard_normal(recording.sample_count)
+    )
+    impaired = IQRecording(
+        iq=(
+            recording.iq
+            * np.exp(
+                1j
+                * (
+                    0.7
+                    + 2.0
+                    * np.pi
+                    * carrier_offset_hz
+                    * sample_index
+                    / recording.sample_rate_hz
+                )
+            )
+            + noise
+        ).astype(np.complex64),
+        sample_rate_hz=recording.sample_rate_hz,
+        metadata=recording.metadata,
+    )
+    signal = SignalDescription(
+        modulation=ModulationKind.QAM16,
+        symbol_rate_hz=2_000_000.0,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        symbol_mapping=BLUETOOTH_HDT_MAPPING,
+    )
+    pattern = KnownPattern(
+        tuple(int(value, 16) for value in "3 E D E 5 0 F 4 7 E".split())
+    )
+
+    result = PatternAnalyzer().search(
+        impaired,
+        signal,
+        PatternSearchSettings(
+            pattern=pattern,
+            correlation_threshold_auto=False,
+            iq_correlation_threshold=0.5,
+        ),
+        ResultRangeSettings(result_length=500),
+        DemodulationSettings(
+            measurement_filter=MeasurementFilterMode.AUTO,
+            bit_ordering=BitOrdering.LSB,
+        ),
+    )
+
+    assert result.pattern_symbol_errors == 0
+    assert result.carrier_frequency_offset_hz == pytest.approx(
+        carrier_offset_hz, abs=50.0
+    )
+    assert result.evm_rms_percent < 5.0
+    assert (
+        result.metadata["phase_estimation_method"]
+        == "known-pattern ambiguity with result-range QAM carrier fit"
+    )
+
+
 def test_pattern_only_sync_does_not_run_without_pattern_search() -> None:
     recording, signal = GeneratedIQSource.psk(
         modulation=ModulationKind.PI4_DQPSK,
