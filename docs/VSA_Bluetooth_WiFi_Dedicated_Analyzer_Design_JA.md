@@ -1369,7 +1369,7 @@ measurement filter、複素gain補正、marker、plot操作はPSKと共通pipeli
 absolute I/Q判定を行う。
 
 Mappingには`Bluetooth HDT`を追加した。HDT6 / HDT7.5のreference constellationは仕様bit tuple順と
-`S_k / 10`のscaleを使う。GenericのNatural / Gray 16QAMは従来どおりunit-mean-power scaleを使い、
+`S_k / sqrt(10)`のunit-mean-power scaleを使う。GenericのNatural / Gray 16QAMも従来どおりunit-mean-power scaleを使い、
 Bluetooth HDT mappingとは明確に分離する。
 
 この段階ではGeneric VSAでの16QAM同期・constellation・symbol decode基盤までを対象とする。

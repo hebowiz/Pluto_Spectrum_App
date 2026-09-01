@@ -73,4 +73,4 @@ def test_bluetooth_hdt_16qam_constellation_uses_spec_scale():
     assert constellation.shape == (16,)
     assert np.unique(constellation.real).size == 4
     assert np.unique(constellation.imag).size == 4
-    assert np.mean(np.abs(constellation) ** 2) == pytest.approx(0.1)
+    assert np.mean(np.abs(constellation) ** 2) == pytest.approx(1.0)

@@ -38,8 +38,7 @@ def test_hdt_symbol_mapping_uses_specified_constellation(rate):
     bits = ((labels[:, None] >> shifts) & 1).reshape(-1)
     symbols = map_hdt_symbols(bits, rate)
     assert symbols.size == 1 << width
-    expected_power = 0.1 if rate in {HDTRate.HDT6, HDTRate.HDT7_5} else 1.0
-    assert np.mean(np.abs(symbols) ** 2) == pytest.approx(expected_power)
+    assert np.mean(np.abs(symbols) ** 2) == pytest.approx(1.0)
 
 
 def test_hdt_pi4_qpsk_alternates_even_and_odd_constellations():

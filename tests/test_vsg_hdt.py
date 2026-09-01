@@ -47,7 +47,7 @@ def test_hdt6_uses_spec_scaled_16qam_payload_mapping() -> None:
     assert np.unique(np.round(symbols.real, 6)).size == 4
     assert np.unique(np.round(symbols.imag, 6)).size == 4
     assert np.unique(np.round(symbols, 6)).size == 16
-    assert np.isclose(np.mean(np.abs(symbols) ** 2), 0.1)
+    assert np.isclose(np.mean(np.abs(symbols) ** 2), 1.0)
 
 
 def test_hdt_repetitions_are_complete_and_equally_spaced() -> None:

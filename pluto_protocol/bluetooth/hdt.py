@@ -109,9 +109,9 @@ def map_hdt_symbols(bits: np.ndarray, rate: HDTRate | str) -> np.ndarray:
         return np.exp(1j * phases[labels]).astype(np.complex64)
     levels = np.asarray([-3.0, -1.0, 3.0, 1.0])
     points = levels[labels >> 2] + 1j * levels[labels & 0x3]
-    # HDT_VSr03_PR specifies S_k x 10.  This is deliberately distinct from
-    # the conventional unit-mean-power 16QAM normalization by sqrt(10).
-    return (points / 10.0).astype(np.complex64)
+    # HDT_VSr03_PR tabulates S_k x sqrt(10), so recover S_k with the
+    # conventional unit-mean-power 16QAM normalization.
+    return (points / np.sqrt(10.0)).astype(np.complex64)
 
 
 __all__ = [

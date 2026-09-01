@@ -114,8 +114,6 @@ def psk_constellation(kind: ModulationKind, mapping: str = NATURAL_MAPPING) -> n
             [levels[value >> 2] + 1j * levels[value & 0x3] for value in range(16)],
             dtype=np.complex128,
         )
-        if normalized == BLUETOOTH_HDT_MAPPING:
-            return points / 10.0
         return points / np.sqrt(10.0)
     else:
         raise ValueError(f"{kind.value} does not have a PSK constellation")
