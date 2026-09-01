@@ -207,6 +207,8 @@ def test_detected_data_hdt_qam_fixture_is_not_truncated_by_psk_interval() -> Non
     )
 
     assert result.decoded_symbols.size == 500
+    assert 145 <= result.metadata["detected_psk_interval_start_symbol"] <= 160
+    assert result.evm_rms_percent < 5.0
 
 
 def test_known_hdt_qam_pattern_uses_the_published_symbol_sample_times() -> None:

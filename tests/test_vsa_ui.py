@@ -33,9 +33,18 @@ from pluto_sa.vsa.ui.main_window import (
 from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
 from pluto_sa.vsa.pluto_source import CaptureCancelledError
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
-from pluto_sa.vsa.mapping import reverse_symbol_bits
+from pluto_sa.vsa.mapping import (
+    BLUETOOTH_HDT_MAPPING,
+    psk_constellation,
+    reverse_symbol_bits,
+)
 from pluto_sa.vsa.pattern import (
+    BitOrdering,
     DemodulationSettings,
+    KnownPattern,
+    MeasurementFilterMode,
+    PatternSearchSettings,
+    ResultRangeSettings,
     SynchronizationSource,
     prepare_psk_iq,
 )
@@ -1064,6 +1073,82 @@ def test_qam_display_options_and_iq_markers_are_independent_from_psk(
         after_i, after_q = window.symbol_plot.listDataItems()[0].getData()
         np.testing.assert_allclose(after_i, before_i)
         np.testing.assert_allclose(after_q, before_q)
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
+def test_qam_physical_symbol_plot_stays_carrier_corrected_when_raw_trace_is_selected(
+    tmp_path,
+) -> None:
+    pg.mkQApp("VSA QAM physical carrier correction test")
+    fixture = (
+        Path(__file__).with_name("fixtures")
+        / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    )
+    recording = FileIQSource.load(fixture)
+    sample_index = np.arange(recording.sample_count, dtype=np.float64)
+    carrier_offset_hz = 100_000.0
+    recording = replace(
+        recording,
+        iq=(
+            recording.iq
+            * np.exp(
+                1j
+                * 2.0
+                * np.pi
+                * carrier_offset_hz
+                * sample_index
+                / recording.sample_rate_hz
+            )
+        ).astype(np.complex64),
+    )
+    signal = SignalDescription(
+        modulation=ModulationKind.QAM16,
+        symbol_rate_hz=2_000_000.0,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        symbol_mapping=BLUETOOTH_HDT_MAPPING,
+    )
+    session = VSASession(recording=recording, signal=signal)
+    session.configure_pattern_analysis(
+        PatternSearchSettings(
+            pattern=KnownPattern(
+                tuple(int(value, 16) for value in "3 E D E 5 0 F 4 7 E".split())
+            )
+        ),
+        ResultRangeSettings(result_length=500),
+        DemodulationSettings(
+            measurement_filter=MeasurementFilterMode.AUTO,
+            bit_ordering=BitOrdering.LSB,
+        ),
+    )
+    session.analyze()
+
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "qam-raw-trace-symbol-plot")
+    )
+    try:
+        window.session = session
+        window.qam_raw_modulation_signal_action.setChecked(True)
+        window._update_summary()
+        window._update_plots(reset_ranges=True)
+
+        symbol_i, symbol_q = window.symbol_plot.listDataItems()[0].getData()
+        displayed = symbol_i + 1j * symbol_q
+        alphabet = psk_constellation(ModulationKind.QAM16, BLUETOOTH_HDT_MAPPING)
+        reference = alphabet[
+            np.argmin(np.abs(displayed[:, None] - alphabet[None, :]), axis=1)
+        ]
+        display_evm_percent = 100.0 * np.sqrt(
+            np.sum(np.abs(displayed - reference) ** 2)
+            / np.sum(np.abs(reference) ** 2)
+        )
+
+        assert window.qam_raw_modulation_signal_action.isChecked()
+        assert display_evm_percent < 4.0
     finally:
         window._meas_config_dialog.close()
         window.close()

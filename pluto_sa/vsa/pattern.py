@@ -855,6 +855,67 @@ def _detected_psk_decision_interval(
     return int(start), int(stop), interval_concentration
 
 
+def _detected_qam_decision_interval(
+    symbols: np.ndarray,
+) -> tuple[int, int, float]:
+    """Locate a sustained square-QAM interval from its amplitude variation."""
+    values = np.abs(np.asarray(symbols, dtype=np.complex128))
+    count = int(values.size)
+    if count < 32:
+        return 0, count, 0.0
+
+    window = min(32, max(16, count // 8))
+    kernel = np.ones(window, dtype=np.float64) / float(window)
+    mean = np.convolve(values, kernel, mode="valid")
+    mean_square = np.convolve(values**2, kernel, mode="valid")
+    coefficient = np.sqrt(
+        np.maximum(0.0, mean_square - mean**2)
+    ) / np.maximum(mean, _EPSILON)
+
+    # A square-QAM payload has several sustained amplitude radii.  This
+    # separates it from a constant-envelope FSK/PSK header without applying
+    # the PSK phase-concentration gate that previously truncated QAM data.
+    reference_level = float(np.quantile(mean, 0.9))
+    active_level = 0.25 * reference_level
+    good = (coefficient >= 0.18) & (mean >= active_level)
+    runs: list[tuple[int, int, float]] = []
+    run_start: int | None = None
+    for index, is_good in enumerate(good):
+        if is_good and run_start is None:
+            run_start = index
+        if run_start is not None and (not is_good or index == good.size - 1):
+            run_stop = index if not is_good else index + 1
+            start = (
+                0
+                if run_start == 0 and mean[0] >= 0.6 * reference_level
+                else min(count, run_start + 3 * window // 4)
+            )
+            stop = (
+                count
+                if (
+                    run_stop == good.size
+                    and mean[-1] >= 0.6 * reference_level
+                )
+                else max(start, min(count, run_stop - window))
+            )
+            if stop - start >= window:
+                runs.append(
+                    (
+                        start,
+                        stop,
+                        float(np.mean(coefficient[run_start:run_stop])),
+                    )
+                )
+            run_start = None
+    if not runs:
+        return 0, count, float(np.max(coefficient, initial=0.0))
+    start, stop, concentration = max(runs, key=lambda item: item[1] - item[0])
+    minimum_sustained = max(32, int(np.ceil(0.2 * count)))
+    if stop - start < minimum_sustained:
+        return 0, count, float(np.max(coefficient, initial=0.0))
+    return int(start), int(stop), concentration
+
+
 def _psk_carrier_symmetry_order(modulation: ModulationKind) -> int:
     """Return physical carrier-recovery symmetry, independent of decisions."""
     if modulation is ModulationKind.QAM16:
@@ -1075,9 +1136,7 @@ class PatternAnalyzer:
                 observed_rms = float(np.sqrt(np.mean(np.abs(observed) ** 2)))
                 normalized = observed / max(observed_rms, _EPSILON)
                 interval_start, interval_stop, interval_concentration = (
-                    0,
-                    normalized.size,
-                    1.0,
+                    _detected_qam_decision_interval(observed)
                 )
             else:
                 # A differential PSK product has magnitude |s[n]||s[n-1]|;

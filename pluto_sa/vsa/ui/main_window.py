@@ -4178,6 +4178,46 @@ class VSAWindow(QtWidgets.QMainWindow):
             if np.isfinite(trajectory_rms) and trajectory_rms > 0.0:
                 processed_iq = processed_iq / trajectory_rms
                 symbol_iq = symbol_iq / trajectory_rms
+            constellation_symbol_iq = symbol_iq
+            if (
+                signal.modulation is ModulationKind.QAM16
+                and pattern_result is not None
+                and self.session.carrier_corrected_result is not None
+                and not use_carrier_corrected
+            ):
+                corrected_display = self.session.carrier_corrected_result
+                corrected_rate_hz = float(
+                    corrected_display.metadata.get(
+                        "analysis_sample_rate_hz",
+                        self.session.recording.sample_rate_hz,
+                    )
+                )
+                corrected_iq, corrected_time_s = _prepare_psk_display_waveform(
+                    corrected_display.iq,
+                    sample_rate_hz=corrected_rate_hz,
+                    symbol_rate_hz=signal.symbol_rate_hz,
+                    tx_filter=signal.tx_filter,
+                    filter_parameter=signal.filter_parameter,
+                    apply_measurement_filter=True,
+                    result_start_time_s=pattern_result.result_start_time_s,
+                    result_stop_time_s=pattern_result.result_stop_time_s,
+                )
+                constellation_symbol_iq = np.interp(
+                    symbol_times_s,
+                    corrected_time_s,
+                    np.real(corrected_iq),
+                ) + 1j * np.interp(
+                    symbol_times_s,
+                    corrected_time_s,
+                    np.imag(corrected_iq),
+                )
+                constellation_rms = float(
+                    np.sqrt(np.mean(np.abs(constellation_symbol_iq) ** 2))
+                )
+                if np.isfinite(constellation_rms) and constellation_rms > 0.0:
+                    constellation_symbol_iq = (
+                        constellation_symbol_iq / constellation_rms
+                    )
             marker_context["modulation_vectors"] = symbol_iq
             if pattern_result is not None:
                 in_result_range = (
@@ -4254,7 +4294,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             if use_physical_iq:
                 raw_constellation_symbols = np.asarray(
-                    symbol_iq, dtype=np.complex128
+                    constellation_symbol_iq, dtype=np.complex128
                 )
                 if signal.modulation.differential:
                     reference_symbols = np.cumprod(reference_symbols)
