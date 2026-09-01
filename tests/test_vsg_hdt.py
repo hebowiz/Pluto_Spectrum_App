@@ -32,6 +32,8 @@ def test_hdt_profiles_generate_each_supported_rate() -> None:
         assert result.iq.dtype == np.complex64
         assert result.iq.size > 0
         assert np.isfinite(result.iq).all()
+        assert np.max(np.abs(result.iq)) <= 1.0 + 1e-6
+        assert 0.0 < result.metadata["digital_scale"] <= 1.0
         assert result.metadata["phy"] == rate.value
         assert result.metadata["modulation"] == definition.modulation
         assert result.metadata["payload_code_rate"] == definition.payload_code_rate

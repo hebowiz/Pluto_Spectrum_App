@@ -68,6 +68,9 @@ class BluetoothHDTWaveformEngine:
         control = map_hdt_symbols(control_bits, "HDT2")
         symbols = np.concatenate((training, control, payload_symbols))
         data_iq = _shape_symbols(symbols, sps, float(settings.rrc_rolloff))
+        peak = float(np.max(np.abs(data_iq))) if data_iq.size else 0.0
+        digital_scale = 1.0 / peak if peak > 1.0 else 1.0
+        data_iq *= digital_scale
         data_count = data_iq.size
 
         envelope = project.power_envelope
@@ -106,5 +109,6 @@ class BluetoothHDTWaveformEngine:
                 "period_sample_count": single.size, "packet_ranges_samples": tuple(ranges),
                 "data_start_sample": data_start, "data_stop_sample": data_start + data_count,
                 "samples_per_symbol": sps, "symbol_rate_hz": 2_000_000.0,
+                "digital_scale": float(digital_scale),
             },
         )

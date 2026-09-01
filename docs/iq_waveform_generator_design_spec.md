@@ -1292,6 +1292,10 @@ HDT 16QAMの座標は、仕様表の`S_k x sqrt(10)`に従って
 `(-3, -1, +3, +1) / sqrt(10)`のunit-mean-power正規化を使う。波形全体のRF level合わせ込みは既存VSGのwaveform RMS / backoff処理が
 別段で担当するため、air-interface symbol mappingと送信level正規化を混同しない。
 
+SRRC整形後のIQはfield間の相対振幅を保ったまま、複素振幅peakが1を超える場合のみ
+波形全体を`1 / peak`倍する。これによりPluto転送およびWV exportのnormalized IQ契約
+`max(abs(IQ)) <= 1`を満たし、RF Levelはscale後の実RMSから計算する。
+
 現段階はPHY波形pipelineの初期実装である。Preamble、Control Header、HEC-C / HEC-P、32-bit CRC、
 PDU Header Zone、packet format 1 schedulingを含む完全なHDT RF PHY test packet bit列は未完成であり、
 R&S VSA等とのbit-level相互検証前に規格準拠packet generatorとは扱わない。
