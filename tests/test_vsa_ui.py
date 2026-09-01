@@ -836,6 +836,43 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         QtWidgets.QApplication.processEvents()
 
 
+def test_symbol_table_defaults_to_hex_and_switches_to_decimal(tmp_path) -> None:
+    pg.mkQApp("VSA Symbol Table format test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "symbol-table-format")
+    )
+    try:
+        window._load_generated(ModulationKind.QAM16)
+        _wait_for_background_analysis(window)
+        document = window._symbol_table_export_document()
+        displayed_values = [int(row[1]) for row in document["rows"]]
+
+        assert window.symbol_table_hex_action.isChecked()
+        assert any(value >= 10 for value in displayed_values)
+        hex_text = [
+            window.symbol_table.item(index // 10, index % 10).text()
+            for index in range(len(displayed_values))
+        ]
+        assert hex_text == [format(value, "X") for value in displayed_values]
+
+        window.symbol_table_decimal_action.trigger()
+        decimal_text = [
+            window.symbol_table.item(index // 10, index % 10).text()
+            for index in range(len(displayed_values))
+        ]
+        assert decimal_text == [str(value) for value in displayed_values]
+        assert window._symbol_table_export_document()["rows"] == document["rows"]
+        assert (
+            window._meas_config_values()["display_config"]["symbol_table_format"]
+            == "Decimal"
+        )
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_symbol_table_click_places_and_toggles_fsk_plot_markers(tmp_path) -> None:
     pg.mkQApp("VSA FSK symbol marker test")
     window = VSAWindow(
@@ -1406,6 +1443,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_limit_result_check.setChecked(False)
         window._apply_result_summary_preset("diagnostics")
         window.symbol_display_action.setChecked(True)
+        window.symbol_table_decimal_action.setChecked(True)
         window.measured_iq_power_action.setChecked(True)
         window.raw_modulation_signal_action.setChecked(True)
         window.qam_raw_modulation_signal_action.setChecked(True)
@@ -1438,6 +1476,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.iq_power_trigger_limit_result_check.setChecked(True)
         window._apply_result_summary_preset("defaults")
         window.symbol_display_action.setChecked(False)
+        window.symbol_table_hex_action.setChecked(True)
         window.raw_iq_power_action.setChecked(True)
         window.measured_modulation_signal_action.setChecked(True)
         window.qam_measured_modulation_signal_action.setChecked(True)
@@ -1484,6 +1523,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window._selected_result_summary_ids == selected_summary_items
         assert set(saved["result_summary"]["visible_items"]) == selected_summary_items
         assert saved["display_config"]["show_symbol_points"] is True
+        assert saved["display_config"]["symbol_table_format"] == "Decimal"
         assert saved["display_config"]["iq_power_signal"] == "Measured"
         assert saved["display_config"]["modulation_signal"] == "Raw IQ"
         assert saved["display_config"]["qam_modulation_signal"] == "Raw IQ"
@@ -1494,6 +1534,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
             "Constellation Frequency"
         )
         assert window.symbol_display_action.isChecked()
+        assert window.symbol_table_decimal_action.isChecked()
         assert window.measured_iq_power_action.isChecked()
         assert window.raw_modulation_signal_action.isChecked()
         assert window.qam_raw_modulation_signal_action.isChecked()
@@ -1521,6 +1562,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         legacy["display_config"].pop("qam_modulation_signal")
         window._apply_meas_config_values(legacy)
         assert window.qam_measured_modulation_signal_action.isChecked()
+        legacy["display_config"].pop("symbol_table_format")
+        window._apply_meas_config_values(legacy)
+        assert window.symbol_table_hex_action.isChecked()
         legacy["display_config"].pop("iq_power_signal")
         window._apply_meas_config_values(legacy)
         assert window.raw_iq_power_action.isChecked()

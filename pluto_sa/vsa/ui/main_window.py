@@ -627,6 +627,27 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.symbol_display_action.setChecked(False)
         self.symbol_display_action.triggered.connect(self._refresh_display_only)
         display_menu.addAction(self.symbol_display_action)
+        symbol_table_format_menu = display_menu.addMenu("Symbol Table Format")
+        self.symbol_table_hex_action = QtGui.QAction(
+            "Hexadecimal", self, checkable=True
+        )
+        self.symbol_table_decimal_action = QtGui.QAction(
+            "Decimal", self, checkable=True
+        )
+        symbol_table_format_group = QtGui.QActionGroup(self)
+        symbol_table_format_group.setExclusive(True)
+        symbol_table_format_group.addAction(self.symbol_table_hex_action)
+        symbol_table_format_group.addAction(self.symbol_table_decimal_action)
+        self.symbol_table_hex_action.setChecked(True)
+        self.symbol_table_hex_action.triggered.connect(
+            self._refresh_display_only
+        )
+        self.symbol_table_decimal_action.triggered.connect(
+            self._refresh_display_only
+        )
+        symbol_table_format_menu.addActions(
+            symbol_table_format_group.actions()
+        )
         iq_power_signal_menu = display_menu.addMenu("IQ Power Signal")
         self.raw_iq_power_action = QtGui.QAction(
             "Raw Capture", self, checkable=True
@@ -1638,6 +1659,10 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _create_symbol_table_context_menu(self) -> QtWidgets.QMenu:
         menu = QtWidgets.QMenu(self.symbol_table)
+        format_menu = menu.addMenu("Symbol Format")
+        format_menu.addAction(self.symbol_table_hex_action)
+        format_menu.addAction(self.symbol_table_decimal_action)
+        menu.addSeparator()
         export_action = menu.addAction("Export Symbol Table...")
         export_action.setEnabled(self.session.result is not None)
         export_action.triggered.connect(self._export_symbol_table)
@@ -1703,6 +1728,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             width = int(round(np.log2(self._selected_modulation().order)))
             return format(int(symbol), f"0{width}b")
         if symbol_format == "Hexadecimal":
+            return format(int(symbol), "X")
+        return str(int(symbol))
+
+    def _format_result_symbol(self, symbol: int) -> str:
+        if self.symbol_table_hex_action.isChecked():
             return format(int(symbol), "X")
         return str(int(symbol))
 
@@ -2139,6 +2169,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             },
             "display_config": {
                 "show_symbol_points": self.symbol_display_action.isChecked(),
+                "symbol_table_format": (
+                    "Decimal"
+                    if self.symbol_table_decimal_action.isChecked()
+                    else "Hexadecimal"
+                ),
                 "iq_power_signal": (
                     "Measured"
                     if self.measured_iq_power_action.isChecked()
@@ -2410,6 +2445,19 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             self.symbol_display_action.setChecked(
                 bool(display_config.get("show_symbol_points", False))
+            )
+            symbol_table_format = str(
+                display_config.get("symbol_table_format", "Hexadecimal")
+            )
+            if symbol_table_format not in {"Decimal", "Hexadecimal"}:
+                raise ValueError(
+                    "Symbol Table format must be Decimal or Hexadecimal"
+                )
+            self.symbol_table_decimal_action.setChecked(
+                symbol_table_format == "Decimal"
+            )
+            self.symbol_table_hex_action.setChecked(
+                symbol_table_format == "Hexadecimal"
             )
             iq_power_signal = str(
                 display_config.get("iq_power_signal", "Raw Capture")
@@ -4505,7 +4553,9 @@ class VSAWindow(QtWidgets.QMainWindow):
                     else configured_symbols
                 )
             for index, symbol in enumerate(shown):
-                item = QtWidgets.QTableWidgetItem(str(int(symbol)))
+                item = QtWidgets.QTableWidgetItem(
+                    self._format_result_symbol(int(symbol))
+                )
                 item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
                 if pattern_result is not None and index < pattern_result.symbol_time_s.size:
                     symbol_time_s = float(pattern_result.symbol_time_s[index])

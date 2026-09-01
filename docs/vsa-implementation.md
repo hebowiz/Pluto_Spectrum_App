@@ -105,7 +105,7 @@ R&SのResult Range表示に合わせ、Pattern Search成立時は次の表示規
 - Symbol Tableは`File > Export Symbol Table...`または右クリックから、schema/version付きUTF-8 JSON（`.vsasymbols.json`）へ全Result Rangeをexportできる。source、signal/mapping/bit-ordering、pattern variant、列定義、symbol/time/pattern statusを保持し、UIの2048 symbol表示上限には切り詰めない。
 - Symbol Tableの入力済みcellをクリックすると、同じResult Range symbolをIQ Power、Modulation、Symbol Plotへcyan diamondで連動表示する。選択は1 symbolのみで、同じcellの再クリックにより解除する。IQ Powerはsymbol番号/dBm、FSK Modulationはsymbol番号/frequency、PSK Modulationはsymbol番号/normalized amplitude/phase、PSK Symbol Plotはsymbol番号/normalized amplitude/phase/point EVMをplot内labelへ表示する。FSK ModulationのRaw IQ表示では復元symbol中心で補間した瞬時周波数、Measured表示ではConstellation Frequencyと共通の復調symbol判定周波数を使用する。最終FSK判定周波数はfractional symbol区間の内側sampleの中央値とし、sample欠落等による孤立位相ジャンプで判定が反転することを防ぐ。FSK Symbol PlotのPhase Differenceは同じ復調symbol周波数から位相差vectorを生成し、瞬時値と混同しないようFrequencyを表示しない。Constellation Frequencyでは同じ復調symbol周波数を縦軸へ描き、markerにもFrequencyを表示する。選択markerは通常のFlat Symbol Plot point（6 px）とは独立した18 pxとし、黒輪郭付きで強調する。新規解析開始時には選択をclearする。
 
-Symbol Tableは現在decimal symbol値のみを表示する。将来の4FSK/8FSK、PSK、QAMを想定し、Binary/Hexadecimal/Decimal表示切替を追加する。表示formatはdecision結果を変更せず、R&Sの`Symbol Format`と同様にview設定として扱う。
+Symbol TableはFSK / PSK / QAMの全mode共通でHexadecimal / Decimal表示を切り替えられる。既定はHexadecimalとし、`Display Config > Symbol Table Format`またはSymbol Table右クリックmenuから変更する。表示formatはdecision結果とJSON exportの数値dataを変更せず、measurement configの`display_config.symbol_table_format`へ保存する。旧configに設定がない場合もHexadecimalへ移行する。
 
 ### Carrier周波数測定・補正の実装境界
 
