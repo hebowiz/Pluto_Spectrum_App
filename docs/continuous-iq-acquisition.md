@@ -38,7 +38,11 @@ thread is not proof that libiio has queued a DMA buffer, so `Armed` is reported
 only after the first actual IQ block has been published. This avoids telling
 the operator to transmit during the initial RX blind interval.
 
-Free RunとI/Q Power Triggerの両方を同じ`vsa_continuous` producerから取得する。解析完了・キャンセル・再アームではproducerを停止せず、新しいcursorだけを現在位置に作る。中心周波数、sample rate、RF bandwidth、gain、接続先などハードウェア設定が変わった場合だけ停止・再設定・再始動する。
+Free RunとI/Q Power Triggerの両方を同じ`vsa_continuous` producerから取得する。解析完了・キャンセル・再アームではproducerを停止しない。Singleは操作後に到着するIQを測る`latest` cursor、Continuousの2回目以降は解析中にringへ蓄積された最新blockを即座に使う`newest` cursorを作る。`newest`は保持中の最新1 blockから開始し、古い未解析blockを順に再生しない。中心周波数、sample rate、RF bandwidth、gain、接続先などハードウェア設定が変わった場合だけ停止・再設定・再始動する。
+
+VSA ringは8 blockに制限する。典型的な240,000 complex64 samples/blockでは約15 MB、8 MS/sで約240 msの履歴となる。共通SpectrumConfigの512 blockをそのまま使うと約1 GBに達し得る一方、VSA Continuousは最新blockだけを選ぶため長い履歴を保持する必要がない。
+
+producer再利用時に`get_current_sample_rate_hz()`と`get_current_rf_bandwidth_hz()`を毎回呼ぶと、blocking `sdr.rx()`の間保持されるreceiver I/Q lockをCapture workerが待ち、Python lockの非公平性によって複数refill分starveする場合がある。実sample rateとRF bandwidthは初回接続または再設定直後に1回だけ取得して`PlutoLiveSource`へcacheし、同一設定のre-armではhardware propertyを再読出ししない。各recordには`continuous_rx_prepare_ms`、`continuous_rx_cursor_setup_ms`、`continuous_rx_first_block_wait_ms`を保存し、完了statusでも各段階を分離表示する。
 
 これにより、従来の `capture_iq_block()` および取得ごとの `receiver.stop()` による受信空白を除去する。VSAの有限recordはblock境界を跨いでsample index基準で組み立てる。
 

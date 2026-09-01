@@ -25,6 +25,7 @@ from pluto_sa.vsa.ui.capture_thread import PlutoSingleCaptureThread
 from pluto_sa.vsa.ui.measurement_chrome import (
     IQ_PLANE_LIMIT,
     FREQUENCY_CONSTELLATION_X_LIMIT,
+    SymbolDensitySpread,
     add_result_range_overlay,
     install_measurement_plot_menu,
     make_measurement_dock,
@@ -211,6 +212,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._selected_result_index = 0
         self._show_symbol_points = True
         self._symbol_density = False
+        self._symbol_density_spread = SymbolDensitySpread.MAXIMUM
         self._fsk_symbol_plot_mode = "Constellation Frequency"
         self._psk_symbol_plot_mode = "Physical IQ"
         self._analysis_plot_ranges: dict[
@@ -264,6 +266,22 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.density_action = display_menu.addAction("Symbol Plot Density")
         self.density_action.setCheckable(True)
         self.density_action.toggled.connect(self._set_symbol_density)
+        density_spread_menu = display_menu.addMenu("Density Spread")
+        self.density_spread_group = QtGui.QActionGroup(self)
+        self.density_spread_group.setExclusive(True)
+        self.density_spread_actions: dict[SymbolDensitySpread, QtGui.QAction] = {}
+        for spread in SymbolDensitySpread:
+            action = density_spread_menu.addAction(spread.value)
+            action.setCheckable(True)
+            action.setData(spread.value)
+            self.density_spread_group.addAction(action)
+            self.density_spread_actions[spread] = action
+            action.triggered.connect(
+                lambda _checked=False, selected=spread: (
+                    self._set_symbol_density_spread(selected)
+                )
+            )
+        self.density_spread_actions[self._symbol_density_spread].setChecked(True)
         fsk_plot_menu = display_menu.addMenu("FSK Symbol Plot")
         fsk_plot_group = QtGui.QActionGroup(self)
         fsk_plot_group.setExclusive(True)
@@ -520,6 +538,16 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.config_density.toggled.connect(self._set_symbol_density)
         display_layout.addWidget(self.config_show_symbols)
         display_layout.addWidget(self.config_density)
+        self.config_density_spread = QtWidgets.QComboBox()
+        self.config_density_spread.addItems(
+            tuple(spread.value for spread in SymbolDensitySpread)
+        )
+        self.config_density_spread.setCurrentText(self._symbol_density_spread.value)
+        self.config_density_spread.currentTextChanged.connect(
+            self._set_symbol_density_spread
+        )
+        display_layout.addWidget(QtWidgets.QLabel("Density Spread (all modulations)"))
+        display_layout.addWidget(self.config_density_spread)
         self.config_fsk_mode = QtWidgets.QComboBox()
         self.config_fsk_mode.addItems(("Constellation Frequency", "Phase Difference"))
         self.config_fsk_mode.setCurrentText(self._fsk_symbol_plot_mode)
@@ -578,6 +606,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         for control, value in (
             (self.config_fsk_mode, self._fsk_symbol_plot_mode),
             (self.config_psk_mode, self._psk_symbol_plot_mode),
+            (self.config_density_spread, self._symbol_density_spread.value),
         ):
             control.blockSignals(True)
             control.setCurrentText(value)
@@ -624,6 +653,24 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self.config_density.blockSignals(True)
             self.config_density.setChecked(self._symbol_density)
             self.config_density.blockSignals(False)
+        if self._result is not None:
+            self._render(self._result)
+
+    @QtCore.Slot(str)
+    def _set_symbol_density_spread(
+        self, spread: SymbolDensitySpread | str
+    ) -> None:
+        try:
+            resolved = SymbolDensitySpread(spread)
+        except ValueError:
+            return
+        self._symbol_density_spread = resolved
+        if hasattr(self, "density_spread_actions"):
+            self.density_spread_actions[resolved].setChecked(True)
+        if hasattr(self, "config_density_spread"):
+            self.config_density_spread.blockSignals(True)
+            self.config_density_spread.setCurrentText(resolved.value)
+            self.config_density_spread.blockSignals(False)
         if self._result is not None:
             self._render(self._result)
 
@@ -887,6 +934,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             "burst_limit_result": self.iq_power_trigger_limit_result_check.isChecked(),
             "show_symbol_points": self._show_symbol_points,
             "symbol_density": self._symbol_density,
+            "symbol_density_spread": self._symbol_density_spread.value,
             "fsk_symbol_plot": self._fsk_symbol_plot_mode,
             "psk_symbol_plot": self._psk_symbol_plot_mode,
         }
@@ -958,6 +1006,14 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         )
         self._set_show_symbol_points(bool(values.get("show_symbol_points", True)))
         self._set_symbol_density(bool(values.get("symbol_density", False)))
+        self._set_symbol_density_spread(
+            str(
+                values.get(
+                    "symbol_density_spread",
+                    SymbolDensitySpread.MAXIMUM.value,
+                )
+            )
+        )
         self._set_fsk_symbol_plot_mode(
             str(values.get("fsk_symbol_plot", "Constellation Frequency"))
         )
@@ -1512,6 +1568,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 measured_frequency_hz / 1e3,
                 y_limit_khz=limit_khz,
                 density=self._symbol_density,
+                density_spread=self._symbol_density_spread,
             )
             self.fsk_symbol_plot.setXRange(
                 -_FREQUENCY_CONSTELLATION_X_LIMIT,
@@ -1632,6 +1689,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             values,
             y_limit_khz=y_limit_khz,
             density=self._symbol_density,
+            density_spread=self._symbol_density_spread,
         )
 
     def _plot_symbol_vectors(
@@ -1641,6 +1699,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             plot,
             symbols,
             density=self._symbol_density,
+            density_spread=self._symbol_density_spread,
         )
 
     def _render_summary(self, result: BluetoothDedicatedResult) -> None:

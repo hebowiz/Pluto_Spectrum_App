@@ -50,6 +50,12 @@ from pluto_sa.vsa.pattern import (
 )
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
+from pluto_sa.vsa.ui.measurement_chrome import (
+    SymbolDensitySpread,
+    plot_complex_symbol_distribution,
+    plot_frequency_symbol_distribution,
+    symbol_density_sigma_bins,
+)
 
 
 def test_peak_decimation_keeps_bucket_extrema() -> None:
@@ -375,6 +381,17 @@ def test_result_range_arrow_actions_select_adjacent_packet(tmp_path) -> None:
 
         assert window._selected_match_index == 1
         assert window._analyze()
+        window._reset_all_packet_statistics()
+        assert window._request_analysis(
+            analysis_context={
+                "continuous": True,
+                "collect_all_packets": True,
+            }
+        )
+        _wait_for_background_analysis(window)
+        assert window._all_packet_statistics.packet_count == 2
+        assert window._selected_match_index == 1
+        assert window.session.pattern_result.pattern_start_sample == 20 * 8
         summary_labels = {
             window.result_summary.item(row, 0).text()
             for row in range(window.result_summary.rowCount())
@@ -1462,6 +1479,49 @@ def test_constellation_density_can_disable_smoothing() -> None:
     assert float(np.min(nonzero)) == pytest.approx(np.log1p(1.0))
 
 
+def test_symbol_density_spread_has_three_shared_kernel_widths() -> None:
+    assert symbol_density_sigma_bins(SymbolDensitySpread.NONE) == 0.0
+    assert 0.0 < symbol_density_sigma_bins(SymbolDensitySpread.MEDIUM) < 0.7
+    assert symbol_density_sigma_bins(SymbolDensitySpread.MAXIMUM) == 0.7
+
+
+def test_symbol_density_spread_applies_to_complex_and_frequency_plots() -> None:
+    pg.mkQApp("VSA shared density spread test")
+    complex_plot = pg.PlotWidget()
+    frequency_plot = pg.PlotWidget()
+    symbols = np.asarray([0.25 + 0.25j] * 8)
+    frequencies = np.asarray([100.0] * 8)
+    complex_counts = []
+    frequency_counts = []
+    try:
+        for spread in SymbolDensitySpread:
+            complex_plot.clear()
+            frequency_plot.clear()
+            complex_item = plot_complex_symbol_distribution(
+                complex_plot,
+                symbols,
+                density=True,
+                density_spread=spread,
+            )
+            frequency_item = plot_frequency_symbol_distribution(
+                frequency_plot,
+                frequencies,
+                y_limit_khz=200.0,
+                density=True,
+                density_spread=spread,
+            )
+            assert complex_item is not None
+            assert frequency_item is not None
+            complex_counts.append(np.count_nonzero(complex_item.image))
+            frequency_counts.append(np.count_nonzero(frequency_item.image))
+    finally:
+        complex_plot.close()
+        frequency_plot.close()
+
+    assert complex_counts[0] < complex_counts[1] < complex_counts[2]
+    assert frequency_counts[0] < frequency_counts[1] < frequency_counts[2]
+
+
 def test_constellation_density_extent_includes_symbols_outside_nominal_plane() -> None:
     symbols = np.asarray([-1.6 + 0.2j, 0.1 + 1.4j, np.nan + 0.0j])
 
@@ -1533,6 +1593,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.raw_modulation_signal_action.setChecked(True)
         window.qam_raw_modulation_signal_action.setChecked(True)
         window.constellation_density_action.setChecked(True)
+        window.constellation_density_spread_actions[
+            SymbolDensitySpread.MEDIUM
+        ].setChecked(True)
         window.differential_iq_symbol_plot_action.setChecked(True)
         window.fsk_constellation_frequency_action.setChecked(True)
         window.measurement_filter_combo.setCurrentText("None")
@@ -1566,6 +1629,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.measured_modulation_signal_action.setChecked(True)
         window.qam_measured_modulation_signal_action.setChecked(True)
         window.constellation_flat_action.setChecked(True)
+        window.constellation_density_spread_actions[
+            SymbolDensitySpread.MAXIMUM
+        ].setChecked(True)
         window.physical_iq_symbol_plot_action.setChecked(True)
         window.fsk_phase_difference_action.setChecked(True)
         window.measurement_filter_combo.setCurrentText("Auto")
@@ -1614,6 +1680,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert saved["display_config"]["qam_modulation_signal"] == "Raw IQ"
         assert "carrier_display" not in saved["display_config"]
         assert saved["display_config"]["constellation_trace_mode"] == "Density"
+        assert saved["display_config"]["constellation_density_spread"] == "Medium"
         assert saved["display_config"]["psk_symbol_plot_mode"] == "Differential IQ"
         assert saved["display_config"]["fsk_symbol_plot_mode"] == (
             "Constellation Frequency"
@@ -1624,6 +1691,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.raw_modulation_signal_action.isChecked()
         assert window.qam_raw_modulation_signal_action.isChecked()
         assert window.constellation_density_action.isChecked()
+        assert window._symbol_density_spread() is SymbolDensitySpread.MEDIUM
         assert window.differential_iq_symbol_plot_action.isChecked()
         assert window.fsk_constellation_frequency_action.isChecked()
         assert window.pattern_symbol_table.item(0, 1).text() == "1"
@@ -1653,6 +1721,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         legacy["display_config"].pop("iq_power_signal")
         window._apply_meas_config_values(legacy)
         assert window.raw_iq_power_action.isChecked()
+        legacy["display_config"].pop("constellation_density_spread")
+        window._apply_meas_config_values(legacy)
+        assert window._symbol_density_spread() is SymbolDensitySpread.MAXIMUM
 
         iq_path = tmp_path / "captures" / "sample.npz"
         pattern_path = tmp_path / "patterns" / "access.vsapattern.json"
@@ -2106,6 +2177,79 @@ def test_pluto_run_single_uses_async_capture_and_updates_session(tmp_path) -> No
         window.deleteLater()
         QtWidgets.QApplication.processEvents()
     assert source.closed
+
+
+def test_pluto_continuous_applies_backpressure_and_updates_all_packets(
+    tmp_path,
+) -> None:
+    pg.mkQApp("VSA Pluto Continuous UI test")
+
+    class FakePlutoSource:
+        def __init__(self) -> None:
+            self.capture_count = 0
+
+        def capture_single(
+            self,
+            settings,
+            *,
+            cancelled=None,
+            armed=None,
+            prefer_buffered=False,
+        ):
+            assert prefer_buffered
+            self.capture_count += 1
+            if armed is not None:
+                armed()
+            recording, _signal = GeneratedIQSource.fsk(
+                symbol_count=64,
+                symbol_rate_hz=settings.symbol_rate_hz,
+                samples_per_symbol=settings.samples_per_symbol,
+                seed=self.capture_count,
+            )
+            return recording
+
+        def close(self) -> None:
+            pass
+
+    source = FakePlutoSource()
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "pluto-continuous"),
+        pluto_source=source,
+    )
+    window.analysis_published.connect(window._toggle_pluto_continuous)
+    try:
+        window._toggle_pluto_continuous()
+        for _index in range(500):
+            QtWidgets.QApplication.processEvents()
+            capture = window._pluto_capture_thread
+            analysis = window._analysis_thread
+            if capture is not None:
+                capture.wait(10)
+            if analysis is not None:
+                analysis.wait(10)
+            if (
+                not window._continuous_run_requested
+                and window._pluto_capture_thread is None
+                and window._analysis_thread is None
+                and window.run_continuous_action.isEnabled()
+            ):
+                break
+        else:
+            raise AssertionError("Continuous did not stop after the active analysis")
+
+        assert source.capture_count == 1
+        assert window._continuous_sweep_count == 1
+        assert window._all_packet_statistics.packet_count == 1
+        assert window.result_summary.columnCount() == 3
+        assert window.result_summary.horizontalHeaderItem(2).text() == "All Packets"
+        assert window._all_packet_summary_values["match_selection"] == "1 packet(s)"
+        assert window.run_single_action.isEnabled()
+        assert window.open_config_action.isEnabled()
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
 
 
 def test_run_single_action_stops_pending_power_trigger_wait(tmp_path) -> None:

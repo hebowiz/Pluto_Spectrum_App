@@ -29,6 +29,8 @@ class _FakeReceiver:
         self.stream_fresh: list[bool] = []
         self.stream_block_sizes: list[int] = []
         self.stop_calls = 0
+        self.sample_rate_reads = 0
+        self.rf_bandwidth_reads = 0
         self.running = False
         self.rx_kernel_buffers_requested = 8
         self.rx_kernel_buffers_applied = 8
@@ -59,9 +61,11 @@ class _FakeReceiver:
         )
 
     def get_current_sample_rate_hz(self) -> int:
+        self.sample_rate_reads += 1
         return self.config.sample_rate_hz
 
     def get_current_rf_bandwidth_hz(self) -> int:
+        self.rf_bandwidth_reads += 1
         return self.config.rx_bandwidth_hz
 
     def start(
@@ -156,6 +160,7 @@ def test_pluto_single_capture_defaults_to_eight_samples_per_symbol() -> None:
     assert receiver.config.rx_gain_db == 30
     assert receiver.config.time_analyzer_sample_rate_hz == 8_000_000
     assert receiver.config.time_analyzer_rf_bandwidth_hz == 8_000_000
+    assert receiver.config.capture_buffer_blocks == 8
     assert receiver.capture_fresh == []
     assert receiver.stream_fresh == [True]
 
@@ -178,18 +183,24 @@ def test_pluto_single_capture_reuses_unchanged_receiver_configuration() -> None:
     settings = PlutoCaptureSettings(capture_length_s=0.010)
 
     first = source.capture_single(settings)
+    assert source.is_stream_ready(settings)
     second = source.capture_single(settings)
 
     receiver = _FakeReceiver.instances[0]
     assert len(_FakeReceiver.instances) == 1
     assert receiver.reconfigured == []
+    assert receiver.sample_rate_reads == 1
+    assert receiver.rf_bandwidth_reads == 1
     assert first.sample_count == second.sample_count == 80_000
 
     changed = replace(settings, center_frequency_hz=2_402_000_000.0)
+    assert not source.is_stream_ready(changed)
     source.capture_single(changed)
 
     assert len(receiver.reconfigured) == 1
     assert receiver.reconfigured[0].center_freq_hz == 2_402_000_000
+    assert receiver.sample_rate_reads == 2
+    assert receiver.rf_bandwidth_reads == 2
 
 
 def test_pluto_capture_can_preserve_rx_buffer_between_continuous_blocks() -> None:
@@ -205,6 +216,26 @@ def test_pluto_capture_can_preserve_rx_buffer_between_continuous_blocks() -> Non
     # does not destroy/recreate the libiio buffer.
     assert receiver.stream_fresh == [True]
     assert receiver.capture_fresh == []
+
+
+def test_pluto_continuous_capture_starts_from_newest_buffered_block() -> None:
+    _FakeReceiver.instances.clear()
+    source = PlutoLiveSource(receiver_factory=_FakeReceiver)
+    settings = PlutoCaptureSettings(capture_length_s=0.010)
+
+    first = source.capture_single(settings)
+    buffered = source.capture_single(settings, prefer_buffered=True)
+
+    receiver = _FakeReceiver.instances[0]
+    assert receiver.stream_fresh == [True]
+    np.testing.assert_array_equal(first.iq, 100.0 + 0.0j)
+    np.testing.assert_array_equal(buffered.iq, 200.0 + 0.0j)
+    assert first.metadata["continuous_rx_producer_reused"] is False
+    assert buffered.metadata["continuous_rx_producer_reused"] is True
+    assert buffered.metadata["continuous_rx_buffered_start"] is True
+    assert buffered.metadata["continuous_rx_prepare_ms"] >= 0.0
+    assert buffered.metadata["continuous_rx_cursor_setup_ms"] >= 0.0
+    assert buffered.metadata["continuous_rx_first_block_wait_ms"] >= 0.0
 
 
 def test_pluto_experimental_lo_offset_preserves_requested_analysis_center() -> None:

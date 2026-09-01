@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
 
@@ -54,6 +55,7 @@ from pluto_sa.vsa.result_summary import (
     ResultSummaryCategory,
     normalize_result_summary_ids,
 )
+from pluto_sa.vsa.result_statistics import ResultSummaryAccumulator
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.pluto_source import (
     CaptureCancelledError,
@@ -73,6 +75,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     plot_frequency_symbol_distribution,
     plot_trace_symbol_points,
     set_frequency_constellation_x_lock,
+    SymbolDensitySpread,
     trace_bounds,
     view_all_traces,
 )
@@ -475,19 +478,51 @@ class _AnalysisThread(QtCore.QThread):
         self,
         generation: int,
         session: VSASession,
+        collect_all_matches: bool = False,
         parent: QtCore.QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.generation = int(generation)
         self.session = session
+        self.collect_all_matches = bool(collect_all_matches)
 
     def run(self) -> None:
         try:
             self.session.analyze()
+            sessions = [self.session]
+            pattern = self.session.pattern_result
+            search = self.session.pattern_search
+            if self.collect_all_matches and pattern is not None and search is not None:
+                focused_index = int(
+                    pattern.metadata.get("selected_match_index", search.match_index)
+                )
+                match_count = int(pattern.metadata.get("eligible_match_count", 1))
+                for match_index in range(1, match_count + 1):
+                    if match_index == focused_index:
+                        continue
+                    if self.isInterruptionRequested():
+                        break
+                    packet = self.session.analysis_snapshot()
+                    packet.pattern_search = replace(
+                        search,
+                        match_selection=MatchSelectionPolicy.INDEX,
+                        match_index=match_index,
+                    )
+                    packet.analyze()
+                    sessions.append(packet)
         except Exception as error:
             self.analysis_failed.emit(self.generation, self.session, str(error))
             return
-        self.analysis_ready.emit(self.generation, self.session)
+        self.analysis_ready.emit(
+            self.generation,
+            _AnalysisCompletion(self.session, tuple(sessions)),
+        )
+
+
+@dataclass(frozen=True)
+class _AnalysisCompletion:
+    focused: VSASession
+    packets: tuple[VSASession, ...]
 
 
 class _PlutoDiscoveryThread(QtCore.QThread):
@@ -526,14 +561,21 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._pluto_discovery_thread: QtCore.QThread | None = None
         self._analysis_thread: _AnalysisThread | None = None
         self._analysis_generation = 0
-        self._pending_analysis: tuple[int, VSASession, dict[str, float]] | None = None
-        self._active_analysis_context: dict[str, float] = {}
+        self._pending_analysis: tuple[int, VSASession, dict[str, object]] | None = None
+        self._active_analysis_context: dict[str, object] = {}
         self._updating_pattern_table = False
         self._pattern_values: list[int] = []
         self._analysis_plot_ranges: dict[str, tuple[list[float], list[float]]] = {}
         self._plot_context_actions: dict[str, dict[str, QtGui.QAction]] = {}
         self._selected_result_summary_ids = set(DEFAULT_RESULT_SUMMARY_IDS)
         self._result_summary_values: dict[str, str] = {}
+        self._all_packet_summary_values: dict[str, str] = {}
+        self._all_packet_statistics = ResultSummaryAccumulator()
+        self._continuous_run_requested = False
+        self._continuous_capture_settings: PlutoCaptureSettings | None = None
+        self._continuous_signal: SignalDescription | None = None
+        self._continuous_sweep_count = 0
+        self._active_capture_continuous = False
         self._updating_result_summary_selection = False
         self._selected_match_index = 1
         self._selected_symbol_marker_index: int | None = None
@@ -596,10 +638,21 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.run_single_action.setShortcut("F6")
         self.run_single_action.triggered.connect(self._run_pluto_single)
         run_menu.addAction(self.run_single_action)
-        analyze_action = QtGui.QAction("Refresh Analysis", self)
-        analyze_action.setShortcut("F5")
-        analyze_action.triggered.connect(self._request_analysis)
-        run_menu.addAction(analyze_action)
+        self.run_continuous_action = QtGui.QAction("Run Continuous", self)
+        self.run_continuous_action.setShortcut("F7")
+        self.run_continuous_action.triggered.connect(self._toggle_pluto_continuous)
+        run_menu.addAction(self.run_continuous_action)
+        self.reset_all_packets_action = QtGui.QAction(
+            "Reset All Packets Statistics", self
+        )
+        self.reset_all_packets_action.triggered.connect(
+            self._reset_all_packet_statistics
+        )
+        run_menu.addAction(self.reset_all_packets_action)
+        self.refresh_analysis_action = QtGui.QAction("Refresh Analysis", self)
+        self.refresh_analysis_action.setShortcut("F5")
+        self.refresh_analysis_action.triggered.connect(self._request_analysis)
+        run_menu.addAction(self.refresh_analysis_action)
         run_menu.addSeparator()
         self.previous_result_action = QtGui.QAction(
             "Previous Result Range", self
@@ -730,6 +783,31 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._refresh_display_only
         )
         constellation_trace_menu.addActions(constellation_trace_group.actions())
+        density_spread_menu = constellation_trace_menu.addMenu("Density Spread")
+        self.constellation_density_spread_group = QtGui.QActionGroup(self)
+        self.constellation_density_spread_group.setExclusive(True)
+        self.constellation_density_spread_actions: dict[
+            SymbolDensitySpread, QtGui.QAction
+        ] = {}
+        for spread in SymbolDensitySpread:
+            action = density_spread_menu.addAction(spread.value)
+            action.setCheckable(True)
+            action.setData(spread.value)
+            action.setToolTip(
+                "No density-kernel spreading"
+                if spread is SymbolDensitySpread.NONE
+                else (
+                    "Intermediate density-kernel spreading"
+                    if spread is SymbolDensitySpread.MEDIUM
+                    else "Original density-kernel spreading"
+                )
+            )
+            self.constellation_density_spread_group.addAction(action)
+            self.constellation_density_spread_actions[spread] = action
+            action.triggered.connect(self._refresh_display_only)
+        self.constellation_density_spread_actions[
+            SymbolDensitySpread.MAXIMUM
+        ].setChecked(True)
         psk_symbol_plot_menu = display_menu.addMenu("PSK Symbol Plot")
         self.psk_symbol_plot_menu = psk_symbol_plot_menu
         self.physical_iq_symbol_plot_action = QtGui.QAction(
@@ -778,18 +856,18 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.reset_graph_scales_action.triggered.connect(self._reset_graph_scales)
         display_menu.addAction(self.reset_graph_scales_action)
 
-        meas_config_menu = self.menuBar().addMenu("Meas Config")
-        open_config_action = QtGui.QAction("Open Meas Config...", self)
-        open_config_action.setShortcut("Ctrl+M")
-        open_config_action.triggered.connect(self._open_meas_config)
-        meas_config_menu.addAction(open_config_action)
-        meas_config_menu.addSeparator()
+        self.meas_config_menu = self.menuBar().addMenu("Meas Config")
+        self.open_config_action = QtGui.QAction("Open Meas Config...", self)
+        self.open_config_action.setShortcut("Ctrl+M")
+        self.open_config_action.triggered.connect(self._open_meas_config)
+        self.meas_config_menu.addAction(self.open_config_action)
+        self.meas_config_menu.addSeparator()
         load_config_action = QtGui.QAction("Load Meas Config...", self)
         load_config_action.triggered.connect(self._load_meas_config_file)
-        meas_config_menu.addAction(load_config_action)
+        self.meas_config_menu.addAction(load_config_action)
         save_config_action = QtGui.QAction("Save Meas Config As...", self)
         save_config_action.triggered.connect(self._save_meas_config_file)
-        meas_config_menu.addAction(save_config_action)
+        self.meas_config_menu.addAction(save_config_action)
 
         mode_menu = self.menuBar().addMenu("Analysis Mode")
         generic_action = mode_menu.addAction("Generic FSK / PSK VSA")
@@ -852,8 +930,14 @@ class VSAWindow(QtWidgets.QMainWindow):
             QtCore.Qt.Orientation.Horizontal,
         )
 
-        self.result_summary = QtWidgets.QTableWidget(0, 2)
-        self.result_summary.setHorizontalHeaderLabels(("Parameter", "Current"))
+        self.result_summary = QtWidgets.QTableWidget(0, 3)
+        self.result_summary.setHorizontalHeaderLabels(
+            ("Parameter", "Current", "All Packets")
+        )
+        self.result_summary.horizontalHeaderItem(2).setToolTip(
+            "From Continuous start: average [minimum … maximum] and sample count. "
+            "Power uses a linear-power average; EVM-style metrics use RMS aggregation."
+        )
         self.result_summary.verticalHeader().setVisible(False)
         self.result_summary.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
@@ -1490,12 +1574,23 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.run_single_button = QtWidgets.QPushButton("Run Single (Pluto)")
         self.run_single_button.clicked.connect(self._run_pluto_single)
         run_layout.addWidget(self.run_single_button)
+        self.run_continuous_button = QtWidgets.QPushButton(
+            "Run Continuous (Pluto)"
+        )
+        self.run_continuous_button.clicked.connect(self._toggle_pluto_continuous)
+        run_layout.addWidget(self.run_continuous_button)
+        reset_statistics_button = QtWidgets.QPushButton(
+            "Reset All Packets Statistics"
+        )
+        reset_statistics_button.clicked.connect(self._reset_all_packet_statistics)
+        run_layout.addWidget(reset_statistics_button)
         refresh_button = QtWidgets.QPushButton("Refresh Analysis")
         refresh_button.clicked.connect(self._request_analysis)
         run_layout.addWidget(refresh_button)
         run_layout.addWidget(
             QtWidgets.QLabel(
-                "Run Single captures new Pluto IQ. Refresh reuses the current capture."
+                "Continuous repeats Capture -> Analysis without buffering captures. "
+                "Refresh reuses the current capture."
             )
         )
         run_layout.addStretch(1)
@@ -2194,6 +2289,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                     if self.constellation_density_action.isChecked()
                     else "Flat"
                 ),
+                "constellation_density_spread": self._symbol_density_spread().value,
                 "psk_symbol_plot_mode": (
                     "Differential IQ"
                     if self.differential_iq_symbol_plot_action.isChecked()
@@ -2523,6 +2619,15 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.constellation_density_action.setChecked(
                 constellation_trace_mode == "Density"
             )
+            density_spread = SymbolDensitySpread(
+                str(
+                    display_config.get(
+                        "constellation_density_spread",
+                        SymbolDensitySpread.MAXIMUM.value,
+                    )
+                )
+            )
+            self.constellation_density_spread_actions[density_spread].setChecked(True)
             psk_symbol_plot_mode = str(
                 display_config.get("psk_symbol_plot_mode", "Physical IQ")
             )
@@ -3009,6 +3114,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
 
     def _run_pluto_single(self) -> None:
+        if self._continuous_run_requested:
+            return
         if (
             self._pluto_capture_thread is not None
             and self._pluto_capture_thread.isRunning()
@@ -3024,9 +3131,60 @@ class VSAWindow(QtWidgets.QMainWindow):
         except ValueError as error:
             QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", str(error))
             return
+        self._start_pluto_capture(settings, continuous=False)
+
+    def _toggle_pluto_continuous(self) -> None:
+        if self._continuous_run_requested:
+            self._continuous_run_requested = False
+            capture = self._pluto_capture_thread
+            if capture is not None and capture.isRunning():
+                capture.cancel()
+            self.run_continuous_action.setEnabled(False)
+            self.run_continuous_button.setEnabled(False)
+            self.statusBar().showMessage(
+                "Stopping Continuous after the active capture/analysis..."
+            )
+            if capture is None and self._analysis_thread is None:
+                self._finish_continuous_run()
+            return
+        if self._pluto_capture_thread is not None or self._analysis_thread is not None:
+            self.statusBar().showMessage(
+                "Wait for the current capture/analysis before starting Continuous"
+            )
+            return
+        try:
+            settings = self._pluto_capture_settings()
+            self._validate_experimental_lo_offset(settings)
+            signal = self._signal_from_controls()
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", str(error))
+            return
+        self._reset_all_packet_statistics()
+        self._continuous_run_requested = True
+        self._continuous_capture_settings = settings
+        self._continuous_signal = signal
+        self._continuous_sweep_count = 0
+        self.run_single_action.setEnabled(False)
+        self.run_single_button.setEnabled(False)
+        self.run_continuous_action.setText("Stop Continuous")
+        self.run_continuous_button.setText("Stop Continuous (Pluto)")
+        self.open_config_action.setEnabled(False)
+        self.meas_config_menu.setEnabled(False)
+        self.refresh_analysis_action.setEnabled(False)
+        self._meas_config_dialog.setEnabled(False)
+        self._start_pluto_capture(settings, continuous=True)
+
+    def _start_pluto_capture(
+        self,
+        settings: PlutoCaptureSettings,
+        *,
+        continuous: bool,
+    ) -> None:
+        self._active_capture_continuous = bool(continuous)
         self.input_source_combo.setCurrentText("Pluto")
-        self.run_single_action.setText("Stop Single")
-        self.run_single_button.setText("Stop Single (Pluto)")
+        if not continuous:
+            self.run_single_action.setText("Stop Single")
+            self.run_single_button.setText("Stop Single (Pluto)")
         if settings.trigger_source is TriggerKind.POWER_LEVEL:
             capture_status = (
                 "Waiting for Pluto I/Q Power trigger - "
@@ -3040,14 +3198,21 @@ class VSAWindow(QtWidgets.QMainWindow):
                 f"{settings.requested_sample_rate_hz / 1e6:.3f} MS/s, "
                 f"{settings.capture_samples:,} samples"
             )
+        ready_check = getattr(self._pluto_source, "is_stream_ready", None)
+        stream_ready = bool(
+            continuous and callable(ready_check) and ready_check(settings)
+        )
         self.statusBar().showMessage(
-            "Preparing Pluto receiver - waiting for the first continuous IQ block..."
+            "Reading the newest buffered Pluto IQ block..."
+            if stream_ready
+            else "Preparing Pluto receiver - waiting for the first IQ block..."
         )
         thread = PlutoSingleCaptureThread(
             self._pluto_source,
             settings,
             capture_status,
             self,
+            prefer_buffered=continuous,
         )
         thread.capture_armed.connect(self._pluto_capture_armed)
         thread.capture_ready.connect(self._pluto_capture_ready)
@@ -3058,6 +3223,45 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._pluto_capture_thread = thread
         self._pluto_capture_started_at = perf_counter()
         thread.start()
+
+    def _start_next_continuous_capture(self) -> None:
+        if not self._continuous_run_requested or self._shutdown_requested:
+            self._finish_continuous_run()
+            return
+        if self._pluto_capture_thread is not None or self._analysis_thread is not None:
+            QtCore.QTimer.singleShot(10, self._start_next_continuous_capture)
+            return
+        settings = self._continuous_capture_settings
+        if settings is None:
+            self._continuous_run_requested = False
+            self._finish_continuous_run()
+            return
+        self._start_pluto_capture(settings, continuous=True)
+
+    def _finish_continuous_run(self) -> None:
+        self._continuous_run_requested = False
+        self._continuous_capture_settings = None
+        self._continuous_signal = None
+        self.run_continuous_action.setText("Run Continuous")
+        self.run_continuous_button.setText("Run Continuous (Pluto)")
+        self.run_continuous_action.setEnabled(True)
+        self.run_continuous_button.setEnabled(True)
+        self.run_single_action.setEnabled(True)
+        self.run_single_button.setEnabled(True)
+        self.open_config_action.setEnabled(True)
+        self.meas_config_menu.setEnabled(True)
+        self.refresh_analysis_action.setEnabled(True)
+        self._meas_config_dialog.setEnabled(True)
+        self.statusBar().showMessage(
+            "Continuous stopped - "
+            f"{self._continuous_sweep_count} capture(s), "
+            f"{self._all_packet_statistics.packet_count} packet(s)"
+        )
+
+    def _reset_all_packet_statistics(self) -> None:
+        self._all_packet_statistics.clear()
+        self._all_packet_summary_values = {}
+        self._render_result_summary()
 
     def _pluto_capture_armed(self, message: str) -> None:
         """Report readiness only after libiio has delivered real IQ."""
@@ -3087,24 +3291,38 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         self.load_recording(
             recording,
-            self._signal_from_controls(),
-            analysis_context={"capture_ms": capture_ms},
+            self._continuous_signal or self._signal_from_controls(),
+            analysis_context={
+                "capture_ms": capture_ms,
+                "continuous": self._active_capture_continuous,
+                "collect_all_packets": self._active_capture_continuous,
+            },
         )
 
     def _pluto_capture_failed(self, message: str) -> None:
         self._pluto_capture_started_at = None
+        was_continuous = self._continuous_run_requested
+        self._continuous_run_requested = False
         self.statusBar().showMessage(f"Pluto capture failed: {message}")
         if self._shutdown_requested:
             return
         QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", message)
+        if was_continuous:
+            self._finish_continuous_run()
 
     def _pluto_capture_cancelled(self) -> None:
         self._pluto_capture_started_at = None
-        self.statusBar().showMessage("Pluto IQ capture cancelled")
+        if not self._continuous_run_requested:
+            self.statusBar().showMessage("Pluto IQ capture cancelled")
 
     def _pluto_capture_stopped(self) -> None:
         self._pluto_capture_started_at = None
         self._pluto_capture_thread = None
+        self._active_capture_continuous = False
+        if self._continuous_capture_settings is not None:
+            if not self._continuous_run_requested and self._analysis_thread is None:
+                self._finish_continuous_run()
+            return
         self.run_single_action.setText("Run Single")
         self.run_single_button.setText("Run Single (Pluto)")
         self.run_single_action.setEnabled(True)
@@ -3278,7 +3496,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         recording: IQRecording,
         signal: SignalDescription | None = None,
         *,
-        analysis_context: dict[str, float] | None = None,
+        analysis_context: dict[str, object] | None = None,
     ) -> None:
         self._selected_match_index = 1
         self.session.set_recording(recording)
@@ -3326,6 +3544,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         """Stop cancellable work and prevent new analysis before window teardown."""
 
         self._shutdown_requested = True
+        self._continuous_run_requested = False
         self._pending_analysis = None
         capture = self._pluto_capture_thread
         if capture is not None and capture.isRunning():
@@ -3390,7 +3609,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self,
         _checked: bool = False,
         *,
-        analysis_context: dict[str, float] | None = None,
+        analysis_context: dict[str, object] | None = None,
     ) -> bool:
         """Queue the newest configured analysis without blocking the GUI."""
         if self._shutdown_requested:
@@ -3423,10 +3642,15 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _start_analysis_request(
         self,
-        request: tuple[int, VSASession, dict[str, float]],
+        request: tuple[int, VSASession, dict[str, object]],
     ) -> None:
         generation, snapshot, context = request
-        thread = _AnalysisThread(generation, snapshot, self)
+        thread = _AnalysisThread(
+            generation,
+            snapshot,
+            bool(context.get("collect_all_packets", False)),
+            self,
+        )
         thread.analysis_ready.connect(self._analysis_ready)
         thread.analysis_failed.connect(self._analysis_failed)
         thread.finished.connect(self._analysis_stopped)
@@ -3437,18 +3661,27 @@ class VSAWindow(QtWidgets.QMainWindow):
         thread.start()
 
     def _analysis_ready(self, generation: int, completed: object) -> None:
-        if not isinstance(completed, VSASession):
+        if not isinstance(completed, _AnalysisCompletion):
             self._analysis_failed(generation, completed, "invalid analysis result")
             return
         if generation != self._analysis_generation:
             return
+        focused = completed.focused
         try:
-            self.session.adopt_analysis_results(completed)
+            self.session.adopt_analysis_results(focused)
         except ValueError:
             return
         display_started = perf_counter()
         self._update_summary()
         self._update_plots(reset_ranges=True)
+        if bool(self._active_analysis_context.get("continuous", False)):
+            for packet in completed.packets:
+                self._all_packet_statistics.add(
+                    self._build_result_summary_values(packet)
+                )
+            self._all_packet_summary_values = self._all_packet_statistics.values()
+            self._continuous_sweep_count += 1
+            self._render_result_summary()
         display_ms = (perf_counter() - display_started) * 1e3
         self._last_analysis_timings_ms = {
             **self.session.analysis_timings_ms,
@@ -3471,8 +3704,11 @@ class VSAWindow(QtWidgets.QMainWindow):
                 f"Display {display_ms:.0f} ms"
             )
             return
-        dsp_ms = self._last_analysis_timings_ms.get("total_dsp", 0.0)
-        total_ms = float(capture_ms) + dsp_ms + display_ms
+        all_dsp_ms = sum(
+            float(packet.analysis_timings_ms.get("total_dsp", 0.0))
+            for packet in completed.packets
+        )
+        total_ms = float(capture_ms) + all_dsp_ms + display_ms
         refill_ratio = float(
             self.session.recording.metadata.get(
                 "continuous_rx_max_refill_ratio",
@@ -3480,6 +3716,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             or 0.0
         )
+        continuous = bool(self._active_analysis_context.get("continuous", False))
         transport_status = ""
         if refill_ratio >= 1.0:
             transport_status = (
@@ -3487,12 +3724,38 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
         elif self.session.recording.sample_rate_hz > 6_000_000.0:
             transport_status = " | RX GAP RISK (>6 MS/s stock Pluto USB)"
+        if continuous and bool(
+            self.session.recording.metadata.get("continuous_rx_buffered_start", False)
+        ):
+            transport_status += " | newest buffered RX block"
+        prepare_stage = self.session.recording.metadata.get(
+            "continuous_rx_prepare_ms"
+        )
+        cursor_stage = self.session.recording.metadata.get(
+            "continuous_rx_cursor_setup_ms"
+        )
+        first_block_stage = self.session.recording.metadata.get(
+            "continuous_rx_first_block_wait_ms"
+        )
+        if prepare_stage is not None:
+            transport_status += (
+                f" | Prep {float(prepare_stage):.1f} ms"
+                f" / Cursor {float(cursor_stage or 0.0):.1f} ms"
+                f" / First block {float(first_block_stage or 0.0):.1f} ms"
+            )
+        run_label = "Pluto Continuous - " if continuous else "Pluto Single complete - "
+        cycle_label = "Cycle" if continuous else "Total"
+        packet_status = (
+            f" | All {self._all_packet_statistics.packet_count} packet(s)"
+            if continuous
+            else ""
+        )
         self.statusBar().showMessage(
-            "Pluto Single complete - "
-            f"{self.session.recording.sample_count:,} samples, "
+            f"{run_label}{self.session.recording.sample_count:,} samples, "
             f"{self.session.recording.sample_rate_hz / 1e6:.3f} MS/s | "
-            f"Capture {capture_ms:.0f} ms | DSP {dsp_ms:.0f} ms | "
-            f"Display {display_ms:.0f} ms | Total {total_ms:.0f} ms"
+            f"Capture {float(capture_ms):.0f} ms | DSP {all_dsp_ms:.0f} ms | "
+            f"Display {display_ms:.0f} ms | {cycle_label} {total_ms:.0f} ms"
+            f"{packet_status}"
             f"{transport_status}"
         )
 
@@ -3504,6 +3767,8 @@ class VSAWindow(QtWidgets.QMainWindow):
     ) -> None:
         if generation != self._analysis_generation:
             return
+        if bool(self._active_analysis_context.get("continuous", False)):
+            self._continuous_run_requested = False
         if isinstance(completed, VSASession):
             try:
                 self.session.adopt_analysis_results(completed)
@@ -3516,12 +3781,18 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Analysis failed: {message}")
 
     def _analysis_stopped(self) -> None:
+        completed_context = self._active_analysis_context
         self._analysis_thread = None
         self._active_analysis_context = {}
         if self._shutdown_requested:
             self._pending_analysis = None
             return
         if self._pending_analysis is None:
+            if bool(completed_context.get("continuous", False)):
+                if self._continuous_run_requested:
+                    QtCore.QTimer.singleShot(0, self._start_next_continuous_capture)
+                else:
+                    self._finish_continuous_run()
             return
         request = self._pending_analysis
         self._pending_analysis = None
@@ -3571,6 +3842,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         return True
 
     def _update_match_navigation_actions(self) -> None:
+        if self._continuous_run_requested:
+            self.previous_result_action.setEnabled(False)
+            self.next_result_action.setEnabled(False)
+            return
         pattern_result = self.session.pattern_result
         if pattern_result is None:
             self.previous_result_action.setEnabled(False)
@@ -4656,6 +4931,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             frequency_khz,
             y_limit_khz=y_limit_khz,
             density=self.constellation_density_action.isChecked(),
+            density_spread=self._symbol_density_spread(),
         )
 
     def _plot_symbol_distribution(
@@ -4670,7 +4946,162 @@ class VSAWindow(QtWidgets.QMainWindow):
             symbols,
             density=self.constellation_density_action.isChecked(),
             minimum_limit=density_limit,
+            density_spread=self._symbol_density_spread(),
         )
+
+    def _symbol_density_spread(self) -> SymbolDensitySpread:
+        action = self.constellation_density_spread_group.checkedAction()
+        return SymbolDensitySpread(
+            action.data()
+            if action is not None
+            else SymbolDensitySpread.MAXIMUM.value
+        )
+
+    def _build_result_summary_values(
+        self, session: VSASession
+    ) -> dict[str, str]:
+        """Format one analyzed packet without publishing it to the GUI."""
+        result = session.result
+        signal = session.signal
+        if result is None or signal is None:
+            return {}
+        pattern = session.pattern_result
+        spectrum_result = session.pattern_range_result or result
+        symbols = pattern.decoded_symbols if pattern is not None else result.decoded_symbols
+        values: dict[str, str] = {
+            "modulation": signal.modulation.value,
+            "result_symbols": str(symbols.size),
+        }
+        finite_power_dbm = spectrum_result.power_dbm[
+            np.isfinite(spectrum_result.power_dbm)
+        ]
+        if finite_power_dbm.size:
+            mean_mw = float(np.mean(10.0 ** (finite_power_dbm / 10.0)))
+            if mean_mw > 0.0:
+                values["power"] = f"{10.0 * np.log10(mean_mw):+.2f} dBm"
+        if signal.modulation.family.uses_iq_constellation:
+            if pattern is not None:
+                for item_id, metadata_key in (
+                    ("evm_rms", "physical_evm_rms_percent"),
+                    (
+                        "differential_symbol_evm_rms",
+                        "differential_symbol_evm_rms_percent",
+                    ),
+                    ("bluetooth_devm_rms", "bluetooth_devm_rms_percent"),
+                ):
+                    metric = pattern.metadata.get(metadata_key)
+                    if metric is not None:
+                        values[item_id] = _format_evm(float(metric))
+            elif spectrum_result.evm_rms_percent is not None:
+                item_id = (
+                    "differential_symbol_evm_rms"
+                    if signal.modulation.differential
+                    else "evm_rms"
+                )
+                values[item_id] = _format_evm(
+                    float(spectrum_result.evm_rms_percent)
+                )
+        if pattern is None:
+            if session.pattern_error:
+                values["pattern_symbols_correct"] = "No"
+                values["pattern_error"] = session.pattern_error
+            elif result.frequency_error_hz is not None:
+                values["carrier_frequency_error"] = (
+                    f"{float(result.frequency_error_hz) / 1e3:+.3f} kHz"
+                )
+            return values
+
+        recording = session.recording
+        analysis_center_hz = (
+            session.settings.analysis_center_frequency_hz
+            if session.settings.analysis_center_frequency_hz is not None
+            else (recording.center_frequency_hz if recording is not None else 0.0)
+        )
+        valid = bool(pattern.metadata.get("pattern_match_valid", True))
+        values.update(
+            {
+                "pattern_symbols_correct": (
+                    "Yes" if valid and pattern.pattern_symbol_errors == 0 else "No"
+                ),
+                "pattern_match_variant": str(
+                    pattern.metadata.get("pattern_match_variant", "Normal")
+                ),
+                "iq_correlation": f"{pattern.correlation * 100.0:.2f} %" if valid else "—",
+                "carrier_frequency_error": (
+                    f"{pattern.carrier_frequency_offset_hz / 1e3:+.3f} kHz"
+                ),
+                "estimated_carrier": (
+                    f"{(analysis_center_hz + pattern.carrier_frequency_offset_hz) / 1e6:.6f} MHz"
+                ),
+                "display": "Measured",
+                "match_selection": str(
+                    pattern.metadata.get("selected_match_index", 1)
+                ),
+            }
+        )
+        if not valid and session.pattern_error:
+            values["pattern_error"] = session.pattern_error
+        reported_drift_hz_per_s = float(
+            pattern.metadata.get(
+                "candidate_drift_hz_per_s",
+                pattern.carrier_frequency_drift_hz_per_s,
+            )
+            if signal.modulation.family is ModulationFamily.FSK
+            else pattern.carrier_frequency_drift_hz_per_s
+        )
+        if signal.modulation.family.uses_iq_constellation:
+            rate_error_ppm = pattern.metadata.get("symbol_rate_error_ppm")
+            sync_evm = pattern.metadata.get("synchronization_evm_rms")
+            if rate_error_ppm is not None:
+                values["symbol_rate_error"] = f"{float(rate_error_ppm):+.2f} ppm"
+            if sync_evm is not None:
+                values["sync_evm_rms"] = _format_evm(float(sync_evm) * 100.0)
+            values["psk_carrier_drift"] = (
+                f"{reported_drift_hz_per_s / 1e6:+.3f} kHz/ms"
+            )
+            return values
+
+        measured_deviation = pattern.frequency_deviation_hz
+        reference_deviation = signal.frequency_deviation_hz
+        if measured_deviation is not None:
+            values["fsk_measured_deviation"] = (
+                f"{float(measured_deviation) / 1e3:.3f} kHz"
+            )
+        if reference_deviation is not None:
+            values["fsk_reference_deviation"] = (
+                f"{float(reference_deviation) / 1e3:.3f} kHz"
+            )
+        if measured_deviation is not None and reference_deviation is not None:
+            values["fsk_deviation_error"] = (
+                f"{float(measured_deviation) - float(reference_deviation):+.0f} Hz"
+            )
+        values["carrier_frequency_drift"] = (
+            f"{reported_drift_hz_per_s / signal.symbol_rate_hz:+.3f} Hz/Sym"
+        )
+        frequency_residual = pattern.metadata.get("frequency_model_residual_rms_hz")
+        if frequency_residual is not None:
+            values["frequency_fit_rms"] = f"{float(frequency_residual) / 1e3:.3f} kHz"
+            if measured_deviation is not None and measured_deviation > 0.0:
+                values["frequency_error_rms"] = (
+                    f"{100.0 * float(frequency_residual) / float(measured_deviation):.2f} %"
+                )
+        timing_confidence = pattern.metadata.get("timing_confidence")
+        if timing_confidence is not None:
+            values["timing_confidence"] = f"{float(timing_confidence):.3f}"
+        deviation_error = pattern.metadata.get("frequency_deviation_error_percent")
+        if deviation_error is not None:
+            values["deviation_error_percent"] = f"{float(deviation_error):+.2f} %"
+        drift_accepted = pattern.metadata.get("drift_model_accepted")
+        drift_reason = pattern.metadata.get("drift_rejection_reason")
+        values["drift_model"] = (
+            "Accepted"
+            if drift_accepted
+            else f"Rejected ({drift_reason or 'quality gate'})"
+        )
+        values["applied_drift"] = (
+            f"{pattern.carrier_frequency_drift_hz_per_s / 1e6:+.3f} kHz/ms"
+        )
+        return values
 
     def _set_result_summary(self, values: dict[str, str]) -> None:
         self._result_summary_values = dict(values)
@@ -4679,10 +5110,14 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _render_result_summary(self) -> None:
         signal = self.session.signal
         if signal is None:
-            rows: list[tuple[str, str]] = []
+            rows: list[tuple[str, str, str]] = []
         else:
             rows = [
-                (definition.label, self._result_summary_values.get(definition.item_id, "—"))
+                (
+                    definition.label,
+                    self._result_summary_values.get(definition.item_id, "—"),
+                    self._all_packet_summary_values.get(definition.item_id, "—"),
+                )
                 for definition in RESULT_SUMMARY_ITEMS
                 if definition.implemented
                 and definition.item_id in self._selected_result_summary_ids
@@ -4694,16 +5129,19 @@ class VSAWindow(QtWidgets.QMainWindow):
             ]
         self.result_summary.clearContents()
         self.result_summary.setRowCount(len(rows))
-        for row, (name, value) in enumerate(rows):
+        for row, (name, value, all_packets) in enumerate(rows):
             name_item = QtWidgets.QTableWidgetItem(name)
             value_item = QtWidgets.QTableWidgetItem(value)
+            all_packets_item = QtWidgets.QTableWidgetItem(all_packets)
             name_item.setTextAlignment(
                 QtCore.Qt.AlignmentFlag.AlignLeft
                 | QtCore.Qt.AlignmentFlag.AlignVCenter
             )
             value_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            all_packets_item.setTextAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             self.result_summary.setItem(row, 0, name_item)
             self.result_summary.setItem(row, 1, value_item)
+            self.result_summary.setItem(row, 2, all_packets_item)
 
     def _add_pattern_range_overlay(
         self, plot: pg.PlotWidget, *, fit_range: bool = True

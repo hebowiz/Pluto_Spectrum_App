@@ -43,6 +43,19 @@ def test_independent_consumers_do_not_remove_each_others_blocks() -> None:
     assert result_a.blocks[0].sequence == result_b.blocks[0].sequence
 
 
+def test_newest_cursor_reuses_latest_retained_block_without_replaying_backlog() -> None:
+    stream = IQStreamBuffer(capacity_blocks=4)
+    stream.begin_stream()
+    stream.publish(make_iq(0, 2))
+    newest = stream.publish(make_iq(2, 2))
+
+    result = stream.read(stream.create_cursor(start="newest"))
+
+    assert result.overrun is False
+    assert [block.sequence for block in result.blocks] == [newest.sequence]
+    np.testing.assert_array_equal(result.blocks[0].iq, make_iq(2, 2))
+
+
 def test_consumer_overrun_is_reported_with_missed_block_count() -> None:
     stream = IQStreamBuffer(capacity_blocks=2)
     stream.begin_stream()

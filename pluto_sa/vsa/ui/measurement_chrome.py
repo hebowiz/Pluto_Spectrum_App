@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from enum import StrEnum
 
 import numpy as np
 import pyqtgraph as pg
@@ -20,6 +21,33 @@ CONSTELLATION_DENSITY_RED_LEVEL = 0.75
 FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH = 0.22
 FREQUENCY_CONSTELLATION_X_LIMIT = 1.0
 TRACE_SYMBOL_SIZE = 5.5
+
+
+class SymbolDensitySpread(StrEnum):
+    """Shared density-kernel width for every VSA symbol-plot mode."""
+
+    NONE = "None"
+    MEDIUM = "Medium"
+    MAXIMUM = "Maximum"
+
+
+_SYMBOL_DENSITY_SIGMA_BINS = {
+    SymbolDensitySpread.NONE: 0.0,
+    SymbolDensitySpread.MEDIUM: 0.45,
+    SymbolDensitySpread.MAXIMUM: CONSTELLATION_DENSITY_SIGMA_BINS,
+}
+
+
+def symbol_density_sigma_bins(
+    spread: SymbolDensitySpread | str,
+) -> float:
+    """Resolve a persisted density-spread choice to Gaussian sigma in bins."""
+
+    try:
+        resolved = SymbolDensitySpread(spread)
+    except ValueError as error:
+        raise ValueError(f"Unsupported symbol density spread: {spread!r}") from error
+    return _SYMBOL_DENSITY_SIGMA_BINS[resolved]
 
 
 class CenteredLabelAxisItem(pg.AxisItem):
@@ -262,6 +290,7 @@ def plot_frequency_symbol_distribution(
     *,
     y_limit_khz: float,
     density: bool,
+    density_spread: SymbolDensitySpread | str = SymbolDensitySpread.MAXIMUM,
 ) -> pg.ImageItem | None:
     """Render the common flat/density FSK constellation-frequency view."""
 
@@ -289,13 +318,15 @@ def plot_frequency_symbol_distribution(
     )
     image = np.zeros((vertical_bins, horizontal_bins), dtype=np.float64)
     image[:, horizontal_bins // 2] = histogram
-    image = gaussian_filter(
-        image,
-        sigma=(CONSTELLATION_DENSITY_SIGMA_BINS,) * 2,
-        mode="constant",
-        cval=0.0,
-        truncate=3.0,
-    )
+    sigma = symbol_density_sigma_bins(density_spread)
+    if sigma > 0.0:
+        image = gaussian_filter(
+            image,
+            sigma=(sigma,) * 2,
+            mode="constant",
+            cval=0.0,
+            truncate=3.0,
+        )
     image = np.log1p(image)
     item = _density_image(
         image,
@@ -318,6 +349,7 @@ def plot_complex_symbol_distribution(
     *,
     density: bool,
     minimum_limit: float = IQ_PLANE_LIMIT,
+    density_spread: SymbolDensitySpread | str = SymbolDensitySpread.MAXIMUM,
 ) -> pg.ImageItem | None:
     """Render the common flat/density complex-symbol view."""
 
@@ -347,13 +379,16 @@ def plot_complex_symbol_distribution(
         bins=CONSTELLATION_DENSITY_BINS,
         range=((-limit, limit), (-limit, limit)),
     )
-    image = gaussian_filter(
-        histogram.T,
-        sigma=CONSTELLATION_DENSITY_SIGMA_BINS,
-        mode="constant",
-        cval=0.0,
-        truncate=3.0,
-    )
+    image = histogram.T
+    sigma = symbol_density_sigma_bins(density_spread)
+    if sigma > 0.0:
+        image = gaussian_filter(
+            image,
+            sigma=sigma,
+            mode="constant",
+            cval=0.0,
+            truncate=3.0,
+        )
     image = np.log1p(image)
     item = _density_image(
         image,

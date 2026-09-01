@@ -22,6 +22,7 @@ from pluto_sa.vsa.protocol_modes.bluetooth.ui import BluetoothAnalyzerWindow, fo
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
+from pluto_sa.vsa.ui.measurement_chrome import SymbolDensitySpread
 from pluto_vsg.engine import BluetoothBRWaveformEngine, BluetoothLEWaveformEngine
 from pluto_vsg.model import BluetoothLEPhy, BluetoothPacketKind
 from pluto_vsg.profiles import bluetooth_br_edr_project, bluetooth_br_fields, bluetooth_le_project
@@ -609,6 +610,7 @@ def test_bluetooth_config_is_separate_and_restored(tmp_path) -> None:
         first.phy_combo.setCurrentText("LE 2M")
         first.channel_spin.setValue(38)
         first._set_symbol_density(True)
+        first._set_symbol_density_spread(SymbolDensitySpread.MEDIUM)
         first._set_fsk_symbol_plot_mode("Phase Difference")
         first._save_startup_meas_config()
     finally:
@@ -625,6 +627,8 @@ def test_bluetooth_config_is_separate_and_restored(tmp_path) -> None:
         assert second.phy_combo.currentText() == "LE 2M"
         assert second.channel_spin.value() == 38
         assert second._symbol_density is True
+        assert second._symbol_density_spread is SymbolDensitySpread.MEDIUM
+        assert second.config_density_spread.currentText() == "Medium"
         assert second._fsk_symbol_plot_mode == "Phase Difference"
     finally:
         second.close()

@@ -25,18 +25,25 @@ class PlutoSingleCaptureThread(QtCore.QThread):
         settings: PlutoCaptureSettings,
         armed_message: str,
         parent: QtCore.QObject | None = None,
+        *,
+        prefer_buffered: bool = False,
     ) -> None:
         super().__init__(parent)
         self._source = source
         self._settings = settings
         self._armed_message = str(armed_message)
+        self._prefer_buffered = bool(prefer_buffered)
 
     def run(self) -> None:
         try:
+            capture_options = {
+                "cancelled": self.isInterruptionRequested,
+                "armed": lambda: self.capture_armed.emit(self._armed_message),
+            }
+            if self._prefer_buffered:
+                capture_options["prefer_buffered"] = True
             recording = self._source.capture_single(
-                self._settings,
-                cancelled=self.isInterruptionRequested,
-                armed=lambda: self.capture_armed.emit(self._armed_message),
+                self._settings, **capture_options
             )
             if self.isInterruptionRequested():
                 self.capture_cancelled.emit()

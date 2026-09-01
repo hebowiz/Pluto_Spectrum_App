@@ -4,7 +4,6 @@
   "settings": {
     "input_frontend": {
       "input_source": "Pluto",
-      "pluto_uri": "",
       "center_frequency_mhz": 2440.0,
       "rf_bandwidth_mhz": 8.0,
       "lo_offset_enabled": false,
@@ -126,9 +125,12 @@
     },
     "display_config": {
       "show_symbol_points": true,
+      "symbol_table_format": "Hexadecimal",
       "iq_power_signal": "Measured",
       "modulation_signal": "Raw IQ",
+      "qam_modulation_signal": "Measured",
       "constellation_trace_mode": "Density",
+      "constellation_density_spread": "None",
       "psk_symbol_plot_mode": "Physical IQ",
       "fsk_symbol_plot_mode": "Constellation Frequency"
     }

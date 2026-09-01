@@ -149,16 +149,20 @@ class IQStreamBuffer:
             return block
 
     def create_cursor(self, *, start: str = "latest") -> IQStreamCursor:
-        """Create a cursor at newly arriving data or the oldest retained block."""
+        """Create a cursor at new, newest retained, or oldest retained data."""
         with self._lock:
             if start == "latest":
                 next_sequence = self._next_sequence
+            elif start == "newest":
+                next_sequence = (
+                    self._blocks[-1].sequence if self._blocks else self._next_sequence
+                )
             elif start == "oldest":
                 next_sequence = (
                     self._blocks[0].sequence if self._blocks else self._next_sequence
                 )
             else:
-                raise ValueError("start must be 'latest' or 'oldest'")
+                raise ValueError("start must be 'latest', 'newest', or 'oldest'")
             return IQStreamCursor(next_sequence=next_sequence)
 
     def read(

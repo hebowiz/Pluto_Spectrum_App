@@ -162,10 +162,13 @@ Modulation  | Symbol Plot | Symbol Table
 ```
 
 - IQ Powerも他resultと同様に移動、float、close、再表示できる。
-- Result SummaryはSymbol Tableから分離し、`Parameter`と`Current`の2列へ項目を縦方向に並べる。
+- Result SummaryはSymbol Tableから分離し、`Parameter`、`Current`、`All Packets`の3列へ項目を縦方向に並べる。`Current`は現在フォーカス中のResult Range、`All Packets`は直近のContinuous開始からStopまでに解析した全packetの統計とする。
 - Result SummaryとSymbol Tableのdata cell背景は交互色を使わず、単一色で統一する。
 - Result Summary項目は`pluto_sa/vsa/result_summary.py`の安定した内部ID、表示名、Common/PSK/FSK/Diagnostics分類、対応modulation family、実装状態、既定表示を唯一の定義元とする。Result Summary右クリックの階層check menuと`Meas Config > Result Summary`のcheck treeは同じ選択setを共有する。`Show All`、`Measurement Results Only`、`Diagnostics Only`、`Restore Defaults`を備え、選択IDは手動Configと終了時Configへ保存する。旧Configのsection欠落時は既定へ戻し、未知の将来IDは無視する。R&S項目の未実装分は`Not implemented`として表示するが選択不可とし、同期用`Sync EVM RMS`/`Frequency Fit RMS`を正式な`EVM RMS`/`Frequency Error RMS`と混同しない。
 - 既定表示はCommonのModulation/Power/Carrier Frequency Error、PSKのEVM RMS/Symbol Rate Error、FSKのFrequency Error RMS/FSK Meas Deviation/FSK Deviation Error/Carrier Frequency Drift、DiagnosticsのPattern Symbols Correct/IQ Correlation/Selected Result/Result Symbols/Pattern Errorとする。PowerはResult Range解析dataのdBmをlinear powerへ戻して平均する。FSK Deviation Errorは`measured-reference`をHz、Carrier Frequency DriftはHz/Symで表示する。Frequency Error RMSは現行FSK frequency-model residualをmeasured deviationで正規化した開発値であり、規格適合値ではない。
+- `All Packets`は数値を`average [minimum … maximum] (N=count)`で表示する。Powerのaverageはlinear powerで重み付き平均してdBmへ戻し、EVM/DEVM/Frequency Error RMS系は二乗平均平方根、その他は算術平均とする。packetごとのResult Symbol数をweightに使い、category値は値別件数を表示する。統計はCapture IQやpacket sessionを保持せずincremental accumulatorだけを保持し、Continuous開始時または`Reset All Packets Statistics`でclearする。
+- Generic VSAの`Run Continuous`は`Capture -> capture内の全eligible pattern候補を逐次解析 -> GUI/統計を1回更新 -> 次Capture`のbackpressure方式とする。未解析Capture queueは持たないため、DSPが実時間に追いつかない場合は測定更新周期が遅くなるがmemoryは増加しない。Continuous中は測定設定と手動Refreshをlockし、Stop後も実行中のDSP 1件は完了させて結果を確定してから停止する。
+- ContinuousのPluto producerはDSP中も停止せず、次Captureはring bufferの`newest` cursor（開始時点で保持されている最新block）から読む。`latest` cursorのように次block到着まで待たず、`oldest` cursorのように解析遅延分のbacklogを再生しない。初回だけはPluto接続、libiio buffer生成、最初のDMA block到着が必要であり、UIは初回を`Preparing`、再利用時を`Reading the newest buffered Pluto IQ block`として区別する。
 - Symbol PlotはPSK時にConstellationを表示する。FSK時は1 symbol期間の位相差分をI/Q平面へ表示する既存方式と、復調器のsymbol-frequencyをR&S `Constellation Frequency`同様に縦一列へ表示する方式を切り替えるDock Widget。後者の縦軸はModulationと同じReference Deviationの±150%としFlat/Densityの両traceに対応する。
 - 初期geometryは各列幅と各行高を均等化する。ユーザーが移動・resizeした後はQt dock layoutに従う。
 

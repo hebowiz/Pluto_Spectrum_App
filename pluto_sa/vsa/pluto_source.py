@@ -130,6 +130,7 @@ class PlutoLiveSource:
         writable_frontend=True,
     )
     _STREAM_CAPTURE_BLOCK_SAMPLES = 65_536
+    _STREAM_BUFFER_BLOCKS = 8
 
     def __init__(
         self,
@@ -141,6 +142,30 @@ class PlutoLiveSource:
         self._receiver: PlutoReceiver | None = None
         self._acquisition: ContinuousIQAcquisition | None = None
         self._active_config: SpectrumConfig | None = None
+        self._actual_sample_rate_hz: int | None = None
+        self._actual_rf_bandwidth_hz: int | None = None
+
+    def is_stream_ready(self, settings: PlutoCaptureSettings) -> bool:
+        """Return whether matching Pluto IQ is already arriving in the ring."""
+        acquisition = self._acquisition
+        if (
+            self._receiver is None
+            or acquisition is None
+            or self._active_config != self._spectrum_config(settings)
+            or not acquisition.is_running
+        ):
+            return False
+        plan = acquisition.plan
+        return bool(
+            plan is not None
+            and plan.source == "vsa_continuous"
+            and plan.max_blocks is None
+            and plan.block_size
+            == resolve_record_stream_block_samples(
+                settings.capture_samples,
+                base_block_samples=self._STREAM_CAPTURE_BLOCK_SAMPLES,
+            )
+        )
 
     def capture_single(
         self,
@@ -149,22 +174,44 @@ class PlutoLiveSource:
         cancelled: Callable[[], bool] | None = None,
         armed: Callable[[], None] | None = None,
         fresh: bool = True,
+        prefer_buffered: bool = False,
     ) -> IQRecording:
         cancelled = cancelled or (lambda: False)
         if cancelled():
             raise CaptureCancelledError("Pluto capture cancelled")
+        prepare_started_at = time.perf_counter()
+        producer_reused = self.is_stream_ready(settings)
+        buffered_start = bool(prefer_buffered and producer_reused)
         config = self._spectrum_config(settings)
         if self._receiver is None:
             self._receiver = self._receiver_factory(config)
             self._acquisition = ContinuousIQAcquisition(self._receiver)
+            self._actual_sample_rate_hz = None
+            self._actual_rf_bandwidth_hz = None
         elif self._active_config != config:
             assert self._acquisition is not None
             self._acquisition.stop()
             self._receiver.reconfigure(config)
+            self._actual_sample_rate_hz = None
+            self._actual_rf_bandwidth_hz = None
         self._active_config = config
 
-        actual_sample_rate_hz = self._receiver.get_current_sample_rate_hz()
-        actual_rf_bandwidth_hz = self._receiver.get_current_rf_bandwidth_hz()
+        # Hardware getters take the receiver I/Q lock.  Once the continuous
+        # producer is running, that lock is held across blocking sdr.rx() calls
+        # and can starve this capture worker for multiple refills.  The values
+        # cannot change without the reconfiguration path above, so cache them
+        # while the producer is stopped/new and reuse them for every re-arm.
+        if self._actual_sample_rate_hz is None:
+            self._actual_sample_rate_hz = int(
+                self._receiver.get_current_sample_rate_hz()
+            )
+        if self._actual_rf_bandwidth_hz is None:
+            self._actual_rf_bandwidth_hz = int(
+                self._receiver.get_current_rf_bandwidth_hz()
+            )
+        actual_sample_rate_hz = self._actual_sample_rate_hz
+        actual_rf_bandwidth_hz = self._actual_rf_bandwidth_hz
+        prepare_ms = (time.perf_counter() - prepare_started_at) * 1e3
         usable_bandwidth_hz = min(
             0.8 * float(actual_sample_rate_hz),
             float(actual_rf_bandwidth_hz),
@@ -192,6 +239,7 @@ class PlutoLiveSource:
             cancelled=cancelled,
             armed=armed,
             fresh=bool(fresh),
+            prefer_buffered=buffered_start,
         )
         recording = recording_from_acquisition(
             record,
@@ -270,6 +318,9 @@ class PlutoLiveSource:
                 ),
                 "acquisition_trigger_sample_index": int(record.trigger_sample_index),
                 "continuous_rx_block_samples": int(stream_block_samples),
+                "continuous_rx_buffered_start": buffered_start,
+                "continuous_rx_producer_reused": bool(producer_reused),
+                "continuous_rx_prepare_ms": float(prepare_ms),
                 "trigger_offset_in_rx_block": int(record.trigger.offset_in_block),
                 "trigger_samples_to_rx_block_end": int(
                     stream_block_samples - record.trigger.offset_in_block
@@ -286,6 +337,7 @@ class PlutoLiveSource:
         cancelled: Callable[[], bool],
         armed: Callable[[], None] | None,
         fresh: bool,
+        prefer_buffered: bool,
     ):
         assert self._receiver is not None
         assert self._acquisition is not None
@@ -334,11 +386,16 @@ class PlutoLiveSource:
             settings.capture_samples,
             base_block_samples=self._STREAM_CAPTURE_BLOCK_SAMPLES,
         )
+        cursor_setup_started_at = time.perf_counter()
         cursor = self._acquisition.start(
             block_size=stream_block_samples,
             source="vsa_continuous",
             fresh=fresh,
+            cursor_start="newest" if prefer_buffered else "latest",
         )
+        cursor_setup_ms = (time.perf_counter() - cursor_setup_started_at) * 1e3
+        first_block_wait_started_at = time.perf_counter()
+        first_block_wait_ms: float | None = None
         armed_reported = False
         observed_blocks = 0
         max_refill_ratio = 0.0
@@ -355,6 +412,10 @@ class PlutoLiveSource:
             if not read_result.blocks:
                 time.sleep(0.001)
                 continue
+            if first_block_wait_ms is None:
+                first_block_wait_ms = (
+                    time.perf_counter() - first_block_wait_started_at
+                ) * 1e3
             if not armed_reported:
                 # A running Python thread is not proof that libiio has queued
                 # and filled its first DMA buffer.  Only expose the armed state
@@ -384,6 +445,10 @@ class PlutoLiveSource:
                         {
                             "continuous_rx_observed_blocks": int(observed_blocks),
                             "continuous_rx_max_refill_ratio": float(max_refill_ratio),
+                            "continuous_rx_cursor_setup_ms": float(cursor_setup_ms),
+                            "continuous_rx_first_block_wait_ms": float(
+                                first_block_wait_ms or 0.0
+                            ),
                             "continuous_rx_kernel_buffers_requested": int(
                                 getattr(self._receiver, "rx_kernel_buffers_requested", 0)
                             ),
@@ -408,6 +473,8 @@ class PlutoLiveSource:
             self._receiver = None
             self._acquisition = None
             self._active_config = None
+            self._actual_sample_rate_hz = None
+            self._actual_rf_bandwidth_hz = None
 
     @staticmethod
     def _spectrum_config(settings: PlutoCaptureSettings) -> SpectrumConfig:
@@ -423,4 +490,5 @@ class PlutoLiveSource:
             time_analyzer_sample_rate_hz=settings.requested_sample_rate_hz,
             time_analyzer_rf_bandwidth_hz=int(round(settings.rf_bandwidth_hz)),
             time_analyzer_time_span_s=float(settings.capture_length_s),
+            capture_buffer_blocks=PlutoLiveSource._STREAM_BUFFER_BLOCKS,
         )
