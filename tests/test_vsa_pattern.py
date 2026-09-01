@@ -6,7 +6,11 @@ from scipy.ndimage import shift as fractional_shift
 
 import pluto_sa.vsa.session as session_module
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
-from pluto_sa.vsa.mapping import BLUETOOTH_HDT_MAPPING, reverse_symbol_bits
+from pluto_sa.vsa.mapping import (
+    BLUETOOTH_HDT_MAPPING,
+    psk_constellation,
+    reverse_symbol_bits,
+)
 from pluto_sa.vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
@@ -19,7 +23,9 @@ from pluto_sa.vsa.pattern import (
     PatternSearchSettings,
     ResultRangeSettings,
     SynchronizationSource,
+    carrier_correct_recording,
     detect_iq_power_trigger_events,
+    prepare_psk_iq,
     _constellation,
     _fit_differential_psk_phase_model,
 )
@@ -201,6 +207,58 @@ def test_detected_data_hdt_qam_fixture_is_not_truncated_by_psk_interval() -> Non
     )
 
     assert result.decoded_symbols.size == 500
+
+
+def test_known_hdt_qam_pattern_uses_the_published_symbol_sample_times() -> None:
+    path = Path(__file__).with_name("fixtures") / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    recording = FileIQSource.load(path)
+    signal = SignalDescription(
+        modulation=ModulationKind.QAM16,
+        symbol_rate_hz=2_000_000.0,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        symbol_mapping=BLUETOOTH_HDT_MAPPING,
+    )
+    pattern = KnownPattern(
+        tuple(int(value, 16) for value in "3 E D E 5 0 F 4 7 E".split())
+    )
+    demodulation = DemodulationSettings(
+        measurement_filter=MeasurementFilterMode.AUTO,
+        bit_ordering=BitOrdering.LSB,
+    )
+    result = PatternAnalyzer().search(
+        recording,
+        signal,
+        PatternSearchSettings(pattern=pattern),
+        ResultRangeSettings(result_length=500),
+        demodulation,
+    )
+    corrected_recording = carrier_correct_recording(
+        recording, result, compensate_drift=False
+    )
+    prepared, prepared_rate_hz = prepare_psk_iq(
+        corrected_recording.iq,
+        sample_rate_hz=corrected_recording.sample_rate_hz,
+        symbol_rate_hz=signal.symbol_rate_hz,
+        tx_filter=signal.tx_filter,
+        filter_parameter=signal.filter_parameter,
+    )
+    centers = result.symbol_time_s * prepared_rate_hz
+    displayed = np.interp(centers, np.arange(prepared.size), prepared.real) + 1j * np.interp(
+        centers, np.arange(prepared.size), prepared.imag
+    )
+    displayed /= np.sqrt(np.mean(np.abs(displayed) ** 2))
+    reference = psk_constellation(
+        signal.modulation, signal.symbol_mapping
+    )[result.decoded_symbols]
+    display_evm_percent = 100.0 * np.sqrt(
+        np.sum(np.abs(displayed - reference) ** 2)
+        / np.sum(np.abs(reference) ** 2)
+    )
+
+    np.testing.assert_allclose(displayed, result.measured_symbols, atol=1e-6)
+    assert result.evm_rms_percent < 4.0
+    assert display_evm_percent < 4.0
 
 
 def test_pattern_only_sync_does_not_run_without_pattern_search() -> None:

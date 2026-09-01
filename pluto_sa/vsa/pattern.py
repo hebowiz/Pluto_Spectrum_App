@@ -1825,7 +1825,16 @@ class PatternAnalyzer:
             centers = centers[centers <= resampled.size - 1]
             if centers.size < len(pattern.symbols):
                 continue
-            indices = np.clip(np.rint(centers).astype(np.int64), 0, resampled.size - 1)
+            if signal.modulation is ModulationKind.QAM16:
+                indices = np.floor(centers + 0.5).astype(np.int64)
+            else:
+                indices = np.rint(centers).astype(np.int64)
+            indices = np.clip(indices, 0, resampled.size - 1)
+            sampled_centers = (
+                indices.astype(np.float64)
+                if signal.modulation is ModulationKind.QAM16
+                else centers
+            )
             waveform_symbols = resampled[indices]
             if signal.modulation.differential:
                 observed = waveform_symbols[1:] * np.conj(waveform_symbols[:-1])
@@ -1846,7 +1855,7 @@ class PatternAnalyzer:
             ):
                 symbol_offset = 1 if signal.modulation.differential else 0
                 start_coordinate = float(
-                    centers[int(index) + symbol_offset]
+                    sampled_centers[int(index) + symbol_offset]
                 )
                 candidates.append(
                     (
@@ -1854,7 +1863,7 @@ class PatternAnalyzer:
                         phase,
                         int(index),
                         waveform_symbols,
-                        centers,
+                        sampled_centers,
                         start_coordinate,
                     )
                 )
