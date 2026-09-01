@@ -28,6 +28,7 @@ from pluto_sa.vsa.pattern import (
     prepare_psk_iq,
     _constellation,
     _fit_differential_psk_phase_model,
+    _root_raised_cosine_taps,
 )
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 from pluto_sa.vsa.session import VSASession
@@ -977,6 +978,85 @@ def test_psk_measurement_filter_none_bypasses_srrc() -> None:
     assert result.metadata["measurement_filter"] == "None"
     assert result.metadata["matched_filter_applied"] is False
     assert result.pattern_symbol_errors == 0
+
+
+@pytest.mark.parametrize(
+    ("modulation", "delay_samples"),
+    (
+        (ModulationKind.BPSK, 0.5),
+        (ModulationKind.QPSK, 0.1),
+        (ModulationKind.QPSK, 0.5),
+        (ModulationKind.QPSK, 0.9),
+        (ModulationKind.OQPSK, 0.5),
+        (ModulationKind.PI4_QPSK, 0.5),
+        (ModulationKind.PSK8, 0.5),
+    ),
+)
+def test_known_nondifferential_psk_refines_fractional_symbol_timing(
+    modulation: ModulationKind,
+    delay_samples: float,
+) -> None:
+    rng = np.random.default_rng(20260902)
+    samples_per_symbol = 8
+    symbols = rng.integers(modulation.order, size=260)
+    waveform_symbols = _constellation(modulation)[symbols]
+    padded = np.pad(waveform_symbols, (10, 10), mode="edge")
+    impulses = np.zeros(
+        padded.size * samples_per_symbol, dtype=np.complex128
+    )
+    impulses[
+        np.arange(padded.size) * samples_per_symbol
+        + samples_per_symbol // 2
+    ] = padded
+    shaped = np.convolve(
+        impulses,
+        _root_raised_cosine_taps(samples_per_symbol, 0.4),
+        mode="same",
+    )
+    start = 10 * samples_per_symbol
+    shaped = shaped[start : start + symbols.size * samples_per_symbol]
+    shaped /= np.sqrt(np.mean(np.abs(shaped) ** 2))
+    delayed_iq = fractional_shift(
+        shaped.real, delay_samples, order=3, mode="constant"
+    ) + 1j * fractional_shift(
+        shaped.imag, delay_samples, order=3, mode="constant"
+    )
+    recording = IQRecording(
+        iq=delayed_iq.astype(np.complex64),
+        sample_rate_hz=8_000_000.0,
+        metadata={"dc_removal_recommended": False},
+    )
+    signal = SignalDescription(
+        modulation=modulation,
+        symbol_rate_hz=1_000_000.0,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+    )
+    pattern = KnownPattern(
+        tuple(
+            map(
+                int,
+                reverse_symbol_bits(symbols[35:59], modulation.order),
+            )
+        )
+    )
+
+    result = PatternAnalyzer().search(
+        recording,
+        signal,
+        PatternSearchSettings(pattern=pattern),
+        ResultRangeSettings(result_length=90),
+    )
+
+    assert result.pattern_symbol_errors == 0
+    assert result.evm_rms_percent < 1.0
+    assert result.metadata["fractional_timing_offset_samples"] == pytest.approx(
+        delay_samples, abs=0.03
+    )
+    assert (
+        result.metadata["phase_estimation_method"]
+        == "known-pattern ambiguity with result-range PSK carrier fit"
+    )
 
 
 def test_pi4_dqpsk_pattern_search_and_lsb_symbol_bits():

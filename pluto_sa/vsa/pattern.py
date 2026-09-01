@@ -928,6 +928,63 @@ def _psk_carrier_symmetry_order(modulation: ModulationKind) -> int:
     return int(modulation.order)
 
 
+def _fit_nondifferential_psk_carrier(
+    symbols: np.ndarray,
+    alphabet: np.ndarray,
+    symmetry_order: int,
+) -> tuple[float, float, float]:
+    """Fit carrier phase/CFO from the rotational symmetry of absolute PSK."""
+    values = np.asarray(symbols, dtype=np.complex128)
+    order = int(symmetry_order)
+    if values.size < 9 or order < 2:
+        return 0.0, 0.0, np.inf
+    unit = values / np.maximum(np.abs(values), _EPSILON)
+    reference = np.asarray(alphabet, dtype=np.complex128)
+    reference_unit = reference / np.maximum(np.abs(reference), _EPSILON)
+    reference_moment = np.sum(reference_unit**order)
+    powered = unit**order * np.exp(-1j * np.angle(reference_moment))
+    axis = np.arange(powered.size, dtype=np.float64)
+    initial_slope, initial_intercept = np.polyfit(
+        axis, np.unwrap(np.angle(powered)), 1
+    )
+
+    def residual(parameters: np.ndarray) -> np.ndarray:
+        intercept, slope = parameters
+        return np.angle(
+            powered * np.exp(-1j * (intercept + slope * axis))
+        )
+
+    fitted = least_squares(
+        residual,
+        np.asarray([initial_intercept, initial_slope]),
+        loss="soft_l1",
+        f_scale=0.25,
+        max_nfev=80,
+    )
+    powered_intercept, powered_slope = map(float, fitted.x)
+    carrier_phase = powered_intercept / order
+    carrier_step = powered_slope / order
+    rms = float(np.sqrt(np.mean(np.abs(values) ** 2)))
+    corrected = values / max(rms, _EPSILON) * np.exp(
+        -1j * (carrier_phase + carrier_step * axis)
+    )
+    decisions = np.argmin(
+        np.abs(corrected[:, None] - reference[None, :]), axis=1
+    )
+    ideal = reference[decisions]
+    cost = float(
+        np.sqrt(
+            np.sum(np.abs(corrected - ideal) ** 2)
+            / max(np.sum(np.abs(ideal) ** 2), _EPSILON)
+        )
+    )
+    return (
+        _wrap_phase(carrier_phase),
+        carrier_step,
+        cost,
+    )
+
+
 def _fit_qam_carrier(
     symbols: np.ndarray,
     alphabet: np.ndarray,
@@ -1890,9 +1947,9 @@ class PatternAnalyzer:
                 indices = np.rint(centers).astype(np.int64)
             indices = np.clip(indices, 0, resampled.size - 1)
             sampled_centers = (
-                indices.astype(np.float64)
-                if signal.modulation is ModulationKind.QAM16
-                else centers
+                centers
+                if signal.modulation.differential
+                else indices.astype(np.float64)
             )
             waveform_symbols = resampled[indices]
             if signal.modulation.differential:
@@ -2371,60 +2428,92 @@ class PatternAnalyzer:
         else:
             available = waveform_symbols[index:]
             selection = _result_slice(len(pattern.symbols), available.size, result_range)
-            if signal.modulation is ModulationKind.QAM16:
-                base_centers = np.asarray(centers[index:], dtype=np.float64)
+            base_centers = np.asarray(centers[index:], dtype=np.float64)
+            carrier_symmetry_order = _psk_carrier_symmetry_order(
+                signal.modulation
+            )
 
-                def qam_timing_cost(timing_offset: float) -> float:
-                    candidate = _interpolate_complex(
-                        resampled, base_centers + float(timing_offset)
-                    )
-                    return _fit_qam_carrier(candidate[selection], alphabet)[2]
-
-                refined_timing = minimize_scalar(
-                    qam_timing_cost,
-                    bounds=(-0.6, 0.6),
-                    method="bounded",
-                    options={"xatol": 1e-4},
+            def fit_absolute_carrier(
+                candidate: np.ndarray,
+            ) -> tuple[float, float, float]:
+                if signal.modulation is ModulationKind.QAM16:
+                    return _fit_qam_carrier(candidate, alphabet)
+                return _fit_nondifferential_psk_carrier(
+                    candidate, alphabet, carrier_symmetry_order
                 )
-                if (
-                    np.isfinite(refined_timing.fun)
-                    and float(refined_timing.fun) < qam_timing_cost(0.0)
-                ):
-                    fractional_timing_offset_samples = float(refined_timing.x)
-                centers = base_centers + fractional_timing_offset_samples
-                available = _interpolate_complex(resampled, centers)
+
+            def symbol_timing_cost(timing_offset: float) -> float:
+                candidate = _interpolate_complex(
+                    resampled, base_centers + float(timing_offset)
+                )
+                return fit_absolute_carrier(candidate[selection])[2]
+
+            timing_bounds = (
+                (-0.6, 0.6)
+                if signal.modulation is ModulationKind.QAM16
+                else (-1.25, 1.25)
+            )
+            timing_grid = np.linspace(
+                timing_bounds[0],
+                timing_bounds[1],
+                13 if signal.modulation is ModulationKind.QAM16 else 21,
+            )
+            timing_costs = np.asarray(
+                [symbol_timing_cost(value) for value in timing_grid]
+            )
+            best_timing_index = int(np.argmin(timing_costs))
+            timing_step = float(timing_grid[1] - timing_grid[0])
+            local_bounds = (
+                max(timing_bounds[0], timing_grid[best_timing_index] - timing_step),
+                min(timing_bounds[1], timing_grid[best_timing_index] + timing_step),
+            )
+            refined_timing = minimize_scalar(
+                symbol_timing_cost,
+                bounds=local_bounds,
+                method="bounded",
+                options={"xatol": 1e-4},
+            )
+            if (
+                np.isfinite(refined_timing.fun)
+                and float(refined_timing.fun) < symbol_timing_cost(0.0)
+            ):
+                fractional_timing_offset_samples = float(refined_timing.x)
+            centers = base_centers + fractional_timing_offset_samples
+            available = _interpolate_complex(resampled, centers)
             fit_window = available[: len(pattern.symbols)]
             phase_error = np.unwrap(np.angle(fit_window * np.conj(expected)))
             relative = np.arange(phase_error.size, dtype=np.float64)
             slope, intercept = np.polyfit(relative, phase_error, 1)
-            if signal.modulation is ModulationKind.QAM16:
-                selected_start = int(selection.start or 0)
-                fitted_phase, fitted_step, synchronization_evm_rms = (
-                    _fit_qam_carrier(available[selection], alphabet)
-                )
-                base_intercept = fitted_phase - fitted_step * selected_start
-                ambiguity = np.pi / 2.0
-                training_axis = np.arange(fit_window.size, dtype=np.float64)
+            selected_start = int(selection.start or 0)
+            fitted_phase, fitted_step, synchronization_evm_rms = (
+                fit_absolute_carrier(available[selection])
+            )
+            base_intercept = fitted_phase - fitted_step * selected_start
+            ambiguity = 2.0 * np.pi / float(carrier_symmetry_order)
+            training_axis = np.arange(fit_window.size, dtype=np.float64)
 
-                def training_phase_cost(candidate_intercept: float) -> float:
-                    residual = np.angle(
-                        fit_window
-                        * np.conj(expected)
-                        * np.exp(
-                            -1j
-                            * (
-                                candidate_intercept
-                                + fitted_step * training_axis
-                            )
+            def training_phase_cost(candidate_intercept: float) -> float:
+                residual = np.angle(
+                    fit_window
+                    * np.conj(expected)
+                    * np.exp(
+                        -1j
+                        * (
+                            candidate_intercept
+                            + fitted_step * training_axis
                         )
                     )
-                    return float(np.mean(residual**2))
-
-                intercept = min(
-                    (base_intercept + ambiguity * rotation for rotation in range(4)),
-                    key=training_phase_cost,
                 )
-                slope = fitted_step
+                return float(np.mean(residual**2))
+
+            intercept = min(
+                (
+                    base_intercept + ambiguity * rotation
+                    for rotation in range(carrier_symmetry_order)
+                ),
+                key=training_phase_cost,
+            )
+            slope = fitted_step
             all_relative = np.arange(available.size, dtype=np.float64)
             corrected_available = available * np.exp(
                 -1j * (intercept + slope * all_relative)
@@ -2433,11 +2522,8 @@ class PatternAnalyzer:
             corrected = corrected_available[selection]
             carrier_offset_hz = slope * signal.symbol_rate_hz / (2.0 * np.pi)
             drift_hz_per_s = 0.0
-            result_centers = centers[index:][selection]
-            start_center = centers[index]
-            if signal.modulation is ModulationKind.QAM16:
-                result_centers = centers[selection]
-                start_center = centers[0]
+            result_centers = centers[selection]
+            start_center = centers[0]
             phase_rotation = _wrap_phase(intercept)
 
         rms = float(np.sqrt(np.mean(np.abs(corrected) ** 2)))
@@ -2531,14 +2617,7 @@ class PatternAnalyzer:
             carrier_reference_time_s=(
                 float(result_centers[0]) / analysis_rate_hz
                 if signal.modulation.differential
-                else (
-                    float(start_center) / analysis_rate_hz
-                    if signal.modulation is ModulationKind.QAM16
-                    else (
-                        start_sample / recording.sample_rate_hz
-                        + 0.5 / signal.symbol_rate_hz
-                    )
-                )
+                else float(start_center) / analysis_rate_hz
             ),
             metadata={
                 "pattern_name": pattern.name,
@@ -2561,7 +2640,7 @@ class PatternAnalyzer:
                     else (
                         "known-pattern ambiguity with result-range QAM carrier fit"
                         if signal.modulation is ModulationKind.QAM16
-                        else "known-pattern phase fit"
+                        else "known-pattern ambiguity with result-range PSK carrier fit"
                     )
                 ),
                 "phase_model_residual_rms_rad": phase_model_residual_rms_rad,

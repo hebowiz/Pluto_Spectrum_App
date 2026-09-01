@@ -409,7 +409,7 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 
 ## 6. 重要な未実装・制約
 
-- 通常解析pipeline単独のtiming/carrier recoveryは未実装。Pattern Search成立後の差動PSKでは、判定差動symbolを累積しTX Filter設定に対応する絶対referenceを生成する。8 samples/symbolへのresampleとmatched filter後、Result Range全体の測定絶対IQとreferenceの複素EVMを目的関数としてfractional timing、symbol-rate error、carrier phase/CFO、linear driftを同時推定する。既知patternを固定reference、残りをdecision-directed referenceとして反復し、zero-drift開始とM乗coarse開始の低EVM側を採用する。
+- 通常解析pipeline単独のtiming/carrier recoveryは未実装。Pattern Search成立後の差動PSKでは、判定差動symbolを累積しTX Filter設定に対応する絶対referenceを生成する。8 samples/symbolへのresampleとmatched filter後、Result Range全体の測定絶対IQとreferenceの複素EVMを目的関数としてfractional timing、symbol-rate error、carrier phase/CFO、linear driftを同時推定する。既知patternを固定reference、残りをdecision-directed referenceとして反復し、zero-drift開始とM乗coarse開始の低EVM側を採用する。BPSK/QPSK/OQPSK/pi/4-QPSK/8PSKの非差動PSKも、既知Patternによる粗検出後にResult Range全体のPSK decision EVMでfractional timingとcarrier phase/CFOを再推定し、capture開始位相によるEVM変動を抑える。
 - TX/RX/Measurement/Reference filter chainは未実装。
 - generated Gaussian waveformは開発用近似であり、規格reference/EVM用filterではありません。
 - PSK EVMは最終同期・補正後のConstellation点と同じsymbol列を使用し、表示との
