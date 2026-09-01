@@ -2371,6 +2371,28 @@ class PatternAnalyzer:
         else:
             available = waveform_symbols[index:]
             selection = _result_slice(len(pattern.symbols), available.size, result_range)
+            if signal.modulation is ModulationKind.QAM16:
+                base_centers = np.asarray(centers[index:], dtype=np.float64)
+
+                def qam_timing_cost(timing_offset: float) -> float:
+                    candidate = _interpolate_complex(
+                        resampled, base_centers + float(timing_offset)
+                    )
+                    return _fit_qam_carrier(candidate[selection], alphabet)[2]
+
+                refined_timing = minimize_scalar(
+                    qam_timing_cost,
+                    bounds=(-0.6, 0.6),
+                    method="bounded",
+                    options={"xatol": 1e-4},
+                )
+                if (
+                    np.isfinite(refined_timing.fun)
+                    and float(refined_timing.fun) < qam_timing_cost(0.0)
+                ):
+                    fractional_timing_offset_samples = float(refined_timing.x)
+                centers = base_centers + fractional_timing_offset_samples
+                available = _interpolate_complex(resampled, centers)
             fit_window = available[: len(pattern.symbols)]
             phase_error = np.unwrap(np.angle(fit_window * np.conj(expected)))
             relative = np.arange(phase_error.size, dtype=np.float64)
@@ -2413,6 +2435,9 @@ class PatternAnalyzer:
             drift_hz_per_s = 0.0
             result_centers = centers[index:][selection]
             start_center = centers[index]
+            if signal.modulation is ModulationKind.QAM16:
+                result_centers = centers[selection]
+                start_center = centers[0]
             phase_rotation = _wrap_phase(intercept)
 
         rms = float(np.sqrt(np.mean(np.abs(corrected) ** 2)))
@@ -2507,8 +2532,12 @@ class PatternAnalyzer:
                 float(result_centers[0]) / analysis_rate_hz
                 if signal.modulation.differential
                 else (
-                    start_sample / recording.sample_rate_hz
-                    + 0.5 / signal.symbol_rate_hz
+                    float(start_center) / analysis_rate_hz
+                    if signal.modulation is ModulationKind.QAM16
+                    else (
+                        start_sample / recording.sample_rate_hz
+                        + 0.5 / signal.symbol_rate_hz
+                    )
                 )
             ),
             metadata={

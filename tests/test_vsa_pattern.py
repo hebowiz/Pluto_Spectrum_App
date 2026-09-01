@@ -331,6 +331,55 @@ def test_known_hdt_qam_pattern_refines_carrier_over_the_result_range() -> None:
     )
 
 
+@pytest.mark.parametrize("delay_samples", (0.1, 0.3, 0.5, 0.7, 0.9))
+def test_known_hdt_qam_pattern_refines_fractional_symbol_timing(
+    delay_samples: float,
+) -> None:
+    path = Path(__file__).with_name("fixtures") / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    recording = FileIQSource.load(path)
+    delayed_iq = fractional_shift(
+        recording.iq.real,
+        delay_samples,
+        order=3,
+        mode="constant",
+    ) + 1j * fractional_shift(
+        recording.iq.imag,
+        delay_samples,
+        order=3,
+        mode="constant",
+    )
+    delayed = IQRecording(
+        iq=delayed_iq.astype(np.complex64),
+        sample_rate_hz=recording.sample_rate_hz,
+        metadata=recording.metadata,
+    )
+    signal = SignalDescription(
+        modulation=ModulationKind.QAM16,
+        symbol_rate_hz=2_000_000.0,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        symbol_mapping=BLUETOOTH_HDT_MAPPING,
+    )
+    pattern = KnownPattern(
+        tuple(int(value, 16) for value in "3 E D E 5 0 F 4 7 E".split())
+    )
+
+    result = PatternAnalyzer().search(
+        delayed,
+        signal,
+        PatternSearchSettings(pattern=pattern),
+        ResultRangeSettings(result_length=500),
+        DemodulationSettings(
+            measurement_filter=MeasurementFilterMode.AUTO,
+            bit_ordering=BitOrdering.LSB,
+        ),
+    )
+
+    assert result.pattern_symbol_errors == 0
+    assert result.evm_rms_percent < 2.0
+    assert abs(result.metadata["fractional_timing_offset_samples"]) > 0.05
+
+
 def test_pattern_only_sync_does_not_run_without_pattern_search() -> None:
     recording, signal = GeneratedIQSource.psk(
         modulation=ModulationKind.PI4_DQPSK,
