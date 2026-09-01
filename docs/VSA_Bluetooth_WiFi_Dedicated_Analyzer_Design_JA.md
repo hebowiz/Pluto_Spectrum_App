@@ -1365,8 +1365,14 @@ Generic VSAのSignal Descriptionへ`16QAM`を追加した。表示内容はPSK�
 - Symbol Table
 
 ただし16QAMは差動PSKではないため、前symbolとの差動位相へ変換しない。symbol timing、carrier補正、
-measurement filter、複素gain補正、marker、plot操作はPSKと共通pipelineを使い、振幅情報を保持した
-absolute I/Q判定を行う。
+measurement filter、複素gain補正、plot操作はPSKと共通pipelineを使い、振幅情報を保持した
+absolute I/Q判定を行う。QAMのdetected-data同期はPSKの位相専用interval検出と分離し、
+4回対称のcarrier推定と振幅を保ったdecision geometryを使う。これによりResult Lengthは
+取得可能symbol数の範囲で設定値どおり適用する。
+
+QAMのModulation Signal表示設定はPSK / FSKの設定と独立して保存する。QAM Symbol Plotは
+Physical IQ固定とし、PSKのPhysical / Differential設定を参照しない。QAMのModulationおよび
+Symbol Plot markerはAmplitude / Phaseではなく、RMS正規化後の`I` / `Q`値を表示する。
 
 Mappingには`Bluetooth HDT`を追加した。HDT6 / HDT7.5のreference constellationは仕様bit tuple順と
 `S_k / sqrt(10)`のunit-mean-power scaleを使う。GenericのNatural / Gray 16QAMも従来どおりunit-mean-power scaleを使い、

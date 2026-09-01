@@ -644,7 +644,8 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._refresh_display_only
         )
         iq_power_signal_menu.addActions(iq_power_signal_group.actions())
-        modulation_signal_menu = display_menu.addMenu("Modulation Signal")
+        modulation_signal_menu = display_menu.addMenu("PSK / FSK Modulation Signal")
+        self.psk_fsk_modulation_signal_menu = modulation_signal_menu
         self.raw_modulation_signal_action = QtGui.QAction(
             "Raw IQ", self, checkable=True
         )
@@ -663,6 +664,32 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._refresh_display_only
         )
         modulation_signal_menu.addActions(modulation_signal_group.actions())
+        qam_modulation_signal_menu = display_menu.addMenu("QAM Modulation Signal")
+        self.qam_modulation_signal_menu = qam_modulation_signal_menu
+        self.qam_raw_modulation_signal_action = QtGui.QAction(
+            "Raw IQ", self, checkable=True
+        )
+        self.qam_measured_modulation_signal_action = QtGui.QAction(
+            "Measured", self, checkable=True
+        )
+        qam_modulation_signal_group = QtGui.QActionGroup(self)
+        qam_modulation_signal_group.setExclusive(True)
+        qam_modulation_signal_group.addAction(
+            self.qam_raw_modulation_signal_action
+        )
+        qam_modulation_signal_group.addAction(
+            self.qam_measured_modulation_signal_action
+        )
+        self.qam_measured_modulation_signal_action.setChecked(True)
+        self.qam_raw_modulation_signal_action.triggered.connect(
+            self._refresh_display_only
+        )
+        self.qam_measured_modulation_signal_action.triggered.connect(
+            self._refresh_display_only
+        )
+        qam_modulation_signal_menu.addActions(
+            qam_modulation_signal_group.actions()
+        )
         constellation_trace_menu = display_menu.addMenu("Symbol Plot Trace")
         self.constellation_flat_action = QtGui.QAction(
             "Flat", self, checkable=True
@@ -683,6 +710,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         constellation_trace_menu.addActions(constellation_trace_group.actions())
         psk_symbol_plot_menu = display_menu.addMenu("PSK Symbol Plot")
+        self.psk_symbol_plot_menu = psk_symbol_plot_menu
         self.physical_iq_symbol_plot_action = QtGui.QAction(
             "Absolute IQ (Physical)", self, checkable=True
         )
@@ -2121,6 +2149,11 @@ class VSAWindow(QtWidgets.QMainWindow):
                     if self.raw_modulation_signal_action.isChecked()
                     else "Measured"
                 ),
+                "qam_modulation_signal": (
+                    "Raw IQ"
+                    if self.qam_raw_modulation_signal_action.isChecked()
+                    else "Measured"
+                ),
                 "constellation_trace_mode": (
                     "Density"
                     if self.constellation_density_action.isChecked()
@@ -2416,6 +2449,19 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.measured_modulation_signal_action.setChecked(
                 modulation_signal == "Measured"
             )
+            qam_modulation_signal = str(
+                display_config.get("qam_modulation_signal", "Measured")
+            )
+            if qam_modulation_signal not in {"Raw IQ", "Measured"}:
+                raise ValueError(
+                    "QAM modulation signal must be Raw IQ or Measured"
+                )
+            self.qam_raw_modulation_signal_action.setChecked(
+                qam_modulation_signal == "Raw IQ"
+            )
+            self.qam_measured_modulation_signal_action.setChecked(
+                qam_modulation_signal == "Measured"
+            )
             constellation_trace_mode = str(
                 display_config.get("constellation_trace_mode", "Flat")
             )
@@ -2543,7 +2589,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         if resolved is None and hasattr(self, "modulation_combo"):
             resolved = self._selected_modulation()
         title = "Symbol Plot"
-        if resolved is not None and resolved.family.uses_iq_constellation:
+        if resolved is ModulationKind.QAM16:
+            title = "Symbol Plot (Physical)"
+        elif resolved is not None and resolved.family.uses_iq_constellation:
             mode = (
                 "Differential"
                 if self.differential_iq_symbol_plot_action.isChecked()
@@ -2665,9 +2713,23 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _selected_modulation(self) -> ModulationKind:
         return ModulationKind(str(self.modulation_combo.currentData()))
 
+    def _measured_modulation_signal_selected(
+        self, modulation: ModulationKind
+    ) -> bool:
+        if modulation is ModulationKind.QAM16:
+            return self.qam_measured_modulation_signal_action.isChecked()
+        return self.measured_modulation_signal_action.isChecked()
+
     def _sync_signal_controls(self) -> None:
         modulation = self._selected_modulation()
         self._update_symbol_plot_dock_title(modulation)
+        is_qam = modulation is ModulationKind.QAM16
+        if hasattr(self, "qam_modulation_signal_menu"):
+            self.qam_modulation_signal_menu.setEnabled(is_qam)
+            self.psk_fsk_modulation_signal_menu.setEnabled(not is_qam)
+            self.psk_symbol_plot_menu.setEnabled(
+                modulation.family.uses_iq_constellation and not is_qam
+            )
         self.deviation_spin.setEnabled(modulation.family is ModulationFamily.FSK)
         mapping_enabled = modulation.family.uses_iq_constellation
         self.mapping_combo.setEnabled(mapping_enabled)
@@ -3694,18 +3756,26 @@ class VSAWindow(QtWidgets.QMainWindow):
         decoded_symbols = np.asarray(
             context.get("decoded_symbols", ()), dtype=np.int16
         )
+        is_qam = signal.modulation is ModulationKind.QAM16
         if symbol_index < modulation_vectors.size:
             vector = complex(modulation_vectors[symbol_index])
+            marker_text = (
+                f"Symbol: {symbol_index}\n"
+                f"I: {vector.real:+.4f}\n"
+                f"Q: {vector.imag:+.4f}"
+                if is_qam
+                else (
+                    f"Symbol: {symbol_index}\n"
+                    f"Amplitude: {abs(vector):.4f}\n"
+                    f"Phase: {np.degrees(np.angle(vector)):+.2f} degree"
+                )
+            )
             self._add_selected_symbol_marker(
                 "modulation",
                 self.modulation_plot,
                 vector.real,
                 vector.imag,
-                (
-                    f"Symbol: {symbol_index}\n"
-                    f"Amplitude: {abs(vector):.4f}\n"
-                    f"Phase: {np.degrees(np.angle(vector)):+.2f} degree"
-                ),
+                marker_text,
             )
         if (
             symbol_index < symbol_plot_vectors.size
@@ -3719,17 +3789,25 @@ class VSAWindow(QtWidgets.QMainWindow):
                 * abs(vector - reference)
                 / max(abs(reference), np.finfo(np.float64).tiny)
             )
+            marker_text = (
+                f"Symbol: {symbol_index}\n"
+                f"I: {vector.real:+.4f}\n"
+                f"Q: {vector.imag:+.4f}\n"
+                f"EVM: {_format_evm(evm_percent)}"
+                if is_qam
+                else (
+                    f"Symbol: {symbol_index}\n"
+                    f"Amplitude: {abs(vector):.4f}\n"
+                    f"Phase: {np.degrees(np.angle(vector)):+.2f} degree\n"
+                    f"EVM: {_format_evm(evm_percent)}"
+                )
+            )
             self._add_selected_symbol_marker(
                 "symbol_plot",
                 self.symbol_plot,
                 vector.real,
                 vector.imag,
-                (
-                    f"Symbol: {symbol_index}\n"
-                    f"Amplitude: {abs(vector):.4f}\n"
-                    f"Phase: {np.degrees(np.angle(vector)):+.2f} degree\n"
-                    f"EVM: {_format_evm(evm_percent)}"
-                ),
+                marker_text,
             )
 
     def _update_plots(self, *, reset_ranges: bool = False) -> None:
@@ -3742,7 +3820,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         if reset_ranges:
             for _name, plot in self._plot_widgets():
                 plot.enableAutoRange(enable=True)
-        measured_selected = self.measured_modulation_signal_action.isChecked()
+        measured_selected = self._measured_modulation_signal_selected(
+            signal.modulation
+        )
         use_carrier_corrected = (
             measured_selected
             and self.session.carrier_corrected_result is not None
@@ -3838,7 +3918,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.modulation_plot.setLabel("left", "Frequency (kHz)")
             self.modulation_plot.setLabel("bottom", "Time (ms)")
             self.modulation_plot.setAspectLocked(False)
-            if self.measured_modulation_signal_action.isChecked():
+            if self._measured_modulation_signal_selected(signal.modulation):
                 analysis_sample_rate_hz = float(
                     display_result.metadata.get(
                         "analysis_sample_rate_hz",
@@ -4004,7 +4084,7 @@ class VSAWindow(QtWidgets.QMainWindow):
                     self.session.recording.sample_rate_hz,
                 )
             )
-            if self.measured_modulation_signal_action.isChecked():
+            if self._measured_modulation_signal_selected(signal.modulation):
                 processed_iq, processed_time_s = _prepare_psk_display_waveform(
                     display_result.iq,
                     sample_rate_hz=analysis_sample_rate_hz,
@@ -4120,7 +4200,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             reference_symbols = psk_constellation(
                 signal.modulation, signal.symbol_mapping
             )[decoded_symbols]
-            use_physical_iq = self.physical_iq_symbol_plot_action.isChecked()
+            use_physical_iq = (
+                signal.modulation is ModulationKind.QAM16
+                or self.physical_iq_symbol_plot_action.isChecked()
+            )
             if use_physical_iq:
                 raw_constellation_symbols = np.asarray(
                     symbol_iq, dtype=np.complex128

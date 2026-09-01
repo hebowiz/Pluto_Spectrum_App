@@ -6,7 +6,7 @@ from scipy.ndimage import shift as fractional_shift
 
 import pluto_sa.vsa.session as session_module
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
-from pluto_sa.vsa.mapping import reverse_symbol_bits
+from pluto_sa.vsa.mapping import BLUETOOTH_HDT_MAPPING, reverse_symbol_bits
 from pluto_sa.vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
@@ -115,6 +115,92 @@ def test_detected_data_psk_sync_runs_without_pattern_search() -> None:
     assert not result.metadata["pattern_match_valid"]
     assert result.decoded_symbols.size == 120
     assert session.pattern_error is None
+
+
+@pytest.mark.parametrize("result_length", (120, 400))
+def test_detected_data_qam_honors_requested_result_length(result_length: int) -> None:
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.QAM16,
+        symbol_count=512,
+        seed=20260901,
+    )
+    result = PatternAnalyzer().detect_data(
+        recording,
+        signal,
+        None,
+        ResultRangeSettings(result_length=result_length),
+        DemodulationSettings(measurement_filter=MeasurementFilterMode.NONE),
+        iq_power_trigger=IQPowerTriggerSettings(enabled=False),
+    )
+
+    assert result.decoded_symbols.size == result_length
+    assert result.metadata["carrier_symmetry_order"] == 4
+    assert result.metadata["detected_psk_interval_start_symbol"] == 0
+    assert result.metadata["detected_psk_interval_stop_symbol"] >= result_length
+    assert result.evm_rms_percent < 2.0
+
+
+def test_detected_data_qam_recovers_carrier_without_losing_amplitude() -> None:
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.QAM16,
+        symbol_count=512,
+        seed=20260902,
+    )
+    carrier_offset_hz = 30_000.0
+    phase_rad = 0.37
+    sample_index = np.arange(recording.sample_count, dtype=np.float64)
+    shifted = IQRecording(
+        iq=recording.iq
+        * np.exp(
+            1j
+            * (
+                phase_rad
+                + 2.0
+                * np.pi
+                * carrier_offset_hz
+                * sample_index
+                / recording.sample_rate_hz
+            )
+        ),
+        sample_rate_hz=recording.sample_rate_hz,
+        metadata=recording.metadata,
+    )
+    result = PatternAnalyzer().detect_data(
+        shifted,
+        signal,
+        None,
+        ResultRangeSettings(result_length=400),
+        DemodulationSettings(measurement_filter=MeasurementFilterMode.NONE),
+        iq_power_trigger=IQPowerTriggerSettings(enabled=False),
+    )
+
+    assert result.decoded_symbols.size == 400
+    assert result.carrier_frequency_offset_hz == pytest.approx(
+        carrier_offset_hz, abs=10.0
+    )
+    assert result.evm_rms_percent < 2.0
+
+
+def test_detected_data_hdt_qam_fixture_is_not_truncated_by_psk_interval() -> None:
+    path = Path(__file__).with_name("fixtures") / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    recording = FileIQSource.load(path)
+    signal = SignalDescription(
+        modulation=ModulationKind.QAM16,
+        symbol_rate_hz=2_000_000.0,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        symbol_mapping=BLUETOOTH_HDT_MAPPING,
+    )
+    result = PatternAnalyzer().detect_data(
+        recording,
+        signal,
+        None,
+        ResultRangeSettings(result_length=500),
+        DemodulationSettings(measurement_filter=MeasurementFilterMode.AUTO),
+        iq_power_trigger=IQPowerTriggerSettings(enabled=False),
+    )
+
+    assert result.decoded_symbols.size == 500
 
 
 def test_pattern_only_sync_does_not_run_without_pattern_search() -> None:

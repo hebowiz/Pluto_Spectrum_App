@@ -985,6 +985,55 @@ def test_symbol_table_click_places_psk_amplitude_phase_and_evm_markers(
         QtWidgets.QApplication.processEvents()
 
 
+def test_qam_display_options_and_iq_markers_are_independent_from_psk(
+    tmp_path,
+) -> None:
+    pg.mkQApp("VSA QAM display separation test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "qam-display-separation")
+    )
+    try:
+        window.raw_modulation_signal_action.setChecked(True)
+        window.differential_iq_symbol_plot_action.setChecked(True)
+        window._load_generated(ModulationKind.QAM16)
+        _wait_for_background_analysis(window)
+
+        assert window.qam_modulation_signal_menu.isEnabled()
+        assert not window.psk_fsk_modulation_signal_menu.isEnabled()
+        assert not window.psk_symbol_plot_menu.isEnabled()
+        assert window.qam_measured_modulation_signal_action.isChecked()
+        assert window._measured_modulation_signal_selected(ModulationKind.QAM16)
+        assert window.symbol_plot_dock.windowTitle() == "Symbol Plot (Physical)"
+
+        symbol_index = 9
+        window._symbol_table_cell_clicked(0, symbol_index)
+        modulation_text = window._symbol_marker_items[
+            "modulation"
+        ][1].textItem.toPlainText()
+        symbol_text = window._symbol_marker_items[
+            "symbol_plot"
+        ][1].textItem.toPlainText()
+        for text in (modulation_text, symbol_text):
+            assert f"Symbol: {symbol_index}" in text
+            assert "I:" in text
+            assert "Q:" in text
+            assert "Amplitude:" not in text
+            assert "Phase:" not in text
+        assert "EVM:" in symbol_text
+
+        before_i, before_q = window.symbol_plot.listDataItems()[0].getData()
+        window.differential_iq_symbol_plot_action.trigger()
+        assert window.symbol_plot_dock.windowTitle() == "Symbol Plot (Physical)"
+        after_i, after_q = window.symbol_plot.listDataItems()[0].getData()
+        np.testing.assert_allclose(after_i, before_i)
+        np.testing.assert_allclose(after_q, before_q)
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+        QtWidgets.QApplication.processEvents()
+
+
 def test_fixed_plot_interaction_uses_middle_drag_for_pan(monkeypatch) -> None:
     pg.mkQApp("VSA fixed mouse interaction test")
     observed_modes: list[int] = []
@@ -1359,6 +1408,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.symbol_display_action.setChecked(True)
         window.measured_iq_power_action.setChecked(True)
         window.raw_modulation_signal_action.setChecked(True)
+        window.qam_raw_modulation_signal_action.setChecked(True)
         window.constellation_density_action.setChecked(True)
         window.differential_iq_symbol_plot_action.setChecked(True)
         window.fsk_constellation_frequency_action.setChecked(True)
@@ -1390,6 +1440,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.symbol_display_action.setChecked(False)
         window.raw_iq_power_action.setChecked(True)
         window.measured_modulation_signal_action.setChecked(True)
+        window.qam_measured_modulation_signal_action.setChecked(True)
         window.constellation_flat_action.setChecked(True)
         window.physical_iq_symbol_plot_action.setChecked(True)
         window.fsk_phase_difference_action.setChecked(True)
@@ -1435,6 +1486,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert saved["display_config"]["show_symbol_points"] is True
         assert saved["display_config"]["iq_power_signal"] == "Measured"
         assert saved["display_config"]["modulation_signal"] == "Raw IQ"
+        assert saved["display_config"]["qam_modulation_signal"] == "Raw IQ"
         assert "carrier_display" not in saved["display_config"]
         assert saved["display_config"]["constellation_trace_mode"] == "Density"
         assert saved["display_config"]["psk_symbol_plot_mode"] == "Differential IQ"
@@ -1444,6 +1496,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.symbol_display_action.isChecked()
         assert window.measured_iq_power_action.isChecked()
         assert window.raw_modulation_signal_action.isChecked()
+        assert window.qam_raw_modulation_signal_action.isChecked()
         assert window.constellation_density_action.isChecked()
         assert window.differential_iq_symbol_plot_action.isChecked()
         assert window.fsk_constellation_frequency_action.isChecked()
@@ -1465,6 +1518,9 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         legacy["display_config"]["carrier_display"] = "Raw IQ"
         window._apply_meas_config_values(legacy)
         assert window.raw_modulation_signal_action.isChecked()
+        legacy["display_config"].pop("qam_modulation_signal")
+        window._apply_meas_config_values(legacy)
+        assert window.qam_measured_modulation_signal_action.isChecked()
         legacy["display_config"].pop("iq_power_signal")
         window._apply_meas_config_values(legacy)
         assert window.raw_iq_power_action.isChecked()

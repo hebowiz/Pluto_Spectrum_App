@@ -857,12 +857,69 @@ def _detected_psk_decision_interval(
 
 def _psk_carrier_symmetry_order(modulation: ModulationKind) -> int:
     """Return physical carrier-recovery symmetry, independent of decisions."""
+    if modulation is ModulationKind.QAM16:
+        return 4
     if modulation in {ModulationKind.PI4_DQPSK, ModulationKind.DPSK8}:
         # pi/4-DQPSK has four differential decisions but alternates between
         # two QPSK constellations; its physical IQ therefore has eightfold
         # rotational symmetry, just like 8DPSK.
         return 8
     return int(modulation.order)
+
+
+def _fit_qam_carrier(
+    symbols: np.ndarray,
+    alphabet: np.ndarray,
+) -> tuple[float, float, float]:
+    """Fit square-QAM carrier phase/CFO without discarding symbol amplitude."""
+    values = np.asarray(symbols, dtype=np.complex128)
+    if values.size < 9:
+        return 0.0, 0.0, np.inf
+    rms = float(np.sqrt(np.mean(np.abs(values) ** 2)))
+    normalized = values / max(rms, _EPSILON)
+    axis = np.arange(normalized.size, dtype=np.float64)
+
+    # Square QAM has fourfold rotational symmetry and a non-zero fourth
+    # moment.  Its spectral peak provides a decision-independent coarse CFO.
+    fourth = normalized**4
+    fft_size = 1 << int(np.ceil(np.log2(max(64, 4 * fourth.size))))
+    spectrum = np.fft.fft(fourth, n=fft_size)
+    frequency = np.fft.fftfreq(fft_size)
+    carrier_step = float(
+        2.0 * np.pi * frequency[int(np.argmax(np.abs(spectrum)))] / 4.0
+    )
+    derotated_fourth = fourth * np.exp(-4j * carrier_step * axis)
+    carrier_phase = float(np.angle(-np.sum(derotated_fourth)) / 4.0)
+
+    # Refine against nearest ideal decisions.  The remaining 90-degree
+    # ambiguity only permutes symbol labels and does not affect geometry.
+    for _ in range(3):
+        corrected = normalized * np.exp(
+            -1j * (carrier_phase + carrier_step * axis)
+        )
+        decisions = np.argmin(
+            np.abs(corrected[:, None] - alphabet[None, :]), axis=1
+        )
+        reference = alphabet[decisions]
+        residual_phase = np.unwrap(np.angle(corrected * np.conj(reference)))
+        slope_delta, intercept_delta = np.polyfit(axis, residual_phase, 1)
+        carrier_phase += float(intercept_delta)
+        carrier_step += float(slope_delta)
+
+    corrected = normalized * np.exp(
+        -1j * (carrier_phase + carrier_step * axis)
+    )
+    decisions = np.argmin(
+        np.abs(corrected[:, None] - alphabet[None, :]), axis=1
+    )
+    reference = alphabet[decisions]
+    evm = float(
+        np.sqrt(
+            np.sum(np.abs(corrected - reference) ** 2)
+            / max(np.sum(np.abs(reference) ** 2), _EPSILON)
+        )
+    )
+    return _wrap_phase(carrier_phase), carrier_step, evm
 
 
 class PatternAnalyzer:
@@ -1010,22 +1067,49 @@ class PatternAnalyzer:
                 observed = absolute
                 result_centers = centers
                 decision_absolute = absolute
-            # Timing recovery is phase-directed.  A differential product has
-            # magnitude |s[n]||s[n-1]|, so using that magnitude in the timing
-            # cost overweights ripple and burst ramps and can select an eye
-            # crossing.  R&S detected-data synchronization likewise derives
-            # timing from the decision geometry, not AM ripple.
-            normalized = observed / np.maximum(np.abs(observed), _EPSILON)
-            interval_start, interval_stop, interval_concentration = (
-                _detected_psk_decision_interval(
-                    normalized, carrier_symmetry_order
+            is_qam = signal.modulation is ModulationKind.QAM16
+            if is_qam:
+                # QAM amplitude is part of the decision geometry.  Do not use
+                # the PSK phase-concentration gate, which can mistake valid
+                # QAM phase populations for a short PSK-like interval.
+                observed_rms = float(np.sqrt(np.mean(np.abs(observed) ** 2)))
+                normalized = observed / max(observed_rms, _EPSILON)
+                interval_start, interval_stop, interval_concentration = (
+                    0,
+                    normalized.size,
+                    1.0,
                 )
-            )
+            else:
+                # A differential PSK product has magnitude |s[n]||s[n-1]|;
+                # remove it so timing is directed by phase geometry.
+                normalized = observed / np.maximum(np.abs(observed), _EPSILON)
+                interval_start, interval_stop, interval_concentration = (
+                    _detected_psk_decision_interval(
+                        normalized, carrier_symmetry_order
+                    )
+                )
             normalized = normalized[interval_start:interval_stop]
             result_centers = result_centers[interval_start:interval_stop]
             decision_absolute = decision_absolute[interval_start:interval_stop]
             if normalized.size < 9:
                 return (np.inf, None) if return_values else np.inf
+
+            if is_qam:
+                physical_phase, carrier_step, cost = _fit_qam_carrier(
+                    decision_absolute, alphabet
+                )
+                if return_values:
+                    return cost, (
+                        decision_absolute,
+                        normalized,
+                        result_centers,
+                        physical_phase,
+                        carrier_step,
+                        interval_start,
+                        interval_stop,
+                        interval_concentration,
+                    )
+                return cost
 
             # Synchronize from the physical IQ symmetry, not from the assumed
             # differential decision alphabet.  In particular pi/4-DQPSK has
