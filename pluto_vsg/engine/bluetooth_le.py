@@ -24,6 +24,7 @@ from pluto_vsg.model import (
     waveform_timing_samples,
     validate_project,
 )
+from pluto_vsg.rf_level import iq_level_metadata, measure_iq_levels
 
 
 _SYNC_WORD = "10010100100000100110111010001110"
@@ -243,7 +244,10 @@ class BluetoothLEWaveformEngine:
 
         boundaries: list[FieldBoundary] = []
         packet_ranges: list[tuple[int, int]] = []
+        active_ranges: list[tuple[int, int]] = []
         for repeat in range(int(project.repeat_count)):
+            active_offset = repeat * single.size + prefix_count
+            active_ranges.append((active_offset, active_offset + active_iq.size))
             offset = repeat * single.size + data_start
             packet_ranges.append((offset, offset + data_sample_count))
             _append_field_boundaries(
@@ -254,6 +258,7 @@ class BluetoothLEWaveformEngine:
                 repeat_suffix=("" if project.repeat_count == 1 else f" [{repeat + 1}]"),
             )
 
+        level_metrics = measure_iq_levels(iq, active_ranges)
         return GenerationResult(
             iq=iq,
             sample_rate_hz=project.sample_rate_hz,
@@ -296,6 +301,7 @@ class BluetoothLEWaveformEngine:
                 "period_symbols": single.size / sps,
                 "post_idle_sample_count": suffix_count,
                 "packet_ranges_samples": tuple(packet_ranges),
+                "active_ranges_samples": tuple(active_ranges),
                 "data_start_sample": data_start,
                 "data_stop_sample": data_start + data_sample_count,
                 "samples_per_symbol": sps,
@@ -307,5 +313,6 @@ class BluetoothLEWaveformEngine:
                 "whitening_channel_index": int(settings.whitening_channel_index),
                 "crc_enabled": bool(settings.crc_enabled),
                 "crc_init": int(settings.crc_init),
+                **iq_level_metadata(level_metrics),
             },
         )

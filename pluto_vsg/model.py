@@ -13,6 +13,7 @@ class StandardProfile(StrEnum):
     BLUETOOTH_BR_EDR = "Bluetooth BR / EDR"
     BLUETOOTH_LE = "Bluetooth LE"
     BLUETOOTH_HDT = "Bluetooth HDT"
+    WIFI = "Wi-Fi"
 
 
 class DataSourceKind(StrEnum):
@@ -29,6 +30,11 @@ class ModulationKind(StrEnum):
     PI_4_QPSK = "pi/4-QPSK"
     PSK8 = "8PSK"
     QAM16 = "16QAM"
+    TRAINING = "Training"
+    OFDM_BPSK = "OFDM / BPSK"
+    OFDM_QPSK = "OFDM / QPSK"
+    OFDM_QAM16 = "OFDM / 16QAM"
+    OFDM_QAM64 = "OFDM / 64QAM"
 
 
 class FilterKind(StrEnum):
@@ -220,6 +226,45 @@ class BluetoothHDTSettings:
     post_idle_symbols: int = 16
 
 
+class WiFiPHYFormat(StrEnum):
+    NON_HT_OFDM = "Non-HT OFDM"
+
+
+class WiFiPSDUSource(StrEnum):
+    RAW_HEX = "Raw PSDU"
+    PATTERN = "Pattern"
+    PRBS9 = "PRBS-9"
+    BEACON = "Beacon"
+
+
+class WiFiScramblerSeedMode(StrEnum):
+    AUTO = "Auto"
+    FIXED = "Fixed"
+
+
+@dataclass(frozen=True)
+class WiFiSettings:
+    """Wi-Fi Non-HT OFDM packet and MAC settings."""
+
+    phy_format: WiFiPHYFormat = WiFiPHYFormat.NON_HT_OFDM
+    channel_bandwidth_mhz: int = 20
+    legacy_rate_mbps: int = 6
+    scrambler_seed_mode: WiFiScramblerSeedMode = WiFiScramblerSeedMode.FIXED
+    scrambler_seed: int = 0x5D
+    psdu_source: WiFiPSDUSource = WiFiPSDUSource.BEACON
+    raw_psdu_hex: str = "00"
+    payload_length_bytes: int = 100
+    payload_pattern_hex: str = "AA"
+    channel: int = 6
+    ssid: str = "Pluto_Test_AP"
+    bssid: str = "02:11:22:33:44:55"
+    sequence_number: int = 0
+    beacon_interval_tu: int = 100
+    fcs_auto: bool = True
+    oversample_factor: int = 2
+    packet_period_us: float = 102_400.0
+
+
 @dataclass(frozen=True)
 class WaveformProject:
     name: str = "Untitled Waveform"
@@ -238,6 +283,7 @@ class WaveformProject:
     bluetooth_br: BluetoothBRSettings | None = None
     bluetooth_le: BluetoothLESettings | None = None
     bluetooth_hdt: BluetoothHDTSettings | None = None
+    wifi: WiFiSettings | None = None
 
 
 @dataclass(frozen=True)
@@ -619,6 +665,35 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                         "Fixed and pattern payloads require a binary pattern.",
                     )
                 )
+    wifi_settings = project.wifi
+    if wifi_settings is not None:
+        if WiFiPHYFormat(wifi_settings.phy_format) != WiFiPHYFormat.NON_HT_OFDM:
+            issues.append(ValidationIssue("wifi.phy_format", "Only Non-HT OFDM is currently supported."))
+        if int(wifi_settings.channel_bandwidth_mhz) != 20:
+            issues.append(ValidationIssue("wifi.channel_bandwidth_mhz", "Non-HT OFDM requires 20 MHz bandwidth."))
+        if int(wifi_settings.legacy_rate_mbps) not in {6, 9, 12, 18, 24, 36, 48, 54}:
+            issues.append(ValidationIssue("wifi.legacy_rate_mbps", "Legacy rate must be 6, 9, 12, 18, 24, 36, 48, or 54 Mbps."))
+        if int(wifi_settings.oversample_factor) not in {1, 2}:
+            issues.append(ValidationIssue("wifi.oversample_factor", "Oversample factor must be 1 or 2."))
+        if not 1 <= int(wifi_settings.channel) <= 13:
+            issues.append(ValidationIssue("wifi.channel", "Non-HT OFDM 2.4 GHz channel must be between 1 and 13."))
+        if not 1 <= int(wifi_settings.scrambler_seed) <= 0x7F:
+            issues.append(ValidationIssue("wifi.scrambler_seed", "Scrambler seed must be a non-zero 7-bit value."))
+        if not 0 <= int(wifi_settings.sequence_number) <= 4095:
+            issues.append(ValidationIssue("wifi.sequence_number", "Sequence number must be between 0 and 4095."))
+        if not 1 <= int(wifi_settings.beacon_interval_tu) <= 65535:
+            issues.append(ValidationIssue("wifi.beacon_interval_tu", "Beacon interval must be between 1 and 65535 TU."))
+        if len(wifi_settings.ssid.encode("utf-8")) > 32:
+            issues.append(ValidationIssue("wifi.ssid", "SSID must be at most 32 UTF-8 bytes."))
+        try:
+            parts = wifi_settings.bssid.split(":")
+            valid_bssid = len(parts) == 6 and all(len(part) == 2 and 0 <= int(part, 16) <= 255 for part in parts)
+        except ValueError:
+            valid_bssid = False
+        if not valid_bssid:
+            issues.append(ValidationIssue("wifi.bssid", "BSSID must use XX:XX:XX:XX:XX:XX notation."))
+        if float(wifi_settings.packet_period_us) <= 0.0:
+            issues.append(ValidationIssue("wifi.packet_period_us", "Packet period must be positive."))
     return tuple(issues)
 
 

@@ -21,6 +21,7 @@ from pluto_common import (
 )
 from pluto_vsg.backends.base import BackendCapabilities
 from pluto_vsg.engine import GenerationResult
+from pluto_vsg.rf_level import generation_result_iq_levels
 
 
 _PLUTO_DAC_FULL_SCALE = 2**15 - 1
@@ -73,8 +74,9 @@ def estimate_pluto_output_power_dbm(
     hardware_gain_db: float,
     digital_backoff_db: float,
     center_frequency_hz: float = _PLUTO_LEVEL_CALIBRATION_FREQUENCY_HZ,
+    active_rms_dbfs: float = 0.0,
 ) -> float:
-    """Estimate active FSK packet power using the provisional 2440 MHz data."""
+    """Estimate active-interval mean power using provisional 2440 MHz data."""
 
     del center_frequency_hz  # Reserved for the future frequency correction.
     full_scale_power_dbm = _interpolate_with_linear_extrapolation(
@@ -82,18 +84,27 @@ def estimate_pluto_output_power_dbm(
         _PLUTO_LEVEL_GAIN_POINTS_DB,
         _PLUTO_LEVEL_OUTPUT_POINTS_DBM,
     )
-    return full_scale_power_dbm + float(digital_backoff_db)
+    return (
+        full_scale_power_dbm
+        + float(digital_backoff_db)
+        + float(active_rms_dbfs)
+    )
 
 
 def pluto_hardware_gain_for_output_power_dbm(
     output_power_dbm: float,
     digital_backoff_db: float,
     center_frequency_hz: float = _PLUTO_LEVEL_CALIBRATION_FREQUENCY_HZ,
+    active_rms_dbfs: float = 0.0,
 ) -> float:
     """Return Tx Gain needed for a provisional conducted RF level target."""
 
     del center_frequency_hz  # Reserved for the future frequency correction.
-    full_scale_target_dbm = float(output_power_dbm) - float(digital_backoff_db)
+    full_scale_target_dbm = (
+        float(output_power_dbm)
+        - float(digital_backoff_db)
+        - float(active_rms_dbfs)
+    )
     return _interpolate_with_linear_extrapolation(
         full_scale_target_dbm,
         _PLUTO_LEVEL_OUTPUT_POINTS_DBM,
@@ -104,6 +115,7 @@ def pluto_hardware_gain_for_output_power_dbm(
 def pluto_output_power_range_dbm(
     digital_backoff_db: float,
     center_frequency_hz: float = _PLUTO_LEVEL_CALIBRATION_FREQUENCY_HZ,
+    active_rms_dbfs: float = 0.0,
 ) -> tuple[float, float]:
     """Return the provisional RF-level range reachable by Pluto Tx Gain."""
 
@@ -112,11 +124,13 @@ def pluto_output_power_range_dbm(
             _PLUTO_MUTED_GAIN_DB,
             digital_backoff_db,
             center_frequency_hz,
+            active_rms_dbfs,
         ),
         estimate_pluto_output_power_dbm(
             0.0,
             digital_backoff_db,
             center_frequency_hz,
+            active_rms_dbfs,
         ),
     )
 
@@ -149,6 +163,8 @@ class PlutoTransmitSettings:
     burst_count: int = 1
     output_power_dbm: float | None = None
     playback_mode: PlutoPlaybackMode = PlutoPlaybackMode.FINITE
+    waveform_active_rms_dbfs: float = 0.0
+    waveform_peak_dbfs: float = 0.0
 
     @property
     def resolved_hardware_gain_db(self) -> float:
@@ -160,6 +176,7 @@ class PlutoTransmitSettings:
             self.output_power_dbm,
             self.digital_backoff_db,
             self.center_frequency_hz,
+            self.waveform_active_rms_dbfs,
         )
 
 
@@ -179,6 +196,14 @@ class PlutoOutputBackend:
         self._sample_count = 0
         self._frame_sample_count = 0
         self._waveform_peak = 0.0
+        self._waveform_peak_dbfs = float(settings.waveform_peak_dbfs)
+        self._waveform_active_rms = 1.0
+        self._waveform_active_rms_dbfs = float(settings.waveform_active_rms_dbfs)
+        self._waveform_crest_factor_db = (
+            self._waveform_peak_dbfs - self._waveform_active_rms_dbfs
+        )
+        self._waveform_block_rms_dbfs: dict[str, float] = {}
+        self._resolved_hardware_gain_db = settings.resolved_hardware_gain_db
         self._dac_peak_code = 0.0
         self._preload_guard_s = 0.0
         self._stop_event = threading.Event()
@@ -307,11 +332,30 @@ class PlutoOutputBackend:
             if self._firmware is None
             else f"v{self._firmware[0]}.{self._firmware[1]}",
             "settings": settings,
-            "resolved_hardware_gain_db": self.settings.resolved_hardware_gain_db,
+            "resolved_hardware_gain_db": self._resolved_hardware_gain_db,
             "sample_count": self._sample_count,
             "frame_sample_count": self._frame_sample_count,
             "period_sample_count": self._frame_sample_count,
             "waveform_peak": self._waveform_peak,
+            "waveform_peak_dbfs": self._waveform_peak_dbfs,
+            "waveform_active_rms": self._waveform_active_rms,
+            "waveform_active_rms_dbfs": self._waveform_active_rms_dbfs,
+            "waveform_crest_factor_db": self._waveform_crest_factor_db,
+            "waveform_block_rms_dbfs": self._waveform_block_rms_dbfs,
+            "rf_level_definition": "active signal mean RF power (RMS)",
+            "requested_rf_output_level_dbm": self.settings.output_power_dbm,
+            "estimated_active_output_power_dbm": estimate_pluto_output_power_dbm(
+                self._resolved_hardware_gain_db,
+                self.settings.digital_backoff_db,
+                self.settings.center_frequency_hz,
+                self._waveform_active_rms_dbfs,
+            ),
+            "estimated_peak_output_power_dbm": estimate_pluto_output_power_dbm(
+                self._resolved_hardware_gain_db,
+                self.settings.digital_backoff_db,
+                self.settings.center_frequency_hz,
+                self._waveform_peak_dbfs,
+            ),
             "dac_full_scale": _PLUTO_DAC_FULL_SCALE,
             "dac_peak_code": self._dac_peak_code,
             "superframe_sample_count": 0
@@ -363,11 +407,20 @@ class PlutoOutputBackend:
             raise ValueError("Pluto RF output level must be finite")
         if not -60.0 <= settings.digital_backoff_db <= 0.0:
             raise ValueError("Pluto digital backoff must be between -60 dB and 0 dB")
+        if not np.isfinite(settings.waveform_active_rms_dbfs):
+            raise ValueError("Waveform active RMS dBFS must be finite")
+        if not np.isfinite(settings.waveform_peak_dbfs):
+            raise ValueError("Waveform peak dBFS must be finite")
+        if settings.waveform_peak_dbfs > 1e-6:
+            raise ValueError("Waveform peak must not exceed 0 dBFS")
+        if settings.waveform_active_rms_dbfs > settings.waveform_peak_dbfs + 1e-6:
+            raise ValueError("Waveform active RMS must not exceed its peak")
         resolved_gain_db = settings.resolved_hardware_gain_db
         if not -89.75 <= resolved_gain_db <= 0.0:
             minimum_dbm, maximum_dbm = pluto_output_power_range_dbm(
                 settings.digital_backoff_db,
                 settings.center_frequency_hz,
+                settings.waveform_active_rms_dbfs,
             )
             if settings.output_power_dbm is not None:
                 raise ValueError(
@@ -437,6 +490,43 @@ class PlutoOutputBackend:
         if iq.size % burst_count:
             raise ValueError("Generated IQ cannot be divided into equal Pluto frames")
         self._waveform_peak = float(np.max(np.abs(iq)))
+        level_metrics = generation_result_iq_levels(result)
+        if level_metrics.active_sample_count == 0 or not np.isfinite(
+            level_metrics.active_rms_dbfs
+        ):
+            raise ValueError("Pluto RF-level control requires a non-empty active IQ interval")
+        self._waveform_peak_dbfs = level_metrics.peak_dbfs
+        self._waveform_active_rms = level_metrics.active_rms
+        self._waveform_active_rms_dbfs = level_metrics.active_rms_dbfs
+        self._waveform_crest_factor_db = level_metrics.crest_factor_db
+        block_rms = result.metadata.get("block_rms_dbfs")
+        self._waveform_block_rms_dbfs = (
+            {
+                str(name): float(value)
+                for name, value in block_rms.items()
+                if np.isfinite(float(value))
+            }
+            if isinstance(block_rms, dict)
+            else {}
+        )
+        if self.settings.output_power_dbm is not None:
+            self._resolved_hardware_gain_db = pluto_hardware_gain_for_output_power_dbm(
+                self.settings.output_power_dbm,
+                self.settings.digital_backoff_db,
+                self.settings.center_frequency_hz,
+                self._waveform_active_rms_dbfs,
+            )
+            if not _PLUTO_MUTED_GAIN_DB <= self._resolved_hardware_gain_db <= 0.0:
+                minimum_dbm, maximum_dbm = pluto_output_power_range_dbm(
+                    self.settings.digital_backoff_db,
+                    self.settings.center_frequency_hz,
+                    self._waveform_active_rms_dbfs,
+                )
+                raise ValueError(
+                    "Pluto RF output level must be between "
+                    f"{minimum_dbm:.2f} dBm and {maximum_dbm:.2f} dBm for the "
+                    "generated waveform active RMS"
+                )
         digital_scale = 10.0 ** (self.settings.digital_backoff_db / 20.0)
         dac_scale = _PLUTO_DAC_FULL_SCALE * digital_scale
         real = np.clip(iq.real, -1.0, 1.0) * dac_scale
@@ -818,7 +908,7 @@ class PlutoOutputBackend:
                 return
             self._record_event("muted_lo_settled")
 
-            sdr.tx_hardwaregain_chan0 = self.settings.resolved_hardware_gain_db
+            sdr.tx_hardwaregain_chan0 = self._resolved_hardware_gain_db
             self._record_event("requested_gain_applied")
             if self._stop_event.is_set():
                 return

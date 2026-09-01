@@ -563,6 +563,53 @@ def test_provisional_pluto_level_conversion_round_trips(backoff_db: float) -> No
         assert recovered_gain_db == pytest.approx(gain_db)
 
 
+def test_pluto_level_conversion_compensates_active_rms() -> None:
+    active_rms_dbfs = -6.020599913
+    output_dbm = estimate_pluto_output_power_dbm(
+        -10.0,
+        -3.0,
+        active_rms_dbfs=active_rms_dbfs,
+    )
+
+    assert output_dbm == pytest.approx(-18.420599913, abs=0.11)
+    assert pluto_hardware_gain_for_output_power_dbm(
+        output_dbm,
+        -3.0,
+        active_rms_dbfs=active_rms_dbfs,
+    ) == pytest.approx(-10.0)
+
+
+def test_pluto_backend_excludes_declared_idle_from_active_rms() -> None:
+    active_rms_dbfs = 20.0 * np.log10(0.5)
+    target_dbm = estimate_pluto_output_power_dbm(
+        -10.0,
+        -3.0,
+        active_rms_dbfs=active_rms_dbfs,
+    )
+    backend = PlutoOutputBackend(
+        _settings(
+            burst_count=1,
+            digital_backoff_db=-3.0,
+            output_power_dbm=target_dbm,
+            waveform_active_rms_dbfs=active_rms_dbfs,
+            waveform_peak_dbfs=active_rms_dbfs,
+        )
+    )
+    result = GenerationResult(
+        iq=np.asarray([0.0, 0.5, 0.5, 0.0], dtype=np.complex64),
+        sample_rate_hz=8_000_000.0,
+        metadata={"active_ranges_samples": ((1, 3),)},
+    )
+
+    backend.transfer(result)
+    report = backend.diagnostic_report()
+
+    assert report["waveform_active_rms_dbfs"] == pytest.approx(active_rms_dbfs)
+    assert report["waveform_crest_factor_db"] == pytest.approx(0.0)
+    assert report["resolved_hardware_gain_db"] == pytest.approx(-10.0)
+    assert report["estimated_active_output_power_dbm"] == pytest.approx(target_dbm)
+
+
 def test_pluto_backend_converts_requested_dbm_to_hardware_gain(monkeypatch) -> None:
     _install_fakes(monkeypatch)
     backend = PlutoOutputBackend(

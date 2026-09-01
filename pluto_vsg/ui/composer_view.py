@@ -146,6 +146,31 @@ class PacketComposerView(QtWidgets.QGraphicsView):
             return _POWER_COLOR
         return _BLOCK_COLORS.get(block.data_source, QtGui.QColor("#4d5968"))
 
+    @staticmethod
+    def _power_block_lanes(
+        blocks: tuple[ComposerBlock, ...],
+    ) -> dict[str, int]:
+        """Place the active-window overview above non-overlapping controls."""
+
+        lanes: dict[str, int] = {}
+        detail_lane_stops: list[float] = []
+        for block in sorted(
+            blocks,
+            key=lambda item: (item.start_symbol, item.stop_symbol, item.block_id),
+        ):
+            if block.block_id == "power:on-level":
+                lanes[block.block_id] = 0
+                continue
+            for lane_index, stop_symbol in enumerate(detail_lane_stops):
+                if block.start_symbol >= stop_symbol - 1e-9:
+                    detail_lane_stops[lane_index] = block.stop_symbol
+                    lanes[block.block_id] = lane_index + 1
+                    break
+            else:
+                detail_lane_stops.append(block.stop_symbol)
+                lanes[block.block_id] = len(detail_lane_stops)
+        return lanes
+
     def _render_graph(self) -> None:
         self._block_items.clear()
         self._block_labels.clear()
@@ -154,6 +179,9 @@ class PacketComposerView(QtWidgets.QGraphicsView):
         if graph is None:
             return
         data_blocks = graph.track_blocks(ComposerTrackKind.DATA)
+        power_blocks = graph.track_blocks(ComposerTrackKind.POWER)
+        power_lanes = self._power_block_lanes(power_blocks)
+        power_lane_count = max(power_lanes.values(), default=0) + 1
         max_depth = max((block.depth for block in data_blocks), default=0)
         minimum_symbol = min(
             (block.start_symbol for block in graph.blocks), default=0.0
@@ -174,7 +202,15 @@ class PacketComposerView(QtWidgets.QGraphicsView):
         data_height = major_height + 18.0 + max(1, max_depth) * (child_height + 5.0)
         modulation_y = major_y + data_height + 34.0
         power_y = modulation_y + 78.0
-        scene_height = power_y + 82.0
+        power_lane_height = 34.0
+        power_lane_gap = 7.0
+        scene_height = (
+            power_y
+            + 24.0
+            + power_lane_count * power_lane_height
+            + max(0, power_lane_count - 1) * power_lane_gap
+            + 16.0
+        )
 
         tracks = (
             (ComposerTrackKind.DATA, 18.0, modulation_y - 12.0),
@@ -220,7 +256,11 @@ class PacketComposerView(QtWidgets.QGraphicsView):
             elif block.track == ComposerTrackKind.MODULATION:
                 y, height = modulation_y + 12.0, 42.0
             else:
-                y, height = power_y + 12.0, 42.0
+                lane = power_lanes.get(block.block_id, 0)
+                y = power_y + 12.0 + lane * (
+                    power_lane_height + power_lane_gap
+                )
+                height = power_lane_height
             item = _ComposerBlockItem(
                 block,
                 QtCore.QRectF(x, y, width, height),

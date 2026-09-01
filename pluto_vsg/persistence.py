@@ -23,6 +23,10 @@ from pluto_vsg.model import (
     PowerEnvelopeDefinition,
     StandardProfile,
     WaveformProject,
+    WiFiPHYFormat,
+    WiFiPSDUSource,
+    WiFiScramblerSeedMode,
+    WiFiSettings,
     validate_project,
 )
 from pluto_protocol.bluetooth.hdt import HDTRate
@@ -101,6 +105,13 @@ def project_to_dict(project: WaveformProject) -> dict[str, object]:
             "rate": HDTRate(project.bluetooth_hdt.rate).value,
             "payload_source": PayloadSourceKind(project.bluetooth_hdt.payload_source).value,
         }
+    if project.wifi is not None:
+        payload["wifi"] = {
+            **asdict(project.wifi),
+            "phy_format": WiFiPHYFormat(project.wifi.phy_format).value,
+            "psdu_source": WiFiPSDUSource(project.wifi.psdu_source).value,
+            "scrambler_seed_mode": WiFiScramblerSeedMode(project.wifi.scrambler_seed_mode).value,
+        }
     return {
         "format": PROJECT_FORMAT,
         "version": PROJECT_VERSION,
@@ -170,6 +181,17 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
             "rate": HDTRate(str(bluetooth_hdt_payload["rate"])),
             "payload_source": PayloadSourceKind(str(bluetooth_hdt_payload["payload_source"])),
         })
+    wifi_payload = payload.get("wifi")
+    wifi = None
+    if wifi_payload is not None:
+        if not isinstance(wifi_payload, dict):
+            raise ValueError("Invalid Wi-Fi settings")
+        wifi = WiFiSettings(**{
+            **wifi_payload,
+            "phy_format": WiFiPHYFormat(str(wifi_payload["phy_format"])),
+            "psdu_source": WiFiPSDUSource(str(wifi_payload["psdu_source"])),
+            "scrambler_seed_mode": WiFiScramblerSeedMode(str(wifi_payload["scrambler_seed_mode"])),
+        })
     standard = StandardProfile(str(payload["standard"]))
     if (
         standard == StandardProfile.BLUETOOTH_BR_EDR
@@ -198,6 +220,7 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
         bluetooth_br=bluetooth,
         bluetooth_le=bluetooth_le,
         bluetooth_hdt=bluetooth_hdt,
+        wifi=wifi,
     )
     issues = validate_project(project)
     if issues:

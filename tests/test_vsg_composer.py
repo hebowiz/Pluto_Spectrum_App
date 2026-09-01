@@ -43,7 +43,7 @@ def test_le_composer_graph_has_three_time_aligned_tracks() -> None:
     assert modulation[0].start_symbol == 0
     assert modulation[0].stop_symbol == graph.total_symbols
     assert [block.name for block in power] == [
-        "Power Envelope",
+        "Active Window",
         "Ramp Up",
         "Ramp Down",
     ]
@@ -154,6 +154,23 @@ def test_visual_composer_labels_stay_inside_their_timeline_blocks() -> None:
             label_rect = label.sceneBoundingRect()
             assert parent_rect.left() <= label_rect.left() <= parent_rect.right()
             assert parent_rect.top() <= label_rect.center().y() <= parent_rect.bottom()
+    finally:
+        view.close()
+
+
+def test_visual_composer_power_controls_do_not_overlap_active_window() -> None:
+    pg.mkQApp("Pluto VSG visual composer power lane test")
+    view = PacketComposerView()
+    try:
+        view.set_graph(build_composer_graph(bluetooth_le_project()))
+        items = {item.block.block_id: item for item in view._block_items}
+        active_window = items["power:on-level"].sceneBoundingRect()
+        ramp_up = items["power:ramp-up"].sceneBoundingRect()
+        ramp_down = items["power:ramp-down"].sceneBoundingRect()
+
+        assert active_window.intersects(ramp_up) is False
+        assert active_window.intersects(ramp_down) is False
+        assert ramp_up.top() == ramp_down.top()
     finally:
         view.close()
 

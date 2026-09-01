@@ -12,6 +12,7 @@ from pluto_vsg.engine.bluetooth_br import (
     _append_field_boundaries, _extend_edge_phase, _placed_power_envelope, _srrc_taps,
 )
 from pluto_vsg.model import PayloadSourceKind, WaveformProject, waveform_timing_samples, validate_project
+from pluto_vsg.rf_level import iq_level_metadata, measure_iq_levels
 
 
 def hdt_payload_bits(project: WaveformProject) -> np.ndarray:
@@ -94,10 +95,14 @@ class BluetoothHDTWaveformEngine:
         data_start = prefix - active_start
         boundaries: list[FieldBoundary] = []
         ranges = []
+        active_ranges = []
         for repeat in range(int(project.repeat_count)):
+            active_offset = repeat * single.size + prefix
+            active_ranges.append((active_offset, active_offset + active_iq.size))
             offset = repeat * single.size + data_start
             ranges.append((offset, offset + data_count))
             _append_field_boundaries(boundaries, project.fields, repeat_offset=offset, samples_per_symbol=sps, repeat_suffix="" if project.repeat_count == 1 else f" [{repeat + 1}]")
+        level_metrics = measure_iq_levels(iq, active_ranges)
         return GenerationResult(
             iq=iq, sample_rate_hz=project.sample_rate_hz, field_boundaries=tuple(boundaries),
             packet_bits=GeneratedPacketBits(payload, "bluetooth.hdt", settings.rate.value, context={"rate_indicator": definition.rate_indicator}),
@@ -107,8 +112,10 @@ class BluetoothHDTWaveformEngine:
                 "modulation": definition.modulation, "payload_code_rate": definition.payload_code_rate,
                 "payload_bits": payload, "coded_payload_bits": coded, "packet_sample_count": data_count,
                 "period_sample_count": single.size, "packet_ranges_samples": tuple(ranges),
+                "active_ranges_samples": tuple(active_ranges),
                 "data_start_sample": data_start, "data_stop_sample": data_start + data_count,
                 "samples_per_symbol": sps, "symbol_rate_hz": 2_000_000.0,
                 "digital_scale": float(digital_scale),
+                **iq_level_metadata(level_metrics),
             },
         )

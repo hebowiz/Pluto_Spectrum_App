@@ -184,7 +184,7 @@ def build_composer_graph(project: WaveformProject) -> ComposerGraph:
         power_specs = (
             (
                 "on-level",
-                "Power Envelope",
+                "Active Window",
                 power_start,
                 power_stop - power_start,
                 (("Level", f"{envelope.on_level_db:.3g} dB"),),

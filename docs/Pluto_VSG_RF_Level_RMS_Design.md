@@ -774,3 +774,25 @@ Backoffによって最大到達電力は下がり、暫定値では0/-3/-6 dB時
 将来はこの暫定関数を、Pluto serial、周波数、sample rate、RF bandwidth、温度、
 変調方式、Digital Backoffを軸にした校正データへ差し替える。UIと送信状態機械は
 そのまま維持し、校正層だけを交換できる構造とする。
+
+---
+
+## 23. Active RMS連動（2026-09-01 実装）
+
+暫定dBm校正を、生成波形が明示する有効区間のRMSへ連動させた。Packet Period内のidle/zero IQは平均に含めない。各波形生成器は`active_ranges_samples`を出力し、バックエンドは送信直前にも同じ区間から実測値を再計算する。
+
+```text
+Pout_est = calibration(Tx Gain)
+           + Digital Backoff
+           + Active IQ RMS [dBFS]
+
+Tx Gain = inverse_calibration(
+              Pout_target
+              - Digital Backoff
+              - Active IQ RMS [dBFS]
+          )
+```
+
+UIには`IQ Active RMS`、`IQ Peak`、`Crest Factor`、`Estimated Peak RF Level`を表示する。EDRはGFSK、Guard、DPSKのブロック別RMSも生成結果とInspectorへ表示する。診断ログには希望RF Level、適用Tx Gain、Active RMS、Peak、Crest Factor、推定平均/ピークRF Levelを記録する。
+
+この補正はデジタル波形のRMS差を補うものであり、周波数応答、個体差、温度差、OFDMのPAPRに依存するアナログ圧縮は引き続き未校正である。

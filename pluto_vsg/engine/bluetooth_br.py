@@ -30,6 +30,7 @@ from pluto_vsg.model import (
     waveform_timing_samples,
     validate_project,
 )
+from pluto_vsg.rf_level import iq_level_metadata, measure_iq_levels
 
 
 _BR_SYMBOL_RATE_HZ = 1_000_000.0
@@ -535,7 +536,12 @@ class BluetoothBRWaveformEngine:
             )
         boundaries: list[FieldBoundary] = []
         packet_ranges_samples: list[tuple[int, int]] = []
+        active_ranges_samples: list[tuple[int, int]] = []
         for repeat in range(project.repeat_count):
+            active_offset = repeat * single.size + prefix_count
+            active_ranges_samples.append(
+                (active_offset, active_offset + active_iq.size)
+            )
             repeat_offset = repeat * single.size + data_start_in_single
             packet_ranges_samples.append(
                 (repeat_offset, repeat_offset + data_sample_count)
@@ -550,6 +556,28 @@ class BluetoothBRWaveformEngine:
             )
             if stop_symbol != generated_symbol_count:
                 raise ValueError("Field hierarchy does not fill the generated packet")
+
+        level_metrics = measure_iq_levels(iq, active_ranges_samples)
+        block_rms_dbfs: dict[str, float] = {}
+        if is_edr and edr_start_relative_sample is not None:
+            gfsk_ranges = []
+            guard_ranges = []
+            dpsk_ranges = []
+            for repeat in range(project.repeat_count):
+                data_offset = repeat * single.size + data_start_in_single
+                gfsk_stop = data_offset + gfsk_sample_count
+                edr_start = data_offset + edr_start_relative_sample
+                gfsk_ranges.append((data_offset, gfsk_stop))
+                guard_ranges.append((gfsk_stop, edr_start))
+                dpsk_ranges.append((edr_start, data_offset + data_sample_count))
+            for name, ranges in (
+                ("GFSK", gfsk_ranges),
+                ("Guard", guard_ranges),
+                ("DPSK", dpsk_ranges),
+            ):
+                metrics = measure_iq_levels(iq, ranges)
+                if metrics.active_sample_count:
+                    block_rms_dbfs[name] = metrics.active_rms_dbfs
 
         return GenerationResult(
             iq=iq,
@@ -619,7 +647,7 @@ class BluetoothBRWaveformEngine:
                 "gaussian_bt": settings.gaussian_bt,
                 "packet_sample_count": int(data_sample_count),
                 "packet_ranges_samples": tuple(packet_ranges_samples),
-                "active_sample_count": int(active_iq.size),
+                "active_ranges_samples": tuple(active_ranges_samples),
                 "data_start_sample": int(data_start_in_single),
                 "data_stop_sample": int(data_start_in_single + data_sample_count),
                 "ramp_rise_start_relative_samples": int(rise_start),
@@ -628,5 +656,7 @@ class BluetoothBRWaveformEngine:
                 ),
                 "edge_frequency_mode": "Hold first / last symbol",
                 "digital_scale": float(digital_scale),
+                "block_rms_dbfs": block_rms_dbfs,
+                **iq_level_metadata(level_metrics),
             },
         )
