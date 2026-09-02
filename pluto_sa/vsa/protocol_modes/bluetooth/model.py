@@ -57,6 +57,26 @@ from pluto_sa.vsa.profiles.bluetooth_br import BluetoothBRProfile, access_code_b
 from pluto_sa.vsa.profiles.bluetooth_edr import edr_sync_symbols
 from pluto_sa.vsa.protocol import analyze_demodulated_packet_bits
 from pluto_sa.vsa.session import VSASession
+from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement.hdt import (
+    apply_hdt_reference,
+    build_hdt_evm_result,
+    estimate_hdt_reference,
+)
+from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
+    BluetoothRFMeasurementFilterProfile,
+    BluetoothRFMeasurementResult,
+    BluetoothRFTestAccumulator,
+    EDRConformanceResult,
+    RFTestEligibility,
+    RFTestVerdict,
+    build_fm_measurement_trace,
+    measure_edr_devm,
+    measure_edr_guard_time,
+    measure_burst_power,
+    measure_carrier_drift,
+    measure_initial_carrier_frequency,
+    measure_modulation_characteristics,
+)
 
 
 class BluetoothAnalysisProfile(StrEnum):
@@ -294,6 +314,13 @@ def _le_access_bits(access_address: int) -> np.ndarray:
 def _le_sync_bits(phy: BluetoothLEPhy, access_address: int) -> np.ndarray:
     access = _le_access_bits(access_address)
     preamble_count = 16 if phy is BluetoothLEPhy.LE_2M else 8
+    if int(access_address) == 0x71764129:
+        # The uncoded RF PHY Test Packet uses the prescribed alternating
+        # preamble paired with Sync Word 0x71764129.
+        preamble = np.resize(
+            np.asarray([1, 0], dtype=np.uint8), preamble_count
+        )
+        return np.concatenate((preamble, access))
     # Core Vol 6, Part B: the alternating preamble is selected so its last
     # transmitted bit differs from the first access-address bit.  In the OTA
     # arrays used here that means the first preamble bit is the complement of
@@ -309,12 +336,256 @@ def _le_signal(phy: BluetoothLEPhy) -> SignalDescription:
     return SignalDescription(
         modulation=ModulationKind.FSK,
         symbol_rate_hz=rate,
-        frequency_deviation_hz=250_000.0,
+        frequency_deviation_hz=(
+            500_000.0 if phy is BluetoothLEPhy.LE_2M else 250_000.0
+        ),
         tx_filter="Gaussian",
         filter_parameter=0.5,
         symbol_mapping="Natural",
     )
 
+
+def _rf_test_eligibility(
+    *,
+    profile: BluetoothAnalysisProfile | str,
+    whitening_enabled: bool,
+    sample_rate_hz: float,
+    minimum_sample_rate_hz: float,
+    extra_reasons: tuple[str, ...] = (),
+) -> RFTestEligibility:
+    reasons = list(extra_reasons)
+    if BluetoothAnalysisProfile(profile) is not BluetoothAnalysisProfile.RF_PHY_TEST:
+        reasons.append("RF / PHY Test profile is not selected")
+    if whitening_enabled:
+        reasons.append("RF test packet must have whitening disabled")
+    if float(sample_rate_hz) <= float(minimum_sample_rate_hz):
+        reasons.append(
+            f"sample rate must exceed {minimum_sample_rate_hz / 1e6:.3f} MS/s"
+        )
+    return RFTestEligibility.from_reasons(reasons)
+
+
+def _sig_fsk_measurements(
+    recording: IQRecording,
+    packet: PacketAnalysisResult,
+    *,
+    profile: BluetoothAnalysisProfile | str,
+    whitening_enabled: bool,
+    symbol_rate_hz: float,
+    filter_profile: BluetoothRFMeasurementFilterProfile,
+    packet_start_sample: int,
+    packet_stop_sample: int,
+    p0_sample: float | None = None,
+    extra_eligibility_reasons: tuple[str, ...] = (),
+    drift_block_symbols: int = 50,
+) -> tuple[tuple[BluetoothMetric, ...], tuple[BluetoothRFMeasurementResult, ...]]:
+    """Measure BR/LE RF properties without decoder frequency-model fitting."""
+
+    scale = 2.0 if filter_profile is BluetoothRFMeasurementFilterProfile.LE_2M else 1.0
+    eligibility = _rf_test_eligibility(
+        profile=profile,
+        whitening_enabled=whitening_enabled,
+        sample_rate_hz=recording.sample_rate_hz,
+        minimum_sample_rate_hz=4_000_000.0 * scale,
+        extra_reasons=extra_eligibility_reasons,
+    )
+    eligibility_text = (
+        "Eligible" if eligibility.eligible else "N/A - " + "; ".join(eligibility.reasons)
+    )
+    metrics: list[BluetoothMetric] = [
+        BluetoothMetric("sig_eligibility", "SIG RF Test Eligibility", eligibility_text)
+    ]
+    payload = _packet_field_by_id(packet.root_fields, "payload_body")
+    if payload is None:
+        payload = _packet_field_by_id(packet.root_fields, "payload")
+    if payload is None or payload.raw_bits.size < 16:
+        unavailable = RFTestEligibility.from_reasons(
+            (*eligibility.reasons, "decoded payload is too short")
+        )
+        return tuple(metrics), (
+            BluetoothRFMeasurementResult(
+                "bluetooth.fsk",
+                unavailable,
+                metadata={"reason": "decoded payload is too short"},
+            ),
+        )
+    try:
+        trace = build_fm_measurement_trace(
+            recording.iq,
+            sample_rate_hz=recording.sample_rate_hz,
+            symbol_rate_hz=symbol_rate_hz,
+            p0_sample=(
+                float(packet_start_sample)
+                if p0_sample is None
+                else float(p0_sample)
+            ),
+            profile=filter_profile,
+        )
+        modulation = measure_modulation_characteristics(
+            trace,
+            payload.raw_bits,
+            payload_start_symbol=int(payload.start_bit),
+        )
+        if modulation.payload_pattern is None:
+            eligibility = RFTestEligibility.from_reasons(
+                (
+                    *eligibility.reasons,
+                    "payload is not an RF test 11110000 or 10101010 pattern",
+                )
+            )
+            metrics[0] = BluetoothMetric(
+                "sig_eligibility",
+                "SIG RF Test Eligibility",
+                "N/A - " + "; ".join(eligibility.reasons),
+            )
+        preamble_symbols = (
+            4
+            if filter_profile is BluetoothRFMeasurementFilterProfile.BR_1M
+            else 16
+            if filter_profile is BluetoothRFMeasurementFilterProfile.LE_2M
+            else 8
+        )
+        initial = measure_initial_carrier_frequency(
+            trace,
+            packet.raw_bits[: min(preamble_symbols, packet.raw_bits.size)],
+            nominal_frequency_hz=recording.center_frequency_hz,
+            start_symbol=0,
+        )
+        drift = measure_carrier_drift(
+            trace,
+            payload.raw_bits,
+            nominal_frequency_hz=recording.center_frequency_hz,
+            start_symbol=int(payload.start_bit),
+            block_symbols=drift_block_symbols,
+        )
+        power = measure_burst_power(
+            recording.iq,
+            full_scale=recording.full_scale,
+            dbfs_to_dbm_offset_db=recording.dbfs_to_dbm_offset_db,
+            start_sample=packet_start_sample,
+            stop_sample=packet_stop_sample,
+        )
+    except (ValueError, RuntimeError) as error:
+        unavailable = RFTestEligibility.from_reasons(
+            (*eligibility.reasons, str(error))
+        )
+        return tuple(metrics), (
+            BluetoothRFMeasurementResult(
+                "bluetooth.fsk", unavailable, metadata={"reason": str(error)}
+            ),
+        )
+
+    metrics.extend(
+        (
+            BluetoothMetric("sig_pavg", "SIG PAVG", _display(power.average_dbm, "dBm")),
+            BluetoothMetric("sig_ppk", "SIG PPK", _display(power.peak_dbm, "dBm")),
+            BluetoothMetric("sig_ppk_minus_pavg", "SIG PPK - PAVG", _display(power.peak_to_average_db, "dB")),
+            BluetoothMetric("sig_initial_carrier_error", "SIG Initial Carrier Error f0", _display(initial.error_hz, "kHz", 1e3)),
+            BluetoothMetric("sig_max_drift", "SIG Max Drift from f0", _display(drift.max_drift_from_f0_hz, "kHz", 1e3)),
+            BluetoothMetric("sig_max_drift_rate", "SIG Max Drift Step", _display(drift.max_drift_rate_hz, "kHz", 1e3)),
+        )
+    )
+    if modulation.delta_f1_avg_hz is not None:
+        metrics.append(
+            BluetoothMetric("sig_delta_f1_avg", "SIG Delta f1avg", _display(modulation.delta_f1_avg_hz, "kHz", 1e3))
+        )
+
+    if modulation.delta_f2_avg_hz is not None:
+        metrics.append(
+            BluetoothMetric("sig_delta_f2_avg", "SIG Delta f2avg", _display(modulation.delta_f2_avg_hz, "kHz", 1e3))
+        )
+    if modulation.delta_f2_max_hz.size:
+        metrics.append(
+            BluetoothMetric(
+                "sig_delta_f2_p999",
+                "SIG Delta f2max 99.9% Floor",
+                _display(float(np.percentile(modulation.delta_f2_max_hz, 0.1)), "kHz", 1e3),
+            )
+        )
+    result = BluetoothRFMeasurementResult(
+        test_case_id="bluetooth.fsk",
+        eligibility=eligibility,
+        verdict=RFTestVerdict.NOT_APPLICABLE,
+        metrics={
+            "delta_f1_avg_hz": modulation.delta_f1_avg_hz,
+            "delta_f2_avg_hz": modulation.delta_f2_avg_hz,
+            "initial_carrier_error_hz": initial.error_hz,
+            "max_drift_from_f0_hz": drift.max_drift_from_f0_hz,
+            "max_drift_rate_hz": drift.max_drift_rate_hz,
+            "pavg_dbm": power.average_dbm,
+            "ppk_dbm": power.peak_dbm,
+        },
+        arrays={
+            "delta_f2_max_hz": modulation.delta_f2_max_hz,
+            "fn_hz": drift.fn_hz,
+            "frequency_hz": trace.frequency_hz,
+            "f0_selected_bit_indices": initial.selected_bit_indices,
+        },
+        metadata={
+            "payload_pattern": modulation.payload_pattern,
+            "filter_profile": filter_profile.value,
+            "aggregation_required": True,
+        },
+    )
+    return tuple(metrics), (result,)
+
+
+def _attach_rf_capture_aggregates(
+    results: list[BluetoothDedicatedResult],
+) -> tuple[BluetoothDedicatedResult, ...]:
+    """Attach capture-wide SIG evidence without inventing incomplete verdicts."""
+
+    accumulator = BluetoothRFTestAccumulator()
+    for item in results:
+        for measurement in item.metadata.get("rf_measurements", ()):
+            if isinstance(measurement, BluetoothRFMeasurementResult):
+                accumulator.add(measurement)
+    test_ids = {measurement.test_case_id for measurement in accumulator.results}
+    aggregates: dict[str, BluetoothRFMeasurementResult] = {}
+    if "bluetooth.fsk" in test_ids:
+        aggregates["bluetooth.fsk"] = accumulator.aggregate_fsk()
+    if "bluetooth.edr" in test_ids:
+        aggregates["bluetooth.edr"] = accumulator.aggregate_edr()
+
+    attached: list[BluetoothDedicatedResult] = []
+    for item in results:
+        measurements = tuple(item.metadata.get("rf_measurements", ()))
+        aggregate = next(
+            (
+                aggregates[measurement.test_case_id]
+                for measurement in measurements
+                if isinstance(measurement, BluetoothRFMeasurementResult)
+                and measurement.test_case_id in aggregates
+            ),
+            None,
+        )
+        if aggregate is None:
+            attached.append(item)
+            continue
+        block_count = aggregate.metrics.get("block_count")
+        suffix = f", {int(block_count)} DEVM blocks" if block_count is not None else ""
+        reasons = "; ".join(aggregate.eligibility.reasons)
+        display = aggregate.verdict.value
+        if reasons:
+            display += f" - {reasons}"
+        display += suffix
+        metadata = dict(item.metadata)
+        metadata["rf_capture_aggregate"] = aggregate
+        attached.append(
+            replace(
+                item,
+                metrics=(
+                    *item.metrics,
+                    BluetoothMetric(
+                        "sig_capture_aggregate",
+                        "SIG Capture Aggregate",
+                        display,
+                    ),
+                ),
+                metadata=metadata,
+            )
+        )
+    return tuple(attached)
 
 def _trim_le_packet_bits(
     bits: np.ndarray,
@@ -823,7 +1094,7 @@ def analyze_bluetooth_hdt_recording(
     matches = _hdt_training_matches(recording) if _matches is None else _matches
     if not 1 <= int(match_index) <= len(matches):
         raise RuntimeError("Bluetooth HDT synchronization pattern was not found")
-    first_center, training_correlation = matches[int(match_index) - 1]
+    coarse_first_center, _detection_correlation = matches[int(match_index) - 1]
     samples_per_symbol = recording.sample_rate_hz / _HDT_SYMBOL_RATE_HZ
     filtered_iq, filtered_rate_hz = prepare_psk_iq(
         recording.iq,
@@ -837,34 +1108,31 @@ def analyze_bluetooth_hdt_recording(
     if not np.isclose(filtered_rate_hz, recording.sample_rate_hz):
         raise RuntimeError("Unexpected HDT matched-filter sample rate")
     filtered_recording = replace(recording, iq=filtered_iq)
+    training_reference = hdt_rf_test_training_symbols()
+    hdt_reference = estimate_hdt_reference(
+        filtered_iq,
+        coarse_first_symbol_center_sample=coarse_first_center,
+        samples_per_symbol=samples_per_symbol,
+        training_reference=training_reference,
+    )
+    first_center = hdt_reference.first_symbol_center_sample
+    training_correlation = hdt_reference.training_correlation
     header_observed = _hdt_sample_symbols(
         filtered_recording, first_center, _HDT_PAYLOAD_START_SYMBOL
     )
     if header_observed.size < _HDT_PAYLOAD_START_SYMBOL:
         raise RuntimeError("Bluetooth HDT control header is incomplete")
-    training_reference = hdt_rf_test_training_symbols()
-    training_phase_error = np.unwrap(
-        np.angle(
-            header_observed[:_HDT_TRAINING_SYMBOLS]
-            * np.conj(training_reference)
-        )
-    )
-    phase_step, phase_intercept = np.polyfit(
-        np.arange(_HDT_TRAINING_SYMBOLS, dtype=np.float64),
-        training_phase_error,
-        1,
-    )
-    header_axis = np.arange(_HDT_PAYLOAD_START_SYMBOL, dtype=np.float64)
-    corrected_header = header_observed * np.exp(
-        -1j * (phase_intercept + phase_step * header_axis)
+    corrected_header = apply_hdt_reference(
+        filtered_iq,
+        hdt_reference,
+        samples_per_symbol=samples_per_symbol,
+        start_symbol=0,
+        symbol_count=_HDT_PAYLOAD_START_SYMBOL,
     )
     control_observed = corrected_header[
         _HDT_TRAINING_SYMBOLS : _HDT_TRAINING_SYMBOLS + _HDT_CONTROL_SYMBOLS
     ]
-    control_rms = float(np.sqrt(np.mean(np.abs(control_observed) ** 2)))
-    control_observed = control_observed / max(
-        control_rms, np.finfo(np.float64).tiny
-    )
+    display_control_rms = float(np.sqrt(np.mean(np.abs(control_observed) ** 2)))
     control_first_center = first_center + _HDT_TRAINING_SYMBOLS * samples_per_symbol
     control_trajectory_start = max(
         0, int(np.floor(control_first_center - 0.5 * samples_per_symbol))
@@ -889,11 +1157,12 @@ def analyze_bluetooth_hdt_recording(
         * np.exp(
             -1j
             * (
-                phase_intercept
-                + phase_step * control_trajectory_axis
+                hdt_reference.phase_rad
+                + hdt_reference.phase_step_rad_per_symbol
+                * control_trajectory_axis
             )
         )
-        / max(control_rms, np.finfo(np.float64).tiny)
+        / max(hdt_reference.amplitude, np.finfo(np.float64).tiny)
     )
     qpsk_alphabets = _hdt_qpsk_constellation(np.arange(_HDT_CONTROL_SYMBOLS))
     control_labels = np.argmin(
@@ -902,12 +1171,6 @@ def analyze_bluetooth_hdt_recording(
     control_reference = qpsk_alphabets[
         np.arange(_HDT_CONTROL_SYMBOLS), control_labels
     ]
-    header_evm = 100.0 * float(
-        np.sqrt(
-            np.sum(np.abs(control_observed - control_reference) ** 2)
-            / np.sum(np.abs(control_reference) ** 2)
-        )
-    )
     control_encoded = (
         (control_labels[:, None] >> np.asarray([1, 0], dtype=np.int16)) & 1
     ).astype(np.uint8).reshape(-1)
@@ -951,33 +1214,37 @@ def analyze_bluetooth_hdt_recording(
         round(first_center - 0.5 * samples_per_symbol + _HDT_PAYLOAD_START_SYMBOL * samples_per_symbol)
     )
     payload_stop = int(round(payload_start + payload_symbol_count * samples_per_symbol))
-    if payload_stop > recording.sample_count:
+    payload_evm_symbol_count = payload_symbol_count + 2
+    payload_evm_stop = int(
+        round(payload_start + payload_evm_symbol_count * samples_per_symbol)
+    )
+    if payload_evm_stop > recording.sample_count:
         raise RuntimeError(
             f"HDT header declares {payload_length} payload byte(s), but the capture is incomplete"
         )
 
-    payload_observed = _hdt_sample_symbols(
-        filtered_recording,
-        first_center + _HDT_PAYLOAD_START_SYMBOL * samples_per_symbol,
-        payload_symbol_count,
+    payload_corrected_all = apply_hdt_reference(
+        filtered_iq,
+        hdt_reference,
+        samples_per_symbol=samples_per_symbol,
+        start_symbol=_HDT_PAYLOAD_START_SYMBOL,
+        symbol_count=payload_evm_symbol_count,
     )
+    payload_corrected = payload_corrected_all[:payload_symbol_count]
     payload_axis = _HDT_PAYLOAD_START_SYMBOL + np.arange(payload_symbol_count)
-    payload_corrected = payload_observed * np.exp(
-        -1j * (phase_intercept + phase_step * payload_axis)
-    )
-    payload_rms = float(np.sqrt(np.mean(np.abs(payload_corrected) ** 2)))
-    payload_corrected /= max(payload_rms, np.finfo(np.float64).tiny)
     payload_signal = _hdt_signal(rate)
     payload_session: VSASession | None = None
     if definition.modulation in {"8PSK", "16QAM"} and payload_symbol_count >= 4:
         alphabet = psk_constellation(
             payload_signal.modulation, BLUETOOTH_HDT_MAPPING
         )
-        seed_count = min(24, payload_symbol_count)
-        seed_labels = np.argmin(
-            np.abs(payload_corrected[:seed_count, None] - alphabet[None, :]),
+        measurement_payload_labels = np.argmin(
+            np.abs(payload_corrected[:, None] - alphabet[None, :]),
             axis=1,
         ).astype(np.int16)
+        payload_reference = alphabet[measurement_payload_labels]
+        seed_count = min(24, payload_symbol_count)
+        seed_labels = measurement_payload_labels[:seed_count]
         pattern_symbols = reverse_symbol_bits(
             seed_labels, payload_signal.modulation.order
         )
@@ -1003,7 +1270,6 @@ def analyze_bluetooth_hdt_recording(
         payload_air_bits = _symbols_to_air_bits(
             payload_labels, payload_signal.modulation.order
         )[:coded_payload_bits]
-        payload_evm = payload_pattern.evm_rms_percent
         vsa_result = (
             payload_session.carrier_corrected_pattern_range_result
             or payload_session.pattern_range_result
@@ -1018,12 +1284,6 @@ def analyze_bluetooth_hdt_recording(
         payload_reference = qpsk_alphabets[
             np.arange(payload_symbol_count), payload_labels
         ]
-        payload_evm = 100.0 * float(
-            np.sqrt(
-                np.sum(np.abs(payload_corrected - payload_reference) ** 2)
-                / np.sum(np.abs(payload_reference) ** 2)
-            )
-        )
         payload_air_bits = (
             (payload_labels[:, None] >> np.asarray([1, 0], dtype=np.int16)) & 1
         ).astype(np.uint8).reshape(-1)[:coded_payload_bits]
@@ -1036,6 +1296,22 @@ def analyze_bluetooth_hdt_recording(
         analysis_sample_offset = 0
     if vsa_result is None:
         raise RuntimeError("Bluetooth HDT payload analysis produced no VSA result")
+
+    terminating_reference = map_hdt_symbols(
+        np.zeros(2 * definition.bits_per_symbol, dtype=np.uint8), rate
+    )
+    payload_reference_all = np.concatenate(
+        (np.asarray(payload_reference, dtype=np.complex128), terminating_reference)
+    )
+    hdt_evm = build_hdt_evm_result(
+        reference=hdt_reference,
+        header_measured_symbols=control_observed,
+        header_reference_symbols=control_reference,
+        payload_measured_symbols=payload_corrected_all,
+        payload_reference_symbols=payload_reference_all,
+    )
+    header_evm = hdt_evm.header_rms_percent
+    payload_evm = hdt_evm.payload_rms_percent
 
     format0_bit_count = (pdu_octets + 4) * 8
     format0_bits, payload_tail, payload_path_errors = _viterbi_decode_hdt_punctured(
@@ -1099,7 +1375,11 @@ def analyze_bluetooth_hdt_recording(
         PacketSourceInfo("iq", int(match_index) - 1, None, recording.center_frequency_hz, packet_start, payload_stop),
         packet_bits,
     )
-    cfo_hz = phase_step * _HDT_SYMBOL_RATE_HZ / (2.0 * np.pi)
+    cfo_hz = (
+        hdt_reference.phase_step_rad_per_symbol
+        * _HDT_SYMBOL_RATE_HZ
+        / (2.0 * np.pi)
+    )
     header_power_dbm = _recording_range_power_dbm(
         recording, packet_start, payload_start
     )
@@ -1111,6 +1391,17 @@ def analyze_bluetooth_hdt_recording(
         if payload_power_dbm is not None and header_power_dbm is not None
         else None
     )
+    hdt_eligibility = _rf_test_eligibility(
+        profile=profile,
+        whitening_enabled=False,
+        sample_rate_hz=recording.sample_rate_hz,
+        minimum_sample_rate_hz=4_000_000.0,
+    )
+    hdt_eligibility_text = (
+        "Eligible"
+        if hdt_eligibility.eligible
+        else "N/A - " + "; ".join(hdt_eligibility.reasons)
+    )
     metrics = (
         BluetoothMetric("detected_phy", "Detected PHY", rate.value),
         BluetoothMetric("payload_modulation", "Payload Modulation", definition.modulation),
@@ -1120,15 +1411,19 @@ def analyze_bluetooth_hdt_recording(
         BluetoothMetric("hec_c", "HEC-C", "Pass" if hec_valid else f"Fail (Rx 0x{received_hec:06X}, Calc 0x{calculated_hec:06X})"),
         BluetoothMetric("crc32", "CRC-32", "Pass" if crc_valid else f"Fail (Rx 0x{received_crc:08X}, Calc 0x{calculated_crc:08X}" + (", legacy-init match" if legacy_crc_match else "") + ")"),
         BluetoothMetric("automatic_result_range", "Payload Result Range", f"{payload_symbol_count} symbol(s) (automatic)"),
-        BluetoothMetric("qpsk_evm_rms", "QPSK Header EVM RMS", _display_evm(header_evm)),
-        BluetoothMetric("payload_evm_rms", f"{definition.modulation} Payload EVM RMS", _display_evm(payload_evm)),
-        BluetoothMetric("qpsk_average_power", "QPSK Header Average Power", _display(header_power_dbm, "dBm")),
-        BluetoothMetric("payload_average_power", f"{definition.modulation} Payload Average Power", _display(payload_power_dbm, "dBm")),
-        BluetoothMetric("payload_relative_power", "Relative Power (Payload - Header)", _display(relative_power_db, "dB")),
-        BluetoothMetric("cfo", "Carrier Frequency Offset", _display(cfo_hz, "kHz", 1e3)),
-        BluetoothMetric("correlation", "Training Correlation", f"{100.0 * training_correlation:.2f} %"),
+        BluetoothMetric("sig_eligibility", "SIG RF Test Eligibility", hdt_eligibility_text),
+        BluetoothMetric("sig_hdt_header_evm_rms", "SIG QPSK Header EVM RMS", _display_evm(header_evm)),
+        BluetoothMetric("sig_hdt_payload_evm_rms", f"SIG {definition.modulation} Payload EVM RMS", _display_evm(payload_evm)),
+        BluetoothMetric("sig_hdt_header_average_power", "SIG QPSK Header Average Power", _display(header_power_dbm, "dBm")),
+        BluetoothMetric("sig_hdt_payload_average_power", f"SIG {definition.modulation} Payload Average Power", _display(payload_power_dbm, "dBm")),
+        BluetoothMetric("sig_hdt_relative_power", "SIG Relative Power (Payload - Header)", _display(relative_power_db, "dB")),
+        BluetoothMetric("sig_hdt_carrier_error", "SIG Carrier Frequency Error", _display(cfo_hz, "kHz", 1e3)),
+        BluetoothMetric("sig_hdt_training_correlation", "SIG Training Correlation", f"{100.0 * training_correlation:.2f} %"),
     )
-    display_control = control_observed * np.exp(
+    display_control_normalized = control_observed / max(
+        display_control_rms, np.finfo(np.float64).tiny
+    )
+    display_control = display_control_normalized * np.exp(
         -1j
         * (
             (np.arange(control_observed.size) & 1) * np.pi / 4.0
@@ -1151,7 +1446,7 @@ def analyze_bluetooth_hdt_recording(
             "analysis_session": payload_session,
             "hdt_header_symbols": np.asarray(display_header, dtype=np.complex64),
             "hdt_header_vector_symbols": np.asarray(
-                control_observed, dtype=np.complex64
+                display_control_normalized, dtype=np.complex64
             ),
             "hdt_header_trajectory": np.asarray(
                 header_trajectory, dtype=np.complex64
@@ -1160,6 +1455,17 @@ def analyze_bluetooth_hdt_recording(
             "hdt_header_spectrum_dbm": header_spectrum_dbm,
             "hdt_header_evm_rms_percent": header_evm,
             "hdt_payload_evm_rms_percent": payload_evm,
+            "hdt_evm_result": hdt_evm,
+            "hdt_reference_amplitude": hdt_reference.amplitude,
+            "hdt_reference_phase_rad": hdt_reference.phase_rad,
+            "hdt_reference_phase_step_rad_per_symbol": (
+                hdt_reference.phase_step_rad_per_symbol
+            ),
+            "hdt_reference_timing_offset_samples": (
+                hdt_reference.timing_offset_samples
+            ),
+            "hdt_payload_evm_symbol_count": payload_evm_symbol_count,
+            "hdt_payload_evm_stop_sample": payload_evm_stop,
             "hdt_rate_indicator": rate_indicator,
             "hdt_pca_a": pca_a,
             "hdt_nesn": nesn,
@@ -1186,6 +1492,32 @@ def analyze_bluetooth_hdt_recording(
             "packet_stop_sample": payload_stop,
             "selected_match_index": int(match_index),
             "eligible_match_count": len(matches),
+            "rf_measurements": (
+                BluetoothRFMeasurementResult(
+                    test_case_id="bluetooth.hdt.evm",
+                    eligibility=hdt_eligibility,
+                    verdict=RFTestVerdict.NOT_APPLICABLE,
+                    metrics={
+                        "header_rms_evm_percent": header_evm,
+                        "payload_rms_evm_percent": payload_evm,
+                        "carrier_error_hz": cfo_hz,
+                        "header_average_power_dbm": header_power_dbm,
+                        "payload_average_power_dbm": payload_power_dbm,
+                        "relative_power_db": relative_power_db,
+                    },
+                    arrays={
+                        "header_measured_symbols": hdt_evm.header_measured_symbols,
+                        "header_reference_symbols": hdt_evm.header_reference_symbols,
+                        "payload_measured_symbols": hdt_evm.payload_measured_symbols,
+                        "payload_reference_symbols": hdt_evm.payload_reference_symbols,
+                    },
+                    metadata={
+                        "fractional_timing_offset_samples": hdt_reference.timing_offset_samples,
+                        "terminating_symbols_included": True,
+                        "appendix_c_final_audit": False,
+                    },
+                ),
+            ),
         },
     )
 
@@ -1216,7 +1548,7 @@ def analyze_bluetooth_hdt_recordings(
             continue
     if not results:
         raise RuntimeError("Bluetooth HDT synchronization pattern was not found")
-    return tuple(results)
+    return _attach_rf_capture_aggregates(results)
 
 
 def analyze_bluetooth_classic_recording(
@@ -1295,6 +1627,8 @@ def analyze_bluetooth_classic_recording(
     analysis_sample_offset = 0
     edr_candidate = _edr_candidate_for_type(br_frontend.header.packet_type)
     edr_error: str | None = None
+    detected_edr_sync_start: int | None = None
+    expected_edr_sync_symbols = np.empty(0, dtype=np.int16)
     if edr_candidate is not None:
         width = 2 if edr_candidate is BluetoothClassicPhy.EDR_2M else 3
         # ``edr_sync_symbols`` is expressed as physical differential phase
@@ -1367,6 +1701,8 @@ def analyze_bluetooth_classic_recording(
                 sync_search_start
                 + int(sync_session.pattern_result.pattern_start_sample)
             )
+            detected_edr_sync_start = detected_sync_start
+            expected_edr_sync_symbols = np.asarray(sync, dtype=np.int16)
             sync_timing_error = detected_sync_start - int(edr_sync_start)
             if abs(sync_timing_error) > sync_timing_tolerance:
                 raise RuntimeError(
@@ -1618,6 +1954,222 @@ def analyze_bluetooth_classic_recording(
         if phy is not BluetoothClassicPhy.BR
         else recording_sample_offset + int(pattern.result_stop_sample)
     )
+    rf_metrics: tuple[BluetoothMetric, ...] = ()
+    rf_measurements: tuple[BluetoothRFMeasurementResult, ...] = ()
+    if phy is BluetoothClassicPhy.BR:
+        rf_metrics, rf_measurements = _sig_fsk_measurements(
+            recording,
+            packet,
+            profile=profile,
+            whitening_enabled=bool(whitening_enabled),
+            symbol_rate_hz=1_000_000.0,
+            filter_profile=BluetoothRFMeasurementFilterProfile.BR_1M,
+            packet_start_sample=packet_start_sample - recording_sample_offset,
+            packet_stop_sample=packet_stop_sample - recording_sample_offset,
+            p0_sample=(
+                float(br_analysis_session.pattern_result.symbol_time_s[0])
+                * recording.sample_rate_hz
+                - 0.5 * recording.sample_rate_hz / 1_000_000.0
+            ),
+            drift_block_symbols=50,
+        )
+        metrics.extend(rf_metrics)
+    elif detected_edr_sync_start is not None:
+        eligibility = _rf_test_eligibility(
+            profile=profile,
+            whitening_enabled=bool(whitening_enabled),
+            sample_rate_hz=recording.sample_rate_hz,
+            minimum_sample_rate_hz=4_000_000.0,
+        )
+        try:
+            br_packet_start = int(
+                br_analysis_session.pattern_result.result_start_sample
+            )
+            header_end_sample = br_packet_start + int(
+                round(126.0 * samples_per_br_symbol)
+            )
+            fm_trace = build_fm_measurement_trace(
+                recording.iq,
+                sample_rate_hz=recording.sample_rate_hz,
+                symbol_rate_hz=1_000_000.0,
+                p0_sample=(
+                    float(br_analysis_session.pattern_result.symbol_time_s[0])
+                    * recording.sample_rate_hz
+                    - 0.5 * samples_per_br_symbol
+                ),
+                profile=BluetoothRFMeasurementFilterProfile.BR_1M,
+            )
+            initial = measure_initial_carrier_frequency(
+                fm_trace,
+                packet.raw_bits[72:126],
+                nominal_frequency_hz=recording.center_frequency_hz,
+                start_symbol=72,
+                symbol_count=54,
+            )
+            fsk_power = measure_burst_power(
+                recording.iq,
+                full_scale=recording.full_scale,
+                dbfs_to_dbm_offset_db=recording.dbfs_to_dbm_offset_db,
+                start_sample=br_packet_start,
+                stop_sample=header_end_sample,
+                central_fraction=0.8,
+            )
+            psk_power = measure_burst_power(
+                recording.iq,
+                full_scale=recording.full_scale,
+                dbfs_to_dbm_offset_db=recording.dbfs_to_dbm_offset_db,
+                start_sample=detected_edr_sync_start,
+                stop_sample=max(
+                    detected_edr_sync_start + 1,
+                    packet_stop_sample
+                    - recording_sample_offset
+                    - int(round(2.0 * samples_per_br_symbol)),
+                ),
+                central_fraction=0.8,
+            )
+            # Differential demodulation needs the preceding absolute symbol;
+            # Generic PatternSearchResult therefore reports its range one
+            # symbol after the physical EDR reference-symbol boundary.
+            edr_reference_start_sample = (
+                detected_edr_sync_start - samples_per_psk_symbol
+            )
+            guard = measure_edr_guard_time(
+                header_end_sample=header_end_sample,
+                reference_symbol_start_sample=edr_reference_start_sample,
+                sample_rate_hz=recording.sample_rate_hz,
+            )
+            first_psk_center = (
+                analysis_sample_offset
+                + float(pattern.symbol_time_s[0]) * recording.sample_rate_hz
+            )
+            devm = measure_edr_devm(
+                recording.iq,
+                sample_rate_hz=recording.sample_rate_hz,
+                symbol_rate_hz=analysis_session.signal.symbol_rate_hz,
+                first_symbol_center_sample=first_psk_center,
+                decoded_symbols=pattern.decoded_symbols,
+                modulation=analysis_session.signal.modulation,
+                symbol_mapping=analysis_session.signal.symbol_mapping,
+                initial_frequency_error_hz=initial.error_hz,
+            )
+            conformance = EDRConformanceResult(
+                sync_symbol_errors=int(pattern.pattern_symbol_errors),
+                trailer_symbol_errors=int(
+                    np.count_nonzero(pattern.decoded_symbols[-2:])
+                ),
+                evaluated_sync_symbols=int(expected_edr_sync_symbols.size),
+                evaluated_trailer_symbols=min(2, pattern.decoded_symbols.size),
+            )
+            relative_power_db = psk_power.average_dbm - fsk_power.average_dbm
+            rf_metrics = (
+                BluetoothMetric(
+                    "sig_eligibility",
+                    "SIG RF Test Eligibility",
+                    "Eligible"
+                    if eligibility.eligible
+                    else "N/A - " + "; ".join(eligibility.reasons),
+                ),
+                BluetoothMetric("sig_edr_pgfsk", "SIG PGFSK", _display(fsk_power.average_dbm, "dBm")),
+                BluetoothMetric("sig_edr_pdpsk", "SIG PDPSK", _display(psk_power.average_dbm, "dBm")),
+                BluetoothMetric("sig_edr_relative_power", "SIG PDPSK - PGFSK", _display(relative_power_db, "dB")),
+                BluetoothMetric("sig_edr_initial_frequency_error", "SIG Initial Frequency Error omega_i", _display(initial.error_hz, "kHz", 1e3)),
+                BluetoothMetric("sig_edr_guard_time", "SIG Guard Time", _display(guard.guard_time_s, "us", 1e-6)),
+                BluetoothMetric("sig_edr_rms_devm", "SIG Worst 50-symbol RMS DEVM", _display_evm(None if devm.rms_worst is None else 100.0 * devm.rms_worst)),
+                BluetoothMetric("sig_edr_99_devm", "SIG 99% DEVM", _display_evm(None if devm.devm_99_percentile is None else 100.0 * devm.devm_99_percentile)),
+                BluetoothMetric("sig_edr_peak_devm", "SIG Peak DEVM", _display_evm(None if devm.peak_worst is None else 100.0 * devm.peak_worst)),
+                BluetoothMetric(
+                    "sig_edr_omega0",
+                    "SIG Worst Residual Frequency Error omega_0",
+                    _display(
+                        max(
+                            (
+                                abs(block.residual_frequency_error_hz)
+                                for block in devm.blocks
+                            ),
+                            default=None,
+                        ),
+                        "kHz",
+                        1e3,
+                    ),
+                ),
+                BluetoothMetric("sig_edr_block_count", "SIG DEVM Blocks", f"{len(devm.blocks)} / 200 (verdict N/A)"),
+                BluetoothMetric("sig_edr_sync_errors", "SIG Sync Symbol Errors", str(conformance.sync_symbol_errors)),
+                BluetoothMetric("sig_edr_trailer_errors", "SIG Trailer Symbol Errors", str(conformance.trailer_symbol_errors)),
+            )
+            metrics.extend(rf_metrics)
+            rf_measurements = (
+                BluetoothRFMeasurementResult(
+                    test_case_id="bluetooth.edr",
+                    eligibility=eligibility,
+                    verdict=RFTestVerdict.NOT_APPLICABLE,
+                    metrics={
+                        "pgfsk_dbm": fsk_power.average_dbm,
+                        "pdpsk_dbm": psk_power.average_dbm,
+                        "relative_power_db": relative_power_db,
+                        "initial_frequency_error_hz": initial.error_hz,
+                        "guard_time_s": guard.guard_time_s,
+                        "rms_devm_worst": devm.rms_worst,
+                        "devm_99_percentile": devm.devm_99_percentile,
+                        "peak_devm_worst": devm.peak_worst,
+                        "omega0_abs_worst_hz": max(
+                            (
+                                abs(block.residual_frequency_error_hz)
+                                for block in devm.blocks
+                            ),
+                            default=None,
+                        ),
+                        "block_count": len(devm.blocks),
+                        "sync_symbol_errors": conformance.sync_symbol_errors,
+                        "trailer_symbol_errors": conformance.trailer_symbol_errors,
+                    },
+                    arrays={
+                        "block_rms_devm": np.asarray(
+                            [block.rms_devm for block in devm.blocks]
+                        ),
+                        "block_peak_devm": np.asarray(
+                            [block.peak_devm for block in devm.blocks]
+                        ),
+                        "symbol_devm": np.concatenate(
+                            [block.symbol_devm for block in devm.blocks]
+                        )
+                        if devm.blocks
+                        else np.empty(0, dtype=np.float64),
+                        "omega0_hz": np.asarray(
+                            [block.residual_frequency_error_hz for block in devm.blocks]
+                        ),
+                        "timing_offset_symbols": np.asarray(
+                            [block.timing_offset_symbols for block in devm.blocks]
+                        ),
+                        "omega_i_selected_header_bit_indices": (
+                            initial.selected_bit_indices
+                        ),
+                    },
+                    metadata={
+                        "trailer_excluded_from_devm": True,
+                        "required_block_count": 200,
+                        "modulation": analysis_session.signal.modulation.value,
+                        "appendix_c_final_audit": False,
+                    },
+                ),
+            )
+        except (ValueError, RuntimeError) as error:
+            unavailable = RFTestEligibility.from_reasons(
+                (*eligibility.reasons, str(error))
+            )
+            metrics.append(
+                BluetoothMetric(
+                    "sig_eligibility",
+                    "SIG RF Test Eligibility",
+                    "N/A - " + "; ".join(unavailable.reasons),
+                )
+            )
+            rf_measurements = (
+                BluetoothRFMeasurementResult(
+                    "bluetooth.edr",
+                    unavailable,
+                    metadata={"reason": str(error)},
+                ),
+            )
     # The shared semantic decoder must see the composite BR-header + EDR data
     # stream, not only the PSK result used by the generic VSA plot products.
     return BluetoothDedicatedResult(
@@ -1644,6 +2196,7 @@ def analyze_bluetooth_classic_recording(
                     "eligible_match_count", 1
                 )
             ),
+            "rf_measurements": rf_measurements,
         },
     )
 
@@ -1727,6 +2280,39 @@ def analyze_bluetooth_le_recording(
         BluetoothMetric("duration", "Packet Duration", f"{duration_ms:.3f} ms"),
         BluetoothMetric("correlation", "Synchronization Correlation", f"{100.0 * float(pattern.correlation):.2f} %"),
     )
+    rf_profile = (
+        BluetoothRFMeasurementFilterProfile.LE_2M
+        if phy is BluetoothLEPhy.LE_2M
+        else BluetoothRFMeasurementFilterProfile.LE_1M
+    )
+    rf_metrics, rf_measurements = _sig_fsk_measurements(
+        recording,
+        packet,
+        profile=profile,
+        whitening_enabled=bool(whitening_enabled),
+        symbol_rate_hz=_le_signal(phy).symbol_rate_hz,
+        filter_profile=rf_profile,
+        packet_start_sample=packet_start_sample - recording_sample_offset,
+        packet_stop_sample=packet_stop_sample - recording_sample_offset,
+        p0_sample=(
+            float(pattern.symbol_time_s[0]) * recording.sample_rate_hz
+            - 0.5 * recording.sample_rate_hz / _le_signal(phy).symbol_rate_hz
+        ),
+        extra_eligibility_reasons=tuple(
+            reason
+            for reason in (
+                None
+                if int(access_address) == 0x71764129
+                else "RF test Access Address must be 0x71764129",
+                None
+                if (int(crc_init) & 0xFFFFFF) == 0x555555
+                else "RF test CRCInit must be 0x555555",
+            )
+            if reason is not None
+        ),
+        drift_block_symbols=(100 if phy is BluetoothLEPhy.LE_2M else 50),
+    )
+    metrics = (*metrics, *rf_metrics)
     return BluetoothDedicatedResult(
         profile=BluetoothAnalysisProfile(profile),
         vsa_result=vsa_result,
@@ -1744,6 +2330,7 @@ def analyze_bluetooth_le_recording(
             "packet_stop_sample": packet_stop_sample,
             "selected_match_index": int(pattern.metadata.get("selected_match_index", match_index)),
             "eligible_match_count": int(pattern.metadata.get("eligible_match_count", 1)),
+            "rf_measurements": rf_measurements,
         },
     )
 
@@ -1815,7 +2402,7 @@ def analyze_bluetooth_classic_recordings(
         {"selected_match_index": 1, "eligible_match_count": count, "capture_result": capture_result}
     )
     results[0] = replace(first, metadata=first_metadata)
-    return tuple(results)
+    return _attach_rf_capture_aggregates(results)
 
 
 def analyze_bluetooth_le_recordings(
@@ -1883,4 +2470,4 @@ def analyze_bluetooth_le_recordings(
         {"selected_match_index": 1, "eligible_match_count": count, "capture_result": capture_result}
     )
     results[0] = replace(first, metadata=first_metadata)
-    return tuple(results)
+    return _attach_rf_capture_aggregates(results)

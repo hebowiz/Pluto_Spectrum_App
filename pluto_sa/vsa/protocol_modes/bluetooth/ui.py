@@ -55,26 +55,7 @@ _STARTUP_CONFIG_KEY = "bluetooth_dedicated/startup_meas_config"
 _STARTUP_CONFIG_SCHEMA = "pluto-vsa-bluetooth-dedicated-config"
 _STARTUP_CONFIG_VERSION = 1
 _FREQUENCY_CONSTELLATION_X_LIMIT = FREQUENCY_CONSTELLATION_X_LIMIT
-_PHY_SUMMARY_METRIC_IDS = frozenset(
-    {
-        "detected_phy",
-        "packet_power",
-        "peak_power",
-        "cfo",
-        "symbol_rate_error",
-        "duration",
-        "correlation",
-        "qpsk_evm_rms",
-        "payload_evm_rms",
-        "qpsk_average_power",
-        "payload_average_power",
-        "payload_relative_power",
-        "fsk_average_power",
-        "psk_average_power",
-        "psk_relative_power",
-        "bluetooth_devm_rms",
-    }
-)
+_PHY_SUMMARY_METRIC_IDS = frozenset({"detected_phy"})
 
 
 def format_air_bits(bits: np.ndarray, group: int = 8) -> str:
@@ -1920,6 +1901,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             (metric.label, metric.display)
             for metric in result.metrics
             if metric.metric_id in _PHY_SUMMARY_METRIC_IDS
+            or metric.metric_id.startswith("sig_")
         ]
         self.summary_table.setRowCount(len(rows))
         for row, (label, value) in enumerate(rows):

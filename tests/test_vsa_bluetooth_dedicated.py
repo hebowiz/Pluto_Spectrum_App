@@ -34,12 +34,14 @@ from pluto_vsg.engine import (
     BluetoothLEWaveformEngine,
 )
 from pluto_vsg.model import BluetoothLEPhy, BluetoothPacketKind
+from pluto_vsg.model import PayloadSourceKind
 from pluto_vsg.profiles import (
     bluetooth_br_edr_project,
     bluetooth_br_fields,
     bluetooth_hdt_fields,
     bluetooth_hdt_project,
     bluetooth_le_project,
+    bluetooth_le_test_project,
 )
 
 
@@ -242,13 +244,14 @@ def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> 
         }
         assert summary_labels == {
             "Detected PHY",
-            "QPSK Header EVM RMS",
-            "16QAM Payload EVM RMS",
-            "QPSK Header Average Power",
-            "16QAM Payload Average Power",
-            "Relative Power (Payload - Header)",
-            "Carrier Frequency Offset",
-            "Training Correlation",
+            "SIG RF Test Eligibility",
+            "SIG QPSK Header EVM RMS",
+            "SIG 16QAM Payload EVM RMS",
+            "SIG QPSK Header Average Power",
+            "SIG 16QAM Payload Average Power",
+            "SIG Relative Power (Payload - Header)",
+            "SIG Carrier Frequency Error",
+            "SIG Training Correlation",
         }
         assert "Payload Length" not in summary_labels
         assert "PDU Control Length" not in summary_labels
@@ -357,6 +360,141 @@ def test_dedicated_le_analyzer_synchronizes_generated_iq_and_shared_crc() -> Non
     assert result.packet.raw_bits.size == generated.packet_bits.bits.size
 
 
+@pytest.mark.parametrize(
+    ("phy", "expected_deviation_hz"),
+    ((BluetoothLEPhy.LE_1M, 250_000.0), (BluetoothLEPhy.LE_2M, 500_000.0)),
+)
+def test_le_rf_test_packet_produces_eligible_raw_sig_measurements(
+    phy: BluetoothLEPhy, expected_deviation_hz: float
+) -> None:
+    project = bluetooth_le_test_project(phy)
+    generated = BluetoothLEWaveformEngine().generate(project)
+    result = analyze_bluetooth_le_recording(
+        IQRecording(
+            iq=generated.iq,
+            sample_rate_hz=generated.sample_rate_hz,
+            center_frequency_hz=project.center_frequency_hz,
+            source=f"generated {phy.value} RF test packet",
+        ),
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        phy=phy.value,
+        access_address=0x71764129,
+        channel_index=0,
+        crc_init=0x555555,
+        whitening_enabled=False,
+        result_length=512,
+    )
+
+    measurement = result.metadata["rf_measurements"][0]
+    assert measurement.eligibility.eligible is True
+    assert measurement.metadata["payload_pattern"] == "10101010"
+    assert measurement.metrics["delta_f2_avg_hz"] is not None
+    assert result.metadata["analysis_session"].signal.frequency_deviation_hz == (
+        expected_deviation_hz
+    )
+
+
+def test_br_rf_test_packet_produces_eligible_raw_sig_measurements() -> None:
+    base = bluetooth_br_edr_project()
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH1,
+        payload_length_bytes=27,
+        payload_source=PayloadSourceKind.PATTERN,
+        payload_pattern="10101010",
+        whitening_enabled=False,
+    )
+    generated = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+    )
+    result = analyze_bluetooth_classic_recording(
+        IQRecording(
+            iq=generated.iq,
+            sample_rate_hz=generated.sample_rate_hz,
+            center_frequency_hz=base.center_frequency_hz,
+            source="generated BR RF test packet",
+        ),
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        lap=settings.lap,
+        uap=settings.uap,
+        clock_6_1=settings.clock_6_1,
+        whitening_enabled=False,
+    )
+
+    measurement = result.metadata["rf_measurements"][0]
+    assert measurement.eligibility.eligible is True
+    assert measurement.metadata["payload_pattern"] == "10101010"
+    assert measurement.metrics["delta_f2_avg_hz"] is not None
+
+
+def test_le_sig_initial_carrier_tracks_injected_cfo() -> None:
+    project = bluetooth_le_test_project(BluetoothLEPhy.LE_1M)
+    generated = BluetoothLEWaveformEngine().generate(project)
+    injected_cfo_hz = 50_000.0
+    axis = np.arange(generated.iq.size, dtype=np.float64)
+    shifted = generated.iq * np.exp(
+        2j * np.pi * injected_cfo_hz * axis / generated.sample_rate_hz
+    )
+    result = analyze_bluetooth_le_recording(
+        IQRecording(
+            iq=shifted,
+            sample_rate_hz=generated.sample_rate_hz,
+            center_frequency_hz=project.center_frequency_hz,
+        ),
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        phy="LE 1M",
+        access_address=0x71764129,
+        channel_index=0,
+        crc_init=0x555555,
+        whitening_enabled=False,
+        result_length=512,
+    )
+
+    measurement = result.metadata["rf_measurements"][0]
+    assert measurement.metrics["initial_carrier_error_hz"] == pytest.approx(
+        injected_cfo_hz, abs=2_000.0
+    )
+
+
+def test_br_sig_deviation_is_not_normalized_to_nominal() -> None:
+    measured: list[float] = []
+    for deviation_hz in (130_000.0, 180_000.0):
+        base = bluetooth_br_edr_project()
+        settings = replace(
+            base.bluetooth_br,
+            packet_kind=BluetoothPacketKind.DH1,
+            payload_length_bytes=27,
+            payload_source=PayloadSourceKind.PATTERN,
+            payload_pattern="10101010",
+            whitening_enabled=False,
+            frequency_deviation_hz=deviation_hz,
+        )
+        generated = BluetoothBRWaveformEngine().generate(
+            replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+        )
+        result = analyze_bluetooth_classic_recording(
+            IQRecording(
+                iq=generated.iq,
+                sample_rate_hz=generated.sample_rate_hz,
+                center_frequency_hz=base.center_frequency_hz,
+            ),
+            profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+            lap=settings.lap,
+            uap=settings.uap,
+            clock_6_1=settings.clock_6_1,
+            whitening_enabled=False,
+        )
+        measured.append(
+            float(
+                result.metadata["rf_measurements"][0].metrics[
+                    "delta_f2_avg_hz"
+                ]
+            )
+        )
+
+    assert measured[1] / measured[0] == pytest.approx(180.0 / 130.0, rel=0.08)
+
+
 def test_dedicated_edr_length_crc_and_type_meaning_use_air_bit_order() -> None:
     base = bluetooth_br_edr_project()
     settings = replace(
@@ -428,6 +566,88 @@ def test_dedicated_edr_length_crc_and_type_meaning_use_air_bit_order() -> None:
     assert (
         result.metadata["br_analysis_session"].demodulation.measurement_filter
         is MeasurementFilterMode.NONE
+    )
+
+
+def test_edr_sig_measurement_uses_five_us_guard_and_excludes_trailer() -> None:
+    base = bluetooth_br_edr_project()
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH3_2,
+        payload_length_bytes=300,
+        whitening_enabled=False,
+    )
+    generated = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+    )
+    result = analyze_bluetooth_classic_recording(
+        IQRecording(
+            iq=generated.iq,
+            sample_rate_hz=generated.sample_rate_hz,
+            center_frequency_hz=base.center_frequency_hz,
+            source="generated 2-DH3 RF test packet",
+        ),
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        lap=settings.lap,
+        uap=settings.uap,
+        clock_6_1=settings.clock_6_1,
+        whitening_enabled=False,
+        result_length=4096,
+    )
+
+    measurement = result.metadata["rf_measurements"][0]
+    assert measurement.eligibility.eligible is True
+    assert measurement.metrics["guard_time_s"] == pytest.approx(5.0e-6, abs=0.2e-6)
+    assert measurement.metrics["sync_symbol_errors"] == 0
+    assert measurement.metrics["trailer_symbol_errors"] == 0
+    assert measurement.metrics["block_count"] > 0
+    assert measurement.metadata["trailer_excluded_from_devm"] is True
+    assert measurement.metrics["rms_devm_worst"] < 0.05
+
+
+def test_edr_sig_devm_retains_symbol_dependent_phase_and_amplitude_error() -> None:
+    base = bluetooth_br_edr_project()
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH3_2,
+        payload_length_bytes=300,
+        whitening_enabled=False,
+    )
+    generated = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+    )
+
+    def analyze(iq: np.ndarray):
+        return analyze_bluetooth_classic_recording(
+            IQRecording(
+                iq=iq,
+                sample_rate_hz=generated.sample_rate_hz,
+                center_frequency_hz=base.center_frequency_hz,
+            ),
+            profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+            lap=settings.lap,
+            uap=settings.uap,
+            clock_6_1=settings.clock_6_1,
+            whitening_enabled=False,
+            result_length=4096,
+        ).metadata["rf_measurements"][0]
+
+    baseline = analyze(generated.iq)
+    impaired_iq = np.array(generated.iq, copy=True)
+    start = int(generated.metadata["edr_start_sample"])
+    stop = int(generated.metadata["data_stop_sample"]) - 2 * 8
+    sample_axis = np.arange(stop - start, dtype=np.float64)
+    symbol_index = (sample_axis // 8).astype(np.int64)
+    amplitude = np.where((symbol_index & 1) == 0, 0.82, 1.0)
+    phase_error = 0.16 * np.sin(2.0 * np.pi * sample_axis / (3.0 * 8.0))
+    impaired_iq[start:stop] *= amplitude * np.exp(1j * phase_error)
+    impaired = analyze(impaired_iq)
+
+    assert impaired.metrics["rms_devm_worst"] > (
+        baseline.metrics["rms_devm_worst"] + 0.08
+    )
+    assert impaired.metrics["peak_devm_worst"] > (
+        baseline.metrics["peak_devm_worst"] + 0.12
     )
 
 
@@ -639,6 +859,12 @@ def test_dedicated_edr_multi_packet_analysis_uses_local_ranges_and_reports_relat
     assert metrics["psk_average_power"] != "--"
     assert metrics["psk_relative_power"] != "--"
     assert abs(float(metrics["psk_relative_power"].split()[0])) < 0.5
+    aggregate = results[1].metadata["rf_capture_aggregate"]
+    assert aggregate.metrics["packet_count"] == 2
+    assert aggregate.metrics["block_count"] == sum(
+        result.metadata["rf_measurements"][0].metrics["block_count"]
+        for result in results
+    )
 
 
 def test_bluetooth_multi_packet_ui_preserves_tabs_and_tracks_selected_fsk_range(tmp_path) -> None:
