@@ -1,0 +1,118 @@
+{
+  "schema": "pluto-vsa-meas-config",
+  "version": 1,
+  "settings": {
+    "input_frontend": {
+      "input_source": "Pluto",
+      "center_frequency_mhz": 2440.0,
+      "rf_bandwidth_mhz": 8.0,
+      "lo_offset_enabled": false,
+      "lo_offset_mhz": 1.5,
+      "internal_gain_db": 20,
+      "external_attenuation_db": 30.0,
+      "external_gain_db": 0.0,
+      "analysis_channel_enabled": false,
+      "analysis_center_mhz": 2440.0,
+      "analysis_bandwidth_mhz": 1.5
+    },
+    "signal_capture": {
+      "capture_length": 5000.0,
+      "capture_length_unit": "Symbols",
+      "samples_per_symbol": 8,
+      "swap_iq": false
+    },
+    "signal_description": {
+      "modulation": "16QAM",
+      "symbol_rate_hz": 2000000.0,
+      "frequency_deviation_hz": 250000.0,
+      "symbol_mapping": "Bluetooth HDT",
+      "tx_filter": "Root Raised Cosine",
+      "filter_parameter": 0.4
+    },
+    "acquisition_trigger": {
+      "source": "power_level",
+      "level_dbm": -25.0,
+      "slope": "rising",
+      "offset_symbols": -10.0,
+      "hysteresis_db": 3.0
+    },
+    "burst_search": {
+      "enabled": true,
+      "level_dbm": -25.0,
+      "hysteresis_db": 3.0,
+      "envelope_average_symbols": 10.0,
+      "dropout_symbols": 10.0,
+      "holdoff_symbols": 0.0,
+      "search_start_offset_symbols": 132.0,
+      "limit_result_to_active_interval": true
+    },
+    "pattern_search": {
+      "enabled": true,
+      "name": "HDT7.5",
+      "symbol_format": "Hexadecimal",
+      "symbols": [
+        3,
+        14,
+        13,
+        14,
+        5,
+        0,
+        15,
+        4,
+        7,
+        14
+      ],
+      "threshold_auto": true,
+      "threshold_percent": 90.0,
+      "meas_only_if_correct": true,
+      "allow_inverted_fsk_pattern": false
+    },
+    "result_range": {
+      "length_symbols": 1000,
+      "reference": "Pattern Waveform",
+      "alignment": "Left",
+      "offset_symbols": 0,
+      "symbol_number_at_pattern_start": 0,
+      "exclude_incomplete_result": false
+    },
+    "demodulation": {
+      "coarse_synchronization": "Auto",
+      "fine_synchronization": "Auto",
+      "measurement_filter": "Auto",
+      "bit_ordering": "LSB",
+      "compensate_carrier_frequency_drift": true,
+      "compensate_fsk_deviation_error": true
+    },
+    "result_summary": {
+      "visible_items": [
+        "modulation",
+        "power",
+        "carrier_frequency_error",
+        "evm_rms",
+        "differential_symbol_evm_rms",
+        "bluetooth_devm_rms",
+        "symbol_rate_error",
+        "frequency_error_rms",
+        "fsk_deviation_error",
+        "fsk_measured_deviation",
+        "carrier_frequency_drift",
+        "pattern_symbols_correct",
+        "pattern_match_variant",
+        "iq_correlation",
+        "match_selection",
+        "result_symbols",
+        "pattern_error"
+      ]
+    },
+    "display_config": {
+      "show_symbol_points": true,
+      "symbol_table_format": "Hexadecimal",
+      "iq_power_signal": "Measured",
+      "modulation_signal": "Measured",
+      "qam_modulation_signal": "Measured",
+      "constellation_trace_mode": "Density",
+      "psk_symbol_plot_mode": "Physical IQ",
+      "fsk_symbol_plot_mode": "Phase Difference"
+    }
+  }
+}

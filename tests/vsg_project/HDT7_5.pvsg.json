@@ -1,0 +1,82 @@
+{
+  "format": "pluto-vsg-project",
+  "version": 1,
+  "project": {
+    "name": "Bluetooth HDT7.5 RF Test Packet",
+    "standard": "Bluetooth HDT",
+    "sample_rate_hz": 16000000.0,
+    "samples_per_symbol": 8,
+    "repeat_count": 1,
+    "period_symbols": null,
+    "center_frequency_hz": 2440000000.0,
+    "fields": [
+      {
+        "name": "Training / Preamble",
+        "symbol_count": 74,
+        "logical_bit_count": 148,
+        "data_source": "Computed",
+        "data": "STS x9 + GI + LTS x2",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "pi/4-QPSK",
+          "symbol_rate_hz": 2000000.0,
+          "filter_kind": "Root Raised Cosine",
+          "filter_parameter": 0.4
+        },
+        "children": []
+      },
+      {
+        "name": "Control Header",
+        "symbol_count": 62,
+        "logical_bit_count": 31,
+        "data_source": "Computed",
+        "data": "RI=101",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "pi/4-QPSK",
+          "symbol_rate_hz": 2000000.0,
+          "filter_kind": "Root Raised Cosine",
+          "filter_parameter": 0.4
+        },
+        "children": []
+      },
+      {
+        "name": "Coded Payload",
+        "symbol_count": 546,
+        "logical_bit_count": 2040,
+        "data_source": "PRBS",
+        "data": "PRBS-9",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "16QAM",
+          "symbol_rate_hz": 2000000.0,
+          "filter_kind": "Root Raised Cosine",
+          "filter_parameter": 0.4
+        },
+        "children": []
+      }
+    ],
+    "power_envelope": {
+      "enabled": true,
+      "on_level_db": 0.0,
+      "idle_level_db": -120.0,
+      "rise_symbols": 1.0,
+      "fall_symbols": 1.0,
+      "rise_delay_symbols": -1.0,
+      "fall_delay_symbols": 1.0,
+      "shape": "Cosine"
+    },
+    "bluetooth_br": null,
+    "bluetooth_le": null,
+    "bluetooth_hdt": {
+      "rate": "HDT7.5",
+      "payload_length_bytes": 255,
+      "payload_source": "PRBS-9",
+      "payload_pattern": "10101010",
+      "training_enabled": true,
+      "rrc_rolloff": 0.4,
+      "pre_idle_symbols": 16,
+      "post_idle_symbols": 300
+    }
+  }
+}
