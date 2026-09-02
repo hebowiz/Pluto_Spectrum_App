@@ -89,10 +89,10 @@ Meas Configは縦並びのaccordionではなく、`Config Top Menu`にカテゴ�
 
 - `KnownPattern`: Name、Description、Symbols。Result Lengthや検索しきい値は持たない。
 - `PatternSearchSettings`: Pattern Search Auto/On/Off、I/Q Correlation Threshold（AutoはR&Sと同じ90%）、`Meas only if Pattern Symbols Correct`、FSK専用の`Allow Inverted Pattern Match`。
-- `ResultRangeSettings`: Result Length、Reference、Alignment、Offset、`Symbol Number at Pattern Start`。
+- `ResultRangeSettings`: Result Length、Reference、Alignment、Offset、`Symbol Number at Pattern Start`。Pattern Waveform基準のOffsetは負値に対応し、Pattern match位置より前の取得済みsymbolもFSK / PSK / QAMで復調・解析する。capture先頭より前へ出る部分は`Exclude Incomplete Result`がOFFなら取得可能範囲へclipし、ONならそのmatchを除外する。
 - `DemodulationSettings`: Coarse/Fine Synchronization、Measurement Filter (`Auto` / `None`)、Bit Ordering、FSKのCarrier Frequency Drift/Deviation Error補償選択。既定の`Auto`はFSKでTransmit Filterと同じBTのGaussianを瞬時周波数へ、PSKでTransmit Filterと同じalphaのSRRCをIQへ適用する。`None`はこれらを適用せず、Analysis Bandwidthによる復調前IQ帯域制限のみを残す。既存Configで設定が省略されている場合は`Auto`へ移行する。
 
-UIにも`Pattern Search`、`Result Range`、`Demodulation`を独立ページとして追加した。Pattern SymbolsはBinary、Decimal、Hexadecimalを入力できる。現在実際にDSPへ反映されるのはpattern、correlation threshold、Pattern Waveform/Leftを起点とした非負offset、Result Length、Measurement Filter、Bit Ordering、Carrier Frequency Drift補償である。その他はR&S互換の設定contractを先に固定した段階で、未実装項目を有効に見せないため今後段階的に接続する。
+UIにも`Pattern Search`、`Result Range`、`Demodulation`を独立ページとして追加した。Pattern SymbolsはBinary、Decimal、Hexadecimalを入力できる。現在実際にDSPへ反映されるのはpattern、correlation threshold、Pattern Waveformを基準とするLeft/Center/Right alignmentと正負offset、Result Length、Measurement Filter、Bit Ordering、Carrier Frequency Drift補償である。その他はR&S互換の設定contractを先に固定した段階で、未実装項目を有効に見せないため今後段階的に接続する。
 
 PSK検索はpattern symbol間の差分相関により一定phase回転とCFOに耐え、patternでcarrier phase/CFOを推定してResult Rangeをdecisionする。Differential PSKはphase incrementを直接検索する。FSK/GFSKは既存のCFO、deviation、drift推定器を任意patternへ一般化した。pattern後の出力はprotocol fieldではなく、symbol番号、symbol値、bit列、symbol時刻、測定vector/frequencyからなる汎用結果である。
 

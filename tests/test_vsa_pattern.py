@@ -21,6 +21,7 @@ from pluto_sa.vsa.pattern import (
     PatternAnalyzer,
     PatternSearchMode,
     PatternSearchSettings,
+    ResultRangeAlignment,
     ResultRangeSettings,
     SynchronizationSource,
     carrier_correct_recording,
@@ -1208,6 +1209,103 @@ def test_rs_style_pattern_and_result_range_settings_are_independent():
     assert search.effective_correlation_threshold == pytest.approx(0.9)
     assert result_range.result_length == 100
     assert not hasattr(pattern, "symbols_after_pattern")
+
+
+@pytest.mark.parametrize(
+    "modulation",
+    (ModulationKind.FSK, ModulationKind.QPSK, ModulationKind.PI4_DQPSK),
+)
+def test_negative_result_offset_demodulates_symbols_before_the_pattern(
+    modulation: ModulationKind,
+) -> None:
+    if modulation is ModulationKind.FSK:
+        recording, signal = GeneratedIQSource.fsk(symbol_count=160, seed=770)
+    else:
+        recording, signal = GeneratedIQSource.psk(
+            modulation=modulation, symbol_count=160, seed=770
+        )
+    expected = np.asarray(recording.metadata["generated_symbols"])
+    pattern_start = 50
+    pattern = _pattern_from_generated(recording, pattern_start, 16)
+
+    result = PatternAnalyzer().search(
+        recording,
+        signal,
+        PatternSearchSettings(pattern=pattern),
+        ResultRangeSettings(result_length=30, offset_symbols=-10),
+    )
+
+    assert result.pattern_start_sample == pattern_start * 8
+    assert result.result_start_sample == (pattern_start - 10) * 8
+    assert result.decoded_symbols.size == 30
+    np.testing.assert_array_equal(
+        result.decoded_symbols,
+        expected[pattern_start - 10 : pattern_start + 20],
+    )
+    assert result.metadata["result_offset_symbols"] == -10
+
+
+@pytest.mark.parametrize(
+    ("alignment", "expected_start"),
+    (
+        (ResultRangeAlignment.CENTER, 43),
+        (ResultRangeAlignment.RIGHT, 36),
+    ),
+)
+def test_center_and_right_result_alignment_can_begin_before_the_pattern(
+    alignment: ResultRangeAlignment,
+    expected_start: int,
+) -> None:
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.QPSK, symbol_count=160, seed=771
+    )
+    expected = np.asarray(recording.metadata["generated_symbols"])
+    pattern_start = 50
+    pattern = _pattern_from_generated(recording, pattern_start, 16)
+
+    result = PatternAnalyzer().search(
+        recording,
+        signal,
+        PatternSearchSettings(pattern=pattern),
+        ResultRangeSettings(
+            result_length=30,
+            alignment=alignment,
+        ),
+    )
+
+    np.testing.assert_array_equal(
+        result.decoded_symbols,
+        expected[expected_start : expected_start + 30],
+    )
+
+
+def test_negative_result_offset_honors_incomplete_result_setting() -> None:
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.QPSK, symbol_count=80, seed=772
+    )
+    expected = np.asarray(recording.metadata["generated_symbols"])
+    pattern = _pattern_from_generated(recording, 5, 16)
+    settings = ResultRangeSettings(result_length=30, offset_symbols=-10)
+
+    partial = PatternAnalyzer().search(
+        recording,
+        signal,
+        PatternSearchSettings(pattern=pattern),
+        settings,
+    )
+
+    np.testing.assert_array_equal(partial.decoded_symbols, expected[:25])
+    with pytest.raises(ValueError, match="search requirements"):
+        PatternAnalyzer().search(
+            recording,
+            signal,
+            PatternSearchSettings(pattern=pattern),
+            ResultRangeSettings(
+                result_length=30,
+                offset_symbols=-10,
+                exclude_incomplete_result=True,
+            ),
+        )
 
 
 def test_session_publishes_generic_pattern_result():

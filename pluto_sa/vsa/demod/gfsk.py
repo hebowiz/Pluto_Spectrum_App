@@ -24,6 +24,7 @@ class GFSKDemodulationResult:
     symbol_time_s: np.ndarray
     access_start_bit: int
     access_start_sample: int
+    pre_pattern_symbol_count: int
     access_correlation: float
     access_bit_errors: int
     carrier_frequency_offset_hz: float
@@ -329,6 +330,7 @@ def _fit_frequency_distortion_model(
     *,
     samples_per_symbol: int,
     pattern_symbols: int,
+    pattern_start_symbol: int = 0,
     gaussian_bt: float | None,
     apply_measurement_filter: bool,
     anchored_cfo_hz: float | None = None,
@@ -355,7 +357,10 @@ def _fit_frequency_distortion_model(
     indices = np.arange(count, dtype=np.float64)
     relative_symbols = (
         (indices + 0.5) / float(samples_per_symbol)
-        - (float(pattern_symbols) - 1.0) / 2.0
+        - (
+            float(pattern_start_symbol)
+            + (float(pattern_symbols) - 1.0) / 2.0
+        )
     )
     # Exclude filter/run-in edge samples when enough packet data is available.
     guard = min(2 * int(samples_per_symbol), max(0, (count - 32) // 4))
@@ -508,9 +513,11 @@ def demodulate_gfsk(
     gaussian_bt: float | None = 0.5,
     apply_measurement_filter: bool = True,
     maximum_symbols: int | None = None,
+    pre_pattern_symbols: int = 0,
     match_selection: str = "First",
     match_index: int = 1,
     required_result_symbols: int | None = None,
+    required_pre_pattern_symbols: int = 0,
     exclude_incomplete_result: bool = False,
     require_zero_pattern_errors: bool = False,
     allow_polarity_inversion: bool = True,
@@ -519,8 +526,8 @@ def demodulate_gfsk(
     """Recover binary symbols using a known access pattern for timing/CFO.
 
     The access pattern performs the same logical role as the sliding access-code
-    correlator in a Bluetooth receiver. The returned bit zero is the first bit
-    of the matched access pattern, not the beginning of the source recording.
+    correlator in a Bluetooth receiver. ``pre_pattern_symbols`` optionally
+    retains recovered symbols before the matched pattern.
     """
     samples = np.asarray(iq)
     if samples.ndim != 1 or not np.issubdtype(samples.dtype, np.complexfloating):
@@ -535,12 +542,16 @@ def demodulate_gfsk(
         raise ValueError("analysis_samples_per_symbol must be at least 4")
     if maximum_symbols is not None and int(maximum_symbols) <= 0:
         raise ValueError("maximum_symbols must be positive when provided")
+    if int(pre_pattern_symbols) < 0:
+        raise ValueError("pre_pattern_symbols must be non-negative")
     if match_selection not in {"Strongest", "First", "Last", "Match Index"}:
         raise ValueError(f"unsupported match selection: {match_selection}")
     if int(match_index) < 1:
         raise ValueError("match_index must be one-based and positive")
     if required_result_symbols is not None and int(required_result_symbols) <= 0:
         raise ValueError("required_result_symbols must be positive when provided")
+    if int(required_pre_pattern_symbols) < 0:
+        raise ValueError("required_pre_pattern_symbols must be non-negative")
     pattern = _validate_bits(access_bits)
     expected_levels = _expected_fsk_symbol_levels(
         pattern,
@@ -740,7 +751,10 @@ def demodulate_gfsk(
             (
                 not exclude_incomplete_result
                 or required_result_symbols is None
-                or available_symbols(candidate) >= int(required_result_symbols)
+                or (
+                    available_symbols(candidate) >= int(required_result_symbols)
+                    and int(candidate[3]) >= int(required_pre_pattern_symbols)
+                )
             )
             and (
                 not require_zero_pattern_errors
@@ -839,13 +853,21 @@ def demodulate_gfsk(
             pattern_cfo_hz = training_fit.cfo_hz
             cfo_hz = pattern_cfo_hz
             signed_deviation = training_fit.signed_deviation_hz
-    packet_observed_frequency = all_symbol_frequency[access_index:]
+    packet_start_index = max(0, access_index - int(pre_pattern_symbols))
+    pattern_offset = access_index - packet_start_index
+    packet_observed_frequency = all_symbol_frequency[packet_start_index:]
     desired_packet_symbol_count = int(packet_observed_frequency.size)
+    packet_start_resampled = (
+        phase + packet_start_index * int(analysis_samples_per_symbol)
+    )
+    packet_start_source = int(
+        round(packet_start_resampled * float(sample_rate_hz) / analysis_rate_hz)
+    )
     for _, burst_stop in bursts:
-        if burst_stop > access_start_source:
+        if burst_stop > packet_start_source:
             burst_symbols = int(
                 np.ceil(
-                    (burst_stop - access_start_source)
+                    (burst_stop - packet_start_source)
                     * float(symbol_rate_hz)
                     / float(sample_rate_hz)
                 )
@@ -863,7 +885,7 @@ def demodulate_gfsk(
     packet_symbol_count = int(packet_observed_frequency.size)
     packet_relative_symbols = (
         np.arange(packet_symbol_count, dtype=np.float64)
-        - (pattern.size - 1.0) / 2.0
+        - (pattern_offset + (pattern.size - 1.0) / 2.0)
     )
     # Start decisions from the known-pattern estimate, then reconstruct the
     # complete reference frequency waveform.  Unlike the former symbol-rate
@@ -874,9 +896,9 @@ def demodulate_gfsk(
         packet_observed_frequency - pattern_cfo_hz
     )
     bits = (initial_packet_frequency >= 0.0).astype(np.uint8)
-    training_size = min(pattern.size, bits.size)
-    bits[:training_size] = pattern[:training_size]
-    packet_start = int(access_start_resampled)
+    training_size = min(pattern.size, max(0, bits.size - pattern_offset))
+    bits[pattern_offset : pattern_offset + training_size] = pattern[:training_size]
+    packet_start = int(packet_start_resampled)
     packet_sample_count = bits.size * int(analysis_samples_per_symbol)
     packet_sample_stop = min(frequency_hz.size, packet_start + packet_sample_count)
     packet_measured_frequency = frequency_hz[packet_start:packet_sample_stop]
@@ -902,6 +924,7 @@ def demodulate_gfsk(
             bits,
             samples_per_symbol=int(analysis_samples_per_symbol),
             pattern_symbols=pattern.size,
+            pattern_start_symbol=pattern_offset,
             gaussian_bt=gaussian_bt,
             apply_measurement_filter=apply_measurement_filter,
             anchored_cfo_hz=pattern_cfo_hz,
@@ -930,17 +953,19 @@ def demodulate_gfsk(
         )
         packet_observed_frequency = _fractional_symbol_values(
             frequency_hz,
-            float(access_start_resampled) + applied_timing_offset,
+            float(packet_start_resampled) + applied_timing_offset,
             int(analysis_samples_per_symbol),
             desired_packet_symbol_count,
         )
         if packet_observed_frequency.size != packet_symbol_count:
             packet_symbol_count = int(packet_observed_frequency.size)
             bits = bits[:packet_symbol_count]
-            training_size = min(pattern.size, bits.size)
+            training_size = min(
+                pattern.size, max(0, bits.size - pattern_offset)
+            )
             packet_relative_symbols = (
                 np.arange(packet_symbol_count, dtype=np.float64)
-                - (pattern.size - 1.0) / 2.0
+                - (pattern_offset + (pattern.size - 1.0) / 2.0)
             )
         estimated_center_frequency = (
             cfo_hz + drift_hz_per_symbol * packet_relative_symbols
@@ -950,7 +975,7 @@ def demodulate_gfsk(
             packet_observed_frequency - estimated_center_frequency
         )
         bits = (packet_frequency >= 0.0).astype(np.uint8)
-        bits[:training_size] = pattern[:training_size]
+        bits[pattern_offset : pattern_offset + training_size] = pattern[:training_size]
     if (
         signed_deviation <= 0.0
         and not allow_polarity_inversion
@@ -983,13 +1008,15 @@ def demodulate_gfsk(
     # Downstream fields begin after a known training word.  Preserve that word
     # in the recovered stream; access_errors above retains the raw hard-decision
     # quality observed before decision-directed packet tracking.
-    training_size = min(pattern.size, bits.size)
+    training_size = min(pattern.size, max(0, bits.size - pattern_offset))
     matched_training = (
         1 - pattern
         if complemented_pattern_match
         else pattern
     )
-    bits[:training_size] = matched_training[:training_size]
+    bits[pattern_offset : pattern_offset + training_size] = matched_training[
+        :training_size
+    ]
     refined_access_start_resampled = (
         float(access_start_resampled) + applied_timing_offset
     )
@@ -1001,7 +1028,8 @@ def demodulate_gfsk(
         )
     )
     symbol_time_s = (
-        refined_access_start_resampled
+        packet_start_resampled
+        + applied_timing_offset
         + (np.arange(bits.size, dtype=np.float64) + 0.5)
         * int(analysis_samples_per_symbol)
     ) / analysis_rate_hz
@@ -1014,6 +1042,7 @@ def demodulate_gfsk(
         symbol_time_s=symbol_time_s,
         access_start_bit=access_index,
         access_start_sample=access_start_source,
+        pre_pattern_symbol_count=pattern_offset,
         access_correlation=abs(score),
         access_bit_errors=access_errors,
         carrier_frequency_offset_hz=cfo_hz,

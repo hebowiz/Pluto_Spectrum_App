@@ -1552,6 +1552,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.pattern_name_edit.setText("Saved Pattern")
         window.pattern_allow_inverted_fsk_check.setChecked(True)
         window.result_length_spin.setValue(73)
+        window.result_offset_spin.setValue(-12)
         window.exclude_incomplete_result_check.setChecked(True)
         window.bit_order_combo.setCurrentText("LSB")
         window.capture_length_spin.setValue(3.0)
@@ -1606,10 +1607,12 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert "match_selection" not in saved["pattern_search"]
         assert "match_index" not in saved["pattern_search"]
         assert saved["pattern_search"]["allow_inverted_fsk_pattern"] is True
+        assert saved["result_range"]["offset_symbols"] == -12
 
         window._set_pattern_symbols([1, 1, 1, 1])
         window.pattern_allow_inverted_fsk_check.setChecked(False)
         window.result_length_spin.setValue(12)
+        window.result_offset_spin.setValue(0)
         window.exclude_incomplete_result_check.setChecked(False)
         window.bit_order_combo.setCurrentText("MSB")
         window.capture_oversampling_combo.setCurrentIndex(
@@ -1643,6 +1646,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.pattern_name_edit.text() == "Saved Pattern"
         assert window.pattern_allow_inverted_fsk_check.isChecked()
         assert window.result_length_spin.value() == 73
+        assert window.result_offset_spin.value() == -12
         assert window.exclude_incomplete_result_check.isChecked()
         assert window.bit_order_combo.currentText() == "LSB"
         assert window.measurement_filter_combo.currentText() == "None"

@@ -413,32 +413,45 @@ def _result_start_symbol(
         start += int(settings.offset_symbols)
     else:
         start = pattern_size - int(settings.result_length) + int(settings.offset_symbols)
-    if start < 0:
-        raise NotImplementedError(
-            "negative result-range positions require pre-pattern demodulation"
-        )
     return start
 
 
 def _result_is_complete(
-    pattern_size: int, available: int, settings: ResultRangeSettings
+    pattern_size: int,
+    available: int,
+    settings: ResultRangeSettings,
+    *,
+    available_before_pattern: int = 0,
 ) -> bool:
     start = _result_start_symbol(pattern_size, settings)
-    return int(available) >= start + int(settings.result_length)
+    return (
+        start >= -int(available_before_pattern)
+        and int(available) >= start + int(settings.result_length)
+    )
 
 
 def _result_slice(
-    pattern_size: int, available: int, settings: ResultRangeSettings
+    pattern_size: int,
+    available: int,
+    settings: ResultRangeSettings,
+    *,
+    available_before_pattern: int = 0,
 ) -> slice:
-    start = _result_start_symbol(pattern_size, settings)
-    if start >= int(available):
-        raise ValueError("result range starts after the available demodulated symbols")
+    requested_start = _result_start_symbol(pattern_size, settings)
+    requested_stop = requested_start + int(settings.result_length)
+    before = int(available_before_pattern)
     if settings.exclude_incomplete_result and not _result_is_complete(
-        pattern_size, available, settings
+        pattern_size,
+        available,
+        settings,
+        available_before_pattern=before,
     ):
-        raise ValueError("complete result range is not available after the pattern")
-    stop = min(int(available), start + int(settings.result_length))
-    return slice(start, max(start, stop))
+        raise ValueError("complete result range is not available around the pattern")
+    start = max(requested_start, -before)
+    stop = min(requested_stop, int(available))
+    if start >= int(available) or stop <= -before or stop <= start:
+        raise ValueError("result range starts after the available demodulated symbols")
+    return slice(start + before, stop + before)
 
 
 def _select_match_candidate(
@@ -1656,10 +1669,12 @@ class PatternAnalyzer:
         else:
             result_start = len(pattern.symbols) - int(result_range.result_length)
             result_start += int(result_range.offset_symbols)
-        maximum_symbols = max(
+        pre_pattern_symbols = max(0, -result_start)
+        required_after_pattern = max(
             len(pattern.symbols),
             result_start + int(result_range.result_length),
         )
+        maximum_symbols = pre_pattern_symbols + required_after_pattern
         demodulation = demodulate_gfsk(
             recording.iq,
             sample_rate_hz=recording.sample_rate_hz,
@@ -1672,9 +1687,11 @@ class PatternAnalyzer:
                 is MeasurementFilterMode.AUTO
             ),
             maximum_symbols=maximum_symbols,
+            pre_pattern_symbols=pre_pattern_symbols,
             match_selection=search.match_selection.value,
             match_index=search.match_index,
-            required_result_symbols=maximum_symbols,
+            required_result_symbols=required_after_pattern,
+            required_pre_pattern_symbols=pre_pattern_symbols,
             exclude_incomplete_result=result_range.exclude_incomplete_result,
             require_zero_pattern_errors=(
                 search.meas_only_if_pattern_symbols_correct
@@ -1684,7 +1701,12 @@ class PatternAnalyzer:
                 search.allow_inverted_fsk_pattern
             ),
         )
-        selection = _result_slice(len(pattern.symbols), demodulation.bits.size, result_range)
+        selection = _result_slice(
+            len(pattern.symbols),
+            demodulation.bits.size - demodulation.pre_pattern_symbol_count,
+            result_range,
+            available_before_pattern=demodulation.pre_pattern_symbol_count,
+        )
         decoded = demodulation.bits[selection].astype(np.int16)
         measured_frequency = (
             demodulation.drift_compensated_symbol_frequency_hz
@@ -1702,7 +1724,14 @@ class PatternAnalyzer:
             recording.sample_count,
             int(round((float(times[-1]) + half_symbol_s) * recording.sample_rate_hz)),
         )
-        refined_pattern_start_time_s = float(times[0]) - half_symbol_s
+        refined_pattern_start_time_s = (
+            float(
+                demodulation.symbol_time_s[
+                    demodulation.pre_pattern_symbol_count
+                ]
+            )
+            - half_symbol_s
+        )
         return PatternSearchResult(
             modulation=signal.modulation,
             pattern_start_sample=demodulation.access_start_sample,
@@ -2049,13 +2078,17 @@ class PatternAnalyzer:
         eligible_candidates = []
         for candidate in physical_candidates:
             _, _, candidate_index, candidate_symbols, _, _ = candidate
+            available_before_pattern = int(candidate_index)
             available = candidate_symbols.size - candidate_index
             if signal.modulation.differential:
                 available -= 1
             if (
                 not result_range.exclude_incomplete_result
                 or _result_is_complete(
-                    len(pattern.symbols), available, result_range
+                    len(pattern.symbols),
+                    available,
+                    result_range,
+                    available_before_pattern=available_before_pattern,
                 )
             ) and (
                 not search.meas_only_if_pattern_symbols_correct
@@ -2098,13 +2131,29 @@ class PatternAnalyzer:
         if signal.modulation.differential:
             base_centers = np.asarray(centers, dtype=np.float64)
             base_observed = waveform_symbols[1:] * np.conj(waveform_symbols[:-1])
-            base_available = base_observed[index:]
-            selection = _result_slice(
-                len(pattern.symbols), base_available.size, result_range
+            requested_start = _result_start_symbol(
+                len(pattern.symbols), result_range
             )
-            all_relative = np.arange(base_available.size, dtype=np.float64)
+            available_before_pattern = min(
+                int(index), max(0, -requested_start)
+            )
+            base_start = int(index) - available_before_pattern
+            base_available = base_observed[base_start:]
+            selection = _result_slice(
+                len(pattern.symbols),
+                base_observed.size - int(index),
+                result_range,
+                available_before_pattern=available_before_pattern,
+            )
+            all_relative = (
+                np.arange(base_available.size, dtype=np.float64)
+                - available_before_pattern
+            )
             selected_relative = all_relative[selection]
-            fit_window = base_available[: len(pattern.symbols)]
+            fit_window = base_available[
+                available_before_pattern : available_before_pattern
+                + len(pattern.symbols)
+            ]
             pattern_error = fit_window * np.conj(expected)
             pattern_phase_anchor = float(
                 np.angle(np.sum(pattern_error * np.abs(fit_window)))
@@ -2157,7 +2206,7 @@ class PatternAnalyzer:
             )
             reference_decisions[known_mask] = expected[pattern_indices[known_mask]]
             reference_absolute = np.cumprod(reference_decisions)
-            base_absolute = waveform_symbols[1 + index :][selection]
+            base_absolute = waveform_symbols[1 + base_start :][selection]
             # Once the absolute reference sequence is available, start the
             # fine fit at zero drift.  The absolute waveform objective is
             # smooth in carrier phase/frequency/drift; seeding it with a blind
@@ -2224,8 +2273,8 @@ class PatternAnalyzer:
                 candidate_observed = candidate_symbols[1:] * np.conj(
                     candidate_symbols[:-1]
                 )
-                candidate_available = candidate_observed[index:]
-                candidate_absolute = candidate_symbols[1 + index :][selection]
+                candidate_available = candidate_observed[base_start:]
+                candidate_absolute = candidate_symbols[1 + base_start :][selection]
                 absolute_phase = (
                     model_phase
                     + model_intercept * selected_relative
@@ -2422,13 +2471,26 @@ class PatternAnalyzer:
                 / (2.0 * np.pi)
             )
             drift_hz_per_s = slope * signal.symbol_rate_hz**2 / (2.0 * np.pi)
-            result_centers = centers[1 + index :][selection]
-            start_center = centers[1 + index]
+            result_centers = centers[1 + base_start :][selection]
+            pattern_center = centers[1 + index]
+            carrier_reference_center = pattern_center
             phase_rotation = _wrap_phase(carrier_phase)
         else:
-            available = waveform_symbols[index:]
-            selection = _result_slice(len(pattern.symbols), available.size, result_range)
-            base_centers = np.asarray(centers[index:], dtype=np.float64)
+            requested_start = _result_start_symbol(
+                len(pattern.symbols), result_range
+            )
+            available_before_pattern = min(
+                int(index), max(0, -requested_start)
+            )
+            base_start = int(index) - available_before_pattern
+            available = waveform_symbols[base_start:]
+            selection = _result_slice(
+                len(pattern.symbols),
+                waveform_symbols.size - int(index),
+                result_range,
+                available_before_pattern=available_before_pattern,
+            )
+            base_centers = np.asarray(centers[base_start:], dtype=np.float64)
             carrier_symmetry_order = _psk_carrier_symmetry_order(
                 signal.modulation
             )
@@ -2480,7 +2542,10 @@ class PatternAnalyzer:
                 fractional_timing_offset_samples = float(refined_timing.x)
             centers = base_centers + fractional_timing_offset_samples
             available = _interpolate_complex(resampled, centers)
-            fit_window = available[: len(pattern.symbols)]
+            fit_window = available[
+                available_before_pattern : available_before_pattern
+                + len(pattern.symbols)
+            ]
             phase_error = np.unwrap(np.angle(fit_window * np.conj(expected)))
             relative = np.arange(phase_error.size, dtype=np.float64)
             slope, intercept = np.polyfit(relative, phase_error, 1)
@@ -2490,7 +2555,10 @@ class PatternAnalyzer:
             )
             base_intercept = fitted_phase - fitted_step * selected_start
             ambiguity = 2.0 * np.pi / float(carrier_symmetry_order)
-            training_axis = np.arange(fit_window.size, dtype=np.float64)
+            training_axis = (
+                available_before_pattern
+                + np.arange(fit_window.size, dtype=np.float64)
+            )
 
             def training_phase_cost(candidate_intercept: float) -> float:
                 residual = np.angle(
@@ -2523,19 +2591,22 @@ class PatternAnalyzer:
             carrier_offset_hz = slope * signal.symbol_rate_hz / (2.0 * np.pi)
             drift_hz_per_s = 0.0
             result_centers = centers[selection]
-            start_center = centers[0]
+            pattern_center = centers[available_before_pattern]
+            carrier_reference_center = centers[0]
             phase_rotation = _wrap_phase(intercept)
 
         rms = float(np.sqrt(np.mean(np.abs(corrected) ** 2)))
         normalized = corrected / max(rms, _EPSILON)
         distances = np.abs(normalized[:, None] - alphabet[None, :])
         decoded = np.argmin(distances, axis=1).astype(np.int16)
+        training_corrected = corrected_available[
+            available_before_pattern : available_before_pattern
+            + len(pattern.symbols)
+        ]
         training_rms = float(
-            np.sqrt(np.mean(np.abs(corrected_available[: len(pattern.symbols)]) ** 2))
+            np.sqrt(np.mean(np.abs(training_corrected) ** 2))
         )
-        normalized_training = corrected_available[: len(pattern.symbols)] / max(
-            training_rms, _EPSILON
-        )
+        normalized_training = training_corrected / max(training_rms, _EPSILON)
         training_decoded = np.argmin(
             np.abs(normalized_training[:, None] - alphabet[None, :]), axis=1
         )
@@ -2544,7 +2615,7 @@ class PatternAnalyzer:
                 training_decoded != canonical_pattern_symbols
             )
         )
-        start_boundary_resampled = start_center - samples_per_symbol / 2.0 + 0.5
+        start_boundary_resampled = pattern_center - samples_per_symbol / 2.0 + 0.5
         start_sample = int(
             round(
                 start_boundary_resampled
@@ -2615,9 +2686,7 @@ class PatternAnalyzer:
             analysis_sample_rate_hz=analysis_rate_hz,
             recording_sample_rate_hz=recording.sample_rate_hz,
             carrier_reference_time_s=(
-                float(result_centers[0]) / analysis_rate_hz
-                if signal.modulation.differential
-                else float(start_center) / analysis_rate_hz
+                float(carrier_reference_center) / analysis_rate_hz
             ),
             metadata={
                 "pattern_name": pattern.name,
