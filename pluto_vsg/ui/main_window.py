@@ -551,7 +551,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             definition = hdt_definition(rate)
             self.rate_combo.addItem(f"{rate.value} / {definition.modulation} / code {definition.payload_code_rate}", rate)
         self.rate_combo.setCurrentIndex(self.rate_combo.findData(HDTRate(settings.rate)))
-        self.length_spin = QtWidgets.QSpinBox(); self.length_spin.setRange(0, 4095); self.length_spin.setValue(settings.payload_length_bytes)
+        self.length_spin = QtWidgets.QSpinBox(); self.length_spin.setRange(0, 509); self.length_spin.setValue(settings.payload_length_bytes)
         self.source_combo = QtWidgets.QComboBox()
         for source in PayloadSourceKind:
             self.source_combo.addItem(source.value, source)

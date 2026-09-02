@@ -632,11 +632,11 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 )
     hdt_settings = project.bluetooth_hdt
     if hdt_settings is not None:
-        if not 0 <= int(hdt_settings.payload_length_bytes) <= 4095:
+        if not 0 <= int(hdt_settings.payload_length_bytes) <= 509:
             issues.append(
                 ValidationIssue(
                     "bluetooth_hdt.payload_length_bytes",
-                    "HDT payload length must be between 0 and 4095 bytes.",
+                    "HDT RF test format-0 payload length must be between 0 and 509 bytes.",
                 )
             )
         if not 0.0 < float(hdt_settings.rrc_rolloff) <= 1.0:

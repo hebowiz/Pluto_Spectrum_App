@@ -1299,3 +1299,25 @@ SRRC整形後のIQはfield間の相対振幅を保ったまま、複素振幅pea
 現段階はPHY波形pipelineの初期実装である。Preamble、Control Header、HEC-C / HEC-P、32-bit CRC、
 PDU Header Zone、packet format 1 schedulingを含む完全なHDT RF PHY test packet bit列は未完成であり、
 R&S VSA等とのbit-level相互検証前に規格準拠packet generatorとは扱わない。
+
+---
+
+## 46. Bluetooth HDT RF PHY Test packet format 0規格対応（2026-09-02）
+
+`HDT_VSr03_PR`のVol 6 Part A 7.3/7.4、Vol 6 Part B 2.7/3.1/3.4、Vol 6 Part F 4.2に基づき、
+RF PHY Test packet format 0のVSG生成と専用VSA解析をbit-exact構成へ更新した。
+
+- Preambleは`STS x9 + GI + LTS x2`の74 symbolsとし、RF PHY Test指定の`u=7`、Table 7.7の`p=8`を使用する
+- Control HeaderはPCA-A、NESN、PFI、RI、RFU、PDU Control、HEC-Cの57 bitsに5 zero termination bitsを付加し、rate 1/2で符号化する
+- RF PHY TestのPCAは`0x9F_1555_5555`、NESNは1、PFIは0とする
+- packet format 0のPDU Controlは、CRCを除く1-byte ACL PDU Headerとpayloadの合計octet数とする
+- Control Header後とPDU/payload symbol stream後に、それぞれ2 terminating symbolsを配置する
+- packet format 0のCRC-32はPDU Header ZoneとPayload Zoneを結合して計算し、初期値`0xAA55_5555`を使用する
+- RF PHY Test packetではwhiteningを行わない
+- 専用VSAは規格Preambleで同期し、CFO補正、Control Header/HEC-C復号、rate/payload長の自動決定、punctured K=6 Viterbi復号、CRC-32検証を行う
+
+実機回帰波形`RT_HDT7_5.npz`では、PCA-A、NESN、PFI、RI、PDU Control、HEC-C、PDU Header、509-byte PRBS-9 payloadを誤りなく復号した。
+受信CRC-32 `0xBB166D73`は規格初期値による計算値`0xCDCA2EBD`とは不一致だが、旧24-bit相当初期値
+`0x0055_5555`による計算値とは一致する。このため専用VSAはCRC Failに加え`legacy-init match`を報告する。
+
+packet format 1、HEC-P、Rx Portion、Tx Portion、Extended Header、複数payload block、暗号化packetは本節の対応範囲外とし、追加実装時に個別の規格test vectorで検証する。

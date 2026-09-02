@@ -2,6 +2,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -24,6 +25,7 @@ from pluto_sa.vsa.protocol_modes.bluetooth.model import (
 from pluto_sa.vsa.protocol_modes.bluetooth.ui import BluetoothAnalyzerWindow, format_air_bits, infer_le_channel
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.session import VSASession
+from pluto_sa.vsa.sources import FileIQSource
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
 from pluto_sa.vsa.ui.measurement_chrome import SymbolDensitySpread
 from pluto_vsg.engine import (
@@ -112,7 +114,7 @@ def test_dedicated_model_combines_rf_metrics_and_shared_le_decode() -> None:
     assert any(metric.metric_id == "packet_power" for metric in result.metrics)
 
 
-@pytest.mark.parametrize("rate", (HDTRate.HDT4, HDTRate.HDT7_5))
+@pytest.mark.parametrize("rate", tuple(HDTRate))
 def test_dedicated_hdt_auto_detects_rate_length_and_exact_payload_range(
     rate: HDTRate,
 ) -> None:
@@ -123,7 +125,11 @@ def test_dedicated_hdt_auto_detects_rate_length_and_exact_payload_range(
         profile=BluetoothAnalysisProfile.RF_PHY_TEST,
     )
 
-    expected_payload_symbols = project.fields[-1].symbol_count
+    expected_payload_symbols = next(
+        field.symbol_count
+        for field in project.fields
+        if field.name == "Coded PDU Header / Payload / CRC"
+    )
     metrics = {metric.metric_id: metric.display for metric in result.metrics}
     assert result.packet.protocol_id == "bluetooth.hdt"
     assert result.packet.phy_name == rate.value
@@ -145,8 +151,13 @@ def test_dedicated_hdt_auto_detects_rate_length_and_exact_payload_range(
     )
     children = {field.field_id: field for field in control.children}
     assert children["rate_indicator"].meaning.startswith(rate.value)
-    assert children["payload_length"].value == 73
-    assert children["payload_length"].meaning == "73 byte(s) before channel coding"
+    assert children["rate_indicator"].value == (
+        f"{rate.value} (0b{result.metadata['hdt_rate_indicator']:03b})"
+    )
+    assert children["pdu_control"].value == 74
+    assert children["hec_c"].status.value == "valid"
+    assert result.packet.integrity.hec_valid is True
+    assert result.packet.integrity.crc_valid is True
 
 
 def test_dedicated_hdt_returns_every_packet_in_capture() -> None:
@@ -165,11 +176,42 @@ def test_dedicated_hdt_returns_every_packet_in_capture() -> None:
 
     assert len(results) == 2
     assert all(result.packet.phy_name == HDTRate.HDT7_5.value for result in results)
+    expected_payload_symbols = next(
+        field.symbol_count
+        for field in project.fields
+        if field.name == "Coded PDU Header / Payload / CRC"
+    )
     assert all(
         result.metadata["hdt_payload_symbol_count"]
-        == project.fields[-1].symbol_count
+        == expected_payload_symbols
         for result in results
     )
+
+
+def test_dedicated_hdt_decodes_real_hdt7_5_and_identifies_legacy_crc_init() -> None:
+    recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "RT_HDT7_5.npz"
+    )
+
+    result = analyze_bluetooth_hdt_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+    )
+
+    assert result.packet.phy_name == HDTRate.HDT7_5.value
+    assert result.packet.integrity.hec_valid is True
+    assert result.packet.integrity.crc_valid is False
+    assert result.metadata["hdt_pca_a"] == 0x9F15
+    assert result.metadata["hdt_nesn"] == 1
+    assert result.metadata["hdt_packet_format_indicator"] == 0
+    assert result.metadata["hdt_rate_indicator"] == 0b101
+    assert result.metadata["hdt_pdu_control_octets"] == 510
+    assert result.metadata["hdt_received_hec_c"] == 0x13FB5A
+    assert result.metadata["hdt_control_path_errors"] == 0
+    assert result.metadata["hdt_payload_path_errors"] == 0
+    assert result.metadata["hdt_received_crc32"] == 0xBB166D73
+    assert result.metadata["hdt_calculated_crc32"] == 0xCDCA2EBD
+    assert result.metadata["hdt_legacy_init_crc32_match"] is True
 
 
 def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> None:
@@ -194,6 +236,64 @@ def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> 
         assert len(window.fsk_symbol_plot.listDataItems()) > 0
         assert len(window.psk_symbol_plot.listDataItems()) > 0
         assert window.decode_tree.topLevelItemCount() == 3
+        summary_labels = {
+            window.summary_table.item(row, 0).text()
+            for row in range(window.summary_table.rowCount())
+        }
+        assert summary_labels == {
+            "Detected PHY",
+            "QPSK Header EVM RMS",
+            "16QAM Payload EVM RMS",
+            "QPSK Header Average Power",
+            "16QAM Payload Average Power",
+            "Relative Power (Payload - Header)",
+            "Carrier Frequency Offset",
+            "Training Correlation",
+        }
+        assert "Payload Length" not in summary_labels
+        assert "PDU Control Length" not in summary_labels
+        assert "HEC-C" not in summary_labels
+        assert "CRC-32" not in summary_labels
+        assert window.decode_tree.headerItem().text(2) == "Stream"
+        training = window.decode_tree.topLevelItem(0)
+        control = window.decode_tree.topLevelItem(1)
+        payload = window.decode_tree.topLevelItem(2)
+        assert (training.text(2), training.text(3)) == (
+            "Training symbols",
+            "N/A",
+        )
+        assert (control.text(2), control.text(3)) == (
+            "Control Header",
+            "0\N{EN DASH}56",
+        )
+        assert control.child(2).text(3) == "19"
+        assert (payload.text(1), payload.text(2), payload.text(3)) == (
+            "\N{EM DASH}",
+            "PDU+Payload",
+            "0\N{EN DASH}423",
+        )
+        assert payload.child(0).text(3) == "0\N{EN DASH}7"
+        assert payload.child(1).text(0) == "Payload"
+        assert payload.child(1).text(3) == "8\N{EN DASH}391"
+        assert payload.child(2).text(3) == "392\N{EN DASH}423"
+        assert len(window.spectrum_plot.listDataItems()) == 2
+        assert len(window.spectrum_legend.items) == 2
+        assert (
+            window.fsk_modulation_plot.listDataItems()[0].xData.size
+            > result.metadata["hdt_header_symbols"].size
+        )
+        assert result.metadata["hdt_header_symbols"].size == 62
+        assert result.metadata["hdt_header_vector_symbols"].size == 62
+        # The pi/4-QPSK control decisions use the same I/Q-axis convention as
+        # the other Bluetooth PSK symbol plots.
+        control_symbols = result.metadata["hdt_header_symbols"]
+        assert np.max(
+            np.minimum(np.abs(control_symbols.real), np.abs(control_symbols.imag))
+        ) < 0.05
+        assert (
+            window.power_plot.listDataItems()[0].xData.size
+            == recording.sample_count
+        )
         assert window.packet_table.item(0, 1).text() == "HDT7.5"
     finally:
         window.close()
@@ -217,6 +317,12 @@ def test_bluetooth_workspace_renders_decode_payload_and_air_bits(tmp_path) -> No
         assert window.decode_tree.topLevelItemCount() > 0
         assert "Air bits" in window.air_bits_text.toPlainText()
         assert window.summary_table.rowCount() > 0
+        summary_labels = {
+            window.summary_table.item(row, 0).text()
+            for row in range(window.summary_table.rowCount())
+        }
+        assert "Access Address" not in summary_labels
+        assert "Analysis Profile" not in summary_labels
     finally:
         window.close()
         window.deleteLater()

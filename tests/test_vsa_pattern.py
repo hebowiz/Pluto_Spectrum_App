@@ -224,7 +224,7 @@ def test_known_hdt_qam_pattern_uses_the_published_symbol_sample_times() -> None:
         symbol_mapping=BLUETOOTH_HDT_MAPPING,
     )
     pattern = KnownPattern(
-        tuple(int(value, 16) for value in "3 E D E 5 0 F 4 7 E".split())
+        tuple(int(value, 16) for value in "6 E 1 8 5 B A B 6 3".split())
     )
     demodulation = DemodulationSettings(
         measurement_filter=MeasurementFilterMode.AUTO,
@@ -304,7 +304,7 @@ def test_known_hdt_qam_pattern_refines_carrier_over_the_result_range() -> None:
         symbol_mapping=BLUETOOTH_HDT_MAPPING,
     )
     pattern = KnownPattern(
-        tuple(int(value, 16) for value in "3 E D E 5 0 F 4 7 E".split())
+        tuple(int(value, 16) for value in "6 E 1 8 5 B A B 6 3".split())
     )
 
     result = PatternAnalyzer().search(
@@ -363,7 +363,7 @@ def test_known_hdt_qam_pattern_refines_fractional_symbol_timing(
         symbol_mapping=BLUETOOTH_HDT_MAPPING,
     )
     pattern = KnownPattern(
-        tuple(int(value, 16) for value in "3 E D E 5 0 F 4 7 E".split())
+        tuple(int(value, 16) for value in "6 E 1 8 5 B A B 6 3".split())
     )
 
     result = PatternAnalyzer().search(

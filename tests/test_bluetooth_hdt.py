@@ -4,7 +4,10 @@ import pytest
 from pluto_protocol.bluetooth.hdt import (
     HDTRate,
     convolutional_encode,
+    hdt_crc32,
     hdt_definition,
+    hdt_rf_test_control_bits,
+    hdt_rf_test_training_symbols,
     map_hdt_symbols,
     puncture,
 )
@@ -57,3 +60,29 @@ def test_hdt_8psk_uses_bluetooth_label_order():
          -np.pi / 4, -np.pi / 2, -np.pi, -3 * np.pi / 4]
     )
     np.testing.assert_allclose(symbols, np.exp(1j * expected_phases), atol=1e-6)
+
+
+def test_hdt_rf_test_training_uses_standard_sts_and_u7_lts():
+    symbols = hdt_rf_test_training_symbols()
+
+    assert symbols.size == 74
+    np.testing.assert_array_equal(
+        symbols[:36], np.tile(np.asarray([-1, -1j, 1j, 1]), 9)
+    )
+    np.testing.assert_allclose(symbols[36:40], symbols[53:57], atol=1e-6)
+    np.testing.assert_allclose(symbols[40:57], symbols[57:74], atol=1e-6)
+
+
+def test_hdt_rf_test_control_header_matches_known_hdt7_5_vector():
+    bits = hdt_rf_test_control_bits(HDTRate.HDT7_5, 509)
+
+    assert bits.size == 57
+    assert bits[20:23].tolist() == [1, 0, 1]
+    assert sum(int(bits[24 + index]) << index for index in range(9)) == 510
+    assert sum(int(bit) << (23 - index) for index, bit in enumerate(bits[33:57])) == 0x13FB5A
+
+
+def test_hdt_crc32_distinguishes_standard_and_legacy_rf_test_initialization():
+    data = np.zeros(8, dtype=np.uint8)
+
+    assert hdt_crc32(data, init=0xAA555555) != hdt_crc32(data, init=0x00555555)

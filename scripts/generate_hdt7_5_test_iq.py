@@ -1,8 +1,8 @@
 """Generate the deterministic HDT7.5 IQ regression fixture.
 
-This fixture exercises the current Bluetooth-derived HDT PHY waveform path.
-It is intentionally generated from the same project/engine used by Pluto VSG
-so that VSG and Generic VSA tests share one reproducible reference waveform.
+This fixture exercises the Bluetooth HDT RF PHY test packet format-0 path.
+It is generated from the same project/engine used by Pluto VSG so that VSG,
+Generic VSA, and dedicated VSA tests share one reproducible reference waveform.
 """
 
 from __future__ import annotations
@@ -60,8 +60,13 @@ def generate(output: Path) -> Path:
         [boundary.stop_sample for boundary in result.field_boundaries],
         dtype=np.int64,
     )
-    payload_start_sample = int(field_start_samples[-1])
-    payload_stop_sample = int(field_stop_samples[-1])
+    payload_index = next(
+        index
+        for index, name in enumerate(field_names)
+        if name == "Coded PDU Header / Payload / CRC"
+    )
+    payload_start_sample = int(field_start_samples[payload_index])
+    payload_stop_sample = int(field_stop_samples[payload_index])
 
     output.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
@@ -100,8 +105,8 @@ def generate(output: Path) -> Path:
             {
                 "description": "Deterministic Pluto VSG HDT7.5 PHY test IQ",
                 "implementation_scope": (
-                    "Current HDT PHY waveform pipeline; not yet a fully "
-                    "bit-exact complete HDT packet implementation"
+                    "Bluetooth HDT RF PHY test packet format 0 with standard "
+                    "training, Control Header/HEC-C, PRBS-9 payload, and CRC-32"
                 ),
                 "sample_rate_hz": result.sample_rate_hz,
                 "center_frequency_hz": project.center_frequency_hz,

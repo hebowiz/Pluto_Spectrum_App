@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from pluto_protocol.bluetooth.hdt import convolutional_encode, hdt_definition, map_hdt_symbols, puncture
+from pluto_protocol.bluetooth.hdt import (
+    convolutional_encode,
+    hdt_definition,
+    hdt_rf_test_control_bits,
+    hdt_rf_test_format0_bits,
+    hdt_rf_test_training_symbols,
+    map_hdt_symbols,
+    puncture,
+)
 from pluto_protocol.model import GeneratedPacketBits
 from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
 from pluto_vsg.engine.base import FieldBoundary, GenerationResult
@@ -56,18 +64,30 @@ class BluetoothHDTWaveformEngine:
             raise ValueError("HDT sample rate must equal 2 Msym/s times samples per symbol")
 
         payload = hdt_payload_bits(project)
-        coded = puncture(convolutional_encode(payload), definition.payload_code_rate)
-        payload_symbols = map_hdt_symbols(coded, settings.rate)
-        # Deterministic reference training and a compact RI/length control header.
-        training_bits = np.resize(np.asarray([0, 0, 0, 1, 1, 1, 1, 0], dtype=np.uint8), 74 * 2)
-        training = map_hdt_symbols(training_bits, "HDT2")
-        control_data = np.asarray(
-            [((definition.rate_indicator >> (2 - i)) & 1) for i in range(3)]
-            + [((int(settings.payload_length_bytes) >> i) & 1) for i in range(12)], dtype=np.uint8,
+        format0_bits = hdt_rf_test_format0_bits(payload)
+        coded = puncture(
+            convolutional_encode(format0_bits), definition.payload_code_rate
         )
-        control_bits = np.resize(convolutional_encode(control_data), 62 * 2)
+        payload_symbols = map_hdt_symbols(coded, settings.rate)
+        training = hdt_rf_test_training_symbols()
+        control_data = hdt_rf_test_control_bits(
+            settings.rate, settings.payload_length_bytes
+        )
+        control_bits = convolutional_encode(control_data)
         control = map_hdt_symbols(control_bits, "HDT2")
-        symbols = np.concatenate((training, control, payload_symbols))
+        control_termination = map_hdt_symbols(np.zeros(4, dtype=np.uint8), "HDT2")
+        payload_termination = map_hdt_symbols(
+            np.zeros(2 * definition.bits_per_symbol, dtype=np.uint8), settings.rate
+        )
+        symbols = np.concatenate(
+            (
+                training,
+                control,
+                control_termination,
+                payload_symbols,
+                payload_termination,
+            )
+        )
         data_iq = _shape_symbols(symbols, sps, float(settings.rrc_rolloff))
         peak = float(np.max(np.abs(data_iq))) if data_iq.size else 0.0
         digital_scale = 1.0 / peak if peak > 1.0 else 1.0
@@ -105,12 +125,14 @@ class BluetoothHDTWaveformEngine:
         level_metrics = measure_iq_levels(iq, active_ranges)
         return GenerationResult(
             iq=iq, sample_rate_hz=project.sample_rate_hz, field_boundaries=tuple(boundaries),
-            packet_bits=GeneratedPacketBits(payload, "bluetooth.hdt", settings.rate.value, context={"rate_indicator": definition.rate_indicator}),
+            packet_bits=GeneratedPacketBits(format0_bits, "bluetooth.hdt", settings.rate.value, context={"rate_indicator": definition.rate_indicator, "packet_format": 0}),
             metadata={
                 "project_name": project.name, "standard": project.standard.value,
                 "packet_name": f"{settings.rate.value} RF Test Packet", "phy": settings.rate.value,
                 "modulation": definition.modulation, "payload_code_rate": definition.payload_code_rate,
-                "payload_bits": payload, "coded_payload_bits": coded, "packet_sample_count": data_count,
+                "payload_bits": payload, "format0_bits": format0_bits,
+                "control_header_bits": control_data, "coded_payload_bits": coded,
+                "packet_sample_count": data_count,
                 "period_sample_count": single.size, "packet_ranges_samples": tuple(ranges),
                 "active_ranges_samples": tuple(active_ranges),
                 "data_start_sample": data_start, "data_stop_sample": data_start + data_count,

@@ -1,6 +1,6 @@
 {
   "description": "Deterministic Pluto VSG HDT7.5 PHY test IQ",
-  "implementation_scope": "Current HDT PHY waveform pipeline; not yet a fully bit-exact complete HDT packet implementation",
+  "implementation_scope": "Bluetooth HDT RF PHY test packet format 0 with standard training, Control Header/HEC-C, PRBS-9 payload, and CRC-32",
   "sample_rate_hz": 16000000.0,
   "center_frequency_hz": 2440000000.0,
   "symbol_rate_hz": 2000000.0,
@@ -13,11 +13,11 @@
   "payload_code_rate": "15/16",
   "packet_sample_range": [
     136,
-    5592
+    5704
   ],
   "payload_sample_range": [
-    1224,
-    5592
+    1240,
+    5688
   ],
   "generic_vsa_setup": {
     "modulation": "16QAM",

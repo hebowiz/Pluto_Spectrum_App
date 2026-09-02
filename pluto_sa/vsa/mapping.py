@@ -72,7 +72,10 @@ def logical_to_phase_indices(kind: ModulationKind, mapping: str) -> np.ndarray:
         return np.asarray(values, dtype=np.int16)
 
     if normalized == BLUETOOTH_HDT_MAPPING:
-        if kind in {ModulationKind.PI4_QPSK, ModulationKind.PSK8, ModulationKind.QAM16}:
+        if kind is ModulationKind.PSK8:
+            # Vol 6, Part A, Table 7.5 logical value -> physical phase index.
+            return np.asarray((0, 1, 3, 2, 7, 6, 4, 5), dtype=np.int16)
+        if kind in {ModulationKind.PI4_QPSK, ModulationKind.QAM16}:
             return np.arange(kind.order, dtype=np.int16)
         raise ValueError("Bluetooth HDT mapping requires pi/4-QPSK, 8PSK or 16QAM")
 

@@ -49,6 +49,11 @@ HDT_DEFINITIONS = {
     HDTRate.HDT7_5: HDTDefinition(HDTRate.HDT7_5, 0b101, "16QAM", 4, "15/16"),
 }
 
+HDT_RF_TEST_PCA = 0x9F_1555_5555
+HDT_RF_TEST_CRC32_INIT = 0xAA55_5555
+HDT_RF_TEST_LTS_ROOT = 7
+HDT_RF_TEST_LTS_PHASE = 8
+
 
 def hdt_definition(rate: HDTRate | str) -> HDTDefinition:
     return HDT_DEFINITIONS[HDTRate(rate)]
@@ -94,12 +99,97 @@ def puncture(bits: np.ndarray, code_rate: str) -> np.ndarray:
     return values[np.resize(mask, values.size)]
 
 
+def _lsb_bits(value: int, width: int) -> np.ndarray:
+    return np.asarray([(int(value) >> index) & 1 for index in range(width)], dtype=np.uint8)
+
+
+def _msb_bits(value: int, width: int) -> np.ndarray:
+    return np.asarray(
+        [(int(value) >> (width - 1 - index)) & 1 for index in range(width)],
+        dtype=np.uint8,
+    )
+
+
+def hdt_crc24(bits: np.ndarray, *, init: int) -> int:
+    """Return the Vol 6 Part B 24-bit CRC register after transmitted-order bits."""
+
+    state = int(init) & 0xFF_FFFF
+    for bit in np.asarray(bits, dtype=np.uint8):
+        feedback = ((state >> 23) & 1) ^ int(bit)
+        state = (state << 1) & 0xFF_FFFF
+        if feedback:
+            state ^= 0x00065B
+    return state
+
+
+def hdt_crc32(bits: np.ndarray, *, init: int = HDT_RF_TEST_CRC32_INIT) -> int:
+    """Return the Vol 6 Part B HDT CRC-32 register after transmitted-order bits."""
+
+    state = int(init) & 0xFFFF_FFFF
+    for bit in np.asarray(bits, dtype=np.uint8):
+        feedback = ((state >> 31) & 1) ^ int(bit)
+        state = (state << 1) & 0xFFFF_FFFF
+        if feedback:
+            state ^= 0x04C11DB7
+    return state
+
+
+def hdt_rf_test_training_symbols() -> np.ndarray:
+    """Return the standard 74-symbol RF PHY test preamble (STS x9, GI, LTS x2)."""
+
+    short = np.tile(np.asarray([-1.0, -1.0j, 1.0j, 1.0]), 9)
+    index = np.arange(17, dtype=np.float64)
+    long = np.exp(
+        -1j * np.pi * HDT_RF_TEST_LTS_ROOT * index * (index + 1.0) / 17.0
+    ) * np.exp(1j * 2.0 * np.pi * HDT_RF_TEST_LTS_PHASE / 17.0)
+    return np.asarray(np.concatenate((short, long[-4:], long, long)), dtype=np.complex64)
+
+
+def hdt_rf_test_control_bits(
+    rate: HDTRate | str,
+    payload_length_bytes: int,
+) -> np.ndarray:
+    """Build the 57 logical Control Header bits for an RF PHY format-0 packet."""
+
+    payload_length = int(payload_length_bytes)
+    if not 0 <= payload_length <= 509:
+        raise ValueError("HDT RF test format-0 payload length must be between 0 and 509 bytes")
+    definition = hdt_definition(rate)
+    pdu_length = payload_length + 1  # one-octet ACL Initial Portion
+    header = np.concatenate(
+        (
+            _lsb_bits((HDT_RF_TEST_PCA >> 24) & 0xFFFF, 16),
+            _lsb_bits(1, 3),
+            _lsb_bits(0, 1),
+            _lsb_bits(definition.rate_indicator, 3),
+            _lsb_bits(0, 1),
+            _lsb_bits(pdu_length, 9),
+        )
+    )
+    hec = hdt_crc24(header, init=HDT_RF_TEST_PCA & 0xFF_FFFF)
+    return np.concatenate((header, _msb_bits(hec, 24)))
+
+
+def hdt_rf_test_format0_bits(payload_bits: np.ndarray) -> np.ndarray:
+    """Build PDU Header + payload + CRC-32 bits for an RF PHY format-0 packet."""
+
+    payload = np.asarray(payload_bits, dtype=np.uint8)
+    if payload.ndim != 1 or np.any(payload > 1) or payload.size % 8:
+        raise ValueError("HDT payload must be a whole number of binary octets")
+    if payload.size > 509 * 8:
+        raise ValueError("HDT RF test format-0 payload cannot exceed 509 bytes")
+    pdu = np.concatenate((np.zeros(8, dtype=np.uint8), payload))
+    crc = hdt_crc32(pdu)
+    return np.concatenate((pdu, _msb_bits(crc, 32)))
+
+
 def hdt_coded_payload_bit_count(
     rate: HDTRate | str, payload_length_bytes: int
 ) -> int:
-    """Return the transmitted payload bit count after coding/puncturing."""
+    """Return format-0 PDU/payload/CRC transmitted bits after coding/puncturing."""
 
-    logical = np.zeros(max(0, int(payload_length_bytes)) * 8, dtype=np.uint8)
+    payload = np.zeros(max(0, int(payload_length_bytes)) * 8, dtype=np.uint8)
+    logical = hdt_rf_test_format0_bits(payload)
     return int(
         puncture(
             convolutional_encode(logical),
@@ -386,6 +476,9 @@ class BluetoothHDTDecoder:
 
 __all__ = [
     "BluetoothHDTDecoder", "HDTDefinition", "HDT_DEFINITIONS", "HDTRate",
-    "convolutional_encode", "hdt_coded_payload_bit_count", "hdt_definition",
-    "map_hdt_symbols", "puncture",
+    "HDT_RF_TEST_CRC32_INIT", "HDT_RF_TEST_LTS_PHASE", "HDT_RF_TEST_LTS_ROOT",
+    "HDT_RF_TEST_PCA", "convolutional_encode", "hdt_coded_payload_bit_count",
+    "hdt_crc24", "hdt_crc32", "hdt_definition", "hdt_rf_test_control_bits",
+    "hdt_rf_test_format0_bits", "hdt_rf_test_training_symbols", "map_hdt_symbols",
+    "puncture",
 ]

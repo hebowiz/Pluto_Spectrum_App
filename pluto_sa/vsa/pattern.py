@@ -891,6 +891,23 @@ def _detected_qam_decision_interval(
     reference_level = float(np.quantile(mean, 0.9))
     active_level = 0.25 * reference_level
     good = (coefficient >= 0.18) & (mean >= active_level)
+    # A short deterministic codeword can momentarily produce nearly constant
+    # symbol radii.  Bridge brief holes so one QAM payload is not split into
+    # multiple intervals by its data pattern.
+    hole_limit = max(2, window // 4)
+    hole_start: int | None = None
+    for index, is_good in enumerate(good):
+        if not is_good and hole_start is None:
+            hole_start = index
+        if hole_start is not None and (is_good or index == good.size - 1):
+            hole_stop = index if is_good else index + 1
+            if (
+                hole_start > 0
+                and hole_stop < good.size
+                and hole_stop - hole_start <= hole_limit
+            ):
+                good[hole_start:hole_stop] = True
+            hole_start = None
     runs: list[tuple[int, int, float]] = []
     run_start: int | None = None
     for index, is_good in enumerate(good):
