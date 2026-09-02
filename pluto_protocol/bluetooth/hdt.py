@@ -7,6 +7,22 @@ from enum import StrEnum
 
 import numpy as np
 
+from pluto_protocol.bitops import bits_hex_lsb
+from pluto_protocol.model import (
+    DecodeProbeResult,
+    FieldStatus,
+    IssueSeverity,
+    PacketAnalysisResult,
+    PacketDecodeInput,
+    PacketField,
+    PacketIntegritySummary,
+    PacketIssue,
+    PacketSummaryItem,
+)
+
+
+PROTOCOL_ID = "bluetooth.hdt"
+
 
 class HDTRate(StrEnum):
     HDT2 = "HDT2"
@@ -78,6 +94,20 @@ def puncture(bits: np.ndarray, code_rate: str) -> np.ndarray:
     return values[np.resize(mask, values.size)]
 
 
+def hdt_coded_payload_bit_count(
+    rate: HDTRate | str, payload_length_bytes: int
+) -> int:
+    """Return the transmitted payload bit count after coding/puncturing."""
+
+    logical = np.zeros(max(0, int(payload_length_bytes)) * 8, dtype=np.uint8)
+    return int(
+        puncture(
+            convolutional_encode(logical),
+            hdt_definition(rate).payload_code_rate,
+        ).size
+    )
+
+
 def map_hdt_symbols(bits: np.ndarray, rate: HDTRate | str) -> np.ndarray:
     """Map coded MSB-first bits to the HDT air-interface constellation."""
 
@@ -114,7 +144,248 @@ def map_hdt_symbols(bits: np.ndarray, rate: HDTRate | str) -> np.ndarray:
     return (points / np.sqrt(10.0)).astype(np.complex64)
 
 
+def _field(
+    field_id: str,
+    name: str,
+    start: int,
+    bits: np.ndarray,
+    value: object = None,
+    meaning: str = "",
+    status: FieldStatus = FieldStatus.INFO,
+    children: tuple[PacketField, ...] = (),
+) -> PacketField:
+    return PacketField(
+        field_id,
+        name,
+        int(start),
+        int(start) + int(bits.size),
+        bits,
+        value,
+        meaning,
+        status,
+        children,
+    )
+
+
+@dataclass(frozen=True)
+class BluetoothHDTDecoder:
+    """Decode the HDT training/control/coded-payload stream used by the PHY."""
+
+    protocol_id: str = PROTOCOL_ID
+    protocol_name: str = "Bluetooth HDT"
+
+    def probe(self, packet: PacketDecodeInput) -> DecodeProbeResult:
+        confidence = 0.98 if packet.protocol_hint == self.protocol_id else 0.15
+        return DecodeProbeResult(
+            self.protocol_id,
+            confidence,
+            "HDT QPSK training, control header and coded payload layout",
+        )
+
+    def decode(self, packet: PacketDecodeInput) -> PacketAnalysisResult:
+        bits = packet.bits
+        context = packet.context
+        training_count = int(context.get("training_bit_count", 148))
+        control_count = int(context.get("control_bit_count", 20))
+        training = bits[: min(bits.size, training_count)]
+        control_start = training_count
+        control = bits[
+            control_start : min(bits.size, control_start + control_count)
+        ]
+        issues: list[PacketIssue] = []
+        fields: list[PacketField] = [
+            _field(
+                "training",
+                "Training / Preamble",
+                0,
+                training,
+                f"{training.size // 2} QPSK symbol(s)",
+                "Packet synchronization and carrier/timing estimation",
+                FieldStatus.VALID if training.size == training_count else FieldStatus.WARNING,
+            )
+        ]
+        if control.size < 15:
+            issues.append(
+                PacketIssue(
+                    "truncated_control_header",
+                    "Packet ends before the HDT rate and payload length are complete",
+                    IssueSeverity.WARNING,
+                    control_start,
+                    control_start + control.size,
+                )
+            )
+            fields.append(
+                _field(
+                    "control_header",
+                    "Control Header",
+                    control_start,
+                    control,
+                    status=FieldStatus.WARNING,
+                )
+            )
+            return self._result(packet, None, None, fields, issues, False)
+
+        rate_indicator = int(
+            sum(int(control[index]) << (2 - index) for index in range(3))
+        )
+        rate = next(
+            (
+                candidate
+                for candidate, definition in HDT_DEFINITIONS.items()
+                if definition.rate_indicator == rate_indicator
+            ),
+            None,
+        )
+        length_bits = control[3:15]
+        payload_length = int(
+            sum(int(length_bits[index]) << index for index in range(12))
+        )
+        tail = control[15:20]
+        ri_status = FieldStatus.VALID if rate is not None else FieldStatus.INVALID
+        if rate is None:
+            issues.append(
+                PacketIssue(
+                    "unsupported_rate_indicator",
+                    f"Unsupported HDT rate indicator 0b{rate_indicator:03b}",
+                    IssueSeverity.ERROR,
+                    control_start,
+                    control_start + 3,
+                )
+            )
+        rate_meaning = (
+            "Unknown/reserved HDT rate"
+            if rate is None
+            else (
+                f"{rate.value}: {hdt_definition(rate).modulation}, "
+                f"code rate {hdt_definition(rate).payload_code_rate}"
+            )
+        )
+        control_children = (
+            _field(
+                "rate_indicator",
+                "Rate Indicator",
+                control_start,
+                control[:3],
+                f"0b{rate_indicator:03b}",
+                rate_meaning,
+                ri_status,
+            ),
+            _field(
+                "payload_length",
+                "Payload Length",
+                control_start + 3,
+                length_bits,
+                payload_length,
+                f"{payload_length} byte(s) before channel coding",
+                FieldStatus.VALID,
+            ),
+            _field(
+                "encoder_tail",
+                "Encoder Tail",
+                control_start + 15,
+                tail,
+                "".join(str(int(value)) for value in tail),
+                "Terminates the K=6 convolutional encoder",
+                FieldStatus.VALID if tail.size == 5 and not np.any(tail) else FieldStatus.WARNING,
+            ),
+        )
+        fields.append(
+            _field(
+                "control_header",
+                "Control Header",
+                control_start,
+                control,
+                f"RI=0b{rate_indicator:03b}, Length={payload_length}",
+                "Convolutionally decoded PHY control information",
+                FieldStatus.VALID if rate is not None else FieldStatus.INVALID,
+                control_children,
+            )
+        )
+
+        payload_start = control_start + control_count
+        payload = bits[payload_start:]
+        expected_payload_bits = (
+            hdt_coded_payload_bit_count(rate, payload_length)
+            if rate is not None
+            else int(context.get("expected_payload_bit_count", payload.size))
+        )
+        complete = payload.size >= expected_payload_bits
+        payload = payload[:expected_payload_bits]
+        if not complete:
+            issues.append(
+                PacketIssue(
+                    "truncated_payload",
+                    f"Expected {expected_payload_bits} coded payload bits, received {payload.size}",
+                    IssueSeverity.WARNING,
+                    payload_start,
+                    payload_start + payload.size,
+                )
+            )
+        definition = hdt_definition(rate) if rate is not None else None
+        fields.append(
+            _field(
+                "payload",
+                "Coded Payload",
+                payload_start,
+                payload,
+                bits_hex_lsb(payload),
+                (
+                    f"{payload_length} logical byte(s), {payload.size} transmitted bit(s)"
+                    + (
+                        ""
+                        if definition is None
+                        else f"; {definition.modulation}, code rate {definition.payload_code_rate}"
+                    )
+                ),
+                FieldStatus.VALID if complete else FieldStatus.WARNING,
+            )
+        )
+        return self._result(packet, rate, payload_length, fields, issues, complete)
+
+    def _result(
+        self,
+        packet: PacketDecodeInput,
+        rate: HDTRate | None,
+        payload_length: int | None,
+        fields: list[PacketField],
+        issues: list[PacketIssue],
+        complete: bool,
+    ) -> PacketAnalysisResult:
+        phy = rate.value if rate is not None else packet.phy_hint
+        definition = hdt_definition(rate) if rate is not None else None
+        summary = (
+            PacketSummaryItem("protocol", "Protocol", self.protocol_name, self.protocol_name),
+            PacketSummaryItem("phy", "Detected PHY", phy, phy or "Unknown"),
+            PacketSummaryItem(
+                "payload_modulation",
+                "Payload Modulation",
+                None if definition is None else definition.modulation,
+                "Unknown" if definition is None else definition.modulation,
+            ),
+            PacketSummaryItem(
+                "payload_length",
+                "Payload Length",
+                payload_length,
+                "Unknown" if payload_length is None else f"{payload_length} byte(s)",
+            ),
+        )
+        return PacketAnalysisResult(
+            "1.0",
+            self.protocol_id,
+            self.protocol_name,
+            phy,
+            phy,
+            summary,
+            tuple(fields),
+            tuple(issues),
+            PacketIntegritySummary(None, None, complete),
+            packet.source,
+            packet.bits,
+        )
+
+
 __all__ = [
-    "HDTDefinition", "HDT_DEFINITIONS", "HDTRate", "convolutional_encode",
-    "hdt_definition", "map_hdt_symbols", "puncture",
+    "BluetoothHDTDecoder", "HDTDefinition", "HDT_DEFINITIONS", "HDTRate",
+    "convolutional_encode", "hdt_coded_payload_bit_count", "hdt_definition",
+    "map_hdt_symbols", "puncture",
 ]

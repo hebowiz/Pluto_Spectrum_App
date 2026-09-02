@@ -1381,3 +1381,22 @@ Bluetooth HDT mappingとは明確に分離する。
 この段階ではGeneric VSAでの16QAM同期・constellation・symbol decode基盤までを対象とする。
 HDT Preamble / Control Header decode、packet segmentation、rate別RMS EVM evaluation region、規格limit判定は
 Bluetooth専用解析modeの後続実装とする。
+
+---
+
+## 32. Bluetooth専用HDT解析（2026-09-02）
+
+Bluetooth専用modeのProtocolへ`Bluetooth HDT`を追加する。PHYは手動指定せず、2 MSym/sの
+74-symbol Trainingを同期後、62-symbol Control Headerをpi/4-QPSK復調する。Control Headerの
+K=6 convolutional codeをhard-decision Viterbi decodeし、Rate IndicatorからHDT2 / HDT3 /
+HDT4 / HDT6 / HDT7.5、12-bit Lengthから論理Payload byte数を自動判別する。
+
+判別したcode rateとbits/symbolからcoded Payloadの正確なsymbol数を計算し、その値をPayload
+Result Rangeへ自動設定する。HDT4は8PSK、HDT6 / HDT7.5は16QAMのBluetooth HDT mappingで
+再同期・再評価し、QPSK Header EVMとPayload EVMを同じpacket resultへまとめる。HDT2 / HDT3の
+pi/4-QPSK Payloadもfield decodeとEVM集計の対象にする。
+
+Packet DecodeにはTraining / Preamble、Control Header、Rate Indicator、Payload Length、Encoder
+Tail、Coded Payloadを表示する。各fieldはraw値だけでなく、同期用途、検出PHY、modulation、code
+rate、論理byte数、transmitted coded bit数の意味を保持する。複数packetを含むcaptureではTraining
+候補を分離し、packet listへ全ての完全なHDT packetを追加する。

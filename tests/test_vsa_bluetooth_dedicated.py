@@ -8,12 +8,15 @@ import pyqtgraph as pg
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from pluto_protocol.bluetooth.hdt import HDTRate
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSAAnalysisResult
 from pluto_sa.vsa.pattern import IQPowerTriggerSettings, MeasurementFilterMode
 from pluto_sa.vsa.protocol_modes.bluetooth.model import (
     BluetoothAnalysisProfile,
     analyze_bluetooth_classic_recording,
     analyze_bluetooth_classic_recordings,
+    analyze_bluetooth_hdt_recording,
+    analyze_bluetooth_hdt_recordings,
     analyze_bluetooth_le_recording,
     analyze_bluetooth_le_recordings,
     analyze_bluetooth_session,
@@ -23,9 +26,38 @@ from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
 from pluto_sa.vsa.ui.measurement_chrome import SymbolDensitySpread
-from pluto_vsg.engine import BluetoothBRWaveformEngine, BluetoothLEWaveformEngine
+from pluto_vsg.engine import (
+    BluetoothBRWaveformEngine,
+    BluetoothHDTWaveformEngine,
+    BluetoothLEWaveformEngine,
+)
 from pluto_vsg.model import BluetoothLEPhy, BluetoothPacketKind
-from pluto_vsg.profiles import bluetooth_br_edr_project, bluetooth_br_fields, bluetooth_le_project
+from pluto_vsg.profiles import (
+    bluetooth_br_edr_project,
+    bluetooth_br_fields,
+    bluetooth_hdt_fields,
+    bluetooth_hdt_project,
+    bluetooth_le_project,
+)
+
+
+def _hdt_recording(rate: HDTRate, payload_length: int = 64):
+    base = bluetooth_hdt_project(rate)
+    settings = replace(
+        base.bluetooth_hdt, payload_length_bytes=payload_length
+    )
+    project = replace(
+        base,
+        bluetooth_hdt=settings,
+        fields=bluetooth_hdt_fields(settings),
+    )
+    generated = BluetoothHDTWaveformEngine().generate(project)
+    return IQRecording(
+        iq=generated.iq,
+        sample_rate_hz=generated.sample_rate_hz,
+        center_frequency_hz=project.center_frequency_hz,
+        source=f"generated {rate.value}",
+    ), generated, project
 
 
 def _session_with_le_bits() -> tuple[VSASession, dict[str, object]]:
@@ -78,6 +110,94 @@ def test_dedicated_model_combines_rf_metrics_and_shared_le_decode() -> None:
     assert result.packet.protocol_id == "bluetooth.le"
     assert result.packet.integrity.crc_valid is True
     assert any(metric.metric_id == "packet_power" for metric in result.metrics)
+
+
+@pytest.mark.parametrize("rate", (HDTRate.HDT4, HDTRate.HDT7_5))
+def test_dedicated_hdt_auto_detects_rate_length_and_exact_payload_range(
+    rate: HDTRate,
+) -> None:
+    recording, _generated, project = _hdt_recording(rate, payload_length=73)
+
+    result = analyze_bluetooth_hdt_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+    )
+
+    expected_payload_symbols = project.fields[-1].symbol_count
+    metrics = {metric.metric_id: metric.display for metric in result.metrics}
+    assert result.packet.protocol_id == "bluetooth.hdt"
+    assert result.packet.phy_name == rate.value
+    assert result.packet.packet_type == rate.value
+    assert result.packet.integrity.complete is True
+    assert metrics["payload_length"] == "73 byte(s)"
+    assert metrics["automatic_result_range"] == (
+        f"{expected_payload_symbols} symbol(s) (automatic)"
+    )
+    assert result.metadata["hdt_payload_symbol_count"] == expected_payload_symbols
+    assert result.metadata["hdt_header_evm_rms_percent"] < 1.0
+    assert result.metadata["hdt_payload_evm_rms_percent"] < 2.0
+    field_ids = {field.field_id for field in result.packet.root_fields}
+    assert field_ids == {"training", "control_header", "payload"}
+    control = next(
+        field
+        for field in result.packet.root_fields
+        if field.field_id == "control_header"
+    )
+    children = {field.field_id: field for field in control.children}
+    assert children["rate_indicator"].meaning.startswith(rate.value)
+    assert children["payload_length"].value == 73
+    assert children["payload_length"].meaning == "73 byte(s) before channel coding"
+
+
+def test_dedicated_hdt_returns_every_packet_in_capture() -> None:
+    recording, generated, project = _hdt_recording(HDTRate.HDT7_5, 32)
+    spacer = np.zeros(128, dtype=np.complex64)
+    repeated = replace(
+        recording,
+        iq=np.concatenate((spacer, generated.iq, spacer, generated.iq, spacer)),
+        source="two generated HDT7.5 packets",
+    )
+
+    results = analyze_bluetooth_hdt_recordings(
+        repeated,
+        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+    )
+
+    assert len(results) == 2
+    assert all(result.packet.phy_name == HDTRate.HDT7_5.value for result in results)
+    assert all(
+        result.metadata["hdt_payload_symbol_count"]
+        == project.fields[-1].symbol_count
+        for result in results
+    )
+
+
+def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> None:
+    pg.mkQApp("Bluetooth dedicated HDT UI test")
+    recording, _generated, _project = _hdt_recording(HDTRate.HDT7_5, 48)
+    result = analyze_bluetooth_hdt_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+    )
+    preferences = QtCore.QSettings(
+        str(tmp_path / "bluetooth-hdt-render.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    window = BluetoothAnalyzerWindow(preferences=preferences)
+    try:
+        window._recording = recording
+        window._classic_analysis_ready((result,))
+        assert window.modulation_tabs.tabText(0) == "QPSK Header - Vector"
+        assert window.modulation_tabs.tabText(1) == "16QAM Payload - Vector"
+        assert window.modulation_tabs.isTabVisible(1)
+        assert window.symbol_tabs.isTabVisible(1)
+        assert len(window.fsk_symbol_plot.listDataItems()) > 0
+        assert len(window.psk_symbol_plot.listDataItems()) > 0
+        assert window.decode_tree.topLevelItemCount() == 3
+        assert window.packet_table.item(0, 1).text() == "HDT7.5"
+    finally:
+        window.close()
+        window.deleteLater()
 
 
 def test_bluetooth_workspace_renders_decode_payload_and_air_bits(tmp_path) -> None:

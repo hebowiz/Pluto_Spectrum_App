@@ -43,6 +43,7 @@ from .model import (
     BluetoothAnalysisProfile,
     BluetoothDedicatedResult,
     analyze_bluetooth_classic_recordings,
+    analyze_bluetooth_hdt_recordings,
     analyze_bluetooth_le_recordings,
     analyze_bluetooth_session,
 )
@@ -179,6 +180,28 @@ class _BluetoothLEAnalysisThread(QtCore.QThread):
             self.analysis_failed.emit(str(error))
 
 
+class _BluetoothHDTAnalysisThread(QtCore.QThread):
+    analysis_ready = QtCore.Signal(object)
+    analysis_failed = QtCore.Signal(str)
+
+    def __init__(self, recording: IQRecording, options: dict[str, object], parent=None) -> None:
+        super().__init__(parent)
+        self._recording = recording
+        self._options = dict(options)
+
+    def run(self) -> None:
+        try:
+            results = analyze_bluetooth_hdt_recordings(
+                self._recording,
+                cancelled=self.isInterruptionRequested,
+                **self._options,
+            )
+            if not self.isInterruptionRequested():
+                self.analysis_ready.emit(results)
+        except Exception as error:
+            self.analysis_failed.emit(str(error))
+
+
 class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
     """Six-pane Bluetooth analyzer using capture or reusable Generic VSA IQ."""
 
@@ -202,7 +225,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._pluto_target = ""
         self._capture_thread: PlutoSingleCaptureThread | None = None
         self._analysis_thread: (
-            _BluetoothClassicAnalysisThread | _BluetoothLEAnalysisThread | None
+            _BluetoothClassicAnalysisThread
+            | _BluetoothLEAnalysisThread
+            | _BluetoothHDTAnalysisThread
+            | None
         ) = None
         self._shutdown_requested = False
         self._session: VSASession | None = None
@@ -344,6 +370,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.protocol_combo = QtWidgets.QComboBox()
         self.protocol_combo.addItem("Bluetooth BR / EDR", "bluetooth.br_edr")
         self.protocol_combo.addItem("Bluetooth LE", "bluetooth.le")
+        self.protocol_combo.addItem("Bluetooth HDT", "bluetooth.hdt")
         self.phy_combo = QtWidgets.QComboBox()
         self.lap_edit = QtWidgets.QLineEdit("C6967E")
         self.lap_edit.setMaximumWidth(72)
@@ -623,6 +650,12 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             values = ("GFSK", "2.000 MSym/s", "Gaussian")
         elif phy.startswith("LE"):
             values = ("GFSK", "1.000 MSym/s", "Gaussian")
+        elif self.protocol_combo.currentData() == "bluetooth.hdt":
+            values = (
+                "Auto: pi/4-QPSK + 8PSK / 16QAM",
+                "2.000 MSym/s",
+                "Root Raised Cosine",
+            )
         else:
             values = ("Auto: GFSK / DPSK", "PHY-derived", "PHY-defined")
         self.derived_modulation.setText(values[0])
@@ -851,16 +884,29 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def _protocol_changed(self) -> None:
-        is_le = self.protocol_combo.currentData() == "bluetooth.le"
+        protocol = self.protocol_combo.currentData()
+        is_le = protocol == "bluetooth.le"
+        is_hdt = protocol == "bluetooth.hdt"
         self.phy_combo.blockSignals(True)
         self.phy_combo.clear()
-        self.phy_combo.addItems(("LE 1M", "LE 2M") if is_le else ("Auto (BR / EDR 2M / EDR 3M)",))
+        if is_le:
+            self.phy_combo.addItems(("LE 1M", "LE 2M"))
+        elif is_hdt:
+            self.phy_combo.addItem("Auto (HDT2 / HDT3 / HDT4 / HDT6 / HDT7.5)")
+        else:
+            self.phy_combo.addItem("Auto (BR / EDR 2M / EDR 3M)")
         self.phy_combo.blockSignals(False)
-        self.context_label.setText("Access Address / Channel / CRC Init:" if is_le else "LAP / UAP / CLK6-1:")
+        self.context_label.setText(
+            "No manual packet parameters (RI and Length are decoded):"
+            if is_hdt
+            else "Access Address / Channel / CRC Init:"
+            if is_le
+            else "LAP / UAP / CLK6-1:"
+        )
         for widget in (self.access_address_edit, self.channel_spin, self.crc_init_edit):
             widget.setVisible(is_le)
         for widget in (self.lap_edit, self.uap_edit, self.clock_spin):
-            widget.setVisible(not is_le)
+            widget.setVisible(not is_le and not is_hdt)
         self._update_derived_config()
 
     def set_session(self, session: VSASession) -> None:
@@ -1086,8 +1132,13 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
     def _capture_settings(self) -> PlutoCaptureSettings:
         symbol_rate_hz = (
             2_000_000.0
-            if self.protocol_combo.currentData() == "bluetooth.le"
-            and self.phy_combo.currentText() == "LE 2M"
+            if (
+                self.protocol_combo.currentData() == "bluetooth.hdt"
+                or (
+                    self.protocol_combo.currentData() == "bluetooth.le"
+                    and self.phy_combo.currentText() == "LE 2M"
+                )
+            )
             else 1_000_000.0
         )
         return PlutoCaptureSettings(
@@ -1216,6 +1267,9 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             "iq_power_trigger": self._iq_power_trigger_settings(),
         }
 
+    def _hdt_options(self) -> dict[str, object]:
+        return {"profile": self.profile_combo.currentData()}
+
     @QtCore.Slot()
     def refresh(self) -> None:
         if self._recording is None:
@@ -1239,6 +1293,22 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self.capture_button.setText("Stop Analysis")
             self.run_action.setText("Stop")
             self.statusBar().showMessage("Analyzing Classic header and detecting BR / EDR PHY...")
+            thread.start()
+            return
+        if self.protocol_combo.currentData() == "bluetooth.hdt":
+            thread = _BluetoothHDTAnalysisThread(
+                self._recording, self._hdt_options(), self
+            )
+            thread.analysis_ready.connect(self._classic_analysis_ready)
+            thread.analysis_failed.connect(self._classic_analysis_failed)
+            thread.finished.connect(self._analysis_stopped)
+            thread.finished.connect(thread.deleteLater)
+            self._analysis_thread = thread
+            self.capture_button.setText("Stop Analysis")
+            self.run_action.setText("Stop")
+            self.statusBar().showMessage(
+                "Synchronizing HDT and decoding Rate Indicator / Payload Length..."
+            )
             thread.start()
             return
         try:
@@ -1346,11 +1416,32 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         analysis_sample_offset = int(
             result.metadata.get("analysis_sample_offset", recording_sample_offset)
         )
+        is_hdt = result.packet.protocol_id == "bluetooth.hdt"
         is_psk = (
             isinstance(session, VSASession)
             and session.signal is not None
-            and session.signal.modulation.family is ModulationFamily.PSK
+            and session.signal.modulation.family.uses_iq_constellation
         )
+        if is_hdt:
+            payload_name = str(
+                next(
+                    (
+                        item.display
+                        for item in result.metrics
+                        if item.metric_id == "payload_modulation"
+                    ),
+                    "Payload",
+                )
+            )
+            self.modulation_tabs.setTabText(0, "QPSK Header - Vector")
+            self.modulation_tabs.setTabText(1, f"{payload_name} Payload - Vector")
+            self.symbol_tabs.setTabText(0, "QPSK Header")
+            self.symbol_tabs.setTabText(1, f"{payload_name} Payload")
+        else:
+            self.modulation_tabs.setTabText(0, "FSK - Instantaneous Frequency")
+            self.modulation_tabs.setTabText(1, "PSK - Vector")
+            self.symbol_tabs.setTabText(0, "FSK")
+            self.symbol_tabs.setTabText(1, "PSK")
         full_result = result.metadata.get("capture_result")
         if not isinstance(full_result, VSAAnalysisResult):
             full_result = session.result if isinstance(session, VSASession) else None
@@ -1362,7 +1453,14 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 full_result = br_session.result
         self.power_plot.clear()
         power_result = full_result or vsa
-        self.power_plot.plot(power_result.time_s * 1e3, power_result.power_dbm, pen=_TRACE)
+        power_time_offset_s = (
+            analysis_sample_offset / recording.sample_rate_hz if is_hdt else 0.0
+        )
+        self.power_plot.plot(
+            (power_result.time_s + power_time_offset_s) * 1e3,
+            power_result.power_dbm,
+            pen=_TRACE,
+        )
         selected_ranges: list[tuple[float, float]] = []
         power_symbol_times_ms: list[np.ndarray] = []
         analyses: list[VSASession] = []
@@ -1403,7 +1501,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 )
         if self._show_symbol_points and power_symbol_times_ms:
             marker_time_ms = np.concatenate(power_symbol_times_ms)
-            power_time_ms = np.asarray(power_result.time_s, dtype=np.float64) * 1e3
+            power_time_ms = (
+                np.asarray(power_result.time_s, dtype=np.float64)
+                + power_time_offset_s
+            ) * 1e3
             power_dbm = np.asarray(power_result.power_dbm, dtype=np.float64)
             count = min(power_time_ms.size, power_dbm.size)
             if count:
@@ -1433,7 +1534,14 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         if br_vsa is not None:
             self.spectrum_plot.plot((br_vsa.spectrum_frequency_hz + recording.center_frequency_hz) / 1e6, br_vsa.spectrum_dbm, pen=_TRACE, name="FSK")
         if is_psk or br_vsa is None:
-            self.spectrum_plot.plot((vsa.spectrum_frequency_hz + recording.center_frequency_hz) / 1e6, vsa.spectrum_dbm, pen="#00ffff" if is_psk else _TRACE, name="PSK" if is_psk else "FSK")
+            vector_name = (
+                session.signal.modulation.value
+                if is_hdt and isinstance(session, VSASession) and session.signal is not None
+                else "PSK"
+                if is_psk
+                else "FSK"
+            )
+            self.spectrum_plot.plot((vsa.spectrum_frequency_hz + recording.center_frequency_hz) / 1e6, vsa.spectrum_dbm, pen="#00ffff" if is_psk else _TRACE, name=vector_name)
 
         self.fsk_modulation_plot.clear()
         self.psk_modulation_plot.clear()
@@ -1552,7 +1660,35 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 dtype=np.complex128,
             )
         )
-        if self._fsk_symbol_plot_mode == "Constellation Frequency":
+        if is_hdt:
+            header_symbols = np.asarray(
+                result.metadata.get("hdt_header_symbols", ()),
+                dtype=np.complex128,
+            )
+            self.fsk_modulation_plot.clear()
+            self.fsk_modulation_plot.setLabel("bottom", "I")
+            self.fsk_modulation_plot.setLabel("left", "Q")
+            self.fsk_modulation_plot.setAspectLocked(True, 1.0)
+            self.fsk_modulation_plot.plot(
+                header_symbols.real, header_symbols.imag, pen=_TRACE
+            )
+            if self._show_symbol_points and header_symbols.size:
+                plot_trace_symbol_points(
+                    self.fsk_modulation_plot,
+                    header_symbols.real,
+                    header_symbols.imag,
+                )
+            self.fsk_symbol_plot.setYLink(None)
+            self._set_frequency_constellation_x_lock(False)
+            self.fsk_symbol_plot.showAxis("bottom", True)
+            self.fsk_symbol_plot.setLabel("bottom", "I")
+            self.fsk_symbol_plot.setLabel("left", "Q")
+            self.fsk_symbol_plot.setAspectLocked(True, 1.0)
+            self._plot_symbol_vectors(self.fsk_symbol_plot, header_symbols)
+            self._plot_unit_circle(self.fsk_symbol_plot)
+            self._set_iq_plane_range(self.fsk_symbol_plot)
+            self._set_iq_plane_range(self.fsk_modulation_plot)
+        elif self._fsk_symbol_plot_mode == "Constellation Frequency":
             self.fsk_symbol_plot.setAspectLocked(False)
             self.fsk_symbol_plot.setYLink(self.fsk_modulation_plot)
             self._set_frequency_constellation_x_lock(True)

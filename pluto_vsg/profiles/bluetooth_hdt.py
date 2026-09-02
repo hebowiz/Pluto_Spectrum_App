@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import math
 
-from pluto_protocol.bluetooth.hdt import HDTRate, convolutional_encode, hdt_definition, puncture
+from pluto_protocol.bluetooth.hdt import (
+    HDTRate,
+    hdt_coded_payload_bit_count as hdt_coded_payload_bit_count_for_rate,
+    hdt_definition,
+)
 from pluto_vsg.model import (
     BluetoothHDTSettings, DataSourceKind, FieldDefinition, FilterKind,
     ModulationDefinition, ModulationKind, StandardProfile, WaveformProject,
 )
-import numpy as np
 
 
 _MODULATION_KIND = {
@@ -20,8 +23,9 @@ _MODULATION_KIND = {
 
 
 def hdt_coded_payload_bit_count(settings: BluetoothHDTSettings) -> int:
-    logical = np.zeros(int(settings.payload_length_bytes) * 8, dtype=np.uint8)
-    return int(puncture(convolutional_encode(logical), hdt_definition(settings.rate).payload_code_rate).size)
+    return hdt_coded_payload_bit_count_for_rate(
+        settings.rate, settings.payload_length_bytes
+    )
 
 
 def bluetooth_hdt_fields(settings: BluetoothHDTSettings) -> tuple[FieldDefinition, ...]:

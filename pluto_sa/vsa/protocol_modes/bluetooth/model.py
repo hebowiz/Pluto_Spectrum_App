@@ -12,10 +12,19 @@ import numpy as np
 
 from pluto_protocol.model import PacketAnalysisResult, PacketField
 from pluto_protocol.bluetooth.common import le_whitening_sequence
+from pluto_protocol.bluetooth.hdt import (
+    HDT_DEFINITIONS,
+    HDTRate,
+    hdt_coded_payload_bit_count,
+    hdt_definition,
+    map_hdt_symbols,
+)
 from pluto_sa.vsa.model import VSAAnalysisResult
 from pluto_sa.vsa.mapping import (
     BLUETOOTH_EDR_MAPPING,
+    BLUETOOTH_HDT_MAPPING,
     phase_indices_to_logical_symbols,
+    psk_constellation,
     reverse_symbol_bits,
 )
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
@@ -28,6 +37,7 @@ from pluto_sa.vsa.pattern import (
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeSettings,
+    prepare_psk_iq,
 )
 from pluto_sa.vsa.profiles.bluetooth_br import BluetoothBRProfile, access_code_bits
 from pluto_sa.vsa.profiles.bluetooth_edr import edr_sync_symbols
@@ -91,6 +101,21 @@ def _mean_power_dbm(values: np.ndarray) -> float | None:
     if not np.isfinite(mean_mw) or mean_mw <= 0.0:
         return None
     return float(10.0 * np.log10(mean_mw))
+
+
+def _recording_range_power_dbm(
+    recording: IQRecording, start_sample: int, stop_sample: int
+) -> float | None:
+    values = np.asarray(
+        recording.iq[max(0, int(start_sample)) : min(recording.sample_count, int(stop_sample))],
+        dtype=np.complex128,
+    )
+    if values.size == 0:
+        return None
+    mean_power = float(np.mean(np.abs(values / recording.full_scale) ** 2))
+    if not np.isfinite(mean_power) or mean_power <= 0.0:
+        return None
+    return float(10.0 * np.log10(mean_power) + recording.dbfs_to_dbm_offset_db)
 
 
 def _display(value: float | None, unit: str, scale: float = 1.0) -> str:
@@ -493,6 +518,429 @@ def _exact_br_result_symbols(packet: PacketAnalysisResult) -> int | None:
         return None
     stop_bit = int(payload.stop_bit)
     return stop_bit if stop_bit > 0 else None
+
+
+_HDT_SYMBOL_RATE_HZ = 2_000_000.0
+_HDT_TRAINING_SYMBOLS = 74
+_HDT_CONTROL_SYMBOLS = 62
+_HDT_PAYLOAD_START_SYMBOL = _HDT_TRAINING_SYMBOLS + _HDT_CONTROL_SYMBOLS
+
+
+def _hdt_training_bits() -> np.ndarray:
+    return np.resize(
+        np.asarray([0, 0, 0, 1, 1, 1, 1, 0], dtype=np.uint8),
+        _HDT_TRAINING_SYMBOLS * 2,
+    )
+
+
+def _hdt_qpsk_constellation(symbol_indices: np.ndarray) -> np.ndarray:
+    even_phases = np.asarray(
+        [np.pi / 4.0, 3.0 * np.pi / 4.0, -np.pi / 4.0, -3.0 * np.pi / 4.0]
+    )
+    odd_phases = np.asarray([np.pi / 2.0, np.pi, 0.0, -np.pi / 2.0])
+    indices = np.asarray(symbol_indices, dtype=np.int64)
+    return np.where(
+        (indices[:, None] & 1) == 0,
+        np.exp(1j * even_phases)[None, :],
+        np.exp(1j * odd_phases)[None, :],
+    )
+
+
+def _hdt_sample_symbols(
+    recording: IQRecording,
+    first_center_sample: float,
+    count: int,
+) -> np.ndarray:
+    samples_per_symbol = recording.sample_rate_hz / _HDT_SYMBOL_RATE_HZ
+    centers = first_center_sample + np.arange(max(0, int(count))) * samples_per_symbol
+    axis = np.arange(recording.sample_count, dtype=np.float64)
+    return (
+        np.interp(centers, axis, recording.iq.real)
+        + 1j * np.interp(centers, axis, recording.iq.imag)
+    )
+
+
+def _hdt_training_matches(recording: IQRecording) -> tuple[tuple[int, float], ...]:
+    """Locate complete HDT training sequences and return first symbol centers."""
+
+    samples_per_symbol = recording.sample_rate_hz / _HDT_SYMBOL_RATE_HZ
+    integer_sps = int(round(samples_per_symbol))
+    if integer_sps < 2 or not np.isclose(samples_per_symbol, integer_sps, atol=1e-6):
+        raise ValueError("HDT analysis requires an integer samples-per-symbol ratio")
+    reference = map_hdt_symbols(_hdt_training_bits(), HDTRate.HDT2).astype(
+        np.complex128
+    )
+    reference_energy = float(np.sum(np.abs(reference) ** 2))
+    candidates: list[tuple[float, int]] = []
+    for phase in range(integer_sps):
+        sampled = np.asarray(recording.iq[phase::integer_sps], dtype=np.complex128)
+        if sampled.size < reference.size:
+            continue
+        correlation = np.correlate(sampled, reference, mode="valid")
+        energy = np.convolve(
+            np.abs(sampled) ** 2,
+            np.ones(reference.size, dtype=np.float64),
+            mode="valid",
+        )
+        scores = np.abs(correlation) / np.sqrt(
+            np.maximum(energy * reference_energy, np.finfo(np.float64).tiny)
+        )
+        for index in np.flatnonzero(scores >= 0.72):
+            candidates.append(
+                (float(scores[index]), int(phase + index * integer_sps))
+            )
+    selected: list[tuple[float, int]] = []
+    guard_samples = int(round(_HDT_TRAINING_SYMBOLS * samples_per_symbol))
+    for score, center in sorted(candidates, reverse=True):
+        if all(abs(center - other_center) >= guard_samples for _, other_center in selected):
+            selected.append((score, center))
+    return tuple((center, score) for score, center in sorted(selected, key=lambda item: item[1]))
+
+
+def _viterbi_decode_hdt_control(encoded: np.ndarray) -> tuple[np.ndarray, int]:
+    """Hard-decision K=6 Viterbi decode for one 40-bit HDT control word."""
+
+    values = np.asarray(encoded, dtype=np.uint8)[:40]
+    if values.size < 40:
+        raise RuntimeError("HDT control header is incomplete")
+    infinity = 1_000_000
+    costs = np.full(32, infinity, dtype=np.int64)
+    costs[0] = 0
+    history: list[tuple[np.ndarray, np.ndarray]] = []
+    for received in values.reshape(-1, 2):
+        next_costs = np.full(32, infinity, dtype=np.int64)
+        previous_state = np.zeros(32, dtype=np.int16)
+        previous_bit = np.zeros(32, dtype=np.uint8)
+        for state in range(32):
+            if costs[state] >= infinity:
+                continue
+            taps = np.asarray([(state >> bit) & 1 for bit in range(5)], dtype=np.uint8)
+            for value in (0, 1):
+                registers = np.concatenate(([value], taps))
+                expected = (
+                    registers[0] ^ registers[2] ^ registers[4] ^ registers[5],
+                    registers[0] ^ registers[1] ^ registers[2] ^ registers[3] ^ registers[5],
+                )
+                next_state = ((state << 1) & 0x1F) | value
+                distance = int(expected[0] != received[0]) + int(
+                    expected[1] != received[1]
+                )
+                candidate = int(costs[state]) + distance
+                if candidate < next_costs[next_state]:
+                    next_costs[next_state] = candidate
+                    previous_state[next_state] = state
+                    previous_bit[next_state] = value
+        costs = next_costs
+        history.append((previous_state, previous_bit))
+    state = int(np.argmin(costs))
+    decoded: list[int] = []
+    for previous_state, previous_bit in reversed(history):
+        decoded.append(int(previous_bit[state]))
+        state = int(previous_state[state])
+    return np.asarray(decoded[::-1], dtype=np.uint8), int(np.min(costs))
+
+
+def _hdt_signal(rate: HDTRate) -> SignalDescription:
+    modulation = {
+        "pi/4-QPSK": ModulationKind.PI4_QPSK,
+        "8PSK": ModulationKind.PSK8,
+        "16QAM": ModulationKind.QAM16,
+    }[hdt_definition(rate).modulation]
+    return SignalDescription(
+        modulation=modulation,
+        symbol_rate_hz=_HDT_SYMBOL_RATE_HZ,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        symbol_mapping=BLUETOOTH_HDT_MAPPING,
+    )
+
+
+def analyze_bluetooth_hdt_recording(
+    recording: IQRecording,
+    *,
+    profile: BluetoothAnalysisProfile,
+    match_index: int = 1,
+    _matches: tuple[tuple[int, float], ...] | None = None,
+) -> BluetoothDedicatedResult:
+    """Synchronize HDT, decode RI/Length, and evaluate its QPSK and payload regions."""
+
+    matches = _hdt_training_matches(recording) if _matches is None else _matches
+    if not 1 <= int(match_index) <= len(matches):
+        raise RuntimeError("Bluetooth HDT synchronization pattern was not found")
+    first_center, training_correlation = matches[int(match_index) - 1]
+    samples_per_symbol = recording.sample_rate_hz / _HDT_SYMBOL_RATE_HZ
+    filtered_iq, filtered_rate_hz = prepare_psk_iq(
+        recording.iq,
+        sample_rate_hz=recording.sample_rate_hz,
+        symbol_rate_hz=_HDT_SYMBOL_RATE_HZ,
+        tx_filter="Root Raised Cosine",
+        filter_parameter=0.4,
+        samples_per_symbol=int(round(samples_per_symbol)),
+        apply_measurement_filter=True,
+    )
+    if not np.isclose(filtered_rate_hz, recording.sample_rate_hz):
+        raise RuntimeError("Unexpected HDT matched-filter sample rate")
+    filtered_recording = replace(recording, iq=filtered_iq)
+    header_observed = _hdt_sample_symbols(
+        filtered_recording, first_center, _HDT_PAYLOAD_START_SYMBOL
+    )
+    if header_observed.size < _HDT_PAYLOAD_START_SYMBOL:
+        raise RuntimeError("Bluetooth HDT control header is incomplete")
+    training_reference = map_hdt_symbols(_hdt_training_bits(), HDTRate.HDT2)
+    training_phase_error = np.unwrap(
+        np.angle(
+            header_observed[:_HDT_TRAINING_SYMBOLS]
+            * np.conj(training_reference)
+        )
+    )
+    phase_step, phase_intercept = np.polyfit(
+        np.arange(_HDT_TRAINING_SYMBOLS, dtype=np.float64),
+        training_phase_error,
+        1,
+    )
+    header_axis = np.arange(_HDT_PAYLOAD_START_SYMBOL, dtype=np.float64)
+    corrected_header = header_observed * np.exp(
+        -1j * (phase_intercept + phase_step * header_axis)
+    )
+    header_rms = float(np.sqrt(np.mean(np.abs(corrected_header) ** 2)))
+    corrected_header /= max(header_rms, np.finfo(np.float64).tiny)
+    qpsk_alphabets = _hdt_qpsk_constellation(
+        np.arange(_HDT_PAYLOAD_START_SYMBOL)
+    )
+    header_labels = np.argmin(
+        np.abs(corrected_header[:, None] - qpsk_alphabets), axis=1
+    ).astype(np.int16)
+    header_reference = qpsk_alphabets[
+        np.arange(_HDT_PAYLOAD_START_SYMBOL), header_labels
+    ]
+    header_evm = 100.0 * float(
+        np.sqrt(
+            np.sum(np.abs(corrected_header - header_reference) ** 2)
+            / np.sum(np.abs(header_reference) ** 2)
+        )
+    )
+    control_labels = header_labels[_HDT_TRAINING_SYMBOLS:]
+    control_encoded = (
+        (control_labels[:, None] >> np.asarray([1, 0], dtype=np.int16)) & 1
+    ).astype(np.uint8).reshape(-1)
+    control_data, control_path_errors = _viterbi_decode_hdt_control(
+        control_encoded
+    )
+    rate_indicator = int(
+        sum(int(control_data[index]) << (2 - index) for index in range(3))
+    )
+    rate = next(
+        (
+            candidate
+            for candidate, definition in HDT_DEFINITIONS.items()
+            if definition.rate_indicator == rate_indicator
+        ),
+        None,
+    )
+    if rate is None:
+        raise RuntimeError(
+            f"Unsupported HDT rate indicator 0b{rate_indicator:03b}"
+        )
+    payload_length = int(
+        sum(int(control_data[3 + index]) << index for index in range(12))
+    )
+    definition = hdt_definition(rate)
+    coded_payload_bits = hdt_coded_payload_bit_count(rate, payload_length)
+    payload_symbol_count = int(
+        np.ceil(coded_payload_bits / float(definition.bits_per_symbol))
+    )
+    payload_start = int(
+        round(first_center - 0.5 * samples_per_symbol + _HDT_PAYLOAD_START_SYMBOL * samples_per_symbol)
+    )
+    payload_stop = int(round(payload_start + payload_symbol_count * samples_per_symbol))
+    if payload_stop > recording.sample_count:
+        raise RuntimeError(
+            f"HDT header declares {payload_length} payload byte(s), but the capture is incomplete"
+        )
+
+    payload_observed = _hdt_sample_symbols(
+        filtered_recording,
+        first_center + _HDT_PAYLOAD_START_SYMBOL * samples_per_symbol,
+        payload_symbol_count,
+    )
+    payload_axis = _HDT_PAYLOAD_START_SYMBOL + np.arange(payload_symbol_count)
+    payload_corrected = payload_observed * np.exp(
+        -1j * (phase_intercept + phase_step * payload_axis)
+    )
+    payload_rms = float(np.sqrt(np.mean(np.abs(payload_corrected) ** 2)))
+    payload_corrected /= max(payload_rms, np.finfo(np.float64).tiny)
+    payload_signal = _hdt_signal(rate)
+    payload_session: VSASession | None = None
+    if definition.modulation in {"8PSK", "16QAM"} and payload_symbol_count >= 4:
+        alphabet = psk_constellation(
+            payload_signal.modulation, BLUETOOTH_HDT_MAPPING
+        )
+        seed_count = min(24, payload_symbol_count)
+        seed_labels = np.argmin(
+            np.abs(payload_corrected[:seed_count, None] - alphabet[None, :]),
+            axis=1,
+        ).astype(np.int16)
+        pattern_symbols = reverse_symbol_bits(
+            seed_labels, payload_signal.modulation.order
+        )
+        padding = int(round(8.0 * samples_per_symbol))
+        crop_start = max(0, payload_start - padding)
+        crop_stop = min(recording.sample_count, payload_stop + padding)
+        payload_recording = replace(
+            recording,
+            iq=recording.iq[crop_start:crop_stop],
+            start_sample_index=recording.start_sample_index + crop_start,
+            trigger_sample_index=None,
+        )
+        payload_session = _analyze_known_pattern(
+            payload_recording,
+            payload_signal,
+            pattern_symbols,
+            result_length=max(1, payload_symbol_count),
+            minimum_correlation=0.60,
+            match_selection=MatchSelectionPolicy.STRONGEST,
+        )
+        payload_pattern = payload_session.pattern_result
+        payload_labels = payload_pattern.decoded_symbols
+        payload_air_bits = _symbols_to_air_bits(
+            payload_labels, payload_signal.modulation.order
+        )[:coded_payload_bits]
+        payload_evm = payload_pattern.evm_rms_percent
+        vsa_result = (
+            payload_session.carrier_corrected_pattern_range_result
+            or payload_session.pattern_range_result
+            or payload_session.result
+        )
+        analysis_sample_offset = crop_start
+    else:
+        qpsk_alphabets = _hdt_qpsk_constellation(payload_axis)
+        payload_labels = np.argmin(
+            np.abs(payload_corrected[:, None] - qpsk_alphabets), axis=1
+        ).astype(np.int16)
+        payload_reference = qpsk_alphabets[
+            np.arange(payload_symbol_count), payload_labels
+        ]
+        payload_evm = 100.0 * float(
+            np.sqrt(
+                np.sum(np.abs(payload_corrected - payload_reference) ** 2)
+                / np.sum(np.abs(payload_reference) ** 2)
+            )
+        )
+        payload_air_bits = (
+            (payload_labels[:, None] >> np.asarray([1, 0], dtype=np.int16)) & 1
+        ).astype(np.uint8).reshape(-1)[:coded_payload_bits]
+        fallback_session = VSASession(name="Bluetooth HDT QPSK")
+        fallback_session.set_recording(recording)
+        fallback_session.set_signal(payload_signal)
+        fallback_session.analyze()
+        payload_session = fallback_session
+        vsa_result = fallback_session.result
+        analysis_sample_offset = 0
+    if vsa_result is None:
+        raise RuntimeError("Bluetooth HDT payload analysis produced no VSA result")
+
+    packet_bits = np.concatenate(
+        (_hdt_training_bits(), control_data, payload_air_bits)
+    )
+    packet_start = max(0, int(round(first_center - 0.5 * samples_per_symbol)))
+    packet = analyze_demodulated_packet_bits(
+        packet_bits,
+        protocol_id="bluetooth.hdt",
+        phy_name=rate.value,
+        context={
+            "training_bit_count": _HDT_TRAINING_SYMBOLS * 2,
+            "control_bit_count": int(control_data.size),
+            "expected_payload_bit_count": coded_payload_bits,
+        },
+        packet_index=int(match_index) - 1,
+        center_frequency_hz=recording.center_frequency_hz,
+        start_sample=packet_start,
+        stop_sample=payload_stop,
+    )
+    cfo_hz = phase_step * _HDT_SYMBOL_RATE_HZ / (2.0 * np.pi)
+    header_power_dbm = _recording_range_power_dbm(
+        recording, packet_start, payload_start
+    )
+    payload_power_dbm = _recording_range_power_dbm(
+        recording, payload_start, payload_stop
+    )
+    relative_power_db = (
+        payload_power_dbm - header_power_dbm
+        if payload_power_dbm is not None and header_power_dbm is not None
+        else None
+    )
+    metrics = (
+        BluetoothMetric("detected_phy", "Detected PHY", rate.value),
+        BluetoothMetric("payload_modulation", "Payload Modulation", definition.modulation),
+        BluetoothMetric("payload_code_rate", "Payload Code Rate", definition.payload_code_rate),
+        BluetoothMetric("payload_length", "Payload Length", f"{payload_length} byte(s)"),
+        BluetoothMetric("automatic_result_range", "Payload Result Range", f"{payload_symbol_count} symbol(s) (automatic)"),
+        BluetoothMetric("qpsk_evm_rms", "QPSK Header EVM RMS", _display_evm(header_evm)),
+        BluetoothMetric("payload_evm_rms", f"{definition.modulation} Payload EVM RMS", _display_evm(payload_evm)),
+        BluetoothMetric("qpsk_average_power", "QPSK Header Average Power", _display(header_power_dbm, "dBm")),
+        BluetoothMetric("payload_average_power", f"{definition.modulation} Payload Average Power", _display(payload_power_dbm, "dBm")),
+        BluetoothMetric("payload_relative_power", "Relative Power (Payload - Header)", _display(relative_power_db, "dB")),
+        BluetoothMetric("cfo", "Carrier Frequency Offset", _display(cfo_hz, "kHz", 1e3)),
+        BluetoothMetric("correlation", "Training Correlation", f"{100.0 * training_correlation:.2f} %"),
+    )
+    display_header = corrected_header * np.exp(
+        -1j * (np.arange(corrected_header.size) & 1) * np.pi / 4.0
+    )
+    return BluetoothDedicatedResult(
+        profile=BluetoothAnalysisProfile(profile),
+        vsa_result=vsa_result,
+        packet=packet,
+        metrics=metrics,
+        metadata={
+            "source": recording.source,
+            "sample_rate_hz": recording.sample_rate_hz,
+            "center_frequency_hz": recording.center_frequency_hz,
+            "analysis_session": payload_session,
+            "hdt_header_symbols": np.asarray(display_header, dtype=np.complex64),
+            "hdt_header_evm_rms_percent": header_evm,
+            "hdt_payload_evm_rms_percent": payload_evm,
+            "hdt_rate_indicator": rate_indicator,
+            "hdt_control_path_errors": control_path_errors,
+            "hdt_payload_symbol_count": payload_symbol_count,
+            "hdt_payload_start_sample": payload_start,
+            "hdt_payload_stop_sample": payload_stop,
+            "recording_sample_offset": 0,
+            "analysis_sample_offset": analysis_sample_offset,
+            "packet_start_sample": packet_start,
+            "packet_stop_sample": payload_stop,
+            "selected_match_index": int(match_index),
+            "eligible_match_count": len(matches),
+        },
+    )
+
+
+def analyze_bluetooth_hdt_recordings(
+    recording: IQRecording,
+    *,
+    profile: BluetoothAnalysisProfile,
+    cancelled: Callable[[], bool] | None = None,
+) -> tuple[BluetoothDedicatedResult, ...]:
+    """Return every complete HDT packet found in a capture."""
+
+    matches = _hdt_training_matches(recording)
+    results: list[BluetoothDedicatedResult] = []
+    for match_index in range(1, len(matches) + 1):
+        if cancelled is not None and cancelled():
+            break
+        try:
+            results.append(
+                analyze_bluetooth_hdt_recording(
+                    recording,
+                    profile=profile,
+                    match_index=match_index,
+                    _matches=matches,
+                )
+            )
+        except RuntimeError:
+            continue
+    if not results:
+        raise RuntimeError("Bluetooth HDT synchronization pattern was not found")
+    return tuple(results)
 
 
 def analyze_bluetooth_classic_recording(
