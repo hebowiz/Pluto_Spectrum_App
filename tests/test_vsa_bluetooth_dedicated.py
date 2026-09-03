@@ -9,7 +9,7 @@ import pyqtgraph as pg
 import pytest
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from pluto_protocol.bluetooth.hdt import HDTRate
+from pluto_protocol.bluetooth.hdt import HDTRate, hdt_definition
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSAAnalysisResult
 from pluto_sa.vsa.pattern import IQPowerTriggerSettings, MeasurementFilterMode
 from pluto_sa.vsa.protocol_modes.bluetooth.model import (
@@ -153,6 +153,42 @@ def test_dedicated_hdt_auto_detects_rate_length_and_exact_payload_range(
     assert result.metadata["hdt_payload_symbol_count"] == expected_payload_symbols
     assert result.metadata["hdt_header_evm_rms_percent"] < 1.0
     assert result.metadata["hdt_payload_evm_rms_percent"] < 2.0
+    hdt_evm = result.metadata["hdt_evm_result"]
+    samples_per_symbol = recording.sample_rate_hz / 2_000_000.0
+    assert hdt_evm.header_corrected_symbols is hdt_evm.header_measured_symbols
+    assert hdt_evm.payload_corrected_symbols is hdt_evm.payload_measured_symbols
+    assert hdt_evm.header_corrected_waveform.size > (
+        hdt_evm.header_corrected_symbols.size
+    )
+    assert hdt_evm.payload_corrected_waveform.size > (
+        hdt_evm.payload_corrected_symbols.size
+    )
+    np.testing.assert_allclose(
+        np.diff(hdt_evm.header_symbol_sample_positions), samples_per_symbol
+    )
+    np.testing.assert_allclose(
+        np.diff(hdt_evm.payload_symbol_sample_positions), samples_per_symbol
+    )
+    np.testing.assert_array_equal(
+        result.metadata["hdt_header_symbols"], hdt_evm.header_corrected_symbols
+    )
+    np.testing.assert_array_equal(
+        result.metadata["hdt_payload_symbols"], hdt_evm.payload_corrected_symbols
+    )
+    plot_data = result.metadata["hdt_plot_data"]
+    assert plot_data.evm is hdt_evm
+    assert plot_data.payload_sample_range == (
+        result.metadata["hdt_payload_start_sample"],
+        result.metadata["hdt_payload_stop_sample"],
+    )
+    assert plot_data.payload_evm_sample_range == (
+        result.metadata["hdt_payload_start_sample"],
+        result.metadata["hdt_payload_evm_stop_sample"],
+    )
+    assert plot_data.packet_sample_range == (
+        result.metadata["packet_start_sample"],
+        result.metadata["packet_stop_sample"],
+    )
     assert [row.metric_id for row in result.summary_rows] == [
         "sig_hdt_output_power",
         "sig_hdt_header_evm_rms",
@@ -207,6 +243,227 @@ def test_dedicated_hdt_auto_detects_rate_length_and_exact_payload_range(
     assert result.packet.integrity.crc_valid is True
 
 
+@pytest.mark.parametrize("rate", tuple(HDTRate))
+def test_hdt_plots_use_analysis_ranges_and_evm_symbols_for_every_rate(
+    rate: HDTRate, tmp_path
+) -> None:
+    pg.mkQApp(f"Bluetooth dedicated {rate.value} plot test")
+    recording, _generated, _project = _hdt_recording(rate, payload_length=73)
+    result = analyze_bluetooth_hdt_recording(
+        recording, profile=BluetoothAnalysisProfile.RF_PHY_TEST
+    )
+    window = BluetoothAnalyzerWindow(
+        preferences=QtCore.QSettings(
+            str(tmp_path / f"bluetooth-{rate.value}-plot.ini"),
+            QtCore.QSettings.Format.IniFormat,
+        )
+    )
+    try:
+        window._recording = recording
+        window._classic_analysis_ready((result,))
+        hdt_evm = result.metadata["hdt_evm_result"]
+        plot_data = result.metadata["hdt_plot_data"]
+
+        def plotted_symbols(item) -> np.ndarray:
+            return np.asarray(item.xData) + 1j * np.asarray(item.yData)
+
+        def pi4_display(values: np.ndarray) -> np.ndarray:
+            symbols = np.asarray(values, dtype=np.complex128)
+            return symbols * np.exp(
+                -1j
+                * (np.arange(symbols.size, dtype=np.float64) + 1.0)
+                * np.pi
+                / 4.0
+            )
+
+        payload_is_qpsk = rate in {HDTRate.HDT2, HDTRate.HDT3}
+        expected_header_symbols = pi4_display(hdt_evm.header_corrected_symbols)
+        expected_payload_symbols = (
+            pi4_display(hdt_evm.payload_corrected_symbols)
+            if payload_is_qpsk
+            else hdt_evm.payload_corrected_symbols
+        )
+        expected_header_reference = pi4_display(hdt_evm.header_reference_symbols)
+        expected_payload_reference = (
+            pi4_display(hdt_evm.payload_reference_symbols)
+            if payload_is_qpsk
+            else hdt_evm.payload_reference_symbols
+        )
+
+        header_vector_points = plotted_symbols(
+            window.fsk_modulation_plot.listDataItems()[1]
+        )
+        header_symbol_points = plotted_symbols(
+            window.fsk_symbol_plot.listDataItems()[0]
+        )
+        payload_vector_points = plotted_symbols(
+            window.psk_modulation_plot.listDataItems()[1]
+        )
+        payload_symbol_points = plotted_symbols(
+            window.psk_symbol_plot.listDataItems()[0]
+        )
+        np.testing.assert_array_equal(
+            plotted_symbols(window.fsk_modulation_plot.listDataItems()[0]),
+            hdt_evm.header_corrected_waveform,
+        )
+        np.testing.assert_array_equal(
+            plotted_symbols(window.psk_modulation_plot.listDataItems()[0]),
+            hdt_evm.payload_corrected_waveform,
+        )
+        np.testing.assert_array_equal(
+            header_vector_points, hdt_evm.header_corrected_symbols
+        )
+        np.testing.assert_allclose(
+            header_symbol_points, expected_header_symbols, atol=1e-12
+        )
+        np.testing.assert_array_equal(
+            payload_vector_points, hdt_evm.payload_corrected_symbols
+        )
+        np.testing.assert_allclose(
+            payload_symbol_points, expected_payload_symbols, atol=1e-12
+        )
+
+        def unique_constellation_points(values: np.ndarray) -> int:
+            points = np.column_stack((values.real, values.imag))
+            return np.unique(np.round(points, decimals=6), axis=0).shape[0]
+
+        assert unique_constellation_points(expected_header_reference) == 4
+        if payload_is_qpsk:
+            assert unique_constellation_points(expected_payload_reference) == 4
+
+        def rms_evm_percent(measured: np.ndarray, reference: np.ndarray) -> float:
+            return 100.0 * float(
+                np.sqrt(
+                    np.sum(np.abs(measured - reference) ** 2)
+                    / np.sum(np.abs(reference) ** 2)
+                )
+            )
+
+        assert rms_evm_percent(
+            header_symbol_points, expected_header_reference
+        ) == pytest.approx(hdt_evm.header_rms_percent, abs=1e-6)
+        assert rms_evm_percent(
+            payload_symbol_points, expected_payload_reference
+        ) == pytest.approx(hdt_evm.payload_rms_percent, abs=1e-6)
+
+        regions = [
+            tuple(item.getRegion())
+            for item in window.power_plot.getPlotItem().items
+            if isinstance(item, pg.LinearRegionItem)
+        ]
+        expected_result_ms = tuple(
+            sample / recording.sample_rate_hz * 1e3
+            for sample in plot_data.payload_evm_sample_range
+        )
+        expected_training_ms = tuple(
+            sample / recording.sample_rate_hz * 1e3
+            for sample in plot_data.training_sample_range
+        )
+        assert len(regions) == 2
+        assert any(np.allclose(region, expected_result_ms) for region in regions)
+        assert any(np.allclose(region, expected_training_ms) for region in regions)
+        payload_label = (
+            "QPSK"
+            if payload_is_qpsk
+            else hdt_definition(rate).modulation
+        )
+        assert window.modulation_tabs.tabText(0) == "QPSK Header"
+        assert window.modulation_tabs.tabText(1) == f"{payload_label} Payload"
+        assert window.symbol_tabs.tabText(0) == "QPSK Header"
+        assert window.symbol_tabs.tabText(1) == f"{payload_label} Payload"
+        legend_labels = {
+            item[1].text for item in window.spectrum_legend.items
+        }
+        assert legend_labels == {"QPSK Header", f"{payload_label} Payload"}
+        header_spectrum, payload_spectrum = window.spectrum_plot.listDataItems()
+        np.testing.assert_array_equal(
+            header_spectrum.xData,
+            result.metadata["hdt_header_spectrum_frequency_hz"] / 1e6,
+        )
+        np.testing.assert_array_equal(
+            header_spectrum.yData, result.metadata["hdt_header_spectrum_dbm"]
+        )
+        np.testing.assert_array_equal(
+            payload_spectrum.xData,
+            result.metadata["hdt_payload_spectrum_frequency_hz"] / 1e6,
+        )
+        np.testing.assert_array_equal(
+            payload_spectrum.yData, result.metadata["hdt_payload_spectrum_dbm"]
+        )
+        assert result.metadata["hdt_header_spectrum_sample_range"] == (
+            plot_data.control_header_sample_range
+        )
+        assert result.metadata["hdt_payload_spectrum_sample_range"] == (
+            plot_data.payload_sample_range
+        )
+        expected_power_marker_ms = (
+            np.concatenate(
+                (
+                    hdt_evm.header_symbol_sample_positions,
+                    hdt_evm.payload_symbol_sample_positions,
+                )
+            )
+            / recording.sample_rate_hz
+            * 1e3
+        )
+        np.testing.assert_allclose(
+            window.power_plot.listDataItems()[1].xData,
+            expected_power_marker_ms,
+        )
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+@pytest.mark.parametrize("rate", (HDTRate.HDT2, HDTRate.HDT3))
+def test_hdt_qpsk_long_packet_uses_1000_symbol_range_and_marks_boundary(
+    rate: HDTRate, tmp_path
+) -> None:
+    pg.mkQApp(f"Bluetooth dedicated {rate.value} long range test")
+    recording, _generated, _project = _hdt_recording(rate, payload_length=255)
+    result = analyze_bluetooth_hdt_recording(
+        recording, profile=BluetoothAnalysisProfile.RF_PHY_TEST
+    )
+    plot_data = result.metadata["hdt_plot_data"]
+    assert plot_data.packet_sample_range[1] > plot_data.payload_evm_sample_range[1]
+    window = BluetoothAnalyzerWindow(
+        preferences=QtCore.QSettings(
+            str(tmp_path / f"bluetooth-{rate.value}-long-range.ini"),
+            QtCore.QSettings.Format.IniFormat,
+        )
+    )
+    try:
+        window._recording = recording
+        window._classic_analysis_ready((result,))
+        regions = [
+            tuple(item.getRegion())
+            for item in window.power_plot.getPlotItem().items
+            if isinstance(item, pg.LinearRegionItem)
+        ]
+        expected_result_ms = tuple(
+            sample / recording.sample_rate_hz * 1e3
+            for sample in plot_data.payload_evm_sample_range
+        )
+        assert any(np.allclose(region, expected_result_ms) for region in regions)
+        packet_stop_ms = (
+            plot_data.packet_sample_range[1] / recording.sample_rate_hz * 1e3
+        )
+        boundary_lines = [
+            item
+            for item in window.power_plot.getPlotItem().items
+            if isinstance(item, pg.InfiniteLine)
+            and np.isclose(float(item.value()), packet_stop_ms)
+        ]
+        assert len(boundary_lines) == 1
+        assert boundary_lines[0].label.format == "Packet End"
+        assert boundary_lines[0].pen.style() == QtCore.Qt.PenStyle.SolidLine
+        assert boundary_lines[0].pen.width() == 1
+        assert window.power_plot.viewRange()[0][1] > packet_stop_ms
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_dedicated_hdt_returns_every_packet_in_capture() -> None:
     recording, generated, project = _hdt_recording(HDTRate.HDT7_5, 32)
     spacer = np.zeros(128, dtype=np.complex64)
@@ -232,6 +489,16 @@ def test_dedicated_hdt_returns_every_packet_in_capture() -> None:
         result.metadata["hdt_payload_symbol_count"]
         == expected_payload_symbols
         for result in results
+    )
+    first_plot = results[0].metadata["hdt_plot_data"]
+    second_plot = results[1].metadata["hdt_plot_data"]
+    assert first_plot.packet_sample_range[1] < second_plot.packet_sample_range[0]
+    assert second_plot.packet_sample_range[0] == results[1].metadata[
+        "packet_start_sample"
+    ]
+    assert second_plot.payload_evm_sample_range == (
+        results[1].metadata["hdt_payload_start_sample"],
+        results[1].metadata["hdt_payload_evm_stop_sample"],
     )
     assert all(
         result.metadata["hdt_rms_evm_aggregate_status"]
@@ -485,8 +752,8 @@ def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> 
     try:
         window._recording = recording
         window._classic_analysis_ready((result,))
-        assert window.modulation_tabs.tabText(0) == "QPSK Header - Vector"
-        assert window.modulation_tabs.tabText(1) == "16QAM Payload - Vector"
+        assert window.modulation_tabs.tabText(0) == "QPSK Header"
+        assert window.modulation_tabs.tabText(1) == "16QAM Payload"
         assert window.modulation_tabs.isTabVisible(1)
         assert window.symbol_tabs.isTabVisible(1)
         assert len(window.fsk_symbol_plot.listDataItems()) > 0
@@ -614,18 +881,75 @@ def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> 
         assert payload.child(2).text(3) == "392\N{EN DASH}423"
         assert len(window.spectrum_plot.listDataItems()) == 2
         assert len(window.spectrum_legend.items) == 2
+        assert {item[1].text for item in window.spectrum_legend.items} == {
+            "QPSK Header",
+            "16QAM Payload",
+        }
         assert (
             window.fsk_modulation_plot.listDataItems()[0].xData.size
             > result.metadata["hdt_header_symbols"].size
         )
         assert result.metadata["hdt_header_symbols"].size == 62
         assert result.metadata["hdt_header_vector_symbols"].size == 62
-        # The pi/4-QPSK control decisions use the same I/Q-axis convention as
-        # the other Bluetooth PSK symbol plots.
-        control_symbols = result.metadata["hdt_header_symbols"]
-        assert np.max(
-            np.minimum(np.abs(control_symbols.real), np.abs(control_symbols.imag))
-        ) < 0.05
+        hdt_evm = result.metadata["hdt_evm_result"]
+
+        def plotted_symbols(item) -> np.ndarray:
+            return np.asarray(item.xData) + 1j * np.asarray(item.yData)
+
+        header_vector_points = plotted_symbols(
+            window.fsk_modulation_plot.listDataItems()[1]
+        )
+        header_symbol_points = plotted_symbols(
+            window.fsk_symbol_plot.listDataItems()[0]
+        )
+        payload_vector_points = plotted_symbols(
+            window.psk_modulation_plot.listDataItems()[1]
+        )
+        payload_symbol_points = plotted_symbols(
+            window.psk_symbol_plot.listDataItems()[0]
+        )
+        header_rotation = np.exp(
+            -1j
+            * (
+                np.arange(hdt_evm.header_corrected_symbols.size) + 1.0
+            )
+            * np.pi
+            / 4.0
+        )
+        header_reference = hdt_evm.header_reference_symbols * header_rotation
+        np.testing.assert_array_equal(
+            header_vector_points, hdt_evm.header_corrected_symbols
+        )
+        np.testing.assert_allclose(
+            header_symbol_points,
+            hdt_evm.header_corrected_symbols * header_rotation,
+            atol=1e-12,
+        )
+        np.testing.assert_array_equal(
+            payload_vector_points, hdt_evm.payload_corrected_symbols
+        )
+        np.testing.assert_array_equal(payload_symbol_points, payload_vector_points)
+
+        def rms_evm_percent(measured: np.ndarray, reference: np.ndarray) -> float:
+            return 100.0 * float(
+                np.sqrt(
+                    np.sum(np.abs(measured - reference) ** 2)
+                    / np.sum(np.abs(reference) ** 2)
+                )
+            )
+
+        assert rms_evm_percent(
+            header_symbol_points, header_reference
+        ) == pytest.approx(hdt_evm.header_rms_percent, abs=1e-6)
+        assert rms_evm_percent(
+            payload_symbol_points, hdt_evm.payload_reference_symbols
+        ) == pytest.approx(hdt_evm.payload_rms_percent, abs=1e-6)
+        assert window.summary_table.item(header_evm_row, 1).text().startswith(
+            f"{hdt_evm.header_rms_percent:.2f} %"
+        )
+        assert window.summary_table.item(payload_evm_row, 1).text().startswith(
+            f"{hdt_evm.payload_rms_percent:.2f} %"
+        )
         assert (
             window.power_plot.listDataItems()[0].xData.size
             == recording.sample_count

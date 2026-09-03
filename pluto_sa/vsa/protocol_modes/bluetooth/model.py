@@ -76,6 +76,7 @@ from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
     BluetoothRFMeasurementResult,
     BluetoothRFTestAccumulator,
     EDRConformanceResult,
+    HDTPlotData,
     RFTestEligibility,
     RFTestVerdict,
     build_fm_measurement_trace,
@@ -1200,8 +1201,10 @@ def analyze_bluetooth_hdt_recording(
     control_observed = corrected_header[
         _HDT_TRAINING_SYMBOLS : _HDT_TRAINING_SYMBOLS + _HDT_CONTROL_SYMBOLS
     ]
-    display_control_rms = float(np.sqrt(np.mean(np.abs(control_observed) ** 2)))
     control_first_center = first_center + _HDT_TRAINING_SYMBOLS * samples_per_symbol
+    control_symbol_sample_positions = control_first_center + (
+        np.arange(_HDT_CONTROL_SYMBOLS, dtype=np.float64) * samples_per_symbol
+    )
     control_trajectory_start = max(
         0, int(np.floor(control_first_center - 0.5 * samples_per_symbol))
     )
@@ -1338,6 +1341,43 @@ def analyze_bluetooth_hdt_recording(
         start_symbol=_HDT_PAYLOAD_START_SYMBOL,
         payload_reference=payload_evm_reference,
     )
+    payload_evm_first_center = (
+        first_center + _HDT_PAYLOAD_START_SYMBOL * samples_per_symbol
+    )
+    payload_symbol_sample_positions = payload_evm_first_center + (
+        np.arange(payload_measurement_symbol_count, dtype=np.float64)
+        * samples_per_symbol
+    )
+    payload_trajectory_start = max(
+        0, int(np.floor(payload_evm_first_center - 0.5 * samples_per_symbol))
+    )
+    payload_trajectory_stop = min(
+        recording.sample_count,
+        int(
+            np.ceil(
+                payload_evm_first_center
+                + (payload_measurement_symbol_count - 0.5) * samples_per_symbol
+            )
+        ),
+    )
+    payload_trajectory_indices = np.arange(
+        payload_trajectory_start, payload_trajectory_stop, dtype=np.float64
+    )
+    payload_trajectory_axis = (
+        payload_trajectory_indices - payload_evm_first_center
+    ) / samples_per_symbol
+    payload_trajectory = (
+        filtered_iq[payload_trajectory_start:payload_trajectory_stop]
+        * hdt_reference.amplitude
+        * np.exp(
+            1j
+            * (
+                payload_estimate.phase_rad
+                + payload_estimate.phase_step_rad_per_symbol
+                * payload_trajectory_axis
+            )
+        )
+    )
     payload_sig_corrected_all = apply_hdt_payload_estimate(
         filtered_iq,
         hdt_reference,
@@ -1443,11 +1483,39 @@ def analyze_bluetooth_hdt_recording(
         payload_estimate=payload_estimate,
         terminating_measured_symbols=terminating_measured,
         terminating_reference_symbols=terminating_reference,
+        header_corrected_waveform=header_trajectory,
+        payload_corrected_waveform=payload_trajectory,
+        header_symbol_sample_positions=control_symbol_sample_positions,
+        payload_symbol_sample_positions=payload_symbol_sample_positions,
     )
     header_evm = hdt_evm.header_rms_percent
     payload_evm = hdt_evm.payload_rms_percent
     packet_bits = np.concatenate((control_data, format0_bits))
     packet_start = max(0, int(round(first_center - 0.5 * samples_per_symbol)))
+    control_header_start_sample = int(
+        round(
+            first_center
+            - 0.5 * samples_per_symbol
+            + _HDT_TRAINING_SYMBOLS * samples_per_symbol
+        )
+    )
+    control_header_stop_sample = int(
+        round(control_header_start_sample + _HDT_CONTROL_SYMBOLS * samples_per_symbol)
+    )
+    payload_evm_stop_sample = int(
+        round(payload_start + payload_measurement_symbol_count * samples_per_symbol)
+    )
+    hdt_plot_data = HDTPlotData(
+        evm=hdt_evm,
+        packet_sample_range=(packet_start, payload_stop),
+        training_sample_range=(packet_start, control_header_start_sample),
+        control_header_sample_range=(
+            control_header_start_sample,
+            control_header_stop_sample,
+        ),
+        payload_sample_range=(payload_start, payload_stop),
+        payload_evm_sample_range=(payload_start, payload_evm_stop_sample),
+    )
     control_children = (
         PacketField("pca_a", "PCA-A", 0, 16, control_data[:16], f"0x{pca_a:04X}"),
         PacketField("nesn", "NESN", 16, 19, control_data[16:19], nesn),
@@ -1699,19 +1767,15 @@ def analyze_bluetooth_hdt_recording(
             group=reference_group,
         ),
     )
-    display_control_normalized = control_observed / max(
-        display_control_rms, np.finfo(np.float64).tiny
-    )
-    display_control = display_control_normalized * np.exp(
-        -1j
-        * (
-            (np.arange(control_observed.size) & 1) * np.pi / 4.0
-            + np.pi / 4.0
+    header_spectrum_frequency_hz, header_spectrum_dbm = (
+        _recording_range_spectrum_dbm(
+            recording,
+            control_header_start_sample,
+            control_header_stop_sample,
         )
     )
-    display_header = display_control
-    header_spectrum_frequency_hz, header_spectrum_dbm = (
-        _recording_range_spectrum_dbm(recording, packet_start, payload_start)
+    payload_spectrum_frequency_hz, payload_spectrum_dbm = (
+        _recording_range_spectrum_dbm(recording, payload_start, payload_stop)
     )
     return BluetoothDedicatedResult(
         profile=BluetoothAnalysisProfile(profile),
@@ -1723,18 +1787,35 @@ def analyze_bluetooth_hdt_recording(
             "sample_rate_hz": recording.sample_rate_hz,
             "center_frequency_hz": recording.center_frequency_hz,
             "analysis_session": payload_session,
-            "hdt_header_symbols": np.asarray(display_header, dtype=np.complex64),
+            "hdt_header_symbols": hdt_evm.header_corrected_symbols,
             "hdt_header_vector_symbols": np.asarray(
-                display_control_normalized, dtype=np.complex64
+                hdt_evm.header_corrected_symbols, dtype=np.complex64
             ),
-            "hdt_header_trajectory": np.asarray(
-                header_trajectory, dtype=np.complex64
+            "hdt_header_trajectory": hdt_evm.header_corrected_waveform,
+            "hdt_payload_symbols": hdt_evm.payload_corrected_symbols,
+            "hdt_payload_vector_symbols": hdt_evm.payload_corrected_symbols,
+            "hdt_payload_trajectory": hdt_evm.payload_corrected_waveform,
+            "hdt_header_reference_symbols": hdt_evm.header_reference_symbols,
+            "hdt_payload_reference_symbols": hdt_evm.payload_reference_symbols,
+            "hdt_header_symbol_sample_positions": (
+                hdt_evm.header_symbol_sample_positions
+            ),
+            "hdt_payload_symbol_sample_positions": (
+                hdt_evm.payload_symbol_sample_positions
             ),
             "hdt_header_spectrum_frequency_hz": header_spectrum_frequency_hz,
             "hdt_header_spectrum_dbm": header_spectrum_dbm,
+            "hdt_header_spectrum_sample_range": (
+                control_header_start_sample,
+                control_header_stop_sample,
+            ),
+            "hdt_payload_spectrum_frequency_hz": payload_spectrum_frequency_hz,
+            "hdt_payload_spectrum_dbm": payload_spectrum_dbm,
+            "hdt_payload_spectrum_sample_range": (payload_start, payload_stop),
             "hdt_header_evm_rms_percent": header_evm,
             "hdt_payload_evm_rms_percent": payload_evm,
             "hdt_evm_result": hdt_evm,
+            "hdt_plot_data": hdt_plot_data,
             "hdt_reference_amplitude": hdt_reference.amplitude,
             "hdt_reference_phase_rad": hdt_reference.phase_rad,
             "hdt_reference_phase_step_rad_per_symbol": (
@@ -1769,12 +1850,7 @@ def analyze_bluetooth_hdt_recording(
             "hdt_output_power_window_start_sample": packet_start,
             "hdt_output_power_window_stop_sample": payload_terminating_stop,
             "hdt_payload_evm_symbol_count": payload_measurement_symbol_count,
-            "hdt_payload_evm_stop_sample": int(
-                round(
-                    payload_start
-                    + payload_measurement_symbol_count * samples_per_symbol
-                )
-            ),
+            "hdt_payload_evm_stop_sample": payload_evm_stop_sample,
             "hdt_payload_terminating_symbol_count": _HDT_TERMINATING_SYMBOLS,
             "hdt_payload_reference_source": "decoded_reencoded_bits",
             "hdt_rate_indicator": rate_indicator,
@@ -1858,6 +1934,18 @@ def analyze_bluetooth_hdt_recording(
                         "header_reference_symbols": hdt_evm.header_reference_symbols,
                         "payload_measured_symbols": hdt_evm.payload_measured_symbols,
                         "payload_reference_symbols": hdt_evm.payload_reference_symbols,
+                        "header_corrected_waveform": (
+                            hdt_evm.header_corrected_waveform
+                        ),
+                        "payload_corrected_waveform": (
+                            hdt_evm.payload_corrected_waveform
+                        ),
+                        "header_symbol_sample_positions": (
+                            hdt_evm.header_symbol_sample_positions
+                        ),
+                        "payload_symbol_sample_positions": (
+                            hdt_evm.payload_symbol_sample_positions
+                        ),
                         "terminating_measured_symbols": (
                             hdt_evm.terminating_measured_symbols
                         ),

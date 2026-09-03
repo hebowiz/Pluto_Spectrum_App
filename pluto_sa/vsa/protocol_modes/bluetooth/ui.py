@@ -52,6 +52,7 @@ from .model import (
     analyze_bluetooth_le_recordings,
     analyze_bluetooth_session,
 )
+from .rf_measurement import HDTEVMResult, HDTPlotData
 
 
 _TRACE = "#ffff00"
@@ -59,6 +60,25 @@ _STARTUP_CONFIG_KEY = "bluetooth_dedicated/startup_meas_config"
 _STARTUP_CONFIG_SCHEMA = "pluto-vsa-bluetooth-dedicated-config"
 _STARTUP_CONFIG_VERSION = 1
 _FREQUENCY_CONSTELLATION_X_LIMIT = FREQUENCY_CONSTELLATION_X_LIMIT
+
+
+def _hdt_modulation_name(name: str) -> str:
+    """Return the modulation label shared by HDT plot tabs and legends."""
+
+    return "QPSK" if name.strip().lower() == "pi/4-qpsk" else name.strip()
+
+
+def _hdt_pi4_qpsk_display_symbols(symbols: np.ndarray) -> np.ndarray:
+    """Collapse alternating pi/4-QPSK symbol sets onto the four I/Q axes.
+
+    The unit-magnitude, symbol-index-dependent rotation is display-only.  If
+    it is applied to both measured and reference symbols, their RMS EVM is
+    unchanged.
+    """
+
+    values = np.asarray(symbols, dtype=np.complex128)
+    axis = np.arange(values.size, dtype=np.float64)
+    return values * np.exp(-1j * (axis + 1.0) * np.pi / 4.0)
 
 
 def format_air_bits(bits: np.ndarray, group: int = 8) -> str:
@@ -1599,13 +1619,23 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             result.metadata.get("analysis_sample_offset", recording_sample_offset)
         )
         is_hdt = result.packet.protocol_id == "bluetooth.hdt"
+        hdt_plot_data = result.metadata.get("hdt_plot_data")
+        if not isinstance(hdt_plot_data, HDTPlotData):
+            hdt_plot_data = None
+        hdt_evm = (
+            hdt_plot_data.evm
+            if hdt_plot_data is not None
+            else result.metadata.get("hdt_evm_result")
+        )
+        if not isinstance(hdt_evm, HDTEVMResult):
+            hdt_evm = None
         is_psk = (
             isinstance(session, VSASession)
             and session.signal is not None
             and session.signal.modulation.family.uses_iq_constellation
         )
         if is_hdt:
-            payload_name = str(
+            payload_modulation = str(
                 next(
                     (
                         item.display
@@ -1615,11 +1645,15 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                     "Payload",
                 )
             )
-            self.modulation_tabs.setTabText(0, "QPSK Header - Vector")
-            self.modulation_tabs.setTabText(1, f"{payload_name} Payload - Vector")
+            payload_name = _hdt_modulation_name(payload_modulation)
+            payload_is_qpsk = payload_name == "QPSK"
+            self.modulation_tabs.setTabText(0, "QPSK Header")
+            self.modulation_tabs.setTabText(1, f"{payload_name} Payload")
             self.symbol_tabs.setTabText(0, "QPSK Header")
             self.symbol_tabs.setTabText(1, f"{payload_name} Payload")
         else:
+            payload_name = "Payload"
+            payload_is_qpsk = False
             self.modulation_tabs.setTabText(0, "FSK - Instantaneous Frequency")
             self.modulation_tabs.setTabText(1, "PSK - Vector")
             self.symbol_tabs.setTabText(0, "FSK")
@@ -1648,24 +1682,61 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             pen=_TRACE,
         )
         selected_ranges: list[tuple[float, float]] = []
-        if is_hdt:
+        power_symbol_times_ms: list[np.ndarray] = []
+        if is_hdt and hdt_plot_data is not None:
+            packet_start_sample, packet_stop_sample = (
+                hdt_plot_data.packet_sample_range
+            )
+            result_start_sample, result_stop_sample = (
+                hdt_plot_data.payload_evm_sample_range
+            )
+            training_start_sample, training_stop_sample = (
+                hdt_plot_data.training_sample_range
+            )
             selected_ranges.append(
                 (
-                    float(result.metadata.get("packet_start_sample", 0))
-                    / recording.sample_rate_hz
-                    * 1e3,
-                    float(
-                        result.metadata.get(
-                            "packet_stop_sample", recording.sample_count
+                    packet_start_sample / recording.sample_rate_hz * 1e3,
+                    packet_stop_sample / recording.sample_rate_hz * 1e3,
+                )
+            )
+            add_result_range_overlay(
+                self.power_plot,
+                result_start_ms=(
+                    result_start_sample / recording.sample_rate_hz * 1e3
+                ),
+                result_stop_ms=(
+                    result_stop_sample / recording.sample_rate_hz * 1e3
+                ),
+                pattern_start_ms=(
+                    training_start_sample / recording.sample_rate_hz * 1e3
+                ),
+                pattern_stop_ms=(
+                    training_stop_sample / recording.sample_rate_hz * 1e3
+                ),
+                label="Packet Start",
+            )
+            packet_end_line = pg.InfiniteLine(
+                pos=packet_stop_sample / recording.sample_rate_hz * 1e3,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen(95, 100, 108, 150),
+                label="Packet End",
+                labelOpts={"position": 0.92, "color": (115, 120, 128)},
+            )
+            self.power_plot.addItem(packet_end_line)
+            if hdt_evm is not None:
+                power_symbol_times_ms.append(
+                    np.concatenate(
+                        (
+                            hdt_evm.header_symbol_sample_positions,
+                            hdt_evm.payload_symbol_sample_positions,
                         )
                     )
                     / recording.sample_rate_hz
-                    * 1e3,
+                    * 1e3
                 )
-            )
-        power_symbol_times_ms: list[np.ndarray] = []
         analyses: list[VSASession] = []
-        for candidate in (br_session, session):
+        for candidate in (() if is_hdt else (br_session, session)):
             if isinstance(candidate, VSASession) and all(
                 candidate is not existing for existing in analyses
             ):
@@ -1746,13 +1817,24 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                     pen=_TRACE,
                     name="QPSK Header",
                 )
-        if is_psk or br_vsa is None:
+            payload_frequency_hz = np.asarray(
+                result.metadata.get("hdt_payload_spectrum_frequency_hz", ()),
+                dtype=np.float64,
+            )
+            payload_spectrum_dbm = np.asarray(
+                result.metadata.get("hdt_payload_spectrum_dbm", ()),
+                dtype=np.float64,
+            )
+            if payload_frequency_hz.size and payload_spectrum_dbm.size:
+                self.spectrum_plot.plot(
+                    payload_frequency_hz / 1e6,
+                    payload_spectrum_dbm,
+                    pen="#00ffff",
+                    name=f"{payload_name} Payload",
+                )
+        elif is_psk or br_vsa is None:
             vector_name = (
-                session.signal.modulation.value
-                if is_hdt and isinstance(session, VSASession) and session.signal is not None
-                else "PSK"
-                if is_psk
-                else "FSK"
+                "PSK" if is_psk else "FSK"
             )
             self.spectrum_plot.plot((vsa.spectrum_frequency_hz + recording.center_frequency_hz) / 1e6, vsa.spectrum_dbm, pen="#00ffff" if is_psk else _TRACE, name=vector_name)
 
@@ -1875,15 +1957,11 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         )
         if is_hdt:
             header_symbols = np.asarray(
-                result.metadata.get("hdt_header_symbols", ()),
-                dtype=np.complex128,
-            )
-            header_vector_symbols = np.asarray(
-                result.metadata.get("hdt_header_vector_symbols", header_symbols),
+                hdt_evm.header_corrected_symbols if hdt_evm is not None else (),
                 dtype=np.complex128,
             )
             header_trajectory = np.asarray(
-                result.metadata.get("hdt_header_trajectory", header_vector_symbols),
+                hdt_evm.header_corrected_waveform if hdt_evm is not None else (),
                 dtype=np.complex128,
             )
             self.fsk_modulation_plot.clear()
@@ -1895,11 +1973,11 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self.fsk_modulation_plot.plot(
                 header_trajectory.real, header_trajectory.imag, pen=_TRACE
             )
-            if self._show_symbol_points and header_vector_symbols.size:
+            if self._show_symbol_points and header_symbols.size:
                 plot_trace_symbol_points(
                     self.fsk_modulation_plot,
-                    header_vector_symbols.real,
-                    header_vector_symbols.imag,
+                    header_symbols.real,
+                    header_symbols.imag,
                 )
             self.fsk_symbol_plot.setYLink(None)
             self._set_frequency_constellation_x_lock(False)
@@ -1907,7 +1985,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self.fsk_symbol_plot.setLabel("bottom", "I")
             self.fsk_symbol_plot.setLabel("left", "Q")
             self.fsk_symbol_plot.setAspectLocked(True, 1.0)
-            self._plot_symbol_vectors(self.fsk_symbol_plot, header_symbols)
+            self._plot_symbol_vectors(
+                self.fsk_symbol_plot,
+                _hdt_pi4_qpsk_display_symbols(header_symbols),
+            )
             self._plot_unit_circle(self.fsk_symbol_plot)
             self._set_iq_plane_range(self.fsk_symbol_plot)
             self._set_iq_plane_range(self.fsk_modulation_plot)
@@ -1954,7 +2035,35 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self._plot_unit_circle(self.fsk_symbol_plot)
             self._set_iq_plane_range(self.fsk_symbol_plot)
 
-        if is_psk:
+        if is_psk and is_hdt and hdt_evm is not None:
+            trajectory = np.asarray(
+                hdt_evm.payload_corrected_waveform, dtype=np.complex128
+            )
+            symbols = np.asarray(
+                hdt_evm.payload_corrected_symbols, dtype=np.complex128
+            )
+            self.psk_modulation_plot.setAspectLocked(True, 1.0)
+            self.psk_modulation_plot.setDownsampling(auto=False)
+            self.psk_modulation_plot.setClipToView(False)
+            self.psk_modulation_plot.plot(
+                trajectory.real, trajectory.imag, pen=_TRACE
+            )
+            if self._show_symbol_points and symbols.size:
+                plot_trace_symbol_points(
+                    self.psk_modulation_plot, symbols.real, symbols.imag
+                )
+            self.psk_symbol_plot.setAspectLocked(True, 1.0)
+            self._plot_symbol_vectors(
+                self.psk_symbol_plot,
+                (
+                    _hdt_pi4_qpsk_display_symbols(symbols)
+                    if payload_is_qpsk
+                    else symbols
+                ),
+            )
+            self._plot_unit_circle(self.psk_symbol_plot)
+            self._set_iq_plane_range(self.psk_symbol_plot)
+        elif is_psk:
             psk_pattern = session.pattern_result
             display_result = session.carrier_corrected_result or session.result
             if display_result is None or psk_pattern is None or session.signal is None:

@@ -24,6 +24,7 @@ from .model import (
 )
 from .hdt import (
     HDTEVMResult,
+    HDTPlotData,
     HDTPayloadEstimate,
     HDTReferenceEstimate,
     apply_hdt_payload_estimate,
@@ -63,6 +64,7 @@ __all__ = [
     "InitialCarrierFrequencyResult",
     "ObservedFSKDeviation",
     "HDTEVMResult",
+    "HDTPlotData",
     "HDTPayloadEstimate",
     "HDTReferenceEstimate",
     "RFPowerResult",

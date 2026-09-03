@@ -8,8 +8,8 @@ import numpy as np
 from scipy.optimize import least_squares, minimize_scalar
 
 
-def _readonly(values: object) -> np.ndarray:
-    result = np.asarray(values, dtype=np.complex64).copy()
+def _readonly(values: object, dtype: np.dtype | type = np.complex64) -> np.ndarray:
+    result = np.asarray(values, dtype=dtype).copy()
     result.setflags(write=False)
     return result
 
@@ -61,6 +61,10 @@ class HDTEVMResult:
     payload_estimate: HDTPayloadEstimate
     terminating_measured_symbols: np.ndarray
     terminating_reference_symbols: np.ndarray
+    header_corrected_waveform: np.ndarray
+    payload_corrected_waveform: np.ndarray
+    header_symbol_sample_positions: np.ndarray
+    payload_symbol_sample_positions: np.ndarray
 
     def __post_init__(self) -> None:
         for name in (
@@ -70,8 +74,55 @@ class HDTEVMResult:
             "payload_reference_symbols",
             "terminating_measured_symbols",
             "terminating_reference_symbols",
+            "header_corrected_waveform",
+            "payload_corrected_waveform",
         ):
             object.__setattr__(self, name, _readonly(getattr(self, name)))
+        for name in (
+            "header_symbol_sample_positions",
+            "payload_symbol_sample_positions",
+        ):
+            object.__setattr__(
+                self, name, _readonly(getattr(self, name), np.float64)
+            )
+
+    @property
+    def header_corrected_symbols(self) -> np.ndarray:
+        """Symbols used verbatim by Header EVM and downstream displays."""
+
+        return self.header_measured_symbols
+
+    @property
+    def payload_corrected_symbols(self) -> np.ndarray:
+        """Symbols used verbatim by Payload EVM and downstream displays."""
+
+        return self.payload_measured_symbols
+
+
+@dataclass(frozen=True)
+class HDTPlotData:
+    """HDT display inputs and global sample ranges fixed by analysis."""
+
+    evm: HDTEVMResult
+    packet_sample_range: tuple[int, int]
+    training_sample_range: tuple[int, int]
+    control_header_sample_range: tuple[int, int]
+    payload_sample_range: tuple[int, int]
+    payload_evm_sample_range: tuple[int, int]
+
+    def __post_init__(self) -> None:
+        for name in (
+            "packet_sample_range",
+            "training_sample_range",
+            "control_header_sample_range",
+            "payload_sample_range",
+            "payload_evm_sample_range",
+        ):
+            start, stop = getattr(self, name)
+            normalized = (int(start), int(stop))
+            if normalized[1] <= normalized[0]:
+                raise ValueError(f"{name} must be a non-empty sample range")
+            object.__setattr__(self, name, normalized)
 
 
 def _initial_correction(
@@ -345,6 +396,10 @@ def build_hdt_evm_result(
     payload_estimate: HDTPayloadEstimate,
     terminating_measured_symbols: np.ndarray,
     terminating_reference_symbols: np.ndarray,
+    header_corrected_waveform: np.ndarray,
+    payload_corrected_waveform: np.ndarray,
+    header_symbol_sample_positions: np.ndarray,
+    payload_symbol_sample_positions: np.ndarray,
 ) -> HDTEVMResult:
     return HDTEVMResult(
         header_rms_percent=rms_evm_percent(
@@ -361,4 +416,8 @@ def build_hdt_evm_result(
         payload_estimate=payload_estimate,
         terminating_measured_symbols=terminating_measured_symbols,
         terminating_reference_symbols=terminating_reference_symbols,
+        header_corrected_waveform=header_corrected_waveform,
+        payload_corrected_waveform=payload_corrected_waveform,
+        header_symbol_sample_positions=header_symbol_sample_positions,
+        payload_symbol_sample_positions=payload_symbol_sample_positions,
     )
