@@ -74,7 +74,8 @@ $applications = @(
     @{ Name = "Pluto_VSA"; Entry = "packaging\entrypoints\pluto_vsa.py"; Hidden = @(
         "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebChannel"
     ) },
-    @{ Name = "Pluto_VSG"; Entry = "packaging\entrypoints\pluto_vsg_entry.py"; Hidden = @() }
+    @{ Name = "Pluto_VSG"; Entry = "packaging\entrypoints\pluto_vsg_entry.py"; Hidden = @() },
+    @{ Name = "Pluto_CAL"; Entry = "packaging\entrypoints\pluto_cal.py"; Hidden = @() }
 )
 
 foreach ($application in $applications) {

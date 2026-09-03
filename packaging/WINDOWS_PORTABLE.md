@@ -1,10 +1,11 @@
 # Windows portable build and GitHub Release
 
-The Windows deliverables are three **one-folder portable ZIP files**:
+The Windows deliverables are four **one-folder portable ZIP files**:
 
 - `Pluto_RTSA-<version>-windows-x64.zip`
 - `Pluto_VSA-<version>-windows-x64.zip`
 - `Pluto_VSG-<version>-windows-x64.zip`
+- `Pluto_CAL-<version>-windows-x64.zip`
 
 Each archive contains one application EXE, Python, Qt, numerical libraries,
 and the official libiio v0.25 Windows runtime. The target PC does not need a
@@ -21,7 +22,7 @@ From a PowerShell prompt in the repository root:
 ```
 
 The script downloads the official libiio v0.25 archive into the ignored
-`.build-cache` directory, builds all three applications, runs frozen smoke
+`.build-cache` directory, builds all four applications, runs frozen smoke
 tests, and creates ZIP files under `release`.
 
 To rebuild without downloading libiio again, leave `.build-cache` in place.
@@ -36,7 +37,7 @@ git push origin v0.1.0-alpha.1
 ```
 
 The `release-windows.yml` workflow builds on a clean Windows runner and
-uploads the three portable archives plus SHA-256 checksums. It can also be
+uploads the four portable archives plus SHA-256 checksums. It can also be
 started manually to produce workflow artifacts without publishing a Release.
 
 ## Smoke-test mode
