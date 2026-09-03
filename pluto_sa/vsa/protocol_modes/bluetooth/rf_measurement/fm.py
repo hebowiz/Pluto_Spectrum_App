@@ -51,6 +51,23 @@ class FSKModulationCharacteristics:
 
 
 @dataclass(frozen=True)
+class ObservedFSKDeviation:
+    """Pattern-independent payload deviation after removal of carrier offset."""
+
+    mean_abs_hz: float | None
+    percentile_99_9_hz: float | None
+    max_abs_hz: float | None
+    deviations_hz: np.ndarray
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "deviations_hz",
+            _readonly(self.deviations_hz, np.float64),
+        )
+
+
+@dataclass(frozen=True)
 class InitialCarrierFrequencyResult:
     nominal_frequency_hz: float
     f0_hz: float
@@ -193,6 +210,41 @@ def measure_modulation_characteristics(
         ratio,
         int(bits.size),
         pattern,
+    )
+
+
+def measure_observed_fsk_deviation(
+    trace: BluetoothFMMeasurementTrace,
+    *,
+    payload_start_symbol: int,
+    payload_symbol_count: int,
+    carrier_frequency_offset_hz: float,
+) -> ObservedFSKDeviation:
+    """Measure absolute payload deviation without assuming an RF-test pattern.
+
+    The instantaneous-frequency samples use the same central-symbol windows as
+    the SIG modulation measurements.  The independently estimated carrier
+    offset is removed before taking the absolute value and statistics.
+    """
+
+    grid = _symbol_grid(
+        trace,
+        int(payload_symbol_count),
+        start_symbol=int(payload_start_symbol),
+        points_per_symbol=32,
+    )
+    deviations = np.abs(
+        np.asarray(grid, dtype=np.float64).reshape(-1)
+        - float(carrier_frequency_offset_hz)
+    )
+    deviations = deviations[np.isfinite(deviations)]
+    if deviations.size == 0:
+        return ObservedFSKDeviation(None, None, None, np.empty(0))
+    return ObservedFSKDeviation(
+        float(np.mean(deviations)),
+        float(np.percentile(deviations, 99.9)),
+        float(np.max(deviations)),
+        deviations,
     )
 
 

@@ -103,8 +103,21 @@ def measure_edr_devm(
         return EDRDEVMTestResult(
             float(initial_frequency_error_hz), (), None, None, None, 0
         )
+    # Appendix-C DEVM starts after removing omega_i obtained from the BR
+    # header.  Leaving that rotation in the samples forced the per-block
+    # omega_0 optimizer to acquire the full carrier error from a zero start;
+    # on real packets it frequently settled in a data-dependent local minimum
+    # and normalized by an almost-zero complex gain, producing 400-900% DEVM.
+    sample_axis = np.arange(values.size, dtype=np.float64)
+    omega_i_corrected = values * np.exp(
+        -2j
+        * np.pi
+        * float(initial_frequency_error_hz)
+        * sample_axis
+        / float(sample_rate_hz)
+    )
     filtered, filtered_rate = prepare_psk_iq(
-        values,
+        omega_i_corrected,
         sample_rate_hz=float(sample_rate_hz),
         symbol_rate_hz=float(symbol_rate_hz),
         tx_filter="Root Raised Cosine",

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 import pytest
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_protocol.bluetooth.hdt import HDTRate
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSAAnalysisResult
@@ -22,12 +22,21 @@ from pluto_sa.vsa.protocol_modes.bluetooth.model import (
     analyze_bluetooth_le_recordings,
     analyze_bluetooth_session,
 )
+import pluto_sa.vsa.protocol_modes.bluetooth.model as bluetooth_model
+from pluto_sa.vsa.profiles.bluetooth_br import access_code_bits
+from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
+    BluetoothRFTestAccumulator,
+)
 from pluto_sa.vsa.protocol_modes.bluetooth.ui import BluetoothAnalyzerWindow, format_air_bits, infer_le_channel
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
-from pluto_sa.vsa.ui.measurement_chrome import SymbolDensitySpread
+from pluto_sa.vsa.ui.measurement_chrome import (
+    CenteredDedicatedTableDelegate,
+    DEDICATED_TABLE_GRID_COLOR,
+    SymbolDensitySpread,
+)
 from pluto_vsg.engine import (
     BluetoothBRWaveformEngine,
     BluetoothHDTWaveformEngine,
@@ -144,6 +153,42 @@ def test_dedicated_hdt_auto_detects_rate_length_and_exact_payload_range(
     assert result.metadata["hdt_payload_symbol_count"] == expected_payload_symbols
     assert result.metadata["hdt_header_evm_rms_percent"] < 1.0
     assert result.metadata["hdt_payload_evm_rms_percent"] < 2.0
+    assert [row.metric_id for row in result.summary_rows] == [
+        "sig_hdt_output_power",
+        "sig_hdt_header_evm_rms",
+        "sig_hdt_payload_evm_rms",
+        "sig_hdt_center_frequency_deviation",
+        "sig_hdt_frequency_offset_change",
+        "sig_hdt_symbol_timing_accuracy",
+        "sig_hdt_pre_packet_emissions",
+        "detected_phy",
+        "sig_eligibility",
+        "sig_hdt_preamble_carrier_error",
+        "sig_hdt_payload_carrier_error",
+        "sig_hdt_header_average_power",
+        "sig_hdt_payload_average_power",
+        "sig_hdt_relative_power",
+        "sig_hdt_training_correlation",
+        "sig_hdt_evm_packets_evaluated",
+    ]
+    payload_evm_row = next(
+        row
+        for row in result.summary_rows
+        if row.metric_id == "sig_hdt_payload_evm_rms"
+    )
+    expected_limit_db = {
+        HDTRate.HDT2: -10,
+        HDTRate.HDT3: -13,
+        HDTRate.HDT4: -16,
+        HDTRate.HDT6: -19,
+        HDTRate.HDT7_5: -22,
+    }[rate]
+    assert payload_evm_row.limit == f"≤ {expected_limit_db} dB"
+    assert all(
+        row.limit == "—" and row.result == "—"
+        for row in result.summary_rows
+        if row.section == "Reference Information"
+    )
     field_ids = {field.field_id for field in result.packet.root_fields}
     assert field_ids == {"training", "control_header", "payload"}
     control = next(
@@ -173,7 +218,7 @@ def test_dedicated_hdt_returns_every_packet_in_capture() -> None:
 
     results = analyze_bluetooth_hdt_recordings(
         repeated,
-        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
     )
 
     assert len(results) == 2
@@ -188,6 +233,18 @@ def test_dedicated_hdt_returns_every_packet_in_capture() -> None:
         == expected_payload_symbols
         for result in results
     )
+    assert all(
+        result.metadata["hdt_rms_evm_aggregate_status"]
+        == "MEASURING 2 / 1500"
+        for result in results
+    )
+    for result in results:
+        evaluated = next(
+            metric
+            for metric in result.metrics
+            if metric.metric_id == "sig_hdt_evm_packets_evaluated"
+        )
+        assert evaluated.display == "2 / 1500"
 
 
 def test_dedicated_hdt_decodes_real_hdt7_5_and_identifies_legacy_crc_init() -> None:
@@ -214,6 +271,203 @@ def test_dedicated_hdt_decodes_real_hdt7_5_and_identifies_legacy_crc_init() -> N
     assert result.metadata["hdt_received_crc32"] == 0xBB166D73
     assert result.metadata["hdt_calculated_crc32"] == 0xCDCA2EBD
     assert result.metadata["hdt_legacy_init_crc32_match"] is True
+    assert result.metadata["hdt_header_evm_rms_percent"] == pytest.approx(
+        5.47, abs=0.25
+    )
+    assert result.metadata["hdt_payload_evm_rms_percent"] == pytest.approx(
+        4.01, abs=0.25
+    )
+    assert result.metadata["hdt_payload_evm_symbol_count"] == 1000
+    assert result.metadata["hdt_payload_reference_source"] == (
+        "decoded_reencoded_bits"
+    )
+    assert (
+        result.metadata["hdt_preamble_carrier_error_hz"]
+        - result.metadata["hdt_payload_carrier_error_hz"]
+    ) == pytest.approx(189.0, abs=25.0)
+    for key in (
+        "hdt_alpha0",
+        "hdt_phi0_rad",
+        "hdt_delta_omega0_rad_per_symbol",
+        "hdt_t0_sample",
+        "hdt_phi1_rad",
+        "hdt_delta_omega1_rad_per_symbol",
+    ):
+        assert np.isfinite(result.metadata[key])
+    metrics = {metric.label: metric for metric in result.metrics if metric.group}
+    assert metrics["Output power"].display.endswith(" dBm")
+    assert metrics["Output power"].limit == "Power Class dependent"
+    assert metrics["Output power"].result == "N/A"
+    assert result.metadata["hdt_output_power_measurement_status"] == "provisional"
+    assert result.metadata["hdt_output_power_window_start_sample"] < (
+        result.metadata["hdt_output_power_window_stop_sample"]
+    )
+    header_trajectory = np.asarray(result.metadata["hdt_header_trajectory"])
+    assert header_trajectory.size > result.metadata["hdt_header_symbols"].size
+    assert np.all(np.isfinite(header_trajectory))
+    assert np.quantile(np.abs(header_trajectory), 0.95) < 1.5
+    assert metrics["Control Header RMS EVM"].result == "PASS"
+    assert metrics["Control Header RMS EVM"].limit == "≤ -10 dB"
+    assert metrics["PDU Header and payload RMS EVM"].result == "PASS"
+    assert metrics["PDU Header and payload RMS EVM"].limit == "≤ -22 dB"
+    assert metrics["Center frequency deviation"].display == "+14.103 kHz"
+    assert metrics["Center frequency deviation"].result == "PASS"
+    assert metrics[
+        "Center frequency offset change between the preamble and the payload"
+    ].display == "0.189 kHz"
+    assert metrics["Symbol timing accuracy"].result == "N/A"
+    assert metrics["Pre-packet emissions"].result == "N/A"
+
+
+@pytest.mark.parametrize(
+    ("filename", "whitening", "expected_phy", "expected_packet", "expected_start"),
+    (
+        ("DH1_test.npz", False, "BR", "DH1", 96),
+        ("bluetooth_br_prbs9_pluto_16msps.npz", False, "BR", "DH1", 15206),
+        ("bluetooth_2dh1_prbs9_16msps.npz", True, "EDR 2M", "2-DH1", 32001),
+        ("bluetooth_3dh1_prbs9_16msps.npz", True, "EDR 3M", "3-DH1", 32001),
+        ("PLUTO_VSG_SMCV100B_2DH1.npz", False, "EDR 2M", "2-DH1", 2074),
+    ),
+)
+def test_real_classic_fixtures_preserve_sync_decode_and_symbol_products(
+    filename: str,
+    whitening: bool,
+    expected_phy: str,
+    expected_packet: str,
+    expected_start: int,
+) -> None:
+    recording = FileIQSource.load(Path(__file__).with_name("fixtures") / filename)
+    result = analyze_bluetooth_classic_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        lap=0xC6967E,
+        uap=0x6B,
+        clock_6_1=0x2B,
+        whitening_enabled=whitening,
+        result_length=4096,
+    )
+    pattern = result.metadata["br_analysis_session"].pattern_result
+    assert pattern is not None
+    assert pattern.correlation > 0.98
+    assert pattern.pattern_start_sample == pytest.approx(expected_start, abs=2)
+    assert pattern.result_start_sample == pattern.pattern_start_sample
+    assert pattern.metadata["eligible_match_count"] >= 1
+    assert pattern.decoded_bits.size == 126
+    np.testing.assert_array_equal(pattern.decoded_bits[:72], access_code_bits(0xC6967E))
+    first_center = pattern.symbol_time_s[0] * recording.sample_rate_hz
+    samples_per_symbol = recording.sample_rate_hz / 1_000_000.0
+    assert first_center == pytest.approx(
+        pattern.pattern_start_sample + 0.5 * samples_per_symbol, abs=1.0
+    )
+    assert result.packet.phy_name == expected_phy
+    assert result.packet.packet_type == expected_packet
+    assert result.packet.integrity.crc_valid is True
+    assert result.packet.integrity.complete is True
+    assert result.vsa_result.measured_symbols.size > 0
+    if expected_phy.startswith("EDR"):
+        assert result.metadata["analysis_session"].pattern_result.decoded_symbols.size > 10
+        measurement = result.metadata["rf_measurements"][0]
+        assert measurement.metrics["rms_devm_worst"] < 0.10
+        assert measurement.metrics["peak_devm_worst"] < 0.15
+        assert measurement.metrics["omega0_abs_worst_hz"] < 10_000.0
+
+
+@pytest.mark.parametrize("filename", ("LE1M_FSK_error_raw.npz", "LE1M_FSK_error.npz"))
+def test_real_le_rf_test_fixtures_preserve_sync_and_symbol_products(filename: str) -> None:
+    recording = FileIQSource.load(Path(__file__).with_name("fixtures") / filename)
+    result = analyze_bluetooth_le_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        phy="LE 1M",
+        access_address=0x71764129,
+        channel_index=18,
+        crc_init=0x555555,
+        whitening_enabled=False,
+        result_length=4096,
+    )
+    pattern = result.metadata["analysis_session"].pattern_result
+    expected_access = np.unpackbits(
+        np.frombuffer((0x71764129).to_bytes(4, "little"), dtype=np.uint8),
+        bitorder="little",
+    )
+    expected_sync = np.concatenate(
+        (np.resize(np.asarray([1, 0], dtype=np.uint8), 8), expected_access)
+    )
+    assert pattern is not None
+    assert pattern.correlation > 0.99
+    assert pattern.pattern_start_sample == pytest.approx(106, abs=2)
+    assert pattern.result_start_sample == pattern.pattern_start_sample
+    assert pattern.metadata["eligible_match_count"] >= 1
+    np.testing.assert_array_equal(pattern.decoded_bits[:40], expected_sync)
+    assert pattern.decoded_bits.size >= 408
+    assert result.packet.phy_name == "LE 1M"
+    assert result.vsa_result.measured_symbols.size > 0
+
+
+def test_sync_is_independent_of_rf_measurement_profile_and_failure(monkeypatch) -> None:
+    recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "bluetooth_br_prbs9_pluto_16msps.npz"
+    )
+    options = {
+        "lap": 0xC6967E,
+        "uap": 0x6B,
+        "clock_6_1": 0x2B,
+        "whitening_enabled": False,
+        "result_length": 4096,
+    }
+    general = analyze_bluetooth_classic_recording(
+        recording, profile=BluetoothAnalysisProfile.GENERAL_PACKET, **options
+    )
+    general_pattern = general.metadata["br_analysis_session"].pattern_result
+
+    def fail_measurement(*_args, **_kwargs):
+        raise RuntimeError("injected RF measurement failure")
+
+    monkeypatch.setattr(bluetooth_model, "build_fm_measurement_trace", fail_measurement)
+    rf_test = analyze_bluetooth_classic_recording(
+        recording, profile=BluetoothAnalysisProfile.RF_PHY_TEST, **options
+    )
+    rf_pattern = rf_test.metadata["br_analysis_session"].pattern_result
+    assert rf_pattern.pattern_start_sample == general_pattern.pattern_start_sample
+    assert rf_pattern.result_start_sample == general_pattern.result_start_sample
+    np.testing.assert_array_equal(rf_pattern.decoded_bits, general_pattern.decoded_bits)
+    assert rf_test.packet.packet_type == general.packet.packet_type == "DH1"
+    assert rf_test.packet.integrity.crc_valid is True
+    measurement = rf_test.metadata["rf_measurements"][0]
+    assert measurement.eligibility.eligible is False
+    assert "injected RF measurement failure" in measurement.metadata["reason"]
+
+
+def test_bluetooth_workspace_opens_iq_file_directly(
+    tmp_path, monkeypatch
+) -> None:
+    pg.mkQApp("Bluetooth dedicated IQ file test")
+    iq_path = Path(__file__).with_name("fixtures") / "RT_HDT7_5.npz"
+    preferences = QtCore.QSettings(
+        str(tmp_path / "bluetooth-open-iq.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    window = BluetoothAnalyzerWindow(preferences=preferences)
+    refresh_calls: list[bool] = []
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *_args, **_kwargs: (str(iq_path), ""),
+        )
+        monkeypatch.setattr(window, "refresh", lambda: refresh_calls.append(True))
+        window._open_iq()
+        assert window._recording is not None
+        assert window._recording.source == "File: RT_HDT7_5.npz"
+        assert window._session is None
+        assert window.center_spin.value() == pytest.approx(2440.0)
+        assert refresh_calls == [True]
+        assert preferences.value("directories/iq", "", type=str) == str(
+            iq_path.resolve().parent
+        )
+    finally:
+        window.close()
+        window.deleteLater()
 
 
 def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> None:
@@ -237,22 +491,101 @@ def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> 
         assert window.symbol_tabs.isTabVisible(1)
         assert len(window.fsk_symbol_plot.listDataItems()) > 0
         assert len(window.psk_symbol_plot.listDataItems()) > 0
+        header_vector_trace = window.fsk_modulation_plot.listDataItems()[0]
+        assert header_vector_trace.opts["pen"] is not None
+        assert (
+            header_vector_trace.xData.size
+            > result.metadata["hdt_header_vector_symbols"].size
+        )
+        assert np.quantile(
+            np.hypot(header_vector_trace.xData, header_vector_trace.yData), 0.95
+        ) < 1.5
         assert window.decode_tree.topLevelItemCount() == 3
         summary_labels = {
             window.summary_table.item(row, 0).text()
             for row in range(window.summary_table.rowCount())
         }
         assert summary_labels == {
+            "RF PHY Measurements",
+            "Output power",
+            "Control Header RMS EVM",
+            "PDU Header and payload RMS EVM",
+            "Center frequency deviation",
+            "Center frequency offset change between the preamble and the payload",
+            "Symbol timing accuracy",
+            "Pre-packet emissions",
+            "Reference Information",
             "Detected PHY",
-            "SIG RF Test Eligibility",
-            "SIG QPSK Header EVM RMS",
-            "SIG 16QAM Payload EVM RMS",
-            "SIG QPSK Header Average Power",
-            "SIG 16QAM Payload Average Power",
-            "SIG Relative Power (Payload - Header)",
-            "SIG Carrier Frequency Error",
-            "SIG Training Correlation",
+            "RF Test Eligibility",
+            "Preamble Carrier Frequency Error",
+            "Payload Carrier Frequency Error",
+            "Control Header Average Power",
+            "PDU Header and Payload Average Power",
+            "Relative Power (Payload - Header)",
+            "Preamble Correlation",
+            "RMS EVM Packets Evaluated",
         }
+        assert window.summary_table.columnCount() == 4
+        assert tuple(
+            window.summary_table.horizontalHeaderItem(column).text()
+            for column in range(window.summary_table.columnCount())
+        ) == ("Test Item", "Value", "Limit", "Result")
+        dedicated_tables = (
+            window.summary_table,
+            window.decode_tree,
+            window.packet_table,
+            window.issues_table,
+        )
+        assert all(
+            isinstance(table.itemDelegate(), CenteredDedicatedTableDelegate)
+            for table in dedicated_tables
+        )
+        assert all(
+            DEDICATED_TABLE_GRID_COLOR in table.styleSheet()
+            for table in dedicated_tables
+        )
+        assert (
+            window.summary_table.horizontalHeader().defaultAlignment()
+            == QtCore.Qt.AlignmentFlag.AlignCenter
+        )
+        assert (
+            window.decode_tree.header().defaultAlignment()
+            == QtCore.Qt.AlignmentFlag.AlignCenter
+        )
+        QtWidgets.QApplication.processEvents()
+        assert (
+            window.summary_table.textElideMode()
+            == QtCore.Qt.TextElideMode.ElideNone
+        )
+        assert all(
+            window.summary_table.columnWidth(column) >= 40
+            for column in range(window.summary_table.columnCount())
+        )
+        assert sum(
+            window.summary_table.columnWidth(column)
+            for column in range(window.summary_table.columnCount())
+        ) <= window.summary_table.viewport().width() + 1
+        summary_rows = {
+            window.summary_table.item(row, 0).text(): row
+            for row in range(window.summary_table.rowCount())
+        }
+        header_evm_row = summary_rows["Control Header RMS EVM"]
+        payload_evm_row = summary_rows["PDU Header and payload RMS EVM"]
+        output_power_row = summary_rows["Output power"]
+        measurement_group_row = summary_rows["RF PHY Measurements"]
+        assert output_power_row == measurement_group_row + 1
+        assert (
+            window.summary_table.item(output_power_row, 2).text()
+            == "Power Class dependent"
+        )
+        assert window.summary_table.item(output_power_row, 3).text() == "N/A"
+        assert window.summary_table.item(header_evm_row, 2).text() == "≤ -10 dB"
+        assert window.summary_table.item(header_evm_row, 3).text() == "PASS"
+        assert window.summary_table.item(payload_evm_row, 2).text() == "≤ -22 dB"
+        assert window.summary_table.item(payload_evm_row, 3).text() == "PASS"
+        timing_row = summary_rows["Symbol timing accuracy"]
+        assert window.summary_table.item(timing_row, 1).text() == "N/A"
+        assert window.summary_table.item(timing_row, 3).text() == "N/A"
         assert "Payload Length" not in summary_labels
         assert "PDU Control Length" not in summary_labels
         assert "HEC-C" not in summary_labels
@@ -311,6 +644,7 @@ def test_bluetooth_workspace_renders_decode_payload_and_air_bits(tmp_path) -> No
     )
     window = BluetoothAnalyzerWindow(preferences=preferences)
     try:
+        window.profile_combo.setCurrentIndex(1)
         window.protocol_combo.setCurrentIndex(1)
         window.whitening_check.setChecked(True)
         window.set_session(session)
@@ -335,6 +669,49 @@ def test_bluetooth_display_helpers_are_deterministic() -> None:
     assert infer_le_channel(2_402e6) == 37
     assert infer_le_channel(2_440e6) == 17
     assert "55" in format_air_bits(np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.uint8))
+
+
+def test_le_rf_profile_uses_test_sync_word_and_general_preserves_user_config(
+    tmp_path,
+) -> None:
+    pg.mkQApp("Bluetooth LE profile config test")
+    preferences = QtCore.QSettings(
+        str(tmp_path / "bluetooth-le-profile.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    window = BluetoothAnalyzerWindow(preferences=preferences)
+    try:
+        window.protocol_combo.setCurrentIndex(
+            window.protocol_combo.findData("bluetooth.le")
+        )
+        assert window.profile_combo.currentData() == BluetoothAnalysisProfile.RF_PHY_TEST
+        assert window.access_address_edit.text() == "71764129"
+        assert window.crc_init_edit.text() == "555555"
+        assert window.whitening_check.isChecked() is False
+        assert window.access_address_edit.isEnabled() is False
+        assert window.crc_init_edit.isEnabled() is False
+        assert window.whitening_check.isEnabled() is False
+        rf_options = window._le_options()
+        assert rf_options["access_address"] == 0x71764129
+        assert rf_options["crc_init"] == 0x555555
+        assert rf_options["whitening_enabled"] is False
+
+        window.profile_combo.setCurrentIndex(
+            window.profile_combo.findData(BluetoothAnalysisProfile.GENERAL_PACKET)
+        )
+        assert window.access_address_edit.isEnabled() is True
+        assert window.crc_init_edit.isEnabled() is True
+        assert window.whitening_check.isEnabled() is True
+        window.access_address_edit.setText("8E89BED6")
+        window.crc_init_edit.setText("123456")
+        window.whitening_check.setChecked(True)
+        general_options = window._le_options()
+        assert general_options["access_address"] == 0x8E89BED6
+        assert general_options["crc_init"] == 0x123456
+        assert general_options["whitening_enabled"] is True
+    finally:
+        window.close()
+        window.deleteLater()
 
 
 def test_dedicated_le_analyzer_synchronizes_generated_iq_and_shared_crc() -> None:
@@ -392,6 +769,54 @@ def test_le_rf_test_packet_produces_eligible_raw_sig_measurements(
     assert result.metadata["analysis_session"].signal.frequency_deviation_hz == (
         expected_deviation_hz
     )
+    assert [row.metric_id for row in result.summary_rows] == [
+        "output_power",
+        "delta_f1_avg",
+        "delta_f2_p999",
+        "delta_f2_ratio",
+        "initial_carrier_frequency",
+        "carrier_frequency_drift",
+        "carrier_frequency_drift_rate",
+        "detected_phy",
+        "rf_test_eligibility",
+        "payload_pattern",
+        "sync_correlation",
+        "packets_evaluated",
+        "peak_power",
+        "mean_abs_fsk_deviation",
+        "p999_fsk_deviation",
+        "max_fsk_deviation",
+    ]
+    summary = {row.metric_id: row for row in result.summary_rows}
+    expected_f1_limit = {
+        BluetoothLEPhy.LE_1M: "225 kHz ≤ Δf1avg ≤ 275 kHz",
+        BluetoothLEPhy.LE_2M: "450 kHz ≤ Δf1avg ≤ 550 kHz",
+    }[phy]
+    assert summary["delta_f1_avg"].limit == expected_f1_limit
+    assert summary["delta_f1_avg"].result == "MEASURING"
+    assert summary["delta_f2_p999"].value != "N/A"
+    assert summary["delta_f2_p999"].limit == {
+        BluetoothLEPhy.LE_1M: "≥ 185 kHz",
+        BluetoothLEPhy.LE_2M: "≥ 370 kHz",
+    }[phy]
+    assert summary["delta_f2_p999"].result == "MEASURING"
+    assert summary["delta_f2_ratio"].result == "MEASURING"
+    assert summary["initial_carrier_frequency"].limit == "±150 kHz"
+    assert summary["carrier_frequency_drift"].limit == "< 50 kHz"
+    assert summary["carrier_frequency_drift_rate"].limit == "≤ 20 kHz / 50 µs"
+    for metric_id in (
+        "mean_abs_fsk_deviation",
+        "p999_fsk_deviation",
+        "max_fsk_deviation",
+    ):
+        assert summary[metric_id].value.endswith(" kHz")
+        assert summary[metric_id].limit == "—"
+        assert summary[metric_id].result == "—"
+    assert all(
+        row.limit == "—" and row.result == "—"
+        for row in result.summary_rows
+        if row.section == "Reference Information"
+    )
 
 
 def test_br_rf_test_packet_produces_eligible_raw_sig_measurements() -> None:
@@ -425,6 +850,86 @@ def test_br_rf_test_packet_produces_eligible_raw_sig_measurements() -> None:
     assert measurement.eligibility.eligible is True
     assert measurement.metadata["payload_pattern"] == "10101010"
     assert measurement.metrics["delta_f2_avg_hz"] is not None
+    assert [row.metric_id for row in result.summary_rows] == [
+        "output_power",
+        "delta_f1_avg",
+        "delta_f2_p999",
+        "delta_f2_ratio",
+        "initial_carrier_frequency",
+        "carrier_frequency_drift",
+        "carrier_frequency_drift_rate",
+        "detected_phy",
+        "rf_test_eligibility",
+        "packet_type",
+        "payload_pattern",
+        "access_code_correlation",
+        "packets_evaluated",
+        "peak_power",
+        "mean_abs_fsk_deviation",
+        "p999_fsk_deviation",
+        "max_fsk_deviation",
+    ]
+    summary = {row.metric_id: row for row in result.summary_rows}
+    assert summary["delta_f1_avg"].result == "MEASURING"
+    assert summary["delta_f2_p999"].value != "N/A"
+    assert summary["delta_f2_p999"].limit == "≥ 115 kHz"
+    assert summary["delta_f2_p999"].result == "MEASURING"
+    assert summary["delta_f2_ratio"].result == "MEASURING"
+    assert summary["initial_carrier_frequency"].limit == "±75 kHz"
+    assert summary["carrier_frequency_drift_rate"].limit == "≤ 20 kHz / 50 µs"
+    for metric_id in (
+        "mean_abs_fsk_deviation",
+        "p999_fsk_deviation",
+        "max_fsk_deviation",
+    ):
+        assert summary[metric_id].value.endswith(" kHz")
+        assert summary[metric_id].limit == "—"
+        assert summary[metric_id].result == "—"
+    assert all(
+        row.limit == "—" and row.result == "—"
+        for row in result.summary_rows
+        if row.section == "Reference Information"
+    )
+
+
+def test_br_arbitrary_payload_keeps_reference_fsk_deviation_metrics() -> None:
+    base = bluetooth_br_edr_project()
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH1,
+        payload_length_bytes=27,
+        payload_source=PayloadSourceKind.PRBS9,
+        whitening_enabled=False,
+    )
+    generated = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+    )
+    result = analyze_bluetooth_classic_recording(
+        IQRecording(
+            iq=generated.iq,
+            sample_rate_hz=generated.sample_rate_hz,
+            center_frequency_hz=base.center_frequency_hz,
+        ),
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        lap=settings.lap,
+        uap=settings.uap,
+        clock_6_1=settings.clock_6_1,
+        whitening_enabled=False,
+    )
+
+    measurement = result.metadata["rf_measurements"][0]
+    assert measurement.metadata["payload_pattern"] is None
+    assert measurement.eligibility.eligible is False
+    summary = {row.metric_id: row for row in result.summary_rows}
+    for metric_id in (
+        "mean_abs_fsk_deviation",
+        "p999_fsk_deviation",
+        "max_fsk_deviation",
+    ):
+        assert summary[metric_id].section == "Reference Information"
+        assert summary[metric_id].value.endswith(" kHz")
+        assert summary[metric_id].limit == "—"
+        assert summary[metric_id].result == "—"
 
 
 def test_le_sig_initial_carrier_tracks_injected_cfo() -> None:
@@ -603,6 +1108,79 @@ def test_edr_sig_measurement_uses_five_us_guard_and_excludes_trailer() -> None:
     assert measurement.metrics["block_count"] > 0
     assert measurement.metadata["trailer_excluded_from_devm"] is True
     assert measurement.metrics["rms_devm_worst"] < 0.05
+    assert measurement.metrics["output_power_dbm"] is not None
+    assert measurement.metadata["output_power_window_start_sample"] > (
+        result.metadata["packet_start_sample"]
+    )
+    assert measurement.metadata["output_power_window_stop_sample"] < (
+        result.metadata["packet_stop_sample"]
+    )
+    assert measurement.metrics["payload_bit_errors"] == 0
+    summary = {row.metric_id: row for row in result.summary_rows}
+    assert summary["output_power"].value.endswith(" dBm")
+    assert summary["output_power"].limit == "Power Class dependent"
+    assert summary["output_power"].result == "N/A"
+    assert summary["omega_i"].result == "PASS"
+    assert summary["omega_0"].result == "PASS"
+    assert summary["omega_i_plus_omega_0"].result == "PASS"
+    assert summary["rms_devm"].value != "N/A"
+    assert summary["rms_devm"].result == "MEASURING"
+    assert summary["p99_devm"].value != "N/A"
+    assert summary["p99_devm"].result == "MEASURING"
+    assert summary["peak_devm"].value != "N/A"
+    assert summary["peak_devm"].result == "MEASURING"
+    assert summary["guard_time"].limit == "4.60–5.40 µs"
+    assert summary["guard_time"].result == "MEASURING"
+    assert summary["differential_phase_encoding"].result == "MEASURING"
+    assert summary["synchronization_sequence"].result == "MEASURING"
+    assert summary["trailer"].limit == "≤ 1 bit error / 50 packets"
+    assert summary["trailer"].result == "MEASURING"
+
+    accumulator = BluetoothRFTestAccumulator()
+    for _ in range(100):
+        accumulator.add(measurement)
+    aggregate = accumulator.aggregate_edr()
+    aggregated = replace(
+        result,
+        metadata={**result.metadata, "rf_capture_aggregate": aggregate},
+    )
+    aggregated_summary = {row.metric_id: row for row in aggregated.summary_rows}
+    assert aggregated_summary["rms_devm"].result == "PASS"
+    assert aggregated_summary["p99_devm"].result == "PASS"
+    assert aggregated_summary["peak_devm"].result == "PASS"
+    assert aggregated_summary["guard_time"].result == "PASS"
+    assert aggregated_summary["differential_phase_encoding"].result == "PASS"
+    assert aggregated_summary["synchronization_sequence"].result == "PASS"
+    assert aggregated_summary["trailer"].result == "PASS"
+    assert aggregated_summary["devm_blocks_evaluated"].value == "200 / 200"
+    assert aggregated_summary["guard_time_packets_evaluated"].value == "100 / 100"
+    assert aggregated_summary["guard_time_valid_packets"].value == "100 / 100"
+
+    bad_metrics = dict(measurement.metrics)
+    bad_metrics.update(
+        guard_time_s=6.0e-6,
+        payload_bit_errors=1,
+        sync_symbol_errors=1,
+        sync_bit_errors=1,
+        trailer_symbol_errors=1,
+        trailer_bit_errors=1,
+    )
+    bad_measurement = replace(measurement, metrics=bad_metrics)
+    failing_accumulator = BluetoothRFTestAccumulator()
+    for _ in range(6):
+        failing_accumulator.add(bad_measurement)
+    failing = replace(
+        result,
+        metadata={
+            **result.metadata,
+            "rf_capture_aggregate": failing_accumulator.aggregate_edr(),
+        },
+    )
+    failing_summary = {row.metric_id: row for row in failing.summary_rows}
+    assert failing_summary["guard_time"].result == "FAIL"
+    assert failing_summary["differential_phase_encoding"].result == "FAIL"
+    assert failing_summary["synchronization_sequence"].result == "FAIL"
+    assert failing_summary["trailer"].result == "FAIL"
 
 
 def test_edr_sig_devm_retains_symbol_dependent_phase_and_amplitude_error() -> None:
@@ -706,6 +1284,46 @@ def test_classic_type_is_only_a_phy_candidate_and_length_sets_result_range(
         result.metadata["analysis_session"].pattern_result.decoded_symbols.size
         == expected_result_symbols
     )
+    if expected_phy.startswith("EDR"):
+        assert [row.metric_id for row in result.summary_rows[:12]] == [
+            "output_power",
+            "relative_transmit_power",
+            "omega_i",
+            "omega_0",
+            "omega_i_plus_omega_0",
+            "rms_devm",
+            "p99_devm",
+            "peak_devm",
+            "guard_time",
+            "differential_phase_encoding",
+            "synchronization_sequence",
+            "trailer",
+        ]
+        summary = {row.metric_id: row for row in result.summary_rows}
+        expected_devm_limits = (
+            ("≤ 20 %", "≤ 30 %", "≤ 35 %")
+            if expected_phy == "EDR 2M"
+            else ("≤ 13 %", "≤ 20 %", "≤ 25 %")
+        )
+        assert (
+            summary["rms_devm"].limit,
+            summary["p99_devm"].limit,
+            summary["peak_devm"].limit,
+        ) == expected_devm_limits
+        assert summary["relative_transmit_power"].limit == (
+            "-4 dB < value < +1 dB"
+        )
+        assert summary["omega_i"].limit == "-75 kHz < ωi < +75 kHz"
+        assert summary["omega_0"].limit == "-10 kHz < ω0 < +10 kHz"
+        assert summary["omega_i_plus_omega_0"].limit == (
+            "-75 kHz < value < +75 kHz"
+        )
+        assert summary["rms_devm"].result == "N/A"
+        assert all(
+            row.limit == "—" and row.result == "—"
+            for row in result.summary_rows
+            if row.section == "Reference Information"
+        )
 
 
 def test_br_packet_is_not_promoted_by_a_later_edr_sync() -> None:
@@ -963,6 +1581,10 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(tmp_path) -> N
             "Analysis Mode",
         ]
         assert window.run_action.shortcut().toString() == "F6"
+        assert window.open_iq_action.text() == "Open IQ..."
+        assert window.open_iq_action.shortcut() == QtGui.QKeySequence(
+            QtGui.QKeySequence.StandardKey.Open
+        )
         window._build_meas_config_dialog()
         assert isinstance(window._meas_config_dialog, HierarchicalMeasConfigDialog)
         assert not window.derived_modulation.isEnabled()

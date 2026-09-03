@@ -21,6 +21,47 @@ CONSTELLATION_DENSITY_RED_LEVEL = 0.75
 FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH = 0.22
 FREQUENCY_CONSTELLATION_X_LIMIT = 1.0
 TRACE_SYMBOL_SIZE = 5.5
+DEDICATED_TABLE_GRID_COLOR = "#606060"
+
+
+class CenteredDedicatedTableDelegate(QtWidgets.QStyledItemDelegate):
+    """Center cell text consistently across dedicated-mode tables."""
+
+    def initStyleOption(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        super().initStyleOption(option, index)
+        option.displayAlignment = QtCore.Qt.AlignmentFlag.AlignCenter
+
+
+def apply_dedicated_table_style(
+    view: QtWidgets.QAbstractItemView,
+) -> None:
+    """Apply the shared dedicated-mode table alignment and grid styling."""
+
+    view.setItemDelegate(CenteredDedicatedTableDelegate(view))
+    view.setStyleSheet(
+        "QTableView::item, QTreeView::item {"
+        f" border-right: 1px solid {DEDICATED_TABLE_GRID_COLOR};"
+        f" border-bottom: 1px solid {DEDICATED_TABLE_GRID_COLOR};"
+        " padding: 2px;"
+        "}"
+        "QHeaderView::section {"
+        f" border-right: 1px solid {DEDICATED_TABLE_GRID_COLOR};"
+        f" border-bottom: 1px solid {DEDICATED_TABLE_GRID_COLOR};"
+        " padding: 2px;"
+        "}"
+    )
+    if isinstance(view, QtWidgets.QTableView):
+        view.setShowGrid(False)
+        header = view.horizontalHeader()
+    elif isinstance(view, QtWidgets.QTreeView):
+        header = view.header()
+    else:
+        return
+    header.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
 
 class SymbolDensitySpread(StrEnum):

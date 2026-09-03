@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 import json
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -16,6 +18,7 @@ from pluto_sa.vsa.analysis import capture_power_traces
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.vsa.pluto_source import PlutoCaptureSettings, PlutoLiveSource
 from pluto_sa.vsa.session import VSASession
+from pluto_sa.vsa.sources import FileIQSource
 from pluto_sa.vsa.pattern import IQPowerTriggerSettings, MeasurementFilterMode
 from pluto_sa.vsa.ui.display_processing import (
     normalized_psk_display,
@@ -28,6 +31,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     FREQUENCY_CONSTELLATION_X_LIMIT,
     SymbolDensitySpread,
     add_result_range_overlay,
+    apply_dedicated_table_style,
     install_measurement_plot_menu,
     make_measurement_dock,
     make_measurement_plot,
@@ -55,7 +59,6 @@ _STARTUP_CONFIG_KEY = "bluetooth_dedicated/startup_meas_config"
 _STARTUP_CONFIG_SCHEMA = "pluto-vsa-bluetooth-dedicated-config"
 _STARTUP_CONFIG_VERSION = 1
 _FREQUENCY_CONSTELLATION_X_LIMIT = FREQUENCY_CONSTELLATION_X_LIMIT
-_PHY_SUMMARY_METRIC_IDS = frozenset({"detected_phy"})
 
 
 def format_air_bits(bits: np.ndarray, group: int = 8) -> str:
@@ -102,17 +105,7 @@ class _PacketAnalysisTree(QtWidgets.QTreeWidget):
             QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
-        self.setStyleSheet(
-            "QTreeWidget::item {"
-            " border-right: 1px solid #505050;"
-            " border-bottom: 1px solid #404040;"
-            " padding: 2px;"
-            "}"
-            "QHeaderView::section {"
-            " border-right: 1px solid #606060;"
-            " border-bottom: 1px solid #606060;"
-            "}"
-        )
+        apply_dedicated_table_style(self)
         header = self.header()
         for column in range(len(self._MINIMUM_WIDTHS)):
             header.setSectionResizeMode(
@@ -147,6 +140,61 @@ class _PacketAnalysisTree(QtWidgets.QTreeWidget):
         for column, column_width in enumerate(widths):
             self.setColumnWidth(column, column_width)
         self.doItemsLayout()
+
+
+class _SummaryTable(QtWidgets.QTableWidget):
+    """Four-column summary that wraps content into the available dock width."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(0, 4, parent)
+        self.setHorizontalHeaderLabels(("Test Item", "Value", "Limit", "Result"))
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.setWordWrap(True)
+        self.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        self.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        apply_dedicated_table_style(self)
+        header = self.horizontalHeader()
+        header.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        header.setMinimumSectionSize(1)
+        for column in range(self.columnCount()):
+            header.setSectionResizeMode(
+                column, QtWidgets.QHeaderView.ResizeMode.Fixed
+            )
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._fit_columns()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self._fit_columns)
+
+    def _fit_columns(self) -> None:
+        width = max(1, self.viewport().width())
+        if width < 160:
+            widths = [width // 4] * 4
+        else:
+            result_width = min(90, max(64, round(width * 0.17)))
+            remaining = width - result_width
+            test_item_width = round(remaining * 0.35)
+            value_width = round(remaining * 0.27)
+            widths = [
+                test_item_width,
+                value_width,
+                remaining - test_item_width - value_width,
+                result_width,
+            ]
+        widths[-1] += width - sum(widths)
+        for column, column_width in enumerate(widths):
+            self.setColumnWidth(column, max(1, column_width))
+        self.resizeRowsToContents()
 
 
 class _BluetoothClassicAnalysisThread(QtCore.QThread):
@@ -279,7 +327,12 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         )
 
     def _build_menu(self) -> None:
-        close_action = self.menuBar().addMenu("File").addAction("Close")
+        file_menu = self.menuBar().addMenu("File")
+        self.open_iq_action = file_menu.addAction("Open IQ...")
+        self.open_iq_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.open_iq_action.triggered.connect(self._open_iq)
+        file_menu.addSeparator()
+        close_action = file_menu.addAction("Close")
         close_action.triggered.connect(self.application_close_requested.emit)
         run_menu = self.menuBar().addMenu("Sweep / Run")
         self.run_action = run_menu.addAction("Run Single")
@@ -425,7 +478,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.external_att_spin.setValue(30.0)
         self.device_label = QtWidgets.QLabel("Pluto: Auto")
         self.protocol_combo.currentIndexChanged.connect(self._protocol_changed)
-        self.profile_combo.currentIndexChanged.connect(self._update_derived_config)
+        self.profile_combo.currentIndexChanged.connect(self._profile_changed)
         self.phy_combo.currentIndexChanged.connect(self._update_derived_config)
         self.refresh_button.clicked.connect(self.refresh)
         self.capture_button.clicked.connect(self._toggle_capture)
@@ -844,12 +897,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.spectrum_dock = self._dock("Spectrum", self.spectrum_plot)
         self.splitDockWidget(self.power_dock, self.spectrum_dock, QtCore.Qt.Orientation.Horizontal)
 
-        self.summary_table = QtWidgets.QTableWidget(0, 2)
-        self.summary_table.setHorizontalHeaderLabels(("Parameter", "Current"))
-        self.summary_table.verticalHeader().setVisible(False)
-        self.summary_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.summary_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
-        self.summary_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.summary_table = _SummaryTable()
         self.summary_dock = self._dock("Result Summary", self.summary_table)
         self.splitDockWidget(self.spectrum_dock, self.summary_dock, QtCore.Qt.Orientation.Horizontal)
 
@@ -877,10 +925,12 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.payload_text = QtWidgets.QPlainTextEdit(readOnly=True)
         self.packet_table = QtWidgets.QTableWidget(0, 5)
         self.packet_table.setHorizontalHeaderLabels(("#", "PHY", "Type", "Integrity", "Bits"))
+        apply_dedicated_table_style(self.packet_table)
         self.packet_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.packet_table.cellClicked.connect(self._packet_row_clicked)
         self.issues_table = QtWidgets.QTableWidget(0, 4)
         self.issues_table.setHorizontalHeaderLabels(("Severity", "Code", "Message", "Bit Range"))
+        apply_dedicated_table_style(self.issues_table)
         self.issues_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.air_bits_text = QtWidgets.QPlainTextEdit(readOnly=True)
         for label, widget in (("Decode", self.decode_tree), ("Payload Hex", self.payload_text), ("Packet List", self.packet_table), ("Issues", self.issues_table), ("Air Bits", self.air_bits_text)):
@@ -920,7 +970,37 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             widget.setVisible(is_le)
         for widget in (self.lap_edit, self.uap_edit, self.clock_spin):
             widget.setVisible(not is_le and not is_hdt)
+        self._sync_le_profile_controls()
         self._update_derived_config()
+
+    @QtCore.Slot()
+    def _profile_changed(self) -> None:
+        self._sync_le_profile_controls()
+        self._update_derived_config()
+
+    def _sync_le_profile_controls(self) -> None:
+        if self.protocol_combo.currentData() != "bluetooth.le":
+            for widget in (
+                self.access_address_edit,
+                self.crc_init_edit,
+                self.whitening_check,
+            ):
+                widget.setEnabled(True)
+            return
+        rf_test = (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.RF_PHY_TEST
+        )
+        if rf_test:
+            self.access_address_edit.setText("71764129")
+            self.crc_init_edit.setText("555555")
+            self.whitening_check.setChecked(False)
+        for widget in (
+            self.access_address_edit,
+            self.crc_init_edit,
+            self.whitening_check,
+        ):
+            widget.setEnabled(not rf_test)
 
     def set_session(self, session: VSASession) -> None:
         self.stage_session(session)
@@ -935,6 +1015,85 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             previous = self.channel_spin.blockSignals(True)
             self.channel_spin.setValue(channel)
             self.channel_spin.blockSignals(previous)
+
+    def _last_directory(self, file_kind: str) -> str:
+        stored = self._preferences.value(f"directories/{file_kind}", "", type=str)
+        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
+
+    def _remember_directory(self, file_kind: str, path: str | Path) -> None:
+        self._preferences.setValue(
+            f"directories/{file_kind}", str(Path(path).resolve().parent)
+        )
+        self._preferences.sync()
+
+    @QtCore.Slot()
+    def _open_iq(self) -> None:
+        if self.shutdown_busy_reason() is not None:
+            self.statusBar().showMessage(
+                "Stop the active Bluetooth capture or analysis before opening IQ"
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open IQ Recording",
+            self._last_directory("iq"),
+            "IQ recordings (*.iq.tar *.npz *.npy *.cf32 *.bin);;All files (*)",
+        )
+        if not path:
+            return
+        self._remember_directory("iq", path)
+        try:
+            try:
+                recording = FileIQSource.load(path)
+            except ValueError as error:
+                if "sample_rate_hz is required" not in str(error):
+                    raise
+                symbol_rate_hz = (
+                    2_000_000.0
+                    if self.protocol_combo.currentData() == "bluetooth.hdt"
+                    or (
+                        self.protocol_combo.currentData() == "bluetooth.le"
+                        and self.phy_combo.currentText() == "LE 2M"
+                    )
+                    else 1_000_000.0
+                )
+                sample_rate_hz, accepted = QtWidgets.QInputDialog.getDouble(
+                    self,
+                    "IQ Sample Rate",
+                    "Sample Rate (Hz)",
+                    symbol_rate_hz * int(self.oversampling_combo.currentData()),
+                    1.0,
+                    100_000_000.0,
+                    0,
+                )
+                if not accepted:
+                    return
+                recording = FileIQSource.load(
+                    path,
+                    sample_rate_hz=sample_rate_hz,
+                    center_frequency_hz=self.center_spin.value() * 1e6,
+                )
+            if recording.center_frequency_hz <= 0.0:
+                recording = replace(
+                    recording,
+                    center_frequency_hz=self.center_spin.value() * 1e6,
+                )
+            self.load_recording(recording)
+        except Exception as error:
+            QtWidgets.QMessageBox.critical(self, "IQ Import Error", str(error))
+
+    def load_recording(self, recording: IQRecording) -> None:
+        """Load one file/capture recording and start dedicated analysis."""
+
+        self._recording = recording
+        self._session = None
+        self.center_spin.setValue(recording.center_frequency_hz / 1e6)
+        if self.protocol_combo.currentData() == "bluetooth.le":
+            previous = self.channel_spin.blockSignals(True)
+            self.channel_spin.setValue(infer_le_channel(recording.center_frequency_hz))
+            self.channel_spin.blockSignals(previous)
+        self.statusBar().showMessage(f"IQ loaded - {recording.source}")
+        self.refresh()
 
     def _context(self) -> dict[str, object]:
         if self.protocol_combo.currentData() == "bluetooth.le":
@@ -1079,6 +1238,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._set_psk_symbol_plot_mode(
             str(values.get("psk_symbol_plot", "Physical IQ"))
         )
+        self._sync_le_profile_controls()
         self._sync_acquisition_trigger_controls()
         self._update_derived_config()
 
@@ -1226,10 +1386,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         if not isinstance(recording, IQRecording):
             self._capture_failed("capture returned an invalid IQ recording")
             return
-        self._recording = recording
-        self._session = None
-        self.center_spin.setValue(recording.center_frequency_hz / 1e6)
-        self.refresh()
+        self.load_recording(recording)
 
     @QtCore.Slot(str)
     def _capture_failed(self, message: str) -> None:
@@ -1359,9 +1516,14 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         if isinstance(session, VSASession):
             self._session = session
         self._render(result)
+        aggregate_status = result.metadata.get("hdt_rms_evm_aggregate_status")
+        aggregate_suffix = (
+            f" - {aggregate_status}" if aggregate_status is not None else ""
+        )
         self.statusBar().showMessage(
             f"Bluetooth analysis complete - {result.packet.phy_name} / "
             f"{result.packet.packet_type or 'packet'} - {len(results)} packet(s)"
+            f"{aggregate_suffix}"
         )
 
     @QtCore.Slot(int)
@@ -1377,8 +1539,15 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         if isinstance(session, VSASession):
             self._session = session
         self._render(self._result)
+        aggregate_status = self._result.metadata.get(
+            "hdt_rms_evm_aggregate_status"
+        )
+        aggregate_suffix = (
+            f" - {aggregate_status}" if aggregate_status is not None else ""
+        )
         self.statusBar().showMessage(
             f"Selected Bluetooth packet {target + 1}/{len(self._results)}"
+            f"{aggregate_suffix}"
         )
 
     @QtCore.Slot(str)
@@ -1893,20 +2062,44 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         )
 
     def _render_summary(self, result: BluetoothDedicatedResult) -> None:
-        # Result Summary is the RF/PHY measurement plane.  Protocol fields,
-        # integrity checks, addresses, lengths, and analysis configuration
-        # belong to Packet Analysis or Meas Config and must not be duplicated
-        # here.
-        rows = [
-            (metric.label, metric.display)
-            for metric in result.metrics
-            if metric.metric_id in _PHY_SUMMARY_METRIC_IDS
-            or metric.metric_id.startswith("sig_")
-        ]
+        rows: list[tuple[str | None, object | None]] = []
+        previous_group: str | None = None
+        for summary_row in result.summary_rows:
+            if summary_row.section != previous_group:
+                rows.append((summary_row.section, None))
+                previous_group = summary_row.section
+            rows.append((None, summary_row))
+        self.summary_table.clearSpans()
         self.summary_table.setRowCount(len(rows))
-        for row, (label, value) in enumerate(rows):
-            self.summary_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(label)))
-            self.summary_table.setItem(row, 1, QtWidgets.QTableWidgetItem(str(value)))
+        for row, (group, metric) in enumerate(rows):
+            if group is not None:
+                item = QtWidgets.QTableWidgetItem(group)
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setBackground(QtGui.QColor("#353535"))
+                self.summary_table.setItem(row, 0, item)
+                self.summary_table.setSpan(row, 0, 1, 4)
+                continue
+            if metric is None:
+                continue
+            values = (metric.test_item, metric.value, metric.limit, metric.result)
+            for column, value in enumerate(values):
+                self.summary_table.setItem(
+                    row, column, QtWidgets.QTableWidgetItem(str(value))
+                )
+            result_color = {
+                "PASS": "#43f5a5",
+                "FAIL": "#ff5b5b",
+                "MEASURING": "#ffd166",
+                "N/A": "#a0a0a0",
+                "\N{EM DASH}": "#a0a0a0",
+            }.get(metric.result)
+            if result_color is not None:
+                self.summary_table.item(row, 3).setForeground(
+                    QtGui.QBrush(QtGui.QColor(result_color))
+                )
+        self.summary_table.resizeRowsToContents()
 
     @staticmethod
     def _field_bit_range(field: PacketField, bit_offset: int) -> str:
