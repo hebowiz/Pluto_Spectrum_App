@@ -10,7 +10,7 @@ from pluto_cal.frequency.backend import PlutoFrequencyBackend
 from pluto_cal.frequency.measurement import measure_frequency
 from pluto_cal.frequency.optimizer import CalibrationCancelled, FrequencyCalibrator
 from pluto_cal.frequency.persistence import (
-    SSHXOCorrectionPersistence,
+    FallbackSSHXOCorrectionPersistence,
 )
 from pluto_cal.model import FrequencyCalibrationConfig
 
@@ -99,14 +99,8 @@ class FrequencyCalibrationWorker(QtCore.QThread):
         backend = None
         try:
             backend = PlutoFrequencyBackend.open(self.device_target, self.config)
-            if backend.persistence_host is None:
-                raise RuntimeError(
-                    "No network endpoint matches the selected Pluto serial; "
-                    "connect/select its IP context before calibration so the "
-                    "verified result can be persisted safely"
-                )
-            persistence = SSHXOCorrectionPersistence(
-                backend.persistence_host,
+            persistence = FallbackSSHXOCorrectionPersistence(
+                backend.persistence_hosts,
                 expected_serial=backend.device_serial,
                 password=self.ssh_password,
             )

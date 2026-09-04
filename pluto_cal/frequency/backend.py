@@ -172,6 +172,18 @@ class PlutoFrequencyBackend:
             return self._network_hosts.get(self.device_serial.casefold())
         return None
 
+    @property
+    def persistence_hosts(self) -> tuple[str, ...]:
+        """Return ordered SSH candidates for verified persistent storage."""
+
+        candidates: list[str] = []
+        if self.device_serial:
+            matched = self._network_hosts.get(self.device_serial.casefold())
+            if matched:
+                candidates.append(matched)
+        candidates.extend(("pluto.local", "192.168.2.1"))
+        return tuple(dict.fromkeys(candidates))
+
     def _configure_receiver(self) -> None:
         sdr = self._sdr
         sdr.sample_rate = int(round(self.config.sample_rate_hz))

@@ -153,6 +153,13 @@ class PlutoCalMainWindow(QtWidgets.QMainWindow):
         self.start_button.setEnabled(not running)
         self.cancel_button.setEnabled(running)
 
+    def _clear_measurement_results(self) -> None:
+        self.current_xo_label.setText("—")
+        self.error_hz_label.setText("—")
+        self.error_ppm_label.setText("—")
+        self.best_xo_label.setText("—")
+        self.best_error_label.setText("—")
+
     def start_frequency_check(self) -> None:
         if self._worker is not None and self._worker.isRunning():
             return
@@ -174,8 +181,7 @@ class PlutoCalMainWindow(QtWidgets.QMainWindow):
         self._best_error_hz = math.inf
         self._persistence_started = False
         self._run_mode = "measure"
-        self.best_xo_label.setText("—")
-        self.best_error_label.setText("—")
+        self._clear_measurement_results()
         self._worker = FrequencyCheckWorker(
             self.device_combo.currentData(), config, self
         )
@@ -215,8 +221,7 @@ class PlutoCalMainWindow(QtWidgets.QMainWindow):
         self._best_error_hz = math.inf
         self._persistence_started = False
         self._run_mode = "calibrate"
-        self.best_xo_label.setText("—")
-        self.best_error_label.setText("—")
+        self._clear_measurement_results()
         self._worker = FrequencyCalibrationWorker(
             self.device_combo.currentData(),
             config,

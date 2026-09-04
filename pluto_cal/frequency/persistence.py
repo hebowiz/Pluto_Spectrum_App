@@ -13,6 +13,10 @@ class PersistenceError(RuntimeError):
     """Raised when an XO correction cannot be saved and verified."""
 
 
+class SSHConnectionError(PersistenceError):
+    """Raised when an SSH endpoint cannot be reached or authenticated."""
+
+
 @runtime_checkable
 class XOCorrectionPersistence(Protocol):
     def persist(
@@ -91,9 +95,11 @@ class SSHXOCorrectionPersistence:
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as error:
-            raise PersistenceError(f"SSH persistence failed: {error}") from error
+            raise SSHConnectionError(f"SSH persistence failed: {error}") from error
         if int(completed.returncode) != 0:
             detail = (completed.stderr or completed.stdout or "SSH command failed").strip()
+            if int(completed.returncode) == 255:
+                raise SSHConnectionError(detail)
             raise PersistenceError(detail)
         return str(completed.stdout).strip()
 
@@ -111,24 +117,30 @@ class SSHXOCorrectionPersistence:
         # host-key prompt while still refusing a cross-device write.
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         try:
-            client.connect(
-                self.host,
-                username=self.user,
-                password=self.password,
-                timeout=self.timeout_s,
-                auth_timeout=self.timeout_s,
-                banner_timeout=self.timeout_s,
-                allow_agent=False,
-                look_for_keys=False,
-            )
-            _stdin, stdout, stderr = client.exec_command(
-                remote_command, timeout=self.timeout_s
-            )
-            output = stdout.read().decode("utf-8", errors="replace").strip()
-            error_output = stderr.read().decode("utf-8", errors="replace").strip()
-            exit_code = int(stdout.channel.recv_exit_status())
-        except Exception as error:
-            raise PersistenceError(f"SSH persistence failed: {error}") from error
+            try:
+                client.connect(
+                    self.host,
+                    username=self.user,
+                    password=self.password,
+                    timeout=self.timeout_s,
+                    auth_timeout=self.timeout_s,
+                    banner_timeout=self.timeout_s,
+                    allow_agent=False,
+                    look_for_keys=False,
+                )
+            except Exception as error:
+                raise SSHConnectionError(
+                    f"SSH connection to {self.host} failed: {error}"
+                ) from error
+            try:
+                _stdin, stdout, stderr = client.exec_command(
+                    remote_command, timeout=self.timeout_s
+                )
+                output = stdout.read().decode("utf-8", errors="replace").strip()
+                error_output = stderr.read().decode("utf-8", errors="replace").strip()
+                exit_code = int(stdout.channel.recv_exit_status())
+            except Exception as error:
+                raise PersistenceError(f"SSH command failed: {error}") from error
         finally:
             client.close()
         if exit_code != 0:
@@ -165,6 +177,9 @@ class SSHXOCorrectionPersistence:
         self.verify_target()
         if before_write is not None:
             before_write()
+        return self._persist_after_target_verification(candidate)
+
+    def _persist_after_target_verification(self, candidate: int) -> int:
         self._ssh(f"fw_setenv xo_correction {candidate}")
         readback = self.read()
         if readback != candidate:
@@ -172,3 +187,63 @@ class SSHXOCorrectionPersistence:
                 f"Persistent XO read-back {readback} does not match {candidate}"
             )
         return readback
+
+
+class FallbackSSHXOCorrectionPersistence:
+    """Try ordered SSH endpoints, but only fall back on connection failure."""
+
+    def __init__(
+        self,
+        hosts: Sequence[str],
+        *,
+        user: str = "root",
+        expected_serial: str | None,
+        password: str | None = "analog",
+        timeout_s: float = 8.0,
+        runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    ) -> None:
+        self.hosts = tuple(
+            dict.fromkeys(
+                normalize_ssh_host(host) for host in hosts if str(host).strip()
+            )
+        )
+        self.user = user
+        self.expected_serial = str(expected_serial or "").strip()
+        self.password = password
+        self.timeout_s = timeout_s
+        self._runner = runner
+        if not self.hosts:
+            raise ValueError("At least one SSH persistence host is required")
+        if not self.expected_serial:
+            raise PersistenceError(
+                "Selected Pluto serial is unavailable; refusing persistent write"
+            )
+
+    def persist(
+        self,
+        value: int,
+        *,
+        before_write: Callable[[], None] | None = None,
+    ) -> int:
+        connection_errors: list[str] = []
+        for host in self.hosts:
+            persistence = SSHXOCorrectionPersistence(
+                host,
+                user=self.user,
+                expected_serial=self.expected_serial,
+                password=self.password,
+                timeout_s=self.timeout_s,
+                runner=self._runner,
+            )
+            try:
+                persistence.verify_target()
+            except SSHConnectionError as error:
+                connection_errors.append(f"{host}: {error}")
+                continue
+            # Serial mismatch or an unreadable serial is a safety failure, not
+            # a reason to probe another device and potentially write to it.
+            if before_write is not None:
+                before_write()
+            return persistence._persist_after_target_verification(int(value))
+        detail = "; ".join(connection_errors) or "no SSH endpoint was reachable"
+        raise PersistenceError(f"Unable to connect to selected Pluto over SSH: {detail}")

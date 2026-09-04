@@ -28,6 +28,7 @@ from pluto_cal.frequency.optimizer import (
     has_converged,
 )
 from pluto_cal.frequency.persistence import (
+    FallbackSSHXOCorrectionPersistence,
     normalize_ssh_host,
     PersistenceError,
     SSHXOCorrectionPersistence,
@@ -38,7 +39,7 @@ from pluto_cal.model import (
     FrequencyMeasurement,
 )
 from pluto_cal.ui.main_window import PlutoCalMainWindow
-from pluto_cal.ui.worker import FrequencyCheckWorker
+from pluto_cal.ui.worker import FrequencyCalibrationWorker, FrequencyCheckWorker
 
 
 def _tone(
@@ -166,6 +167,24 @@ def test_backend_rejects_runtime_xo_outside_available_range(monkeypatch) -> None
     )
 
 
+def test_backend_prefers_same_serial_ip_context_for_persistence() -> None:
+    backend = object.__new__(PlutoFrequencyBackend)
+    backend.device_serial = "selected-serial"
+    backend._network_hosts = {"selected-serial": "192.168.10.42"}
+    assert backend.persistence_hosts == (
+        "192.168.10.42",
+        "pluto.local",
+        "192.168.2.1",
+    )
+
+
+def test_backend_uses_standard_ssh_hosts_without_ip_context() -> None:
+    backend = object.__new__(PlutoFrequencyBackend)
+    backend.device_serial = "selected-serial"
+    backend._network_hosts = {}
+    assert backend.persistence_hosts == ("pluto.local", "192.168.2.1")
+
+
 def test_ssh_persistence_writes_only_then_reads_back() -> None:
     commands: list[tuple[str, ...]] = []
 
@@ -206,6 +225,106 @@ def test_ssh_persistence_checks_selected_pluto_serial_before_write() -> None:
     with pytest.raises(PersistenceError, match="does not match"):
         persistence.persist(40_000_000)
     assert commands == ["cat /etc/serial"]
+
+
+def test_fallback_ssh_uses_usb_address_after_pluto_local_connection_failure() -> None:
+    commands: list[tuple[str, str]] = []
+
+    def runner(command, **_kwargs):
+        host, remote_command = command[-2], command[-1]
+        commands.append((host, remote_command))
+        if host == "root@pluto.local":
+            return subprocess.CompletedProcess(command, 255, "", "connection failed")
+        if remote_command == "cat /etc/serial":
+            output = "selected-serial\n"
+        elif remote_command == "fw_printenv -n xo_correction":
+            output = "40000012\n"
+        else:
+            output = ""
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    persistence = FallbackSSHXOCorrectionPersistence(
+        ("pluto.local", "192.168.2.1"),
+        expected_serial="selected-serial",
+        runner=runner,
+    )
+    assert persistence.persist(40_000_012) == 40_000_012
+    assert commands[0] == ("root@pluto.local", "cat /etc/serial")
+    assert commands[1] == ("root@192.168.2.1", "cat /etc/serial")
+    assert any(command.startswith("fw_setenv") for _host, command in commands)
+
+
+def test_fallback_ssh_matching_serial_allows_persistence() -> None:
+    commands: list[str] = []
+
+    def runner(command, **_kwargs):
+        commands.append(command[-1])
+        output = {
+            "cat /etc/serial": "selected-serial\n",
+            "fw_printenv -n xo_correction": "40000012\n",
+        }.get(command[-1], "")
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    persistence = FallbackSSHXOCorrectionPersistence(
+        ("pluto.local",), expected_serial="selected-serial", runner=runner
+    )
+    assert persistence.persist(40_000_012) == 40_000_012
+    assert commands == [
+        "cat /etc/serial",
+        "fw_setenv xo_correction 40000012",
+        "fw_printenv -n xo_correction",
+    ]
+
+
+def test_fallback_ssh_serial_mismatch_never_writes_or_tries_next_host() -> None:
+    commands: list[tuple[str, str]] = []
+
+    def runner(command, **_kwargs):
+        commands.append((command[-2], command[-1]))
+        return subprocess.CompletedProcess(command, 0, "different-serial\n", "")
+
+    persistence = FallbackSSHXOCorrectionPersistence(
+        ("pluto.local", "192.168.2.1"),
+        expected_serial="selected-serial",
+        runner=runner,
+    )
+    with pytest.raises(PersistenceError, match="does not match"):
+        persistence.persist(40_000_012)
+    assert commands == [("root@pluto.local", "cat /etc/serial")]
+
+
+def test_fallback_ssh_unreadable_serial_never_writes_or_tries_next_host() -> None:
+    commands: list[tuple[str, str]] = []
+
+    def runner(command, **_kwargs):
+        commands.append((command[-2], command[-1]))
+        return subprocess.CompletedProcess(command, 1, "", "serial unavailable")
+
+    persistence = FallbackSSHXOCorrectionPersistence(
+        ("pluto.local", "192.168.2.1"),
+        expected_serial="selected-serial",
+        runner=runner,
+    )
+    with pytest.raises(PersistenceError, match="serial unavailable"):
+        persistence.persist(40_000_012)
+    assert commands == [("root@pluto.local", "cat /etc/serial")]
+
+
+def test_fallback_ssh_connection_failure_never_writes() -> None:
+    commands: list[str] = []
+
+    def runner(command, **_kwargs):
+        commands.append(command[-1])
+        return subprocess.CompletedProcess(command, 255, "", "connection refused")
+
+    persistence = FallbackSSHXOCorrectionPersistence(
+        ("pluto.local", "192.168.2.1"),
+        expected_serial="selected-serial",
+        runner=runner,
+    )
+    with pytest.raises(PersistenceError, match="Unable to connect"):
+        persistence.persist(40_000_012)
+    assert commands == ["cat /etc/serial", "cat /etc/serial"]
 
 
 def test_scoped_ipv6_ssh_host_uses_socket_interface_index(monkeypatch) -> None:
@@ -362,6 +481,48 @@ def test_pluto_cal_window_exposes_frequency_calibration_controls(monkeypatch) ->
         assert window.cancel_button.text() == "Cancel"
         assert window.status_state_label.text() == "IDLE"
     finally:
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize(
+    ("start_method", "worker_class"),
+    (
+        ("start_frequency_check", FrequencyCheckWorker),
+        ("start_calibration", FrequencyCalibrationWorker),
+    ),
+)
+def test_new_run_clears_previous_measurement_values(
+    monkeypatch, start_method, worker_class
+) -> None:
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    monkeypatch.setattr("pluto_cal.ui.main_window.iio.scan_contexts", lambda: {})
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(worker_class, "start", lambda _worker: None)
+    window = PlutoCalMainWindow()
+    try:
+        labels = (
+            window.current_xo_label,
+            window.error_hz_label,
+            window.error_ppm_label,
+            window.best_xo_label,
+            window.best_error_label,
+        )
+        for label in labels:
+            label.setText("old result")
+        getattr(window, start_method)()
+        assert [label.text() for label in labels] == ["—"] * 5
+        assert window.status_state_label.text() == "SIGNAL_CHECK"
+        assert "checking the CW" in window.status_label.text()
+    finally:
+        if window._worker is not None:
+            window._worker.deleteLater()
+            window._worker = None
         window.close()
         window.deleteLater()
         app.processEvents()
