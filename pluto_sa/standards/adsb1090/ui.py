@@ -42,10 +42,13 @@ from pluto_sa.vsa.pluto_source import (
 )
 from pluto_sa.vsa.sources import FileIQSource
 from pluto_sa.vsa.ui.measurement_chrome import (
+    configure_iq_power_plot,
     install_measurement_plot_menu,
+    limit_iq_power_display_dbm,
     make_measurement_dock,
     make_measurement_plot,
 )
+from pluto_sa.vsa.ui.iq_export import export_iq_recording
 
 
 _TRACE_COLOR = "y"
@@ -55,7 +58,6 @@ _PACKET_GROUP_GAP_S = 0.020
 _STREAM_BLOCK_DURATION_S = 0.050
 _STREAM_OVERLAP_S = 160e-6
 _SINGLE_PRETRIGGER_S = 1e-3
-_IQ_POWER_DISPLAY_FLOOR_DBM = -120.0
 _MAX_POWER_PLOT_POINTS = 25_000
 _STREAM_DISPLAY_BATCH_MS = 100
 _MODE_S_HEADER_FIELDS = (
@@ -663,6 +665,9 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         open_action = file_menu.addAction("Open IQ...")
         open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self._open_iq)
+        self.export_iq_action = file_menu.addAction("Export IQ Recording...")
+        self.export_iq_action.setEnabled(self.recording is not None)
+        self.export_iq_action.triggered.connect(self._export_iq_recording)
         self.export_packet_list_action = file_menu.addAction("Export Packet List...")
         self.export_packet_list_action.triggered.connect(self._export_packet_list)
         metadata_menu = file_menu.addMenu("Aircraft Database")
@@ -699,6 +704,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         bluetooth_action = mode_menu.addAction("Bluetooth Dedicated Analyzer...")
         bluetooth_action.triggered.connect(
             lambda: self.analysis_mode_requested.emit("bluetooth")
+        )
+        dect_action = mode_menu.addAction("DECT Dedicated Analyzer...")
+        dect_action.triggered.connect(
+            lambda: self.analysis_mode_requested.emit("dect")
         )
         mode_menu.addSeparator()
         adsb_action = mode_menu.addAction("ADS-B 1090ES")
@@ -763,6 +772,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.power_plot = make_measurement_plot(
             "IQ Power (dBm)", "Measurement Elapsed Time (ms)"
         )
+        configure_iq_power_plot(self.power_plot)
         self.ppm_plot = make_measurement_plot(
             "First / Second Chip Power (dB)", "Data Bit Index"
         )
@@ -1622,6 +1632,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             },
         )
         self.recording = view_recording
+        self.export_iq_action.setEnabled(True)
         self.result = result
         scan_wall = self._scan_started_wall_time or datetime.now().astimezone()
         elapsed_base_s = start_sample / view_recording.sample_rate_hz
@@ -1666,6 +1677,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             for index, payload in enumerate(pending):
                 is_latest = index == len(pending) - 1
                 self.recording = payload.recording
+                self.export_iq_action.setEnabled(True)
                 self.result = payload.result
                 self._display_result(
                     payload.result,
@@ -1764,6 +1776,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "ADS-B 1090ES", str(error))
             return
         self.recording = recording
+        self.export_iq_action.setEnabled(True)
         self.result = result
         started_at = capture_started_at or datetime.now().astimezone()
         self._display_result(
@@ -1779,6 +1792,9 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             f"{len(result.messages)} new messages, {valid} parity verified, "
             f"{len(self._packet_history)} total"
         )
+
+    def _export_iq_recording(self) -> None:
+        export_iq_recording(self, self.recording, self._preferences)
 
     def _clear_packet_history(self) -> None:
         self._packet_history.clear()
@@ -1815,9 +1831,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         if update_power_plot:
             self.power_plot.clear()
             time_ms = (elapsed_base_s + result.time_s) * 1e3
-            display_power = np.maximum(
-                result.power_dbfs + recording.dbfs_to_dbm_offset_db,
-                _IQ_POWER_DISPLAY_FLOOR_DBM,
+            display_power = limit_iq_power_display_dbm(
+                result.power_dbfs + recording.dbfs_to_dbm_offset_db
             )
             plot_time_ms, plot_power = _peak_envelope_decimate(
                 time_ms,

@@ -27,22 +27,32 @@ from pluto_sa.vsa.ui.display_processing import (
 )
 from pluto_sa.vsa.ui.capture_thread import PlutoSingleCaptureThread
 from pluto_sa.vsa.ui.measurement_chrome import (
+    DedicatedPacketAnalysisTree,
+    DedicatedSummaryTable,
     IQ_PLANE_LIMIT,
     FREQUENCY_CONSTELLATION_X_LIMIT,
     SymbolDensitySpread,
+    add_fsk_symbol_plot_menu,
     add_result_range_overlay,
+    add_symbol_density_menu,
     apply_dedicated_table_style,
+    configure_iq_power_plot,
+    dedicated_status_color,
     install_measurement_plot_menu,
+    limit_iq_power_display_dbm,
     make_measurement_dock,
     make_measurement_plot,
     plot_complex_symbol_distribution,
     plot_frequency_symbol_distribution,
     plot_trace_symbol_points,
+    plot_unit_circle,
+    set_iq_plane_range,
     set_frequency_constellation_x_lock,
     trace_bounds,
     view_all_traces,
 )
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
+from pluto_sa.vsa.ui.iq_export import export_iq_recording
 
 from .model import (
     BluetoothAnalysisProfile,
@@ -113,108 +123,18 @@ def infer_le_channel(center_frequency_hz: float) -> int:
     return 37
 
 
-class _PacketAnalysisTree(QtWidgets.QTreeWidget):
-    """Packet table that fits the dock while preserving full decoded values."""
-
-    _MINIMUM_WIDTHS = (120, 120, 105, 72, 55)
-    _EXPAND_COLUMNS = (0, 1)
-
+class _PacketAnalysisTree(DedicatedPacketAnalysisTree):
     def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        super().__init__(
+            ("Field", "Value", "Stream", "Bit Range", "Status"),
+            (120, 120, 105, 72, 55),
+            expand_columns=(0, 1),
+            parent=parent,
         )
-        self.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
-        apply_dedicated_table_style(self)
-        header = self.header()
-        for column in range(len(self._MINIMUM_WIDTHS)):
-            header.setSectionResizeMode(
-                column, QtWidgets.QHeaderView.ResizeMode.Fixed
-            )
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self._fit_columns()
-
-    def showEvent(self, event: QtGui.QShowEvent) -> None:
-        super().showEvent(event)
-        QtCore.QTimer.singleShot(0, self._fit_columns)
-
-    def _fit_columns(self) -> None:
-        width = max(1, self.viewport().width())
-        widths = list(self._MINIMUM_WIDTHS)
-        extra = max(0, width - sum(widths))
-        if extra:
-            value_extra = int(extra * 0.55)
-            widths[self._EXPAND_COLUMNS[0]] += value_extra
-            widths[self._EXPAND_COLUMNS[1]] += extra - value_extra
-        elif width < sum(widths):
-            # Preserve the semantic columns and shrink the two long-text
-            # columns together.  Their explicit line wrapping keeps all text
-            # visible without a horizontal scrollbar or ellipsis.
-            deficit = sum(widths) - width
-            for column in self._EXPAND_COLUMNS:
-                reduction = min(deficit, max(0, widths[column] - 80))
-                widths[column] -= reduction
-                deficit -= reduction
-        for column, column_width in enumerate(widths):
-            self.setColumnWidth(column, column_width)
-        self.doItemsLayout()
 
 
-class _SummaryTable(QtWidgets.QTableWidget):
-    """Four-column summary that wraps content into the available dock width."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(0, 4, parent)
-        self.setHorizontalHeaderLabels(("Test Item", "Value", "Limit", "Result"))
-        self.verticalHeader().setVisible(False)
-        self.verticalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
-        self.setWordWrap(True)
-        self.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
-        self.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
-        apply_dedicated_table_style(self)
-        header = self.horizontalHeader()
-        header.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
-        header.setMinimumSectionSize(1)
-        for column in range(self.columnCount()):
-            header.setSectionResizeMode(
-                column, QtWidgets.QHeaderView.ResizeMode.Fixed
-            )
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self._fit_columns()
-
-    def showEvent(self, event: QtGui.QShowEvent) -> None:
-        super().showEvent(event)
-        QtCore.QTimer.singleShot(0, self._fit_columns)
-
-    def _fit_columns(self) -> None:
-        width = max(1, self.viewport().width())
-        if width < 160:
-            widths = [width // 4] * 4
-        else:
-            result_width = min(90, max(64, round(width * 0.17)))
-            remaining = width - result_width
-            test_item_width = round(remaining * 0.35)
-            value_width = round(remaining * 0.27)
-            widths = [
-                test_item_width,
-                value_width,
-                remaining - test_item_width - value_width,
-                result_width,
-            ]
-        widths[-1] += width - sum(widths)
-        for column, column_width in enumerate(widths):
-            self.setColumnWidth(column, max(1, column_width))
-        self.resizeRowsToContents()
+class _SummaryTable(DedicatedSummaryTable):
+    pass
 
 
 class _BluetoothClassicAnalysisThread(QtCore.QThread):
@@ -351,6 +271,9 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.open_iq_action = file_menu.addAction("Open IQ...")
         self.open_iq_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         self.open_iq_action.triggered.connect(self._open_iq)
+        self.export_iq_action = file_menu.addAction("Export IQ Recording...")
+        self.export_iq_action.setEnabled(False)
+        self.export_iq_action.triggered.connect(self._export_iq_recording)
         file_menu.addSeparator()
         close_action = file_menu.addAction("Close")
         close_action.triggered.connect(self.application_close_requested.emit)
@@ -375,41 +298,27 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.symbols_action.setChecked(True)
         self.symbols_action.setShortcut(QtGui.QKeySequence("S"))
         self.symbols_action.toggled.connect(self._set_show_symbol_points)
-        self.density_action = display_menu.addAction("Symbol Plot Density")
-        self.density_action.setCheckable(True)
-        self.density_action.toggled.connect(self._set_symbol_density)
-        density_spread_menu = display_menu.addMenu("Density Spread")
-        self.density_spread_group = QtGui.QActionGroup(self)
-        self.density_spread_group.setExclusive(True)
-        self.density_spread_actions: dict[SymbolDensitySpread, QtGui.QAction] = {}
-        for spread in SymbolDensitySpread:
-            action = density_spread_menu.addAction(spread.value)
-            action.setCheckable(True)
-            action.setData(spread.value)
-            self.density_spread_group.addAction(action)
-            self.density_spread_actions[spread] = action
-            action.triggered.connect(
-                lambda _checked=False, selected=spread: (
-                    self._set_symbol_density_spread(selected)
-                )
-            )
-        self.density_spread_actions[self._symbol_density_spread].setChecked(True)
-        fsk_plot_menu = display_menu.addMenu("FSK Symbol Plot")
-        fsk_plot_group = QtGui.QActionGroup(self)
-        fsk_plot_group.setExclusive(True)
-        self.fsk_frequency_action = fsk_plot_menu.addAction(
-            "Constellation Frequency"
+        (
+            self.density_action,
+            self.density_spread_group,
+            self.density_spread_actions,
+        ) = add_symbol_density_menu(
+            display_menu,
+            self,
+            enabled=self._symbol_density,
+            spread=self._symbol_density_spread,
+            on_enabled=self._set_symbol_density,
+            on_spread=self._set_symbol_density_spread,
         )
-        self.fsk_phase_action = fsk_plot_menu.addAction("Phase Difference")
-        for action in (self.fsk_frequency_action, self.fsk_phase_action):
-            action.setCheckable(True)
-            fsk_plot_group.addAction(action)
-        self.fsk_frequency_action.setChecked(True)
-        self.fsk_frequency_action.triggered.connect(
-            lambda: self._set_fsk_symbol_plot_mode("Constellation Frequency")
-        )
-        self.fsk_phase_action.triggered.connect(
-            lambda: self._set_fsk_symbol_plot_mode("Phase Difference")
+        (
+            self.fsk_frequency_action,
+            self.fsk_phase_action,
+            self.fsk_plot_group,
+        ) = add_fsk_symbol_plot_menu(
+            display_menu,
+            self,
+            mode=self._fsk_symbol_plot_mode,
+            on_mode=self._set_fsk_symbol_plot_mode,
         )
         psk_plot_menu = display_menu.addMenu("PSK Symbol Plot")
         psk_plot_group = QtGui.QActionGroup(self)
@@ -442,6 +351,8 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         current.setCheckable(True)
         current.setChecked(True)
         current.setEnabled(False)
+        dect = menu.addAction("DECT Dedicated Analyzer...")
+        dect.triggered.connect(lambda: self.analysis_mode_requested.emit("dect"))
         adsb = menu.addAction("ADS-B 1090ES...")
         adsb.triggered.connect(lambda: self.analysis_mode_requested.emit("adsb1090"))
 
@@ -910,6 +821,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
 
     def _build_results(self) -> None:
         self.power_plot = make_measurement_plot("IQ Power (dBm)", "Time (ms)")
+        configure_iq_power_plot(self.power_plot)
         self.power_dock = self._dock("IQ Power", self.power_plot)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.power_dock)
         self.spectrum_plot = make_measurement_plot("Magnitude (dBm)", "Frequency (MHz)")
@@ -1030,6 +942,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         """Remember a Generic VSA result without repainting a hidden workspace."""
         self._session = session
         self._recording = session.recording
+        self.export_iq_action.setEnabled(self._recording is not None)
         if session.recording is not None and self.protocol_combo.currentData() == "bluetooth.le":
             channel = infer_le_channel(session.recording.center_frequency_hz)
             previous = self.channel_spin.blockSignals(True)
@@ -1102,10 +1015,15 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "IQ Import Error", str(error))
 
+    @QtCore.Slot()
+    def _export_iq_recording(self) -> None:
+        export_iq_recording(self, self._recording, self._preferences)
+
     def load_recording(self, recording: IQRecording) -> None:
         """Load one file/capture recording and start dedicated analysis."""
 
         self._recording = recording
+        self.export_iq_action.setEnabled(True)
         self._session = None
         self.center_spin.setValue(recording.center_frequency_hz / 1e6)
         if self.protocol_combo.currentData() == "bluetooth.le":
@@ -1678,7 +1596,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             power_time_offset_s = 0.0
         self.power_plot.plot(
             (power_time_s + power_time_offset_s) * 1e3,
-            power_dbm,
+            limit_iq_power_display_dbm(power_dbm),
             pen=_TRACE,
         )
         selected_ranges: list[tuple[float, float]] = []
@@ -2131,17 +2049,11 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
 
     @staticmethod
     def _set_iq_plane_range(plot: pg.PlotWidget) -> None:
-        plot.setXRange(-1.25, 1.25, padding=0.0)
-        plot.setYRange(-1.25, 1.25, padding=0.0)
+        set_iq_plane_range(plot)
 
     @staticmethod
     def _plot_unit_circle(plot: pg.PlotWidget) -> None:
-        angle = np.linspace(0.0, 2.0 * np.pi, 361)
-        plot.plot(
-            np.cos(angle),
-            np.sin(angle),
-            pen=pg.mkPen((120, 120, 120, 110), width=1),
-        )
+        plot_unit_circle(plot)
 
     def _plot_frequency_symbols(
         self, plot: pg.PlotWidget, frequency_khz: np.ndarray
@@ -2197,16 +2109,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 self.summary_table.setItem(
                     row, column, QtWidgets.QTableWidgetItem(str(value))
                 )
-            result_color = {
-                "PASS": "#43f5a5",
-                "FAIL": "#ff5b5b",
-                "MEASURING": "#ffd166",
-                "N/A": "#a0a0a0",
-                "\N{EM DASH}": "#a0a0a0",
-            }.get(metric.result)
+            result_color = dedicated_status_color(metric.result)
             if result_color is not None:
                 self.summary_table.item(row, 3).setForeground(
-                    QtGui.QBrush(QtGui.QColor(result_color))
+                    QtGui.QBrush(result_color)
                 )
         self.summary_table.resizeRowsToContents()
 
@@ -2244,9 +2150,9 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             QtCore.Qt.AlignmentFlag.AlignLeft
             | QtCore.Qt.AlignmentFlag.AlignVCenter,
         )
-        color = {FieldStatus.VALID: "#43f5a5", FieldStatus.INVALID: "#ff5b5b", FieldStatus.WARNING: "#ffd166"}.get(field.status)
+        color = dedicated_status_color(field.status)
         if color:
-            item.setForeground(4, QtGui.QBrush(QtGui.QColor(color)))
+            item.setForeground(4, QtGui.QBrush(color))
         for column, text in enumerate(
             (
                 field.name,

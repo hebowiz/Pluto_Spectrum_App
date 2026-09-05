@@ -9,6 +9,7 @@ from pluto_common import short_pluto_identity
 from pluto_sa.standards.adsb1090.ui import ADSB1090Window
 from pluto_sa.vsa.pluto_source import PlutoLiveSource
 from pluto_sa.vsa.protocol_modes.bluetooth import BluetoothAnalyzerWindow
+from pluto_sa.vsa.protocol_modes.dect import DectAnalyzerWindow
 from pluto_sa.vsa.ui.main_window import VSAWindow
 
 
@@ -38,9 +39,11 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         self.bluetooth_workspace = BluetoothAnalyzerWindow(
             pluto_source=self._pluto_source,
         )
+        self.dect_workspace = DectAnalyzerWindow(pluto_source=self._pluto_source)
         for workspace in (
             self.generic_workspace,
             self.bluetooth_workspace,
+            self.dect_workspace,
             self.adsb1090_workspace,
         ):
             workspace.setWindowFlags(QtCore.Qt.WindowType.Widget)
@@ -69,6 +72,9 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         bluetooth = self.bluetooth_workspace.shutdown_busy_reason()
         if bluetooth is not None:
             return bluetooth
+        dect = self.dect_workspace.shutdown_busy_reason()
+        if dect is not None:
+            return dect
         return None
 
     @QtCore.Slot(str)
@@ -76,6 +82,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         target = {
             "generic": self.generic_workspace,
             "bluetooth": self.bluetooth_workspace,
+            "dect": self.dect_workspace,
             "adsb1090": self.adsb1090_workspace,
         }.get(str(mode))
         if target is None:
@@ -97,6 +104,8 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 target.analyze_recording(recording)
         elif target is self.bluetooth_workspace:
             target.set_session(self.generic_workspace.session)
+        elif target is self.dect_workspace:
+            target.set_session(self.generic_workspace.session)
         self._stack.setCurrentWidget(target)
         self._update_window_title(target)
 
@@ -110,6 +119,10 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self.setWindowTitle(
                 f"Pluto VSA - Bluetooth Dedicated Analyzer [RX: {identity}]"
             )
+        elif target is self.dect_workspace:
+            self.setWindowTitle(
+                f"Pluto VSA - DECT Dedicated Analyzer [RX: {identity}]"
+            )
         else:
             self.setWindowTitle(f"Pluto VSA - ADS-B 1090ES [RX: {identity}]")
 
@@ -118,6 +131,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         target = self.generic_workspace._selected_pluto_target()
         self.adsb1090_workspace.set_pluto_target(target)
         self.bluetooth_workspace.set_pluto_target(target)
+        self.dect_workspace.set_pluto_target(target)
         current = self._stack.currentWidget()
         if current is not None:
             self._update_window_title(current)
@@ -129,11 +143,16 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 self.bluetooth_workspace.set_session(session)
             else:
                 self.bluetooth_workspace.stage_session(session)
+            if self._stack.currentWidget() is self.dect_workspace:
+                self.dect_workspace.set_session(session)
+            else:
+                self.dect_workspace.stage_session(session)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._shutdown_requested = True
         self.generic_workspace.request_shutdown()
         self.bluetooth_workspace.request_shutdown()
+        self.dect_workspace.request_shutdown()
         self.adsb1090_workspace.request_shutdown()
         busy = self._busy_reason()
         if busy is not None:
@@ -144,6 +163,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self._shutdown_finalized = True
             self.adsb1090_workspace.finalize_shutdown()
             self.bluetooth_workspace.finalize_shutdown()
+            self.dect_workspace.finalize_shutdown()
             self.generic_workspace.finalize_shutdown()
             self._pluto_source.close()
         event.accept()

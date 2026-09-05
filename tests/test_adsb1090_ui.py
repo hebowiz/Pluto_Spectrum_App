@@ -59,6 +59,7 @@ def test_adsb_workspace_starts_without_iq() -> None:
     window = ADSB1090Window()
     try:
         assert window.recording is None
+        assert not window.export_iq_action.isEnabled()
         assert window.packet_table.rowCount() == 0
         assert "ADS-B 1090ES" in window.windowTitle()
         assert window.preamble_snr_spin.value() == pytest.approx(5.0)
@@ -174,6 +175,8 @@ def test_adsb_workspace_displays_saved_multi_packet_fixture() -> None:
     path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
     window = ADSB1090Window(FileIQSource.load(path))
     try:
+        assert window.export_iq_action.isEnabled()
+        assert window.export_iq_action.text() == "Export IQ Recording..."
         assert window.packet_table.rowCount() == 4
         assert window.packet_table.item(0, 5).text() == "4840D6"
         assert window.packet_table.item(0, 7).text() == "OK"

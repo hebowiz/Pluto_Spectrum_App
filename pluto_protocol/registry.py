@@ -46,10 +46,12 @@ def default_registry() -> ProtocolRegistry:
     from pluto_protocol.bluetooth.br_edr import BluetoothBREDRDecoder
     from pluto_protocol.bluetooth.hdt import BluetoothHDTDecoder
     from pluto_protocol.bluetooth.le import BluetoothLEDecoder
+    from pluto_protocol.dect.classic import DectClassicDecoder
     registry = ProtocolRegistry()
     registry.register(BluetoothBREDRDecoder())
     registry.register(BluetoothHDTDecoder())
     registry.register(BluetoothLEDecoder())
+    registry.register(DectClassicDecoder())
     return registry
 
 

@@ -22,10 +22,46 @@ FREQUENCY_CONSTELLATION_DENSITY_HALF_WIDTH = 0.22
 FREQUENCY_CONSTELLATION_X_LIMIT = 1.0
 TRACE_SYMBOL_SIZE = 5.5
 DEDICATED_TABLE_GRID_COLOR = "#606060"
+IQ_POWER_DISPLAY_FLOOR_DBM = -120.0
+DEDICATED_STATUS_COLORS = {
+    "PASS": "#43f5a5",
+    "FAIL": "#ff5b5b",
+    "MEASURING": "#ffd166",
+    "VALID": "#43f5a5",
+    "INVALID": "#ff5b5b",
+    "WARNING": "#ffd166",
+    "N/A": "#a0a0a0",
+    "—": "#a0a0a0",
+}
 
 
 class CenteredDedicatedTableDelegate(QtWidgets.QStyledItemDelegate):
     """Center cell text consistently across dedicated-mode tables."""
+
+    @staticmethod
+    def _text_layout(
+        text: str,
+        font: QtGui.QFont,
+        width: float,
+    ) -> tuple[QtGui.QTextLayout, float]:
+        layout = QtGui.QTextLayout(text, font)
+        text_option = QtGui.QTextOption()
+        text_option.setWrapMode(
+            QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+        )
+        text_option.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.setTextOption(text_option)
+        height = 0.0
+        layout.beginLayout()
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(max(1.0, float(width)))
+            line.setPosition(QtCore.QPointF(0.0, height))
+            height += line.height()
+        layout.endLayout()
+        return layout, height
 
     def initStyleOption(
         self,
@@ -34,6 +70,78 @@ class CenteredDedicatedTableDelegate(QtWidgets.QStyledItemDelegate):
     ) -> None:
         super().initStyleOption(option, index)
         option.displayAlignment = QtCore.Qt.AlignmentFlag.AlignCenter
+        option.features |= QtWidgets.QStyleOptionViewItem.ViewItemFeature.WrapText
+
+    def paint(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        """Paint unbroken values (for example long Hex) as real wrapped text."""
+
+        styled = QtWidgets.QStyleOptionViewItem(option)
+        self.initStyleOption(styled, index)
+        text = styled.text
+        style = styled.widget.style() if styled.widget is not None else QtWidgets.QApplication.style()
+        text_rect = style.subElementRect(
+            QtWidgets.QStyle.SubElement.SE_ItemViewItemText,
+            styled,
+            styled.widget,
+        ).adjusted(2, 1, -2, -1)
+        styled.text = ""
+        style.drawControl(
+            QtWidgets.QStyle.ControlElement.CE_ItemViewItem,
+            styled,
+            painter,
+            styled.widget,
+        )
+        if not text or text_rect.width() <= 0 or text_rect.height() <= 0:
+            return
+        layout, height = self._text_layout(text, styled.font, text_rect.width())
+        selected = bool(
+            styled.state & QtWidgets.QStyle.StateFlag.State_Selected
+        )
+        enabled = bool(styled.state & QtWidgets.QStyle.StateFlag.State_Enabled)
+        group = (
+            QtGui.QPalette.ColorGroup.Normal
+            if enabled
+            else QtGui.QPalette.ColorGroup.Disabled
+        )
+        role = (
+            QtGui.QPalette.ColorRole.HighlightedText
+            if selected
+            else QtGui.QPalette.ColorRole.Text
+        )
+        painter.save()
+        painter.setPen(styled.palette.color(group, role))
+        top = text_rect.top() + max(0.0, (text_rect.height() - height) / 2.0)
+        painter.setClipRect(text_rect)
+        layout.draw(painter, QtCore.QPointF(text_rect.left(), top))
+        painter.restore()
+
+    def sizeHint(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> QtCore.QSize:
+        """Return a row height that preserves wrapped dedicated-table text."""
+
+        base = super().sizeHint(option, index)
+        view = self.parent()
+        if not isinstance(view, QtWidgets.QAbstractItemView):
+            return base
+        width = max(8, int(view.columnWidth(index.column())) - 8)
+        if isinstance(view, QtWidgets.QTreeView) and index.column() == 0:
+            depth = 1
+            parent = index.parent()
+            while parent.isValid():
+                depth += 1
+                parent = parent.parent()
+            width = max(8, width - depth * view.indentation())
+        text = str(index.data(QtCore.Qt.ItemDataRole.DisplayRole) or "")
+        _layout, height = self._text_layout(text, option.font, width)
+        return QtCore.QSize(base.width(), max(base.height(), int(np.ceil(height)) + 6))
 
 
 def apply_dedicated_table_style(
@@ -64,12 +172,187 @@ def apply_dedicated_table_style(
     header.setDefaultAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
 
 
+def dedicated_status_color(status: object) -> QtGui.QColor | None:
+    """Return the status color shared by all dedicated analyzer tables."""
+
+    text = str(getattr(status, "value", status)).strip().upper()
+    key = "MEASURING" if text.startswith("MEASURING") else text
+    value = DEDICATED_STATUS_COLORS.get(key)
+    return None if value is None else QtGui.QColor(value)
+
+
+class DedicatedSummaryTable(QtWidgets.QTableWidget):
+    """Four-column dedicated summary fitted to its dock without ellipsis."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(0, 4, parent)
+        self.setHorizontalHeaderLabels(("Test Item", "Value", "Limit", "Result"))
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.setWordWrap(True)
+        self.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        apply_dedicated_table_style(self)
+        header = self.horizontalHeader()
+        header.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        header.setMinimumSectionSize(1)
+        for column in range(self.columnCount()):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Fixed)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._fit_columns()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self._fit_columns)
+
+    def _fit_columns(self) -> None:
+        width = max(1, self.viewport().width())
+        if width < 160:
+            widths = [width // 4] * 4
+        else:
+            result_width = min(90, max(64, round(width * 0.17)))
+            remaining = width - result_width
+            item_width = round(remaining * 0.35)
+            value_width = round(remaining * 0.27)
+            widths = [
+                item_width,
+                value_width,
+                remaining - item_width - value_width,
+                result_width,
+            ]
+        widths[-1] += width - sum(widths)
+        for column, column_width in enumerate(widths):
+            self.setColumnWidth(column, max(1, column_width))
+        self.resizeRowsToContents()
+
+
+class DedicatedPacketAnalysisTree(QtWidgets.QTreeWidget):
+    """Dedicated packet table that preserves complete cell text."""
+
+    def __init__(
+        self,
+        headers: tuple[str, ...],
+        minimum_widths: tuple[int, ...],
+        *,
+        expand_columns: tuple[int, ...] = (0, 1),
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        if len(headers) != len(minimum_widths):
+            raise ValueError("headers and minimum_widths must have equal length")
+        self._minimum_widths = tuple(int(value) for value in minimum_widths)
+        self._expand_columns = tuple(int(value) for value in expand_columns)
+        self.setColumnCount(len(headers))
+        self.setHeaderLabels(headers)
+        self.setWordWrap(True)
+        self.setUniformRowHeights(False)
+        self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        apply_dedicated_table_style(self)
+        header = self.header()
+        header.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        for column in range(len(headers)):
+            header.setSectionResizeMode(column, QtWidgets.QHeaderView.ResizeMode.Fixed)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._fit_columns()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self._fit_columns)
+
+    def _fit_columns(self) -> None:
+        width = max(1, self.viewport().width())
+        widths = list(self._minimum_widths)
+        extra = max(0, width - sum(widths))
+        if extra and self._expand_columns:
+            portion, remainder = divmod(extra, len(self._expand_columns))
+            for offset, column in enumerate(self._expand_columns):
+                widths[column] += portion + (1 if offset < remainder else 0)
+        elif width < sum(widths) and self._expand_columns:
+            deficit = sum(widths) - width
+            for column in self._expand_columns:
+                reduction = min(deficit, max(0, widths[column] - 80))
+                widths[column] -= reduction
+                deficit -= reduction
+        for column, column_width in enumerate(widths):
+            self.setColumnWidth(column, max(1, column_width))
+        self.doItemsLayout()
+
+
 class SymbolDensitySpread(StrEnum):
     """Shared density-kernel width for every VSA symbol-plot mode."""
 
     NONE = "None"
     MEDIUM = "Medium"
     MAXIMUM = "Maximum"
+
+
+def add_symbol_density_menu(
+    menu: QtWidgets.QMenu,
+    owner: QtCore.QObject,
+    *,
+    enabled: bool,
+    spread: SymbolDensitySpread,
+    on_enabled: Callable[[bool], None],
+    on_spread: Callable[[SymbolDensitySpread], None],
+) -> tuple[QtGui.QAction, QtGui.QActionGroup, dict[SymbolDensitySpread, QtGui.QAction]]:
+    """Install the density controls shared by every VSA Symbol Plot."""
+
+    density_action = menu.addAction("Symbol Plot Density")
+    density_action.setCheckable(True)
+    density_action.setChecked(bool(enabled))
+    density_action.toggled.connect(on_enabled)
+    spread_menu = menu.addMenu("Density Spread")
+    spread_group = QtGui.QActionGroup(owner)
+    spread_group.setExclusive(True)
+    spread_actions: dict[SymbolDensitySpread, QtGui.QAction] = {}
+    for candidate in SymbolDensitySpread:
+        action = spread_menu.addAction(candidate.value)
+        action.setCheckable(True)
+        action.setData(candidate.value)
+        spread_group.addAction(action)
+        spread_actions[candidate] = action
+        action.triggered.connect(
+            lambda _checked=False, selected=candidate: on_spread(selected)
+        )
+    spread_actions[spread].setChecked(True)
+    return density_action, spread_group, spread_actions
+
+
+def add_fsk_symbol_plot_menu(
+    menu: QtWidgets.QMenu,
+    owner: QtCore.QObject,
+    *,
+    mode: str,
+    on_mode: Callable[[str], None],
+) -> tuple[QtGui.QAction, QtGui.QAction, QtGui.QActionGroup]:
+    """Install the common frequency/phase FSK Symbol Plot selector."""
+
+    fsk_menu = menu.addMenu("FSK Symbol Plot")
+    group = QtGui.QActionGroup(owner)
+    group.setExclusive(True)
+    frequency_action = fsk_menu.addAction("Constellation Frequency")
+    phase_action = fsk_menu.addAction("Phase Difference")
+    for action in (frequency_action, phase_action):
+        action.setCheckable(True)
+        group.addAction(action)
+    frequency_action.setChecked(mode == "Constellation Frequency")
+    phase_action.setChecked(mode == "Phase Difference")
+    frequency_action.triggered.connect(
+        lambda _checked=False: on_mode("Constellation Frequency")
+    )
+    phase_action.triggered.connect(
+        lambda _checked=False: on_mode("Phase Difference")
+    )
+    return frequency_action, phase_action, group
 
 
 _SYMBOL_DENSITY_SIGMA_BINS = {
@@ -146,6 +429,39 @@ def make_measurement_plot(left: str, bottom: str) -> pg.PlotWidget:
     plot.setDownsampling(auto=True, mode="peak")
     plot.setClipToView(True)
     return plot
+
+
+def configure_iq_power_plot(plot: pg.PlotWidget) -> None:
+    """Apply the shared finite IQ-power display floor."""
+
+    plot.getViewBox().setLimits(yMin=IQ_POWER_DISPLAY_FLOOR_DBM)
+
+
+def packet_time_view_range_ms(
+    *,
+    packet_start_ms: float,
+    packet_stop_ms: float,
+    capture_stop_ms: float,
+    minimum_margin_ms: float = 0.0,
+) -> tuple[float, float]:
+    """Return the common packet-plus-context range for time-domain plots."""
+
+    duration_ms = max(0.0, float(packet_stop_ms) - float(packet_start_ms))
+    margin_ms = max(0.10 * duration_ms, float(minimum_margin_ms), 1e-9)
+    lower = max(0.0, float(packet_start_ms) - margin_ms)
+    upper = min(float(capture_stop_ms), float(packet_stop_ms) + margin_ms)
+    if upper <= lower:
+        upper = min(float(capture_stop_ms), lower + max(margin_ms, 1e-9))
+    return lower, upper
+
+
+def limit_iq_power_display_dbm(values: np.ndarray) -> np.ndarray:
+    """Clamp display-only IQ power without changing measurement data."""
+
+    display = np.asarray(values, dtype=np.float64).copy()
+    display[~np.isfinite(display)] = IQ_POWER_DISPLAY_FLOOR_DBM
+    np.maximum(display, IQ_POWER_DISPLAY_FLOOR_DBM, out=display)
+    return display
 
 
 def make_measurement_dock(
@@ -453,6 +769,24 @@ def plot_trace_symbol_points(
         symbolBrush=pg.mkBrush(70, 255, 145, 230),
         symbolPen=pg.mkPen(10, 35, 20, 230, width=1),
     )
+
+
+def plot_unit_circle(plot: pg.PlotWidget) -> None:
+    """Draw the common IQ-plane unit reference circle."""
+
+    angle = np.linspace(0.0, 2.0 * np.pi, 361)
+    plot.plot(
+        np.cos(angle),
+        np.sin(angle),
+        pen=pg.mkPen((120, 120, 120, 110), width=1),
+    )
+
+
+def set_iq_plane_range(plot: pg.PlotWidget) -> None:
+    """Apply the common fixed initial IQ-plane range."""
+
+    plot.setXRange(-IQ_PLANE_LIMIT, IQ_PLANE_LIMIT, padding=0.0)
+    plot.setYRange(-IQ_PLANE_LIMIT, IQ_PLANE_LIMIT, padding=0.0)
 
 
 def set_frequency_constellation_x_lock(

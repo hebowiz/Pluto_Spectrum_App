@@ -54,6 +54,30 @@ from pluto_vsg.profiles import (
 )
 
 
+def test_bluetooth_dedicated_exposes_common_iq_export_action(tmp_path) -> None:
+    pg.mkQApp("Bluetooth dedicated IQ export action test")
+    recording = IQRecording(
+        iq=np.ones(128, dtype=np.complex64),
+        sample_rate_hz=8_000_000.0,
+        center_frequency_hz=2_440_000_000.0,
+    )
+    window = BluetoothAnalyzerWindow(
+        preferences=QtCore.QSettings(
+            str(tmp_path / "bluetooth-export.ini"),
+            QtCore.QSettings.Format.IniFormat,
+        )
+    )
+    try:
+        assert not window.export_iq_action.isEnabled()
+        window.stage_session(VSASession(recording=recording))
+        assert window.export_iq_action.isEnabled()
+        assert window.export_iq_action.text() == "Export IQ Recording..."
+    finally:
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+
+
 def _hdt_recording(rate: HDTRate, payload_length: int = 64):
     base = bluetooth_hdt_project(rate)
     settings = replace(

@@ -25,7 +25,6 @@ from pluto_sa.vsa.mapping import (
     psk_constellation,
     reverse_symbol_bits,
 )
-from pluto_sa.vsa.dc import apply_robust_dc_removal
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, ModulationKind, SignalDescription
 from pluto_sa.vsa.pattern import (
     BitOrdering,
@@ -64,10 +63,13 @@ from pluto_sa.vsa.pluto_source import (
 )
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 from pluto_sa.vsa.ui.measurement_chrome import (
+    IQ_POWER_DISPLAY_FLOOR_DBM,
     CenteredLabelAxisItem as _CenteredLabelAxisItem,
     FixedInteractionViewBox as _FixedInteractionViewBox,
     add_result_range_overlay,
+    configure_iq_power_plot,
     install_measurement_plot_menu,
+    limit_iq_power_display_dbm,
     make_measurement_dock,
     make_measurement_plot,
     padded_range,
@@ -80,6 +82,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     view_all_traces,
 )
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
+from pluto_sa.vsa.ui.iq_export import export_iq_recording
 from pluto_sa.vsa.ui.display_processing import (
     constellation_display_symbols as _shared_constellation_display_symbols,
     physical_constellation_display_symbols as _shared_physical_constellation_display_symbols,
@@ -109,7 +112,7 @@ _STARTUP_CONFIG_VERSION = 1
 _SYMBOL_TABLE_EXPORT_SCHEMA = "pluto-vsa-symbol-table"
 _SYMBOL_TABLE_EXPORT_VERSION = 1
 _TRACE_COLOR = "y"
-_IQ_POWER_DISPLAY_FLOOR_DBM = -120.0
+_IQ_POWER_DISPLAY_FLOOR_DBM = IQ_POWER_DISPLAY_FLOOR_DBM
 _IQ_PLANE_LIMIT = 1.25
 _TRACE_SYMBOL_SIZE = 5.5
 _SYMBOL_PLOT_FLAT_SIZE = 6.0
@@ -142,10 +145,7 @@ def _limit_iq_power_display_dbm(values: np.ndarray) -> np.ndarray:
     This is deliberately a display-only guard. Triggering, result summary
     calculations, and exported IQ continue to use the original samples.
     """
-    display = np.asarray(values, dtype=np.float64).copy()
-    display[~np.isfinite(display)] = _IQ_POWER_DISPLAY_FLOOR_DBM
-    np.maximum(display, _IQ_POWER_DISPLAY_FLOOR_DBM, out=display)
-    return display
+    return limit_iq_power_display_dbm(values)
 
 
 def _peak_decimate_xy(
@@ -879,6 +879,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         bluetooth_action.triggered.connect(
             lambda: self.analysis_mode_requested.emit("bluetooth")
         )
+        dect_action = mode_menu.addAction("DECT Dedicated Analyzer...")
+        dect_action.triggered.connect(
+            lambda: self.analysis_mode_requested.emit("dect")
+        )
         adsb_action = mode_menu.addAction("ADS-B 1090ES...")
         adsb_action.triggered.connect(
             lambda: self.analysis_mode_requested.emit("adsb1090")
@@ -914,9 +918,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _build_results(self) -> None:
         self.zero_span_plot = self._make_plot("Capture Power", "IQ Power (dBm)", "Time (ms)")
-        self.zero_span_plot.getViewBox().setLimits(
-            yMin=_IQ_POWER_DISPLAY_FLOOR_DBM
-        )
+        configure_iq_power_plot(self.zero_span_plot)
         self.zero_span_dock = self._dock("IQ Power", self.zero_span_plot)
         self.addDockWidget(
             QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.zero_span_dock
@@ -2125,47 +2127,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
 
     def _export_iq_recording(self) -> None:
-        recording = self.session.recording
-        if recording is None:
-            self.statusBar().showMessage("No IQ recording is available to export")
-            return
-        processing, accepted = QtWidgets.QInputDialog.getItem(
+        export_iq_recording(
             self,
-            "Export IQ Recording",
-            "IQ processing:",
-            (
-                "Raw capture",
-                "Software DC removed (full-rate capture)",
-            ),
-            0,
-            False,
+            self.session.recording,
+            self._preferences,
         )
-        if not accepted:
-            return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Export IQ Recording",
-            self._last_directory("iq"),
-            "NumPy IQ recording (*.npz)",
-        )
-        if not path:
-            return
-        path = self._with_suffix(path, ".npz")
-        self._remember_directory("iq", path)
-        try:
-            remove_dc = processing.startswith("Software DC removed")
-            exported = (
-                apply_robust_dc_removal(recording)
-                if remove_dc
-                else recording
-            )
-            FileIQSource.save_npz(path, exported)
-            mode = "software DC removed" if remove_dc else "raw"
-            self.statusBar().showMessage(
-                f"IQ recording exported ({mode}) - {Path(path).name}"
-            )
-        except (OSError, ValueError) as error:
-            QtWidgets.QMessageBox.critical(self, "IQ Export Error", str(error))
 
     def _meas_config_values(self) -> dict[str, object]:
         return {
