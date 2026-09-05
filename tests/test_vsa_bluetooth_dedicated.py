@@ -663,6 +663,85 @@ def test_real_classic_fixtures_preserve_sync_decode_and_symbol_products(
         assert measurement.metrics["omega0_abs_worst_hz"] < 10_000.0
 
 
+@pytest.mark.parametrize(
+    ("filename", "whitening", "expected_packet"),
+    (
+        ("bluetooth_2dh1_prbs9_16msps.npz", True, "2-DH1"),
+        ("bluetooth_3dh1_prbs9_16msps.npz", True, "3-DH1"),
+        ("PLUTO_VSG_SMCV100B_2DH1.npz", False, "2-DH1"),
+    ),
+)
+def test_edr_sig_devm_uses_reference_plus_50_physical_symbols_and_shared_centers(
+    filename: str,
+    whitening: bool,
+    expected_packet: str,
+) -> None:
+    recording = FileIQSource.load(Path(__file__).with_name("fixtures") / filename)
+    result = analyze_bluetooth_classic_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        lap=0xC6967E,
+        uap=0x6B,
+        clock_6_1=0x2B,
+        whitening_enabled=whitening,
+        result_length=4096,
+    )
+    assert result.packet.packet_type == expected_packet
+    assert result.packet.integrity.crc_valid is True
+    session = result.metadata["analysis_session"]
+    pattern = session.pattern_result
+    measurement = result.metadata["rf_measurements"][0]
+    sps = recording.sample_rate_hz / session.signal.symbol_rate_hz
+
+    sync_center = float(result.metadata["edr_sync_first_symbol_center_sample"])
+    reference_center = float(result.metadata["edr_reference_symbol_center_sample"])
+    payload_center = float(result.metadata["edr_payload_first_symbol_center_sample"])
+    trailer_center = float(result.metadata["edr_trailer_first_symbol_center_sample"])
+    expected_sync_center = (
+        float(result.metadata["analysis_sample_offset"])
+        + float(pattern.symbol_time_s[0]) * recording.sample_rate_hz
+    )
+    assert abs(sync_center - expected_sync_center) <= 0.5 * sps
+    assert reference_center == pytest.approx(sync_center - sps, abs=1e-6)
+    assert payload_center == pytest.approx(sync_center + 10 * sps, abs=1e-6)
+    assert trailer_center == pytest.approx(
+        sync_center + (pattern.decoded_symbols.size - 2) * sps,
+        abs=1e-6,
+    )
+
+    block_centers = measurement.arrays["block_physical_symbol_center_samples"]
+    corrected = measurement.arrays["block_corrected_received_symbols"]
+    references = measurement.arrays["block_reference_symbols"]
+    errors = measurement.arrays["block_differential_error_vectors"]
+    assert block_centers.shape[1] == 51
+    assert corrected.shape == references.shape == block_centers.shape
+    assert errors.shape == (block_centers.shape[0], 50)
+    assert block_centers[0, 0] == pytest.approx(
+        reference_center - result.metadata["recording_sample_offset"], abs=1e-6
+    )
+    assert block_centers[0, 1] == pytest.approx(
+        sync_center - result.metadata["recording_sample_offset"], abs=1e-6
+    )
+    assert block_centers[0, 11] == pytest.approx(
+        payload_center - result.metadata["recording_sample_offset"], abs=1e-6
+    )
+    np.testing.assert_allclose(np.diff(block_centers, axis=1), sps, atol=1e-5)
+    np.testing.assert_allclose(errors, np.diff(corrected * np.conj(references), axis=1))
+    recalculated_rms = np.sqrt(
+        np.sum(np.abs(errors) ** 2, axis=1)
+        / np.sum(np.abs(corrected[:, 1:] * np.conj(references[:, 1:])) ** 2, axis=1)
+    )
+    np.testing.assert_allclose(
+        recalculated_rms,
+        measurement.arrays["block_rms_devm"],
+        rtol=1e-10,
+        atol=1e-12,
+    )
+    assert measurement.metadata["reference_source"] == (
+        "known Sync plus decoded/re-encoded packet"
+    )
+
+
 @pytest.mark.parametrize("filename", ("LE1M_FSK_error_raw.npz", "LE1M_FSK_error.npz"))
 def test_real_le_rf_test_fixtures_preserve_sync_and_symbol_products(filename: str) -> None:
     recording = FileIQSource.load(Path(__file__).with_name("fixtures") / filename)
@@ -1969,6 +2048,14 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(tmp_path) -> N
         window._meas_config_dialog.hide()
         window._recording = result.metadata["analysis_session"].recording
         window._classic_analysis_ready((result,))
+        fsk_trace, fsk_markers = window.fsk_modulation_plot.listDataItems()[:2]
+        np.testing.assert_allclose(
+            fsk_markers.yData,
+            np.interp(fsk_markers.xData, fsk_trace.xData, fsk_trace.yData),
+            atol=1e-9,
+        )
+        fsk_symbol_values = window.fsk_symbol_plot.listDataItems()[0].yData
+        np.testing.assert_array_equal(fsk_symbol_values, fsk_markers.yData)
         assert window.modulation_tabs.isTabVisible(1)
         assert window.symbol_tabs.isTabVisible(1)
         assert len(window.spectrum_plot.listDataItems()) == 2
@@ -2034,6 +2121,10 @@ def test_bluetooth_config_is_separate_and_restored(tmp_path) -> None:
         first._set_symbol_density(True)
         first._set_symbol_density_spread(SymbolDensitySpread.MEDIUM)
         first._set_fsk_symbol_plot_mode("Phase Difference")
+        first.channel_filter_check.setChecked(True)
+        first.analysis_bandwidth_spin.setValue(1.75)
+        first.lo_offset_check.setChecked(True)
+        first.lo_offset_spin.setValue(1.6)
         first._save_startup_meas_config()
     finally:
         first.close()
@@ -2052,6 +2143,13 @@ def test_bluetooth_config_is_separate_and_restored(tmp_path) -> None:
         assert second._symbol_density_spread is SymbolDensitySpread.MEDIUM
         assert second.config_density_spread.currentText() == "Medium"
         assert second._fsk_symbol_plot_mode == "Phase Difference"
+        assert second.channel_filter_check.isChecked()
+        assert second.analysis_bandwidth_spin.value() == 1.75
+        assert second.lo_offset_check.isChecked()
+        assert second.lo_offset_spin.value() == 1.6
+        capture = second._capture_settings()
+        assert capture.analysis_bandwidth_hz == 1_750_000.0
+        assert capture.lo_offset_hz == 1_600_000.0
     finally:
         second.close()
         second.deleteLater()

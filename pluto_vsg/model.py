@@ -14,6 +14,7 @@ class StandardProfile(StrEnum):
     BLUETOOTH_LE = "Bluetooth LE"
     BLUETOOTH_HDT = "Bluetooth HDT"
     WIFI = "Wi-Fi"
+    DECT = "DECT"
 
 
 class DataSourceKind(StrEnum):
@@ -47,6 +48,19 @@ class PayloadSourceKind(StrEnum):
     FIXED = "Fixed"
     PATTERN = "Pattern"
     PRBS9 = "PRBS-9"
+
+
+class DectDirection(StrEnum):
+    RFP = "RFP"
+    PP = "PP"
+
+
+class DectPacketType(StrEnum):
+    P00 = "P00"
+    P32 = "P32"
+    P32Z = "P32Z"
+    P80 = "P80"
+    P80Z = "P80Z"
 
 
 class BluetoothPacketKind(StrEnum):
@@ -226,6 +240,34 @@ class BluetoothHDTSettings:
     post_idle_symbols: int = 16
 
 
+@dataclass(frozen=True)
+class DectSettings:
+    """Editable Classic DECT air fields and GFSK RF settings."""
+
+    direction: DectDirection = DectDirection.RFP
+    packet_type: DectPacketType = DectPacketType.P32
+    prolonged_preamble: bool = False
+    preamble_bits: str = "1010101010101010"
+    sync_word_bits: str = "1110100110001010"
+    a_header_bits: str = "00000000"
+    a_tail_bits: str = "0000000000000000000000000000000000000000"
+    r_crc_auto: bool = True
+    r_crc_bits: str = "0000000000000000"
+    b_field_source: PayloadSourceKind = PayloadSourceKind.PATTERN
+    b_field_pattern: str = "00001111"
+    x_crc_auto: bool = True
+    x_field_bits: str = "0000"
+    z_repeat_auto: bool = True
+    z_field_bits: str = "0000"
+    carrier_plan_id: str = "etsi_1880"
+    carrier_channel: str = "0"
+    carrier_frequency_offset_hz: float = 0.0
+    frequency_deviation_hz: float = 288_000.0
+    gaussian_bt: float = 0.5
+    pre_idle_symbols: int = 16
+    post_idle_symbols: int = 0
+
+
 class WiFiPHYFormat(StrEnum):
     NON_HT_OFDM = "Non-HT OFDM"
 
@@ -284,6 +326,7 @@ class WaveformProject:
     bluetooth_le: BluetoothLESettings | None = None
     bluetooth_hdt: BluetoothHDTSettings | None = None
     wifi: WiFiSettings | None = None
+    dect: DectSettings | None = None
 
 
 @dataclass(frozen=True)
@@ -311,7 +354,12 @@ def waveform_timing_samples(project: WaveformProject) -> tuple[int, int, int, in
         active_stop = max(packet_samples, fall_start + fall_count)
     else:
         active_start, active_stop = 0, packet_samples
-    settings = project.bluetooth_br or project.bluetooth_le or project.bluetooth_hdt
+    settings = (
+        project.bluetooth_br
+        or project.bluetooth_le
+        or project.bluetooth_hdt
+        or project.dect
+    )
     pre_idle = int(getattr(settings, "pre_idle_symbols", 0)) * sps
     post_idle = int(getattr(settings, "post_idle_symbols", 0)) * sps
     minimum_period = pre_idle + active_stop - active_start
@@ -694,6 +742,103 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
             issues.append(ValidationIssue("wifi.bssid", "BSSID must use XX:XX:XX:XX:XX:XX notation."))
         if float(wifi_settings.packet_period_us) <= 0.0:
             issues.append(ValidationIssue("wifi.packet_period_us", "Packet period must be positive."))
+    dect_settings = project.dect
+    if dect_settings is not None:
+        from pluto_protocol.dect.carriers import carrier_by_identity
+
+        def validate_binary(name: str, value: str, length: int) -> None:
+            normalized = str(value).replace(" ", "").replace("_", "")
+            if len(normalized) != length or any(bit not in "01" for bit in normalized):
+                issues.append(
+                    ValidationIssue(
+                        f"dect.{name}",
+                        f"Value must contain exactly {length} binary digits.",
+                    )
+                )
+
+        validate_binary("preamble_bits", dect_settings.preamble_bits, 16)
+        validate_binary("sync_word_bits", dect_settings.sync_word_bits, 16)
+        validate_binary("a_header_bits", dect_settings.a_header_bits, 8)
+        validate_binary("a_tail_bits", dect_settings.a_tail_bits, 40)
+        if not dect_settings.r_crc_auto:
+            validate_binary("r_crc_bits", dect_settings.r_crc_bits, 16)
+        if DectPacketType(dect_settings.packet_type) is not DectPacketType.P00:
+            source = PayloadSourceKind(dect_settings.b_field_source)
+            if source is not PayloadSourceKind.PRBS9:
+                pattern = (
+                    str(dect_settings.b_field_pattern)
+                    .replace(" ", "")
+                    .replace("_", "")
+                )
+                if not pattern or any(bit not in "01" for bit in pattern):
+                    issues.append(
+                        ValidationIssue(
+                            "dect.b_field_pattern",
+                            "Fixed and pattern B-fields require binary data.",
+                        )
+                    )
+            if not dect_settings.x_crc_auto:
+                validate_binary("x_field_bits", dect_settings.x_field_bits, 4)
+            if (
+                DectPacketType(dect_settings.packet_type)
+                in {DectPacketType.P32Z, DectPacketType.P80Z}
+                and not dect_settings.z_repeat_auto
+            ):
+                validate_binary("z_field_bits", dect_settings.z_field_bits, 4)
+        if dect_settings.frequency_deviation_hz <= 0.0:
+            issues.append(
+                ValidationIssue(
+                    "dect.frequency_deviation_hz",
+                    "Frequency deviation must be positive.",
+                )
+            )
+        if dect_settings.gaussian_bt <= 0.0:
+            issues.append(
+                ValidationIssue("dect.gaussian_bt", "Gaussian B*T must be positive.")
+            )
+        if dect_settings.pre_idle_symbols < 0 or dect_settings.post_idle_symbols < 0:
+            issues.append(
+                ValidationIssue(
+                    "dect.idle_symbols", "DECT idle symbol counts must not be negative."
+                )
+            )
+        expected_rate = 1_152_000.0 * int(project.samples_per_symbol)
+        if not abs(project.sample_rate_hz - expected_rate) <= 0.5:
+            issues.append(
+                ValidationIssue(
+                    "sample_rate_hz",
+                    "DECT sample rate must equal 1.152 MSym/s times samples/symbol.",
+                )
+            )
+        try:
+            carrier = carrier_by_identity(
+                dect_settings.carrier_plan_id, dect_settings.carrier_channel
+            )
+        except StopIteration:
+            issues.append(
+                ValidationIssue(
+                    "dect.carrier",
+                    "Selected DECT carrier is not present in the carrier plan.",
+                )
+            )
+        else:
+            if abs(project.center_frequency_hz - carrier.center_frequency_hz) > 0.5:
+                issues.append(
+                    ValidationIssue(
+                        "center_frequency_hz",
+                        "Project center must match the selected DECT carrier.",
+                    )
+                )
+        occupied_offset = abs(dect_settings.carrier_frequency_offset_hz) + float(
+            dect_settings.frequency_deviation_hz
+        )
+        if occupied_offset >= 0.45 * project.sample_rate_hz:
+            issues.append(
+                ValidationIssue(
+                    "dect.carrier_frequency_offset_hz",
+                    "Frequency offset plus deviation exceeds the generated IQ bandwidth.",
+                )
+            )
     return tuple(issues)
 
 

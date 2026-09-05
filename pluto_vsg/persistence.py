@@ -15,6 +15,9 @@ from pluto_vsg.model import (
     BluetoothLESettings,
     BluetoothPacketKind,
     DataSourceKind,
+    DectDirection,
+    DectPacketType,
+    DectSettings,
     FieldDefinition,
     FilterKind,
     ModulationDefinition,
@@ -112,6 +115,15 @@ def project_to_dict(project: WaveformProject) -> dict[str, object]:
             "psdu_source": WiFiPSDUSource(project.wifi.psdu_source).value,
             "scrambler_seed_mode": WiFiScramblerSeedMode(project.wifi.scrambler_seed_mode).value,
         }
+    if project.dect is not None:
+        payload["dect"] = {
+            **asdict(project.dect),
+            "direction": DectDirection(project.dect.direction).value,
+            "packet_type": DectPacketType(project.dect.packet_type).value,
+            "b_field_source": PayloadSourceKind(
+                project.dect.b_field_source
+            ).value,
+        }
     return {
         "format": PROJECT_FORMAT,
         "version": PROJECT_VERSION,
@@ -192,6 +204,21 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
             "psdu_source": WiFiPSDUSource(str(wifi_payload["psdu_source"])),
             "scrambler_seed_mode": WiFiScramblerSeedMode(str(wifi_payload["scrambler_seed_mode"])),
         })
+    dect_payload = payload.get("dect")
+    dect = None
+    if dect_payload is not None:
+        if not isinstance(dect_payload, dict):
+            raise ValueError("Invalid DECT settings")
+        dect = DectSettings(
+            **{
+                **dect_payload,
+                "direction": DectDirection(str(dect_payload["direction"])),
+                "packet_type": DectPacketType(str(dect_payload["packet_type"])),
+                "b_field_source": PayloadSourceKind(
+                    str(dect_payload["b_field_source"])
+                ),
+            }
+        )
     standard = StandardProfile(str(payload["standard"]))
     if (
         standard == StandardProfile.BLUETOOTH_BR_EDR
@@ -221,6 +248,7 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
         bluetooth_le=bluetooth_le,
         bluetooth_hdt=bluetooth_hdt,
         wifi=wifi,
+        dect=dect,
     )
     issues = validate_project(project)
     if issues:

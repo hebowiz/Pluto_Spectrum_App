@@ -735,11 +735,11 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         frequency_items = window.symbol_plot.listDataItems()
         assert len(frequency_items) == 1
         frequency_x, frequency_y = frequency_items[0].getData()
-        np.testing.assert_allclose(frequency_x, 0.0)
-        np.testing.assert_allclose(
-            frequency_y,
-            np.real(window.session.pattern_result.measured_symbols) / 1e3,
+        _modulation_symbol_x, modulation_symbol_y = (
+            window.modulation_plot.listDataItems()[1].getData()
         )
+        np.testing.assert_allclose(frequency_x, 0.0)
+        np.testing.assert_array_equal(frequency_y, modulation_symbol_y)
         window.constellation_density_action.trigger()
         assert window._constellation_density_item is not None
         assert window._constellation_density_item.image.shape == (96, 16)
@@ -966,32 +966,26 @@ def test_symbol_table_click_places_and_toggles_fsk_plot_markers(tmp_path) -> Non
         assert marker_y[0] == pytest.approx(expected_power)
 
         _modulation_x, modulation_y = modulation_point.getData()
+        trace_x, trace_y = window.modulation_plot.listDataItems()[0].getData()
         symbol_i, symbol_q = symbol_point.getData()
         symbol_plot_frequency_hz = (
             np.angle(complex(symbol_i[0], symbol_q[0]))
             * window.session.signal.symbol_rate_hz
             / (2.0 * np.pi)
         )
-        assert modulation_y[0] * 1e3 == pytest.approx(
-            float(np.real(pattern_result.measured_symbols[symbol_index]))
+        assert modulation_y[0] == pytest.approx(
+            float(np.interp(expected_time_s * 1e3, trace_x, trace_y))
         )
         window.raw_modulation_signal_action.trigger()
         raw_modulation_point, _raw_modulation_label = (
             window._symbol_marker_items["modulation"]
         )
         _raw_modulation_x, raw_modulation_y = raw_modulation_point.getData()
-        assert raw_modulation_y[0] * 1e3 == pytest.approx(
-            float(
-                np.interp(
-                    expected_time_s,
-                    result.time_s,
-                    result.instantaneous_frequency_hz,
-                )
-            )
+        raw_trace_x, raw_trace_y = window.modulation_plot.listDataItems()[0].getData()
+        assert raw_modulation_y[0] == pytest.approx(
+            float(np.interp(expected_time_s * 1e3, raw_trace_x, raw_trace_y))
         )
-        assert symbol_plot_frequency_hz == pytest.approx(
-            float(np.real(pattern_result.measured_symbols[symbol_index]))
-        )
+        assert symbol_plot_frequency_hz == pytest.approx(modulation_y[0] * 1e3)
 
         window._symbol_table_cell_clicked(0, symbol_index)
         assert window._selected_symbol_marker_index is None

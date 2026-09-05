@@ -55,6 +55,7 @@ from pluto_sa.vsa.result_summary import (
     normalize_result_summary_ids,
 )
 from pluto_sa.vsa.result_statistics import ResultSummaryAccumulator
+from pluto_sa.vsa.channel import validate_analysis_channel_capture
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.pluto_source import (
     CaptureCancelledError,
@@ -84,6 +85,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
 from pluto_sa.vsa.ui.iq_export import export_iq_recording
 from pluto_sa.vsa.ui.display_processing import (
+    build_fsk_display_data as _shared_build_fsk_display_data,
     constellation_display_symbols as _shared_constellation_display_symbols,
     physical_constellation_display_symbols as _shared_physical_constellation_display_symbols,
     prepare_fsk_display_frequency as _shared_prepare_fsk_display_frequency,
@@ -3060,24 +3062,12 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _validate_experimental_lo_offset(
         self, settings: PlutoCaptureSettings
     ) -> None:
-        if settings.lo_offset_hz == 0.0:
-            return
-        if not self.channel_filter_check.isChecked():
-            raise ValueError("LO Offset requires Enable Analysis Channel")
-        analysis_bandwidth_hz = self.analysis_bandwidth_spin.value() * 1e6
-        if abs(settings.lo_offset_hz) <= 0.5 * analysis_bandwidth_hz:
-            raise ValueError(
-                "LO Offset must exceed half the Analysis Bandwidth so the "
-                "Analysis Filter can reject the Pluto DC spur"
-            )
-        if (
-            abs(settings.lo_offset_hz) + 0.5 * analysis_bandwidth_hz
-            > 0.5 * settings.nominal_usable_bandwidth_hz
-        ):
-            raise ValueError(
-                "LO Offset and Analysis Bandwidth exceed the usable Pluto "
-                "capture bandwidth"
-            )
+        validate_analysis_channel_capture(
+            sample_rate_hz=settings.requested_sample_rate_hz,
+            usable_bandwidth_hz=settings.nominal_usable_bandwidth_hz,
+            lo_offset_hz=settings.lo_offset_hz,
+            analysis_bandwidth_hz=settings.analysis_bandwidth_hz,
+        )
 
     def _run_pluto_single(self) -> None:
         if self._continuous_run_requested:
@@ -4244,9 +4234,14 @@ class VSAWindow(QtWidgets.QMainWindow):
                     display_result.instantaneous_frequency_hz
                 )
                 modulation_time_s = display_result.time_s
+            fsk_display_data = _shared_build_fsk_display_data(
+                modulation_frequency_trace_hz,
+                modulation_time_s,
+                symbol_times_s,
+            )
             frequency_time_ms, display_frequency_khz = _peak_decimate_xy(
-                modulation_time_s * 1e3,
-                modulation_frequency_trace_hz / 1e3,
+                fsk_display_data.time_s * 1e3,
+                fsk_display_data.corrected_frequency_hz / 1e3,
                 required_x_values=required_symbol_times_ms,
             )
             self.modulation_plot.plot(
@@ -4254,25 +4249,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                 display_frequency_khz,
                 pen=pg.mkPen(_TRACE_COLOR, width=1),
             )
-            measured_frequency_hz = np.real(
-                self.session.pattern_result.measured_symbols
-                if self.session.pattern_result is not None
-                else display_result.measured_symbols
-            )
-            # Measured symbol points are the recovered decision values used by
-            # Constellation Frequency, not a single instantaneous-frequency
-            # sample.  Raw IQ intentionally keeps the uncorrected trace value.
-            modulation_frequency_hz = measured_frequency_hz
-            if not measured_selected:
-                modulation_frequency_hz = (
-                    np.interp(
-                        symbol_times_s,
-                        modulation_time_s,
-                        modulation_frequency_trace_hz,
-                    )
-                    if symbol_times_s.size
-                    else np.empty(0, dtype=np.float64)
-                )
+            measured_frequency_hz = fsk_display_data.symbol_frequency_hz
+            modulation_frequency_hz = fsk_display_data.symbol_frequency_hz
             marker_context["modulation_frequency_hz"] = (
                 modulation_frequency_hz
             )

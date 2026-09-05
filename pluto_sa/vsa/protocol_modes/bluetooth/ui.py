@@ -15,12 +15,18 @@ from pluto_protocol.model import FieldStatus, PacketField
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.model import IQRecording, ModulationFamily, VSAAnalysisResult
 from pluto_sa.vsa.analysis import capture_power_traces
+from pluto_sa.vsa.channel import (
+    extract_requested_analysis_channel,
+    validate_analysis_channel_capture,
+)
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.vsa.pluto_source import PlutoCaptureSettings, PlutoLiveSource
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource
 from pluto_sa.vsa.pattern import IQPowerTriggerSettings, MeasurementFilterMode
 from pluto_sa.vsa.ui.display_processing import (
+    FSKDisplayData,
+    build_fsk_display_data,
     normalized_psk_display,
     prepare_fsk_display_frequency,
     prepare_psk_display_waveform,
@@ -401,6 +407,23 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.rf_bandwidth_spin = QtWidgets.QDoubleSpinBox()
         self.rf_bandwidth_spin.setRange(0.2, 56.0)
         self.rf_bandwidth_spin.setValue(8.0)
+        self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
+        self.analysis_bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.analysis_bandwidth_spin.setRange(0.000001, 100.0)
+        self.analysis_bandwidth_spin.setDecimals(6)
+        self.analysis_bandwidth_spin.setValue(1.5)
+        self.analysis_bandwidth_spin.setSuffix(" MHz")
+        self.lo_offset_check = QtWidgets.QCheckBox("Enable")
+        self.lo_offset_check.setToolTip(
+            "Tune the Pluto LO away from the selected Bluetooth channel. "
+            "Requires the Analysis Channel filter."
+        )
+        self.lo_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.lo_offset_spin.setRange(-50.0, 50.0)
+        self.lo_offset_spin.setDecimals(6)
+        self.lo_offset_spin.setValue(1.5)
+        self.lo_offset_spin.setSuffix(" MHz")
+        self.resolved_lo_label = QtWidgets.QLabel()
         self.internal_gain_spin = QtWidgets.QDoubleSpinBox()
         self.internal_gain_spin.setRange(0.0, 70.0)
         self.internal_gain_spin.setValue(30.0)
@@ -413,7 +436,30 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.phy_combo.currentIndexChanged.connect(self._update_derived_config)
         self.refresh_button.clicked.connect(self.refresh)
         self.capture_button.clicked.connect(self._toggle_capture)
+        self.center_spin.valueChanged.connect(self._sync_analysis_channel_controls)
+        self.channel_filter_check.toggled.connect(
+            self._sync_analysis_channel_controls
+        )
+        self.lo_offset_check.toggled.connect(self._sync_analysis_channel_controls)
+        self.lo_offset_spin.valueChanged.connect(self._sync_analysis_channel_controls)
+        self._sync_analysis_channel_controls()
         self._protocol_changed()
+
+    def _sync_analysis_channel_controls(self, _value: object = None) -> None:
+        filter_enabled = self.channel_filter_check.isChecked()
+        if self.sender() is self.lo_offset_check and self.lo_offset_check.isChecked():
+            self.channel_filter_check.setChecked(True)
+            filter_enabled = True
+        elif not filter_enabled and self.lo_offset_check.isChecked():
+            self.lo_offset_check.setChecked(False)
+        self.analysis_bandwidth_spin.setEnabled(filter_enabled)
+        offset_enabled = self.lo_offset_check.isChecked()
+        self.lo_offset_spin.setEnabled(offset_enabled)
+        offset_mhz = self.lo_offset_spin.value() if offset_enabled else 0.0
+        self.resolved_lo_label.setText(
+            f"{self.center_spin.value() + offset_mhz:.6f} MHz"
+            + (" (offset on)" if offset_enabled else " (offset off)")
+        )
 
     def _build_trigger_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
@@ -532,6 +578,11 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             ("Capture Length (ms)", self.capture_length_spin),
             ("Samples / Symbol", self.oversampling_combo),
             ("RF Bandwidth (MHz)", self.rf_bandwidth_spin),
+            ("Analysis Channel", self.channel_filter_check),
+            ("Analysis Bandwidth", self.analysis_bandwidth_spin),
+            ("LO Offset", self.lo_offset_check),
+            ("Offset Frequency", self.lo_offset_spin),
+            ("Resolved LO", self.resolved_lo_label),
             ("Internal Gain (dB)", self.internal_gain_spin),
             ("External ATT (dB)", self.external_att_spin),
             ("Input Device", self.device_label),
@@ -1069,6 +1120,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             "capture_ms": self.capture_length_spin.value(),
             "samples_per_symbol": int(self.oversampling_combo.currentData()),
             "rf_bandwidth_mhz": self.rf_bandwidth_spin.value(),
+            "analysis_channel_enabled": self.channel_filter_check.isChecked(),
+            "analysis_bandwidth_mhz": self.analysis_bandwidth_spin.value(),
+            "lo_offset_enabled": self.lo_offset_check.isChecked(),
+            "lo_offset_mhz": self.lo_offset_spin.value(),
             "internal_gain_db": self.internal_gain_spin.value(),
             "external_att_db": self.external_att_spin.value(),
             "acquisition_trigger_source": str(
@@ -1128,6 +1183,8 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             (self.center_spin, "center_mhz"),
             (self.capture_length_spin, "capture_ms"),
             (self.rf_bandwidth_spin, "rf_bandwidth_mhz"),
+            (self.analysis_bandwidth_spin, "analysis_bandwidth_mhz"),
+            (self.lo_offset_spin, "lo_offset_mhz"),
             (self.internal_gain_spin, "internal_gain_db"),
             (self.external_att_spin, "external_att_db"),
             (self.acquisition_trigger_level_spin, "acquisition_trigger_level_dbm"),
@@ -1160,6 +1217,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.iq_power_trigger_limit_result_check.setChecked(
             bool(values.get("burst_limit_result", True))
         )
+        self.channel_filter_check.setChecked(
+            bool(values.get("analysis_channel_enabled", False))
+        )
+        self.lo_offset_check.setChecked(bool(values.get("lo_offset_enabled", False)))
         self._set_show_symbol_points(bool(values.get("show_symbol_points", True)))
         self._set_symbol_density(bool(values.get("symbol_density", False)))
         self._set_symbol_density_spread(
@@ -1178,6 +1239,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         )
         self._sync_le_profile_controls()
         self._sync_acquisition_trigger_controls()
+        self._sync_analysis_channel_controls()
         self._update_derived_config()
 
     def _save_startup_meas_config(self) -> None:
@@ -1258,6 +1320,16 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             samples_per_symbol=int(self.oversampling_combo.currentData()),
             capture_length_s=self.capture_length_spin.value() * 1e-3,
             rf_bandwidth_hz=self.rf_bandwidth_spin.value() * 1e6,
+            lo_offset_hz=(
+                self.lo_offset_spin.value() * 1e6
+                if self.lo_offset_check.isChecked()
+                else 0.0
+            ),
+            analysis_bandwidth_hz=(
+                self.analysis_bandwidth_spin.value() * 1e6
+                if self.channel_filter_check.isChecked()
+                else None
+            ),
             sdr_uri=self._pluto_target or None,
             power_correction=InputPowerCorrection(
                 internal_gain_db=self.internal_gain_spin.value(),
@@ -1290,6 +1362,16 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Stopping Bluetooth IQ capture...")
             return
         settings = self._capture_settings()
+        try:
+            validate_analysis_channel_capture(
+                sample_rate_hz=settings.requested_sample_rate_hz,
+                usable_bandwidth_hz=settings.nominal_usable_bandwidth_hz,
+                lo_offset_hz=settings.lo_offset_hz,
+                analysis_bandwidth_hz=settings.analysis_bandwidth_hz,
+            )
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Bluetooth Capture", str(error))
+            return
         if settings.trigger_source is TriggerKind.POWER_LEVEL:
             armed_message = (
                 "Waiting for Bluetooth I/Q Power trigger - "
@@ -1324,6 +1406,11 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         if not isinstance(recording, IQRecording):
             self._capture_failed("capture returned an invalid IQ recording")
             return
+        try:
+            recording = extract_requested_analysis_channel(recording)
+        except ValueError as error:
+            self._capture_failed(str(error))
+            return
         self.load_recording(recording)
 
     @QtCore.Slot(str)
@@ -1335,6 +1422,9 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
     @QtCore.Slot()
     def _capture_stopped(self) -> None:
         self._capture_thread = None
+        stop_stream = getattr(self._pluto_source, "stop_stream", None)
+        if callable(stop_stream):
+            stop_stream()
         if self._analysis_thread is None or not self._analysis_thread.isRunning():
             self.capture_button.setText("Single Capture")
             self.run_action.setText("Run Single")
@@ -1685,6 +1775,36 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 pattern_stop_ms=pattern_stop_ms,
             )
             symbol_time_s = np.asarray(pattern.symbol_time_s, dtype=np.float64)
+            if analysis is session and is_psk and not is_hdt:
+                devm_centers = np.asarray(
+                    result.metadata.get("edr_devm_symbol_center_samples", ()),
+                    dtype=np.float64,
+                )
+                if devm_centers.size and symbol_time_s.size:
+                    symbol_time_s = np.array(symbol_time_s, copy=True)
+                    coordinate_count = min(
+                        symbol_time_s.size, devm_centers.size
+                    )
+                    symbol_time_s[:coordinate_count] = (
+                        devm_centers[:coordinate_count] - offset
+                    ) / recording.sample_rate_hz
+                reference_center = result.metadata.get(
+                    "edr_reference_symbol_center_sample"
+                )
+                if reference_center is not None:
+                    symbol_time_s = np.concatenate(
+                        (
+                            np.asarray(
+                                [
+                                    (
+                                        float(reference_center) - offset
+                                    )
+                                    / recording.sample_rate_hz
+                                ]
+                            ),
+                            symbol_time_s,
+                        )
+                    )
             if symbol_time_s.size:
                 power_symbol_times_ms.append(
                     (symbol_time_s + offset / recording.sample_rate_hz) * 1e3
@@ -1768,7 +1888,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             else None
         )
         fsk_display_result = (
-            (fsk_session.carrier_corrected_result or fsk_session.result)
+            fsk_session.result
             if isinstance(fsk_session, VSASession)
             else None
         )
@@ -1777,6 +1897,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             if isinstance(fsk_session, VSASession)
             else None
         )
+        fsk_display_data: FSKDisplayData | None = None
         if fsk_display_result is not None and fsk_signal is not None:
             fsk_analysis_rate_hz = float(
                 fsk_display_result.metadata.get(
@@ -1805,36 +1926,52 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                     else None
                 ),
             )
+            symbol_time_s = np.asarray(
+                fsk_pattern.symbol_time_s if fsk_pattern is not None else (),
+                dtype=np.float64,
+            )
+            fsk_display_data = build_fsk_display_data(
+                fsk_frequency_hz,
+                fsk_time_s,
+                symbol_time_s,
+                frequency_offset_hz=(
+                    fsk_pattern.carrier_frequency_offset_hz
+                    if fsk_pattern is not None
+                    else 0.0
+                ),
+                frequency_drift_hz_per_s=(
+                    fsk_pattern.carrier_frequency_drift_hz_per_s
+                    if fsk_pattern is not None
+                    else 0.0
+                ),
+                reference_time_s=(
+                    fsk_pattern.carrier_reference_time_s
+                    if fsk_pattern is not None
+                    else 0.0
+                ),
+            )
             self.fsk_modulation_plot.plot(
-                (fsk_time_s + recording_sample_offset / recording.sample_rate_hz)
+                (
+                    fsk_display_data.time_s
+                    + recording_sample_offset / recording.sample_rate_hz
+                )
                 * 1e3,
-                fsk_frequency_hz / 1e3,
+                fsk_display_data.corrected_frequency_hz / 1e3,
                 pen=_TRACE,
             )
             if self._show_symbol_points and fsk_pattern is not None:
-                symbol_time_s = np.asarray(
-                    fsk_pattern.symbol_time_s, dtype=np.float64
-                )
-                # Match Generic VSA: marker Y values are the recovered symbol
-                # decisions, while the yellow line remains the continuous
-                # Measured trace.
-                symbol_frequency_hz = np.real(
-                    np.asarray(
-                        fsk_pattern.measured_symbols,
-                        dtype=np.complex128,
-                    )
-                )
                 symbol_count = min(
-                    symbol_time_s.size, symbol_frequency_hz.size
+                    fsk_display_data.symbol_time_s.size,
+                    fsk_display_data.symbol_frequency_hz.size,
                 )
                 plot_trace_symbol_points(
                     self.fsk_modulation_plot,
                     (
-                        symbol_time_s[:symbol_count]
+                        fsk_display_data.symbol_time_s[:symbol_count]
                         + recording_sample_offset / recording.sample_rate_hz
                     )
                     * 1e3,
-                    symbol_frequency_hz[:symbol_count] / 1e3,
+                    fsk_display_data.symbol_frequency_hz[:symbol_count] / 1e3,
                 )
         else:
             fsk_count = min(
@@ -1863,15 +2000,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 fsk_stop_ms + fsk_margin_ms,
                 padding=0.0,
             )
-        measured_frequency_hz = np.real(
-            np.asarray(
-                (
-                    fsk_pattern.measured_symbols
-                    if fsk_pattern is not None
-                    else fsk_vsa.measured_symbols
-                ),
-                dtype=np.complex128,
-            )
+        measured_frequency_hz = (
+            fsk_display_data.symbol_frequency_hz
+            if fsk_display_data is not None
+            else np.real(np.asarray(fsk_vsa.measured_symbols, dtype=np.complex128))
         )
         if is_hdt:
             header_symbols = np.asarray(
@@ -2004,10 +2136,43 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 result_start_time_s=psk_pattern.result_start_time_s,
                 result_stop_time_s=psk_pattern.result_stop_time_s,
             )
+            psk_symbol_time_s = np.asarray(
+                psk_pattern.symbol_time_s, dtype=np.float64
+            )
+            devm_centers = np.asarray(
+                result.metadata.get("edr_devm_symbol_center_samples", ()),
+                dtype=np.float64,
+            )
+            if devm_centers.size and psk_symbol_time_s.size:
+                psk_symbol_time_s = np.array(psk_symbol_time_s, copy=True)
+                coordinate_count = min(
+                    psk_symbol_time_s.size, devm_centers.size
+                )
+                psk_symbol_time_s[:coordinate_count] = (
+                    devm_centers[:coordinate_count] - analysis_sample_offset
+                ) / recording.sample_rate_hz
+            reference_center = result.metadata.get(
+                "edr_reference_symbol_center_sample"
+            )
+            if reference_center is not None:
+                psk_symbol_time_s = np.concatenate(
+                    (
+                        np.asarray(
+                            [
+                                (
+                                    float(reference_center)
+                                    - analysis_sample_offset
+                                )
+                                / recording.sample_rate_hz
+                            ]
+                        ),
+                        psk_symbol_time_s,
+                    )
+                )
             trajectory, physical_symbol_iq, symbols = normalized_psk_display(
                 processed_iq,
                 processed_time_s,
-                psk_pattern.symbol_time_s,
+                psk_symbol_time_s,
                 modulation=session.signal.modulation,
                 differential_symbols=psk_pattern.measured_symbols,
                 physical=self._psk_symbol_plot_mode == "Physical IQ",

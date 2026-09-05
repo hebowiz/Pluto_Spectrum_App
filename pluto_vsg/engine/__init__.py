@@ -5,12 +5,14 @@ from pluto_vsg.engine.bluetooth_br import BluetoothBRWaveformEngine
 from pluto_vsg.engine.bluetooth_le import BluetoothLEWaveformEngine
 from pluto_vsg.engine.bluetooth_hdt import BluetoothHDTWaveformEngine
 from pluto_vsg.engine.wifi_legacy_ofdm import WiFiLegacyOFDMWaveformEngine
+from pluto_vsg.engine.dect import DectWaveformEngine
 
 __all__ = [
     "BluetoothBRWaveformEngine",
     "BluetoothLEWaveformEngine",
     "BluetoothHDTWaveformEngine",
     "WiFiLegacyOFDMWaveformEngine",
+    "DectWaveformEngine",
     "FieldBoundary",
     "GenerationResult",
     "WaveformEngine",

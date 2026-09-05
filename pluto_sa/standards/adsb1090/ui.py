@@ -1735,6 +1735,9 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
     def _pluto_capture_stopped(self) -> None:
         self._capture_thread = None
+        stop_stream = getattr(self._pluto_source, "stop_stream", None)
+        if callable(stop_stream):
+            stop_stream()
         if (
             self._analysis_stream_thread is not None
             and self._analysis_stream_thread.isRunning()

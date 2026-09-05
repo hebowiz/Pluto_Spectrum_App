@@ -476,6 +476,12 @@ class PlutoLiveSource:
             self._actual_sample_rate_hz = None
             self._actual_rf_bandwidth_hz = None
 
+    def stop_stream(self) -> None:
+        """Stop background IQ production without closing the Pluto receiver."""
+
+        if self._acquisition is not None:
+            self._acquisition.stop()
+
     @staticmethod
     def _spectrum_config(settings: PlutoCaptureSettings) -> SpectrumConfig:
         correction = settings.power_correction

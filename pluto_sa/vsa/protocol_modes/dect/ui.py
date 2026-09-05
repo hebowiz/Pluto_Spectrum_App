@@ -16,6 +16,10 @@ from pluto_protocol.model import PacketField
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.model import IQRecording
+from pluto_sa.vsa.channel import (
+    extract_requested_analysis_channel,
+    validate_analysis_channel_capture,
+)
 from pluto_sa.vsa.pluto_source import PlutoCaptureSettings, PlutoLiveSource
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource
@@ -45,6 +49,11 @@ from pluto_sa.vsa.ui.measurement_chrome import (
 )
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
 from pluto_sa.vsa.ui.iq_export import export_iq_recording
+from pluto_sa.vsa.ui.display_processing import (
+    FSKDisplayData,
+    build_fsk_display_data,
+    fit_binary_fsk_display_drift,
+)
 
 from .analysis import (
     DectPacketResult,
@@ -263,6 +272,23 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.rf_bandwidth_spin.setRange(3.0, 20.0)
         self.rf_bandwidth_spin.setValue(6.0)
         self.rf_bandwidth_spin.setSuffix(" MHz")
+        self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
+        self.analysis_bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.analysis_bandwidth_spin.setRange(3.0, 100.0)
+        self.analysis_bandwidth_spin.setDecimals(6)
+        self.analysis_bandwidth_spin.setValue(3.0)
+        self.analysis_bandwidth_spin.setSuffix(" MHz")
+        self.lo_offset_check = QtWidgets.QCheckBox("Enable")
+        self.lo_offset_check.setToolTip(
+            "Tune the Pluto LO away from the selected DECT carrier. "
+            "Requires the Analysis Channel filter."
+        )
+        self.lo_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.lo_offset_spin.setRange(-50.0, 50.0)
+        self.lo_offset_spin.setDecimals(6)
+        self.lo_offset_spin.setValue(2.0)
+        self.lo_offset_spin.setSuffix(" MHz")
+        self.resolved_lo_label = QtWidgets.QLabel()
         self.internal_gain_spin = QtWidgets.QDoubleSpinBox()
         self.internal_gain_spin.setRange(0.0, 70.0)
         self.internal_gain_spin.setValue(30.0)
@@ -279,9 +305,39 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.capture_button = QtWidgets.QPushButton("Single Capture")
         self.refresh_button = QtWidgets.QPushButton("Refresh Result")
         self.plan_combo.currentIndexChanged.connect(self._plan_changed)
+        self.carrier_combo.currentIndexChanged.connect(
+            self._sync_analysis_channel_controls
+        )
+        self.channel_filter_check.toggled.connect(
+            self._sync_analysis_channel_controls
+        )
+        self.lo_offset_check.toggled.connect(self._sync_analysis_channel_controls)
+        self.lo_offset_spin.valueChanged.connect(self._sync_analysis_channel_controls)
         self.capture_button.clicked.connect(self._toggle_capture)
         self.refresh_button.clicked.connect(self.refresh)
         self._plan_changed()
+        self._sync_analysis_channel_controls()
+
+    def _sync_analysis_channel_controls(self, _value: object = None) -> None:
+        filter_enabled = self.channel_filter_check.isChecked()
+        if self.sender() is self.lo_offset_check and self.lo_offset_check.isChecked():
+            self.channel_filter_check.setChecked(True)
+            filter_enabled = True
+        elif not filter_enabled and self.lo_offset_check.isChecked():
+            self.lo_offset_check.setChecked(False)
+        self.analysis_bandwidth_spin.setEnabled(filter_enabled)
+        offset_enabled = self.lo_offset_check.isChecked()
+        self.lo_offset_spin.setEnabled(offset_enabled)
+        offset_mhz = self.lo_offset_spin.value() if offset_enabled else 0.0
+        center_mhz = (
+            self._nominal_frequency_hz() / 1e6
+            if self.carrier_combo.currentData() is not None
+            else 0.0
+        )
+        self.resolved_lo_label.setText(
+            f"{center_mhz + offset_mhz:.6f} MHz"
+            + (" (offset on)" if offset_enabled else " (offset off)")
+        )
 
     @QtCore.Slot(bool)
     def _set_show_symbol_points(self, enabled: bool) -> None:
@@ -372,6 +428,11 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             ("Capture Length", self.capture_length_spin),
             ("Samples / Symbol", self.oversampling_combo),
             ("RF Bandwidth", self.rf_bandwidth_spin),
+            ("Analysis Channel", self.channel_filter_check),
+            ("Analysis Bandwidth", self.analysis_bandwidth_spin),
+            ("LO Offset", self.lo_offset_check),
+            ("Offset Frequency", self.lo_offset_spin),
+            ("Resolved LO", self.resolved_lo_label),
             ("Internal Gain", self.internal_gain_spin),
             ("External ATT", self.external_att_spin),
             ("I/Q Power Trigger", self.trigger_level_spin),
@@ -560,6 +621,10 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             "capture_ms": self.capture_length_spin.value(),
             "samples_per_symbol": self.oversampling_combo.currentData(),
             "rf_bandwidth_mhz": self.rf_bandwidth_spin.value(),
+            "analysis_channel_enabled": self.channel_filter_check.isChecked(),
+            "analysis_bandwidth_mhz": self.analysis_bandwidth_spin.value(),
+            "lo_offset_enabled": self.lo_offset_check.isChecked(),
+            "lo_offset_mhz": self.lo_offset_spin.value(),
             "internal_gain_db": self.internal_gain_spin.value(),
             "external_att_db": self.external_att_spin.value(),
             "trigger_level_dbm": self.trigger_level_spin.value(),
@@ -601,6 +666,16 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             if sps_index >= 0:
                 self.oversampling_combo.setCurrentIndex(sps_index)
             self.rf_bandwidth_spin.setValue(float(settings["rf_bandwidth_mhz"]))
+            self.analysis_bandwidth_spin.setValue(
+                float(settings.get("analysis_bandwidth_mhz", 3.0))
+            )
+            self.lo_offset_spin.setValue(float(settings.get("lo_offset_mhz", 2.0)))
+            self.channel_filter_check.setChecked(
+                bool(settings.get("analysis_channel_enabled", False))
+            )
+            self.lo_offset_check.setChecked(
+                bool(settings.get("lo_offset_enabled", False))
+            )
             self.internal_gain_spin.setValue(float(settings["internal_gain_db"]))
             self.external_att_spin.setValue(float(settings["external_att_db"]))
             self.trigger_level_spin.setValue(float(settings["trigger_level_dbm"]))
@@ -625,6 +700,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                     )
                 )
             )
+            self._sync_analysis_channel_controls()
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return False
         return True
@@ -816,6 +892,16 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             samples_per_symbol=int(self.oversampling_combo.currentData()),
             capture_length_s=self.capture_length_spin.value() * 1e-3,
             rf_bandwidth_hz=self.rf_bandwidth_spin.value() * 1e6,
+            lo_offset_hz=(
+                self.lo_offset_spin.value() * 1e6
+                if self.lo_offset_check.isChecked()
+                else 0.0
+            ),
+            analysis_bandwidth_hz=(
+                self.analysis_bandwidth_spin.value() * 1e6
+                if self.channel_filter_check.isChecked()
+                else None
+            ),
             sdr_uri=self._pluto_target or None,
             power_correction=InputPowerCorrection(
                 internal_gain_db=self.internal_gain_spin.value(),
@@ -837,6 +923,16 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("Stopping DECT capture...")
             return
         settings = self._capture_settings()
+        try:
+            validate_analysis_channel_capture(
+                sample_rate_hz=settings.requested_sample_rate_hz,
+                usable_bandwidth_hz=settings.nominal_usable_bandwidth_hz,
+                lo_offset_hz=settings.lo_offset_hz,
+                analysis_bandwidth_hz=settings.analysis_bandwidth_hz,
+            )
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "DECT Capture", str(error))
+            return
         thread = PlutoSingleCaptureThread(
             self._pluto_source,
             settings,
@@ -862,6 +958,11 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         if not isinstance(recording, IQRecording):
             self._capture_failed("capture returned an invalid IQ recording")
             return
+        try:
+            recording = extract_requested_analysis_channel(recording)
+        except ValueError as error:
+            self._capture_failed(str(error))
+            return
         self.load_recording(recording)
 
     @QtCore.Slot(str)
@@ -873,6 +974,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
     @QtCore.Slot()
     def _capture_stopped(self) -> None:
         self._capture_thread = None
+        stop_stream = getattr(self._pluto_source, "stop_stream", None)
+        if callable(stop_stream):
+            stop_stream()
         if self._analysis_thread is None or not self._analysis_thread.isRunning():
             self.capture_button.setText("Single Capture")
             self.run_action.setText("Run Single")
@@ -1016,23 +1120,34 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             )
             & (result.measurement_fm_sample <= result.packet_end_sample)
         )
-        deviation_time_ms = (
-            result.measurement_fm_sample[packet_mask]
-            / recording.sample_rate_hz
-            * 1e3
-        )
         reference_hz = result.modulation_reference_hz(self._modulation_reference)
-        deviation_khz = (
-            result.measurement_fm_frequency_hz[packet_mask] - reference_hz
-        ) / 1e3
+        symbol_time_s = result.symbol_centers / recording.sample_rate_hz
+        display_drift_hz_per_s, display_reference_time_s = (
+            fit_binary_fsk_display_drift(
+                symbol_time_s,
+                result.symbol_frequency_hz,
+                result.bits,
+            )
+        )
+        display_data = build_fsk_display_data(
+            result.measurement_fm_frequency_hz[packet_mask],
+            result.measurement_fm_sample[packet_mask]
+            / recording.sample_rate_hz,
+            symbol_time_s,
+            frequency_offset_hz=reference_hz,
+            frequency_drift_hz_per_s=display_drift_hz_per_s,
+            reference_time_s=display_reference_time_s,
+        )
         self.deviation_plot.plot(
-            deviation_time_ms, deviation_khz, pen=pg.mkPen("y", width=1)
+            display_data.time_s * 1e3,
+            display_data.corrected_frequency_hz / 1e3,
+            pen=pg.mkPen("y", width=1),
         )
         if self._show_symbol_points:
             plot_trace_symbol_points(
                 self.deviation_plot,
-                result.symbol_centers / recording.sample_rate_hz * 1e3,
-                (result.symbol_frequency_hz - reference_hz) / 1e3,
+                display_data.symbol_time_s * 1e3,
+                display_data.symbol_frequency_hz / 1e3,
             )
         for level in (-403.0, -259.0, -202.0, 202.0, 259.0, 403.0):
             self.deviation_plot.addItem(
@@ -1043,7 +1158,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                 )
             )
 
-        self._render_symbol_plot(result)
+        self._render_symbol_plot(result, display_data)
         self._render_summary(result)
         self._render_packet_analysis(result)
         for name, plot in self._plot_widgets():
@@ -1069,11 +1184,10 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         )
         self._capture_analysis_plot_ranges()
 
-    def _render_symbol_plot(self, result: DectPacketResult) -> None:
-        measured_frequency_hz = (
-            np.asarray(result.symbol_frequency_hz, dtype=np.float64)
-            - result.modulation_reference_hz(self._modulation_reference)
-        )
+    def _render_symbol_plot(
+        self, result: DectPacketResult, display_data: FSKDisplayData
+    ) -> None:
+        measured_frequency_hz = display_data.symbol_frequency_hz
         if self._fsk_symbol_plot_mode == "Constellation Frequency":
             self.symbol_plot.setAspectLocked(False)
             self.symbol_plot.setYLink(self.deviation_plot)

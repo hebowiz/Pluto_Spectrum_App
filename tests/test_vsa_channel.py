@@ -2,7 +2,11 @@ import numpy as np
 import pytest
 
 from pluto_sa.vsa.analysis import VSAAnalyzer
-from pluto_sa.vsa.channel import extract_analysis_channel
+from pluto_sa.vsa.channel import (
+    extract_analysis_channel,
+    extract_requested_analysis_channel,
+    validate_analysis_channel_capture,
+)
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSASettings
 from pluto_sa.vsa.profiles.bluetooth_br import (
     BluetoothBRProfile,
@@ -138,3 +142,60 @@ def test_extract_analysis_channel_rejects_selection_outside_capture() -> None:
             center_frequency_hz=103_000_000.0,
             bandwidth_hz=1_000_000.0,
         )
+
+
+def test_offset_lo_requires_filter_and_must_reject_dc() -> None:
+    with pytest.raises(ValueError, match="requires Enable Analysis Channel"):
+        validate_analysis_channel_capture(
+            sample_rate_hz=8_000_000.0,
+            usable_bandwidth_hz=6_400_000.0,
+            lo_offset_hz=1_500_000.0,
+            analysis_bandwidth_hz=None,
+        )
+    with pytest.raises(ValueError, match="must exceed half"):
+        validate_analysis_channel_capture(
+            sample_rate_hz=8_000_000.0,
+            usable_bandwidth_hz=6_400_000.0,
+            lo_offset_hz=700_000.0,
+            analysis_bandwidth_hz=1_500_000.0,
+        )
+
+
+def test_offset_lo_and_filter_must_fit_usable_capture_bandwidth() -> None:
+    validate_analysis_channel_capture(
+        sample_rate_hz=8_000_000.0,
+        usable_bandwidth_hz=6_400_000.0,
+        lo_offset_hz=1_500_000.0,
+        analysis_bandwidth_hz=1_500_000.0,
+    )
+    with pytest.raises(ValueError, match="exceed the usable Pluto"):
+        validate_analysis_channel_capture(
+            sample_rate_hz=8_000_000.0,
+            usable_bandwidth_hz=6_400_000.0,
+            lo_offset_hz=2_500_000.0,
+            analysis_bandwidth_hz=1_500_000.0,
+        )
+
+
+def test_requested_live_analysis_channel_returns_to_nominal_center() -> None:
+    sample_rate_hz = 8_000_000.0
+    samples = np.arange(8192, dtype=np.float64)
+    hardware_lo_hz = 2_442_500_000.0
+    requested_center_hz = 2_441_000_000.0
+    iq = np.exp(-2j * np.pi * 1_500_000.0 * samples / sample_rate_hz)
+    recording = IQRecording(
+        iq,
+        sample_rate_hz=sample_rate_hz,
+        center_frequency_hz=hardware_lo_hz,
+        usable_bandwidth_hz=6_400_000.0,
+        metadata={
+            "requested_center_frequency_hz": requested_center_hz,
+            "requested_analysis_bandwidth_hz": 1_500_000.0,
+        },
+    )
+
+    selected = extract_requested_analysis_channel(recording)
+
+    assert selected.center_frequency_hz == requested_center_hz
+    assert selected.metadata["analysis_center_offset_hz"] == -1_500_000.0
+    assert selected.metadata["analysis_channel_applied"] is True

@@ -34,14 +34,26 @@ def _interpolate_complex(values: np.ndarray, positions: np.ndarray) -> np.ndarra
 class EDRDEVMBlockResult:
     block_index: int
     start_symbol: int
+    stop_symbol: int
     timing_offset_symbols: float
     residual_frequency_error_hz: float
     rms_devm: float
     peak_devm: float
     symbol_devm: np.ndarray
+    physical_symbol_center_samples: np.ndarray
+    corrected_received_symbols: np.ndarray
+    reference_symbols: np.ndarray
+    error_vectors: np.ndarray
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "symbol_devm", _readonly(self.symbol_devm))
+        for name, dtype in (
+            ("symbol_devm", np.float64),
+            ("physical_symbol_center_samples", np.float64),
+            ("corrected_received_symbols", np.complex128),
+            ("reference_symbols", np.complex128),
+            ("error_vectors", np.complex128),
+        ):
+            object.__setattr__(self, name, _readonly(getattr(self, name), dtype))
 
 
 @dataclass(frozen=True)
@@ -52,6 +64,8 @@ class EDRDEVMTestResult:
     peak_worst: float | None
     devm_99_percentile: float | None
     total_symbol_count: int
+    reference_symbol_center_sample: float | None = None
+    sync_first_symbol_center_sample: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "blocks", tuple(self.blocks))
@@ -79,21 +93,30 @@ def measure_edr_devm(
     symbol_rate_hz: float,
     first_symbol_center_sample: float,
     decoded_symbols: np.ndarray,
+    reference_symbols: np.ndarray | None = None,
     modulation: ModulationKind,
     symbol_mapping: str,
     initial_frequency_error_hz: float,
     trailer_symbols: int = 2,
     block_symbols: int = 50,
 ) -> EDRDEVMTestResult:
-    """Measure non-overlapping 50-symbol EDR DEVM blocks.
+    """Measure non-overlapping 50-symbol Bluetooth EDR DEVM blocks.
 
-    The final two trailer symbols are removed before block construction.
-    Per block, only timing, residual frequency and a constant complex
-    reference coefficient are fitted.
+    ``first_symbol_center_sample`` is the center of the first EDR Sync
+    differential symbol.  The physical Reference Symbol immediately before
+    it is included in the first 51-symbol measurement window.  Every block
+    minimizes the differential error energy using only sampling phase and
+    residual frequency error; no complex gain or absolute phase fit is made.
     """
 
     values = np.asarray(iq, dtype=np.complex128)
-    labels = np.asarray(decoded_symbols, dtype=np.int16)
+    decoded = np.asarray(decoded_symbols, dtype=np.int16)
+    labels = np.asarray(
+        decoded if reference_symbols is None else reference_symbols,
+        dtype=np.int16,
+    )
+    if labels.size != decoded.size:
+        raise ValueError("EDR DEVM reference must match the decoded symbol count")
     usable = max(0, labels.size - max(0, int(trailer_symbols)))
     labels = labels[:usable]
     block_size = max(1, int(block_symbols))
@@ -129,62 +152,116 @@ def measure_edr_devm(
         raise ValueError("EDR measurement filter changed the sample rate")
     alphabet = psk_constellation(ModulationKind(modulation), symbol_mapping)
     differential = alphabet[labels]
-    absolute_reference = np.cumprod(differential)
+    # S[0] is the EDR Reference Symbol S0.  S[k + 1] is the physical
+    # transmitted symbol after applying differential symbol k.
+    absolute_reference = np.concatenate(
+        (np.ones(1, dtype=np.complex128), np.cumprod(differential))
+    )
     sps = float(sample_rate_hz) / float(symbol_rate_hz)
+    reference_symbol_center = float(first_symbol_center_sample) - sps
     blocks: list[EDRDEVMBlockResult] = []
     all_devm: list[np.ndarray] = []
 
     for block_index, start in enumerate(range(0, labels.size, block_size)):
-        reference = absolute_reference[start : start + block_size]
-        relative = np.arange(block_size, dtype=np.float64)
+        stop = start + block_size
+        # 51 physical symbols produce the 50 differential error vectors.
+        reference = absolute_reference[start : stop + 1]
+        physical_index = start + np.arange(block_size + 1, dtype=np.float64)
         nominal_centers = (
-            float(first_symbol_center_sample) + (start + relative) * sps
+            reference_symbol_center + physical_index * sps
         )
 
         def residual(parameters: np.ndarray) -> np.ndarray:
-            timing_samples, phase_step = map(float, parameters)
-            observed = _interpolate_complex(filtered, nominal_centers + timing_samples)
-            rotating_reference = reference * np.exp(1j * phase_step * relative)
+            timing_samples, residual_frequency_hz = map(float, parameters)
+            centers = nominal_centers + timing_samples
+            observed = _interpolate_complex(filtered, centers)
+            observed *= np.exp(
+                -2j
+                * np.pi
+                * residual_frequency_hz
+                * (centers - centers[0])
+                / float(sample_rate_hz)
+            )
+            q_symbols = observed * np.conj(reference)
+            errors = np.diff(q_symbols)
             denominator = max(
-                float(np.sum(np.abs(rotating_reference) ** 2)),
+                float(np.sum(np.abs(q_symbols[1:]) ** 2)),
                 np.finfo(np.float64).tiny,
             )
-            gain = np.vdot(rotating_reference, observed) / denominator
-            error = observed - gain * rotating_reference
-            scale = max(abs(gain), np.finfo(np.float64).tiny)
-            error /= scale
-            return np.concatenate((error.real, error.imag))
+            normalized_errors = errors / np.sqrt(denominator)
+            return np.concatenate(
+                (normalized_errors.real, normalized_errors.imag)
+            )
+
+        # A phase-slope estimate from Q gives a stable starting point without
+        # introducing an additional fitted parameter into the measurement.
+        initial_centers = nominal_centers
+        initial_observed = _interpolate_complex(filtered, initial_centers)
+        initial_q = initial_observed * np.conj(reference)
+        initial_phase_step = float(
+            np.median(np.angle(initial_q[1:] * np.conj(initial_q[:-1])))
+        )
+        initial_omega0_hz = float(
+            np.clip(
+                initial_phase_step * float(symbol_rate_hz) / (2.0 * np.pi),
+                -100_000.0,
+                100_000.0,
+            )
+        )
 
         fitted = least_squares(
             residual,
-            np.zeros(2, dtype=np.float64),
-            bounds=(np.asarray([-0.5 * sps, -0.35]), np.asarray([0.5 * sps, 0.35])),
-            x_scale=np.asarray([max(0.25, 0.25 * sps), 0.02]),
-            max_nfev=80,
+            np.asarray([0.0, initial_omega0_hz], dtype=np.float64),
+            bounds=(
+                np.asarray([-0.5 * sps, -100_000.0]),
+                np.asarray([0.5 * sps, 100_000.0]),
+            ),
+            x_scale=np.asarray([max(0.25, 0.25 * sps), 10_000.0]),
+            max_nfev=120,
         )
-        timing_samples, phase_step = map(float, fitted.x)
-        observed = _interpolate_complex(filtered, nominal_centers + timing_samples)
-        rotating_reference = reference * np.exp(1j * phase_step * relative)
-        gain = np.vdot(rotating_reference, observed) / max(
-            float(np.sum(np.abs(rotating_reference) ** 2)),
-            np.finfo(np.float64).tiny,
+        timing_samples, residual_frequency_hz = map(float, fitted.x)
+        centers = nominal_centers + timing_samples
+        corrected = _interpolate_complex(filtered, centers)
+        corrected *= np.exp(
+            -2j
+            * np.pi
+            * residual_frequency_hz
+            * (centers - centers[0])
+            / float(sample_rate_hz)
         )
-        corrected = observed / max(abs(gain), np.finfo(np.float64).tiny)
-        predicted = rotating_reference * np.exp(1j * np.angle(gain))
-        symbol_devm = np.abs(corrected - predicted)
-        rms = float(np.sqrt(np.mean(symbol_devm**2)))
+        q_symbols = corrected * np.conj(reference)
+        errors = np.diff(q_symbols)
+        rms_amplitude = np.sqrt(
+            max(
+                float(np.mean(np.abs(q_symbols[1:]) ** 2)),
+                np.finfo(np.float64).tiny,
+            )
+        )
+        symbol_devm = np.abs(errors) / rms_amplitude
+        rms = float(
+            np.sqrt(
+                np.sum(np.abs(errors) ** 2)
+                / max(
+                    float(np.sum(np.abs(q_symbols[1:]) ** 2)),
+                    np.finfo(np.float64).tiny,
+                )
+            )
+        )
         peak = float(np.max(symbol_devm))
         blocks.append(
             EDRDEVMBlockResult(
                 block_index=block_index,
                 start_symbol=start,
+                stop_symbol=stop,
                 timing_offset_symbols=timing_samples / sps,
-                residual_frequency_error_hz=(
-                    phase_step * float(symbol_rate_hz) / (2.0 * np.pi)
-                ),
+                residual_frequency_error_hz=residual_frequency_hz,
                 rms_devm=rms,
                 peak_devm=peak,
                 symbol_devm=symbol_devm,
+                physical_symbol_center_samples=centers,
+                corrected_received_symbols=corrected,
+                reference_symbols=reference,
+                error_vectors=errors,
             )
         )
         all_devm.append(symbol_devm)
@@ -196,6 +273,8 @@ def measure_edr_devm(
         peak_worst=max(block.peak_devm for block in blocks),
         devm_99_percentile=float(np.percentile(combined, 99.0)),
         total_symbol_count=int(combined.size),
+        reference_symbol_center_sample=reference_symbol_center,
+        sync_first_symbol_center_sample=float(first_symbol_center_sample),
     )
 
 

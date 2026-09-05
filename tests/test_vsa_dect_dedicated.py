@@ -14,6 +14,7 @@ from pluto_sa.vsa.protocol_modes.dect import (
     generate_dect_packet,
 )
 from pluto_sa.vsa.session import VSASession
+from pluto_sa.vsa.ui.display_processing import fit_binary_fsk_display_drift
 
 
 class _Source:
@@ -57,6 +58,13 @@ def test_dect_workspace_has_independent_carrier_list_and_capture_settings(tmp_pa
         assert capture.requested_sample_rate_hz == 9_216_000
         assert capture.rf_bandwidth_hz >= 3_000_000.0
         assert capture.trigger_source.value == "power_level"
+        assert capture.analysis_bandwidth_hz is None
+        assert capture.lo_offset_hz == 0.0
+        window.lo_offset_check.setChecked(True)
+        capture = window._capture_settings()
+        assert window.channel_filter_check.isChecked()
+        assert capture.analysis_bandwidth_hz == 3_000_000.0
+        assert capture.lo_offset_hz == 2_000_000.0
     finally:
         window._config_dialog.close()
         window.close()
@@ -133,14 +141,29 @@ def test_dect_workspace_renders_measurement_and_packet_views(tmp_path) -> None:
         ].isChecked()
         fm_trace = window.deviation_plot.listDataItems()[0]
         _fm_x, fm_y = fm_trace.getData()
+        fm_markers = window.deviation_plot.listDataItems()[1]
+        np.testing.assert_allclose(
+            fm_markers.yData,
+            np.interp(fm_markers.xData, fm_trace.xData, fm_trace.yData),
+            atol=1e-9,
+        )
+        symbol_values = window.symbol_plot.listDataItems()[0].yData
+        np.testing.assert_array_equal(symbol_values, fm_markers.yData)
         fm_mask = (
             (result.measurement_fm_sample >= result.metadata["actual_preamble_start_sample"])
             & (result.measurement_fm_sample <= result.packet_end_sample)
         )
+        display_drift, display_reference_time = fit_binary_fsk_display_drift(
+            result.symbol_centers / recording.sample_rate_hz,
+            result.symbol_frequency_hz,
+            result.bits,
+        )
+        fm_time_s = result.measurement_fm_sample[fm_mask] / recording.sample_rate_hz
         assert fm_y == pytest.approx(
             (
                 result.measurement_fm_frequency_hz[fm_mask]
                 - result.frequency_references.measured_hz
+                - display_drift * (fm_time_s - display_reference_time)
             )
             / 1e3
         )

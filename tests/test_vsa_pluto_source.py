@@ -193,6 +193,11 @@ def test_pluto_single_capture_reuses_unchanged_receiver_configuration() -> None:
     assert receiver.rf_bandwidth_reads == 1
     assert first.sample_count == second.sample_count == 80_000
 
+    source.stop_stream()
+    assert not source.is_stream_ready(settings)
+    assert receiver.stop_calls >= 1
+    assert not receiver.closed
+
     changed = replace(settings, center_frequency_hz=2_402_000_000.0)
     assert not source.is_stream_ready(changed)
     source.capture_single(changed)

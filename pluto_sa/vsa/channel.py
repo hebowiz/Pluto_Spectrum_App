@@ -8,6 +8,54 @@ from scipy.signal import fftconvolve, firwin
 from pluto_sa.vsa.model import IQRecording
 
 
+def validate_analysis_channel_capture(
+    *,
+    sample_rate_hz: float,
+    usable_bandwidth_hz: float,
+    lo_offset_hz: float,
+    analysis_bandwidth_hz: float | None,
+) -> None:
+    """Validate the shared VSA analysis-filter/offset-LO geometry."""
+
+    if analysis_bandwidth_hz is None:
+        if lo_offset_hz != 0.0:
+            raise ValueError("LO Offset requires Enable Analysis Channel")
+        return
+    bandwidth_hz = float(analysis_bandwidth_hz)
+    input_rate_hz = float(sample_rate_hz)
+    usable_hz = min(input_rate_hz, float(usable_bandwidth_hz))
+    if bandwidth_hz >= input_rate_hz:
+        raise ValueError(
+            "Analysis Bandwidth must be smaller than the input sample rate"
+        )
+    if abs(float(lo_offset_hz)) + 0.5 * bandwidth_hz > 0.5 * usable_hz:
+        raise ValueError(
+            "LO Offset and Analysis Bandwidth exceed the usable Pluto "
+            "capture bandwidth"
+        )
+    if lo_offset_hz != 0.0 and abs(float(lo_offset_hz)) <= 0.5 * bandwidth_hz:
+        raise ValueError(
+            "LO Offset must exceed half the Analysis Bandwidth so the "
+            "Analysis Filter can reject the Pluto DC spur"
+        )
+
+
+def extract_requested_analysis_channel(recording: IQRecording) -> IQRecording:
+    """Apply the analysis channel requested by a Pluto live capture."""
+
+    bandwidth = recording.metadata.get("requested_analysis_bandwidth_hz")
+    if bandwidth is None:
+        return recording
+    center = recording.metadata.get(
+        "requested_center_frequency_hz", recording.center_frequency_hz
+    )
+    return extract_analysis_channel(
+        recording,
+        center_frequency_hz=float(center),
+        bandwidth_hz=float(bandwidth),
+    )
+
+
 def _default_decimation(sample_rate_hz: float, bandwidth_hz: float) -> int:
     """Keep approximately four output samples per analysis-bandwidth period."""
     desired_rate_hz = 4.0 * float(bandwidth_hz)

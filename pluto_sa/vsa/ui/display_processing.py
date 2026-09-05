@@ -7,11 +7,23 @@ preset cannot silently change measurement presentation.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from pluto_sa.vsa.model import ModulationKind
 from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
 from pluto_sa.vsa.pattern import prepare_psk_iq
+
+
+@dataclass(frozen=True)
+class FSKDisplayData:
+    """One display-only FSK series shared by line and symbol views."""
+
+    time_s: np.ndarray
+    corrected_frequency_hz: np.ndarray
+    symbol_time_s: np.ndarray
+    symbol_frequency_hz: np.ndarray
 
 
 def format_evm(percent: float) -> str:
@@ -95,6 +107,91 @@ def prepare_fsk_display_frequency(
         frequency_hz.size, dtype=np.float64
     ) / float(prepared_rate_hz)
     return frequency_hz, time_s
+
+
+def sample_fsk_display_trace(
+    frequency_hz: np.ndarray,
+    time_s: np.ndarray,
+    symbol_time_s: np.ndarray,
+) -> np.ndarray:
+    """Sample the displayed FSK trace at recovered symbol-center times.
+
+    This function is display-only.  Decoder decisions and RF-PHY measurement
+    values retain their protocol-specific filtering and symbol-window rules.
+    """
+
+    frequency = np.asarray(frequency_hz, dtype=np.float64)
+    trace_time = np.asarray(time_s, dtype=np.float64)
+    symbol_time = np.asarray(symbol_time_s, dtype=np.float64)
+    count = min(frequency.size, trace_time.size)
+    if count == 0 or symbol_time.size == 0:
+        return np.empty(0, dtype=np.float64)
+    return np.interp(symbol_time, trace_time[:count], frequency[:count])
+
+
+def build_fsk_display_data(
+    frequency_hz: np.ndarray,
+    time_s: np.ndarray,
+    symbol_time_s: np.ndarray,
+    *,
+    frequency_offset_hz: float = 0.0,
+    frequency_drift_hz_per_s: float = 0.0,
+    reference_time_s: float = 0.0,
+) -> FSKDisplayData:
+    """Build the corrected frequency series used by every FSK display."""
+
+    frequency = np.asarray(frequency_hz, dtype=np.float64)
+    trace_time = np.asarray(time_s, dtype=np.float64)
+    symbol_time = np.asarray(symbol_time_s, dtype=np.float64)
+    count = min(frequency.size, trace_time.size)
+    trace_time = np.array(trace_time[:count], copy=True)
+    correction = float(frequency_offset_hz) + float(
+        frequency_drift_hz_per_s
+    ) * (trace_time - float(reference_time_s))
+    corrected = np.array(frequency[:count] - correction, copy=True)
+    sampled = sample_fsk_display_trace(corrected, trace_time, symbol_time)
+    symbol_time = np.array(symbol_time, copy=True)
+    for values in (trace_time, corrected, symbol_time, sampled):
+        values.setflags(write=False)
+    return FSKDisplayData(
+        time_s=trace_time,
+        corrected_frequency_hz=corrected,
+        symbol_time_s=symbol_time,
+        symbol_frequency_hz=sampled,
+    )
+
+
+def fit_binary_fsk_display_drift(
+    symbol_time_s: np.ndarray,
+    symbol_frequency_hz: np.ndarray,
+    symbols: np.ndarray,
+) -> tuple[float, float]:
+    """Estimate display-only carrier drift while fitting both FSK levels."""
+
+    time_s = np.asarray(symbol_time_s, dtype=np.float64)
+    frequency_hz = np.asarray(symbol_frequency_hz, dtype=np.float64)
+    bits = np.asarray(symbols, dtype=np.float64)
+    count = min(time_s.size, frequency_hz.size, bits.size)
+    if count < 3:
+        return 0.0, float(time_s[0]) if count else 0.0
+    time_s = time_s[:count]
+    frequency_hz = frequency_hz[:count]
+    levels = 2.0 * bits[:count] - 1.0
+    finite = np.isfinite(time_s) & np.isfinite(frequency_hz) & np.isfinite(levels)
+    if np.count_nonzero(finite) < 3:
+        return 0.0, float(np.nanmean(time_s))
+    time_s = time_s[finite]
+    frequency_hz = frequency_hz[finite]
+    levels = levels[finite]
+    reference_time_s = float(np.mean(time_s))
+    design = np.column_stack(
+        (np.ones(time_s.size), levels, time_s - reference_time_s)
+    )
+    coefficients, _residuals, rank, _singular = np.linalg.lstsq(
+        design, frequency_hz, rcond=None
+    )
+    drift_hz_per_s = float(coefficients[2]) if rank == 3 else 0.0
+    return drift_hz_per_s, reference_time_s
 
 
 def constellation_display_symbols(modulation: ModulationKind, symbols: np.ndarray) -> np.ndarray:

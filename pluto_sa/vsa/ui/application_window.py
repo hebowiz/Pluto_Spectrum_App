@@ -52,9 +52,6 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             workspace.application_close_requested.connect(self.close)
             if hasattr(workspace, "shutdown_ready"):
                 workspace.shutdown_ready.connect(self._continue_shutdown)
-        self.generic_workspace.analysis_published.connect(
-            self._generic_analysis_published
-        )
         self.generic_workspace.pluto_uri_edit.currentTextChanged.connect(
             self._pluto_target_changed
         )
@@ -98,14 +95,9 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 f"{busy}. Stop it before changing modes.",
             )
             return
-        if target is self.adsb1090_workspace:
-            recording = self.generic_workspace.session.recording
-            if recording is not None and recording is not target.recording:
-                target.analyze_recording(recording)
-        elif target is self.bluetooth_workspace:
-            target.set_session(self.generic_workspace.session)
-        elif target is self.dect_workspace:
-            target.set_session(self.generic_workspace.session)
+        stop_stream = getattr(self._pluto_source, "stop_stream", None)
+        if callable(stop_stream):
+            stop_stream()
         self._stack.setCurrentWidget(target)
         self._update_window_title(target)
 
@@ -135,18 +127,6 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         current = self._stack.currentWidget()
         if current is not None:
             self._update_window_title(current)
-
-    @QtCore.Slot(object)
-    def _generic_analysis_published(self, session: object) -> None:
-        if isinstance(session, type(self.generic_workspace.session)):
-            if self._stack.currentWidget() is self.bluetooth_workspace:
-                self.bluetooth_workspace.set_session(session)
-            else:
-                self.bluetooth_workspace.stage_session(session)
-            if self._stack.currentWidget() is self.dect_workspace:
-                self.dect_workspace.set_session(session)
-            else:
-                self.dect_workspace.stage_session(session)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self._shutdown_requested = True

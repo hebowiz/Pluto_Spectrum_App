@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+import logging
 from types import MappingProxyType
 from collections.abc import Callable
 from typing import Mapping
@@ -60,6 +61,7 @@ from pluto_sa.vsa.profiles.bluetooth_br import (
     BluetoothBRProfile,
     access_code_bits,
     prbs9_period,
+    whitening_sequence,
 )
 from pluto_sa.vsa.profiles.bluetooth_edr import edr_sync_symbols
 from pluto_sa.vsa.protocol import analyze_demodulated_packet_bits
@@ -101,6 +103,9 @@ from pluto_sa.vsa.protocol_modes.bluetooth.summary import (
     BluetoothSummaryRow,
     build_bluetooth_summary,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class BluetoothAnalysisProfile(StrEnum):
@@ -853,6 +858,18 @@ def _symbols_to_air_bits(symbols: np.ndarray, order: int) -> np.ndarray:
     values = np.asarray(symbols, dtype=np.int16)
     shifts = np.arange(bit_count - 1, -1, -1, dtype=np.int16)
     return ((values[:, None] >> shifts) & 1).astype(np.uint8).reshape(-1)
+
+
+def _air_bits_to_symbols(bits: np.ndarray, order: int) -> np.ndarray:
+    """Group Bluetooth EDR air bits into logical differential symbols."""
+
+    bit_count = int(round(np.log2(int(order))))
+    values = np.asarray(bits, dtype=np.uint8)
+    if values.size % bit_count:
+        raise ValueError("EDR air-bit reference is not symbol aligned")
+    groups = values.reshape(-1, bit_count)
+    weights = 1 << np.arange(bit_count - 1, -1, -1, dtype=np.int16)
+    return np.sum(groups * weights, axis=1, dtype=np.int16)
 
 
 def _packet_field_by_id(
@@ -2407,6 +2424,7 @@ def analyze_bluetooth_classic_recording(
     )
     rf_metrics: tuple[BluetoothMetric, ...] = ()
     rf_measurements: tuple[BluetoothRFMeasurementResult, ...] = ()
+    edr_coordinate_metadata: dict[str, object] = {}
     if phy is BluetoothClassicPhy.BR:
         rf_metrics, rf_measurements = _sig_fsk_measurements(
             recording,
@@ -2486,31 +2504,174 @@ def analyze_bluetooth_classic_recording(
                 stop_sample=packet_stop_sample - recording_sample_offset,
                 central_fraction=0.8,
             )
-            # Differential demodulation needs the preceding absolute symbol;
-            # Generic PatternSearchResult therefore reports its range one
-            # symbol after the physical EDR reference-symbol boundary.
+            first_psk_center = (
+                analysis_sample_offset
+                + float(pattern.symbol_time_s[0]) * recording.sample_rate_hz
+            )
+            # PatternSearchResult starts at the first EDR Sync differential
+            # symbol.  Express every EDR boundary from that recovered center
+            # so Guard Time, DEVM and PSK plots cannot disagree by one symbol
+            # or by a center-versus-boundary conversion.
+            edr_sync_start_boundary_sample = (
+                first_psk_center - 0.5 * samples_per_psk_symbol
+            )
+            edr_reference_center_sample = (
+                first_psk_center - samples_per_psk_symbol
+            )
             edr_reference_start_sample = (
-                detected_edr_sync_start - samples_per_psk_symbol
+                edr_reference_center_sample - 0.5 * samples_per_psk_symbol
+            )
+            edr_payload_first_center_sample = (
+                first_psk_center
+                + expected_edr_decoded_sync_symbols.size
+                * samples_per_psk_symbol
+            )
+            edr_trailer_first_center_sample = (
+                first_psk_center
+                + max(0, pattern.decoded_symbols.size - 2)
+                * samples_per_psk_symbol
             )
             guard = measure_edr_guard_time(
                 header_end_sample=header_end_sample,
                 reference_symbol_start_sample=edr_reference_start_sample,
                 sample_rate_hz=recording.sample_rate_hz,
             )
-            first_psk_center = (
-                analysis_sample_offset
-                + float(pattern.symbol_time_s[0]) * recording.sample_rate_hz
+            # Build one fixed physical reference from the known Sync and the
+            # decoded packet bitstream re-encoded into its over-the-air form.
+            # The DEVM optimizer never substitutes nearest constellation
+            # decisions for this sequence.
+            decoded_payload_field = _packet_field_by_id(
+                packet.root_fields, "payload"
             )
+            if decoded_payload_field is None:
+                raise ValueError("EDR DEVM requires a decoded payload reference")
+            payload_reference_bits = np.asarray(
+                decoded_payload_field.raw_bits, dtype=np.uint8
+            )
+            if whitening_enabled:
+                payload_reference_bits = payload_reference_bits ^ (
+                    whitening_sequence(
+                        int(clock_6_1), 18 + payload_reference_bits.size
+                    )[18:]
+                )
+            bits_per_edr_symbol = int(
+                round(np.log2(analysis_session.signal.modulation.order))
+            )
+            padding_count = (-payload_reference_bits.size) % bits_per_edr_symbol
+            if padding_count:
+                payload_reference_bits = np.concatenate(
+                    (
+                        payload_reference_bits,
+                        np.zeros(padding_count, dtype=np.uint8),
+                    )
+                )
+            edr_devm_reference_symbols = np.concatenate(
+                (
+                    expected_edr_decoded_sync_symbols,
+                    _air_bits_to_symbols(
+                        payload_reference_bits,
+                        analysis_session.signal.modulation.order,
+                    ),
+                    np.zeros(2, dtype=np.int16),
+                )
+            )
+            if edr_devm_reference_symbols.size != pattern.decoded_symbols.size:
+                raise ValueError(
+                    "re-encoded EDR reference does not match the physical "
+                    "packet symbol count"
+                )
             devm = measure_edr_devm(
                 recording.iq,
                 sample_rate_hz=recording.sample_rate_hz,
                 symbol_rate_hz=analysis_session.signal.symbol_rate_hz,
                 first_symbol_center_sample=first_psk_center,
                 decoded_symbols=pattern.decoded_symbols,
+                reference_symbols=edr_devm_reference_symbols,
                 modulation=analysis_session.signal.modulation,
                 symbol_mapping=analysis_session.signal.symbol_mapping,
                 initial_frequency_error_hz=initial.error_hz,
             )
+            evaluated_center_samples = (
+                np.concatenate(
+                    [
+                        block.physical_symbol_center_samples[1:]
+                        for block in devm.blocks
+                    ]
+                )
+                if devm.blocks
+                else np.empty(0, dtype=np.float64)
+            )
+            display_reference_center_sample = (
+                float(devm.blocks[0].physical_symbol_center_samples[0])
+                if devm.blocks
+                else edr_reference_center_sample
+            )
+            display_sync_center_sample = (
+                float(devm.blocks[0].physical_symbol_center_samples[1])
+                if devm.blocks
+                else first_psk_center
+            )
+            display_payload_center_sample = (
+                float(devm.blocks[0].physical_symbol_center_samples[11])
+                if devm.blocks
+                and devm.blocks[0].physical_symbol_center_samples.size > 11
+                else edr_payload_first_center_sample
+            )
+            # Top-level, capture-relative coordinates are consumed by both
+            # IQ Power markers and PSK display sampling.  Keeping them here
+            # prevents either UI path from reconstructing EDR field ranges.
+            edr_coordinate_metadata = {
+                "edr_reference_symbol_center_sample": (
+                    recording_sample_offset + display_reference_center_sample
+                ),
+                "edr_sync_first_symbol_center_sample": (
+                    recording_sample_offset + display_sync_center_sample
+                ),
+                "edr_payload_first_symbol_center_sample": (
+                    recording_sample_offset + display_payload_center_sample
+                ),
+                "edr_trailer_first_symbol_center_sample": (
+                    recording_sample_offset
+                    + display_sync_center_sample
+                    + max(0, pattern.decoded_symbols.size - 2)
+                    * samples_per_psk_symbol
+                ),
+                "edr_devm_symbol_center_samples": (
+                    evaluated_center_samples + recording_sample_offset
+                ),
+            }
+            LOGGER.info(
+                "EDR SIG %s: sync=%.3f, reference=%.3f, payload=%.3f, "
+                "trailer=%.3f samples; omega_i=%+.3f Hz; blocks=%d; "
+                "RMS=%s, 99%%=%s, peak=%s, guard=%.3f us",
+                phy.value,
+                first_psk_center,
+                edr_reference_center_sample,
+                edr_payload_first_center_sample,
+                edr_trailer_first_center_sample,
+                initial.error_hz,
+                len(devm.blocks),
+                "N/A" if devm.rms_worst is None else f"{100.0 * devm.rms_worst:.4f}%",
+                (
+                    "N/A"
+                    if devm.devm_99_percentile is None
+                    else f"{100.0 * devm.devm_99_percentile:.4f}%"
+                ),
+                "N/A" if devm.peak_worst is None else f"{100.0 * devm.peak_worst:.4f}%",
+                1e6 * guard.guard_time_s,
+            )
+            for block in devm.blocks:
+                LOGGER.debug(
+                    "EDR SIG block %d symbols [%d, %d): epsilon0=%+.6f "
+                    "symbol, omega0=%+.3f Hz, RMS=%+.4f%%, peak=%+.4f%%",
+                    block.block_index,
+                    block.start_symbol,
+                    block.stop_symbol,
+                    block.timing_offset_symbols,
+                    block.residual_frequency_error_hz,
+                    100.0 * block.rms_devm,
+                    100.0 * block.peak_devm,
+                )
             conformance = EDRConformanceResult(
                 sync_symbol_errors=int(
                     np.count_nonzero(
@@ -2676,6 +2837,58 @@ def analyze_bluetooth_classic_recording(
                         "timing_offset_symbols": np.asarray(
                             [block.timing_offset_symbols for block in devm.blocks]
                         ),
+                        "physical_symbol_center_samples": np.concatenate(
+                            [
+                                block.physical_symbol_center_samples[1:]
+                                for block in devm.blocks
+                            ]
+                        )
+                        if devm.blocks
+                        else np.empty(0, dtype=np.float64),
+                        "corrected_received_symbols": np.concatenate(
+                            [
+                                block.corrected_received_symbols[1:]
+                                for block in devm.blocks
+                            ]
+                        )
+                        if devm.blocks
+                        else np.empty(0, dtype=np.complex128),
+                        "reference_symbols": np.concatenate(
+                            [block.reference_symbols[1:] for block in devm.blocks]
+                        )
+                        if devm.blocks
+                        else np.empty(0, dtype=np.complex128),
+                        "differential_error_vectors": np.concatenate(
+                            [block.error_vectors for block in devm.blocks]
+                        )
+                        if devm.blocks
+                        else np.empty(0, dtype=np.complex128),
+                        "block_physical_symbol_center_samples": np.stack(
+                            [
+                                block.physical_symbol_center_samples
+                                for block in devm.blocks
+                            ]
+                        )
+                        if devm.blocks
+                        else np.empty((0, 0), dtype=np.float64),
+                        "block_corrected_received_symbols": np.stack(
+                            [
+                                block.corrected_received_symbols
+                                for block in devm.blocks
+                            ]
+                        )
+                        if devm.blocks
+                        else np.empty((0, 0), dtype=np.complex128),
+                        "block_reference_symbols": np.stack(
+                            [block.reference_symbols for block in devm.blocks]
+                        )
+                        if devm.blocks
+                        else np.empty((0, 0), dtype=np.complex128),
+                        "block_differential_error_vectors": np.stack(
+                            [block.error_vectors for block in devm.blocks]
+                        )
+                        if devm.blocks
+                        else np.empty((0, 0), dtype=np.complex128),
                         "omega_i_selected_header_bit_indices": (
                             initial.selected_bit_indices
                         ),
@@ -2688,6 +2901,19 @@ def analyze_bluetooth_classic_recording(
                         "output_power_window_start_sample": output_power.start_sample,
                         "output_power_window_stop_sample": output_power.stop_sample,
                         "appendix_c_final_audit": False,
+                        "reference_source": "known Sync plus decoded/re-encoded packet",
+                        "header_end_boundary_sample": header_end_sample,
+                        "guard_start_boundary_sample": header_end_sample,
+                        "reference_symbol_start_sample": edr_reference_start_sample,
+                        "reference_symbol_center_sample": edr_reference_center_sample,
+                        "sync_start_boundary_sample": edr_sync_start_boundary_sample,
+                        "sync_first_symbol_center_sample": first_psk_center,
+                        "payload_first_symbol_center_sample": (
+                            edr_payload_first_center_sample
+                        ),
+                        "trailer_first_symbol_center_sample": (
+                            edr_trailer_first_center_sample
+                        ),
                     },
                 ),
             )
@@ -2736,6 +2962,7 @@ def analyze_bluetooth_classic_recording(
                 )
             ),
             "rf_measurements": rf_measurements,
+            **edr_coordinate_metadata,
         },
     )
 

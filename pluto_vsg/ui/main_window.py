@@ -32,6 +32,7 @@ from pluto_vsg.engine import (
     BluetoothBRWaveformEngine,
     BluetoothHDTWaveformEngine,
     BluetoothLEWaveformEngine,
+    DectWaveformEngine,
     GenerationResult,
     WiFiLegacyOFDMWaveformEngine,
 )
@@ -42,6 +43,7 @@ from pluto_vsg.model import (
     BluetoothLEPayloadSourceKind,
     BluetoothLEPhy,
     BluetoothPacketKind,
+    DectPacketType,
     PayloadSourceKind,
     StandardProfile,
     WaveformProject,
@@ -69,6 +71,8 @@ from pluto_vsg.profiles import (
     wifi_beacon_project,
     wifi_fields,
     wifi_project,
+    dect_fields,
+    dect_project,
 )
 from pluto_protocol.bluetooth.hdt import HDTRate, hdt_definition
 from pluto_vsg.ui.style import (
@@ -80,6 +84,7 @@ from pluto_vsg.ui.style import (
     panel_title_font,
 )
 from pluto_vsg.ui.composer_view import PacketComposerView
+from pluto_vsg.ui.dect_settings import DectSettingsDialog
 
 
 def _instantaneous_frequency_khz(
@@ -1570,6 +1575,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.new_hdt_action.triggered.connect(self._new_bluetooth_hdt_project)
         self.new_wifi_action = QtGui.QAction("New Wi-Fi Packet", self)
         self.new_wifi_action.triggered.connect(self._new_wifi_project)
+        self.new_dect_action = QtGui.QAction("New DECT Packet", self)
+        self.new_dect_action.triggered.connect(self._new_dect_project)
         self.open_action = QtGui.QAction("Open...", self)
         self.open_action.triggered.connect(self._open_project)
         self.save_action = QtGui.QAction("Save", self)
@@ -1631,7 +1638,14 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         file_menu = menu_bar.addMenu("File")
         new_menu = file_menu.addMenu("New")
         new_menu.addActions(
-            [self.new_action, self.new_le1m_action, self.new_le2m_action, self.new_hdt_action, self.new_wifi_action]
+            [
+                self.new_action,
+                self.new_le1m_action,
+                self.new_le2m_action,
+                self.new_hdt_action,
+                self.new_wifi_action,
+                self.new_dect_action,
+            ]
         )
         file_menu.addActions([self.open_action, self.save_action, self.save_as_action])
         file_menu.addSeparator()
@@ -1849,8 +1863,35 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.generate_waveform()
         self._configuration_maybe_changed(previous_signature)
 
+    def _new_dect_project(self) -> None:
+        previous_signature = self._pluto_configuration_signature()
+        self.project = dect_project()
+        self.project_path = None
+        self.undo_stack.clear()
+        self._refresh_project_view()
+        self.generate_waveform()
+        self._configuration_maybe_changed(previous_signature)
+
     def _apply_rf_test_preset(self) -> None:
-        if self.project.standard == StandardProfile.WIFI:
+        if self.project.standard == StandardProfile.DECT:
+            current = self.project.dect
+            if current is None:
+                return
+            settings = replace(
+                current,
+                b_field_source=PayloadSourceKind.PATTERN,
+                b_field_pattern="00001111",
+                r_crc_auto=True,
+                x_crc_auto=True,
+                z_repeat_auto=True,
+            )
+            updated_project = replace(
+                self.project,
+                name=f"DECT {DectPacketType(settings.packet_type).value} RF Test Packet",
+                fields=dect_fields(settings),
+                dect=settings,
+            )
+        elif self.project.standard == StandardProfile.WIFI:
             updated_project = wifi_beacon_project()
         elif self.project.standard == StandardProfile.BLUETOOTH_HDT:
             current = self.project.bluetooth_hdt
@@ -1900,7 +1941,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._commit_project_change(updated_project, "Apply RF test packet preset")
 
     def _edit_project_settings(self) -> None:
-        if self.project.standard == StandardProfile.WIFI:
+        if self.project.standard == StandardProfile.DECT:
+            dialog = DectSettingsDialog(self.project, self)
+            if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+                self._commit_project_change(dialog.project, "Edit DECT packet settings")
+        elif self.project.standard == StandardProfile.WIFI:
             dialog = _WiFiSettingsDialog(self.project, self)
             if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
                 self._commit_project_change(dialog.project, "Edit Wi-Fi packet settings")
@@ -1993,6 +2038,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         le_settings = self.project.bluetooth_le
         hdt_settings = self.project.bluetooth_hdt
         wifi_settings = self.project.wifi
+        dect_settings = self.project.dect
         parameters = [
             ("Project", self.project.name),
             ("Standard", self.project.standard.value),
@@ -2083,10 +2129,43 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 ("SSID", wifi_settings.ssid if WiFiPSDUSource(wifi_settings.psdu_source) == WiFiPSDUSource.BEACON else "-"),
                 ("BSSID", wifi_settings.bssid if WiFiPSDUSource(wifi_settings.psdu_source) == WiFiPSDUSource.BEACON else "-"),
             ])
+        elif dect_settings is not None:
+            parameters.extend(
+                [
+                    ("Direction", dect_settings.direction.value),
+                    ("Packet Type", dect_settings.packet_type.value),
+                    ("Carrier Plan", dect_settings.carrier_plan_id),
+                    ("Carrier", dect_settings.carrier_channel),
+                    (
+                        "Frequency Offset",
+                        f"{dect_settings.carrier_frequency_offset_hz / 1e3:+.3f} kHz",
+                    ),
+                    (
+                        "Generated RF Frequency",
+                        f"{(self.project.center_frequency_hz + dect_settings.carrier_frequency_offset_hz) / 1e6:.6f} MHz",
+                    ),
+                    (
+                        "Deviation",
+                        f"{dect_settings.frequency_deviation_hz / 1e3:.3f} kHz",
+                    ),
+                    ("Gaussian B*T", f"{dect_settings.gaussian_bt:.3f}"),
+                    (
+                        "B-field Source",
+                        PayloadSourceKind(dect_settings.b_field_source).value,
+                    ),
+                    (
+                        "R/X/Z Generation",
+                        f"R-CRC {'Auto' if dect_settings.r_crc_auto else 'Manual'} / "
+                        f"X {'Auto' if dect_settings.x_crc_auto else 'Manual'} / "
+                        f"Z {'Auto' if dect_settings.z_repeat_auto else 'Manual'}",
+                    ),
+                ]
+            )
         settings_label = ({
             StandardProfile.BLUETOOTH_LE: "Bluetooth LE Packet Settings...",
             StandardProfile.BLUETOOTH_HDT: "Bluetooth HDT Settings...",
             StandardProfile.WIFI: "Wi-Fi Packet / Waveform Settings...",
+            StandardProfile.DECT: "DECT Packet / Waveform Settings...",
         }).get(self.project.standard, "Bluetooth BR / EDR Settings...")
         self.settings_action.setText(settings_label)
         self.edit_settings_button.setText(f"Edit {settings_label}")
@@ -2147,6 +2226,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 StandardProfile.BLUETOOTH_LE: BluetoothLEWaveformEngine,
                 StandardProfile.BLUETOOTH_HDT: BluetoothHDTWaveformEngine,
                 StandardProfile.WIFI: WiFiLegacyOFDMWaveformEngine,
+                StandardProfile.DECT: DectWaveformEngine,
             }.get(self.project.standard, BluetoothBRWaveformEngine)()
             self.result = engine.generate(self.project)
         except ValueError as error:
@@ -2464,6 +2544,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         minimum_bandwidth_hz = (
             20_000_000.0
             if self.project.standard == StandardProfile.WIFI
+            else 3_000_000.0
+            if self.project.standard == StandardProfile.DECT
             else 200_000.0
         )
         bandwidth_hz = min(
