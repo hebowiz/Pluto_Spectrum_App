@@ -47,6 +47,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     limit_iq_power_display_dbm,
     make_measurement_dock,
     make_measurement_plot,
+    set_iq_power_default_y_range,
 )
 from pluto_sa.vsa.ui.iq_export import export_iq_recording
 
@@ -1923,6 +1924,9 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 padding=0.0,
             )
         if update_power_plot:
+            self.power_plot.enableAutoRange(axis="y", enable=True)
+            self.power_plot.getViewBox().updateAutoRange()
+            set_iq_power_default_y_range(self.power_plot, display_power)
             self._remember_plot_range("power", self.power_plot)
         if update_selection and selected_entry is not None:
             self._show_message_plot(selected_entry)

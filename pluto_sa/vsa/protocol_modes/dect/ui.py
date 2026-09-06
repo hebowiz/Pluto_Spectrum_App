@@ -47,6 +47,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     plot_trace_symbol_points,
     plot_unit_circle,
     set_frequency_constellation_x_lock,
+    set_iq_power_default_y_range,
     set_iq_plane_range,
     view_all_traces,
 )
@@ -1099,6 +1100,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         stop_stream = getattr(self._pluto_source, "stop_stream", None)
         if callable(stop_stream):
             stop_stream()
+        self.run_action.setText("Run Single")
+        self.capture_button.setText("Single Capture")
         self.run_continuous_action.setText("Run Continuous")
         self.continuous_capture_button.setText("Continuous Capture")
         self.run_continuous_action.setEnabled(True)
@@ -1378,6 +1381,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             ):
                 continue
             view_all_traces(plot)
+        set_iq_power_default_y_range(self.power_plot, power_dbm)
         self.deviation_plot.setYRange(
             -_DECT_FSK_MODULATION_Y_LIMIT_KHZ,
             _DECT_FSK_MODULATION_Y_LIMIT_KHZ,

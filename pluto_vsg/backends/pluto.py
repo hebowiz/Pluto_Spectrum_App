@@ -31,6 +31,7 @@ _DEFAULT_DMA_PREROLL_S = 0.010
 _DEFAULT_COMPLETION_MARGIN_S = 0.100
 _MAX_BURST_COUNT = 1000
 _NONCYCLIC_SUFFIX_GUARD_S = 0.002
+_IIO_OPERATION_TIMEOUT_MS = 3_000
 _SERIAL_PATTERN = re.compile(r"\bserial\s*[=:]\s*([^\s,;]+)", re.IGNORECASE)
 
 # Provisional conducted-power calibration measured at 2440 MHz with a
@@ -468,6 +469,17 @@ class PlutoOutputBackend:
         for uri in candidates:
             try:
                 sdr = adi.Pluto(uri=uri) if uri is not None else adi.Pluto()
+                # libiio otherwise permits a USB/network transaction to wait
+                # indefinitely.  This is particularly visible when a cyclic
+                # TX buffer is cancelled: the worker never reaches its
+                # ``finished`` signal and the UI remains at "Stopping...".
+                # Keep all hardware access on the TX owner thread, but give
+                # the context a finite upper bound so cleanup can finish (or
+                # fail safely with the LO already powered down).
+                context = getattr(sdr, "_ctx", None)
+                set_timeout = getattr(context, "set_timeout", None)
+                if callable(set_timeout):
+                    set_timeout(_IIO_OPERATION_TIMEOUT_MS)
                 return sdr, uri, lease
             except Exception as error:
                 errors.append(f"{uri or 'auto'}: {error}")
@@ -798,27 +810,39 @@ class PlutoOutputBackend:
                 f"(requested {bool(powerdown)}, found {readback})"
             )
 
-    @classmethod
-    def _mute_and_stop(cls, sdr) -> None:
+    def _mute_and_stop(self, sdr) -> None:
         """Mute RF first, then remove DMA and select the DAC zero source."""
 
+        self._record_event("cleanup_gain_mute_started")
         try:
             sdr.tx_hardwaregain_chan0 = _PLUTO_MUTED_GAIN_DB
-        except Exception:
-            pass
+        except Exception as error:
+            self._record_event(f"cleanup_gain_mute_failed:{type(error).__name__}")
+        else:
+            self._record_event("cleanup_gain_mute_completed")
+        self._record_event("cleanup_lo_powerdown_started")
         try:
-            cls._set_tx_lo_powerdown(sdr, True)
-        except Exception:
-            pass
+            self._set_tx_lo_powerdown(sdr, True)
+        except Exception as error:
+            self._record_event(f"cleanup_lo_powerdown_failed:{type(error).__name__}")
+        else:
+            self._record_event("cleanup_lo_powerdown_completed")
+        self._record_event("cleanup_dma_destroy_started")
         try:
             sdr.tx_destroy_buffer()
-        except Exception:
-            pass
+        except Exception as error:
+            self._record_event(f"cleanup_dma_destroy_failed:{type(error).__name__}")
+        else:
+            self._record_event("cleanup_dma_destroy_completed")
+        self._record_event("cleanup_dac_zero_started")
         try:
             sdr.tx_enabled_channels = []
             sdr.tx()
-        except Exception:
-            pass
+        except Exception as error:
+            self._record_event(f"cleanup_dac_zero_failed:{type(error).__name__}")
+        else:
+            self._record_event("cleanup_dac_zero_completed")
+
     def _wait_precise(self, duration_s: float) -> None:
         """Wait for a short RF window without Windows timer-quantum overshoot."""
 
@@ -949,7 +973,14 @@ class PlutoOutputBackend:
             self._record_event("cleanup_started")
             self._mute_and_stop(sdr)
             self._record_event("cleanup_completed")
-            self._observe_hardware("after_cleanup", sdr)
+            # A user Stop already completed the safety-critical writes above.
+            # Avoid another group of synchronous USB read-backs on that path;
+            # they add no control action and used to provide another chance
+            # for the worker to remain stuck after successful cleanup.
+            if self._stop_event.is_set():
+                self._record_event("post_cleanup_readback_skipped_after_stop")
+            else:
+                self._observe_hardware("after_cleanup", sdr)
             if self._state != "ERROR":
                 self._state = "READY"
             self._sdr = None

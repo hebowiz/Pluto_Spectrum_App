@@ -81,6 +81,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     plot_frequency_symbol_distribution,
     plot_trace_symbol_points,
     set_frequency_constellation_x_lock,
+    set_iq_power_default_y_range,
     SymbolDensitySpread,
     trace_bounds,
     view_all_traces,
@@ -3251,6 +3252,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._continuous_run_requested = False
         self._continuous_capture_settings = None
         self._continuous_signal = None
+        self.run_single_action.setText("Run Single")
+        self.run_single_button.setText("Run Single (Pluto)")
         self.run_continuous_action.setText("Run Continuous")
         self.run_continuous_button.setText("Run Continuous (Pluto)")
         self.run_continuous_action.setEnabled(True)
@@ -4935,6 +4938,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             f"Showing {shown.size} of {table_symbols.size} result-range symbols"
         )
         if reset_ranges:
+            self.zero_span_plot.enableAutoRange(axis="y", enable=True)
+            self.zero_span_plot.getViewBox().updateAutoRange()
+            set_iq_power_default_y_range(
+                self.zero_span_plot, capture_power_dbm
+            )
             self._capture_analysis_plot_ranges()
 
     @staticmethod

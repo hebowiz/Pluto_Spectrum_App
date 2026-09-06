@@ -55,6 +55,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     plot_trace_symbol_points,
     plot_unit_circle,
     set_iq_plane_range,
+    set_iq_power_default_y_range,
     set_frequency_constellation_x_lock,
     trace_bounds,
     view_all_traces,
@@ -1545,6 +1546,8 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         stop_stream = getattr(self._pluto_source, "stop_stream", None)
         if callable(stop_stream):
             stop_stream()
+        self.run_action.setText("Run Single")
+        self.capture_button.setText("Single Capture")
         self.run_continuous_action.setText("Run Continuous")
         self.continuous_capture_button.setText("Continuous Capture")
         self.run_continuous_action.setEnabled(True)
@@ -1914,6 +1917,11 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 power_min - power_padding,
                 power_max + power_padding,
                 padding=0.0,
+            )
+            set_iq_power_default_y_range(
+                self.power_plot,
+                finite_power_dbm,
+                upper_dbm=power_max + power_padding,
             )
         selected_ranges: list[tuple[float, float]] = []
         power_symbol_times_ms: list[np.ndarray] = []

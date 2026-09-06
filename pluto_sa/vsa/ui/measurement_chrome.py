@@ -23,6 +23,7 @@ FREQUENCY_CONSTELLATION_X_LIMIT = 1.0
 TRACE_SYMBOL_SIZE = 5.5
 DEDICATED_TABLE_GRID_COLOR = "#606060"
 IQ_POWER_DISPLAY_FLOOR_DBM = -120.0
+IQ_POWER_DEFAULT_SPAN_DB = 50.0
 DEDICATED_STATUS_COLORS = {
     "PASS": "#43f5a5",
     "FAIL": "#ff5b5b",
@@ -479,6 +480,29 @@ def limit_iq_power_display_dbm(values: np.ndarray) -> np.ndarray:
     display[~np.isfinite(display)] = IQ_POWER_DISPLAY_FLOOR_DBM
     np.maximum(display, IQ_POWER_DISPLAY_FLOOR_DBM, out=display)
     return display
+
+
+def set_iq_power_default_y_range(
+    plot: pg.PlotWidget,
+    values_dbm: np.ndarray,
+    *,
+    upper_dbm: float | None = None,
+) -> tuple[float, float] | None:
+    """Keep the existing upper scale and show 50 dB below trace peak."""
+
+    values = np.asarray(values_dbm, dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    peak_dbm = float(np.max(finite))
+    if upper_dbm is None:
+        upper_dbm = float(plot.viewRange()[1][1])
+    upper = max(float(upper_dbm), peak_dbm)
+    lower = max(IQ_POWER_DISPLAY_FLOOR_DBM, peak_dbm - IQ_POWER_DEFAULT_SPAN_DB)
+    if upper <= lower:
+        upper = lower + 1.0
+    plot.setYRange(lower, upper, padding=0.0)
+    return lower, upper
 
 
 def make_measurement_dock(

@@ -173,6 +173,8 @@ def test_dect_continuous_repeats_until_user_stop(tmp_path, monkeypatch) -> None:
         assert window._continuous_capture_count == 2
         assert source.buffered == [True, True]
         assert source.stop_count == 1
+        assert window.run_action.text() == "Run Single"
+        assert window.capture_button.text() == "Single Capture"
     finally:
         window._config_dialog.close()
         window.close()
@@ -415,6 +417,10 @@ def test_iq_power_initial_range_is_packet_plus_margin_not_full_capture(tmp_path)
         assert lower < packet_start
         assert upper > packet_stop
         assert upper - lower < recording.duration_s * 1e3
+        _, displayed_power = window.power_plot.listDataItems()[0].getData()
+        assert window.power_plot.viewRange()[1][0] == pytest.approx(
+            float(np.max(displayed_power)) - 50.0
+        )
     finally:
         window._config_dialog.close()
         window.close()

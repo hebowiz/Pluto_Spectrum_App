@@ -55,6 +55,7 @@ class _FakeContext:
     attrs = {"fw_version": "v0.39"}
 
     def __init__(self) -> None:
+        self.timeout_ms = None
         self.phy = type("FakePhy", (), {})()
         self.phy.name = "ad9361-phy"
         self.phy.channels = []
@@ -68,6 +69,9 @@ class _FakeContext:
             ),
         }
         self.devices = [self.phy, _FakeGpioDevice()]
+
+    def set_timeout(self, timeout_ms: int) -> None:
+        self.timeout_ms = int(timeout_ms)
 
     def _calibration_mode_written(self, value: str) -> None:
         _FakePluto.events.append(f"calib:{value}")
@@ -328,6 +332,7 @@ def test_pluto_backend_repeats_one_period_with_cyclic_dma_until_stopped(
 
     device = _FakePluto.instances[-1]
     assert device.tx_cyclic_buffer is True
+    assert device._ctx.timeout_ms == 3_000
     assert device.transmitted is not None
     assert device.transmitted.size == frame.size
     np.testing.assert_allclose(
@@ -350,6 +355,11 @@ def test_pluto_backend_repeats_one_period_with_cyclic_dma_until_stopped(
     assert "continuous_playback_started" in names
     assert "continuous_stop_requested" in names
     assert "continuous_stop_received" in names
+    assert "cleanup_gain_mute_completed" in names
+    assert "cleanup_lo_powerdown_completed" in names
+    assert "cleanup_dma_destroy_completed" in names
+    assert "cleanup_dac_zero_completed" in names
+    assert "post_cleanup_readback_skipped_after_stop" in names
     assert "noncyclic_stream_committed" not in names
 
 

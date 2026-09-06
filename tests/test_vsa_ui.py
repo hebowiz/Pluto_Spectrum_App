@@ -52,8 +52,10 @@ from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 from pluto_sa.vsa.ui.measurement_chrome import (
     SymbolDensitySpread,
+    make_measurement_plot,
     plot_complex_symbol_distribution,
     plot_frequency_symbol_distribution,
+    set_iq_power_default_y_range,
     symbol_density_sigma_bins,
 )
 
@@ -90,6 +92,21 @@ def test_iq_power_display_floor_replaces_invalid_and_extreme_values() -> None:
     )
 
     np.testing.assert_allclose(limited, [-120.0, -120.0, -120.0, -119.0, -20.0])
+
+
+def test_iq_power_default_range_is_50_db_below_peak_and_keeps_upper() -> None:
+    pg.mkQApp("IQ power default Y range test")
+    plot = make_measurement_plot("IQ Power (dBm)", "Time (ms)")
+    try:
+        values = np.asarray([-92.0, -18.0, -20.0], dtype=np.float64)
+        applied = set_iq_power_default_y_range(
+            plot, values, upper_dbm=-15.5
+        )
+
+        assert applied == pytest.approx((-68.0, -15.5))
+        np.testing.assert_allclose(plot.viewRange()[1], [-68.0, -15.5])
+    finally:
+        plot.close()
 
 
 def test_burst_search_initial_time_range_starts_before_trigger() -> None:
@@ -574,6 +591,10 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             name: (list(ranges[0]), list(ranges[1]))
             for name, ranges in window._analysis_plot_ranges.items()
         }
+        _, initial_power = window.zero_span_plot.listDataItems()[0].getData()
+        assert initial_ranges["iq_power"][1][0] == pytest.approx(
+            float(np.max(initial_power)) - 50.0
+        )
         for _name, plot in window._plot_widgets():
             plot.setRange(xRange=(-99.0, -98.0), yRange=(-77.0, -76.0))
         window.reset_graph_scales_action.trigger()
@@ -2248,6 +2269,8 @@ def test_pluto_continuous_applies_backpressure_and_updates_all_packets(
         assert window.result_summary.horizontalHeaderItem(2).text() == "All Packets"
         assert window._all_packet_summary_values["match_selection"] == "1 packet(s)"
         assert window.run_single_action.isEnabled()
+        assert window.run_single_action.text() == "Run Single"
+        assert window.run_single_button.text() == "Run Single (Pluto)"
         assert window.open_config_action.isEnabled()
     finally:
         window._meas_config_dialog.close()

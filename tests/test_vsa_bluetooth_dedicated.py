@@ -2463,6 +2463,8 @@ def test_bluetooth_continuous_repeats_until_user_stop(tmp_path, monkeypatch) -> 
         assert window._continuous_capture_count == 2
         assert source.buffered == [True, True]
         assert source.stop_count == 1
+        assert window.run_action.text() == "Run Single"
+        assert window.capture_button.text() == "Single Capture"
     finally:
         window.close()
         window.deleteLater()
@@ -2668,6 +2670,8 @@ def test_hdt_iq_power_reset_restores_both_axes(tmp_path) -> None:
         window._recording = recording
         window._classic_analysis_ready((result,))
         expected_x, expected_y = window._analysis_plot_ranges["iq_power"]
+        _, displayed_power = window.power_plot.listDataItems()[0].getData()
+        assert expected_y[0] == pytest.approx(float(np.max(displayed_power)) - 50.0)
         window.power_plot.setRange(xRange=[0.0, 0.1], yRange=[-2.0, 2.0])
         window._reset_plot_scale("iq_power", window.power_plot)
         actual_x, actual_y = window.power_plot.viewRange()

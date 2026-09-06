@@ -244,6 +244,9 @@ def test_adsb_iq_power_display_has_a_finite_dbm_floor() -> None:
     try:
         _, displayed_power = window.power_plot.listDataItems()[0].getData()
         assert np.min(displayed_power) == pytest.approx(-120.0)
+        assert window.power_plot.viewRange()[1][0] == pytest.approx(
+            float(np.max(displayed_power)) - 50.0
+        )
     finally:
         window.close()
 
