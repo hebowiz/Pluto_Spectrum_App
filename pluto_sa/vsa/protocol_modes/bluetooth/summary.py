@@ -243,6 +243,14 @@ def build_fsk_summary(
             return aggregate_state
         return "PASS" if passed else "FAIL"
 
+    def modulation_verdict(value: float | None, passed: bool) -> str:
+        # The prescribed 11110000/10101010 payload patterns qualify only the
+        # corresponding modulation-characteristic rows.  An arbitrary payload
+        # must not turn otherwise valid carrier measurements into N/A.
+        if value is None:
+            return aggregate_state if f1_count > 0 or f2_count > 0 else "N/A"
+        return aggregate_verdict(passed)
+
     f1_number = _number(f1)
     f2_number = _number(f2_floor)
     ratio_number = _number(ratio)
@@ -286,7 +294,8 @@ def build_fsk_summary(
             "\N{GREEK CAPITAL LETTER DELTA}f1avg",
             _display_unsigned(f1, "kHz", 1e3),
             f"{f1_low / 1e3:.0f} kHz \N{LESS-THAN OR EQUAL TO} \N{GREEK CAPITAL LETTER DELTA}f1avg \N{LESS-THAN OR EQUAL TO} {f1_high / 1e3:.0f} kHz",
-            aggregate_verdict(
+            modulation_verdict(
+                f1_number,
                 f1_number is not None and f1_low <= f1_number <= f1_high
             ),
             "delta_f1_avg",
@@ -301,12 +310,14 @@ def build_fsk_summary(
                 else f"\N{GREATER-THAN OR EQUAL TO} {LE_DELTA_F2_P999_MIN_HZ[phy] / 1e3:.0f} kHz"
             ),
             (
-                aggregate_verdict(
+                modulation_verdict(
+                    f2_number,
                     f2_number is not None
                     and f2_number >= BR_DELTA_F2_P999_MIN_HZ
                 )
                 if not is_le
-                else aggregate_verdict(
+                else modulation_verdict(
+                    f2_number,
                     f2_number is not None
                     and f2_number >= LE_DELTA_F2_P999_MIN_HZ[phy]
                 )
@@ -318,7 +329,8 @@ def build_fsk_summary(
             "\N{GREEK CAPITAL LETTER DELTA}f2avg / \N{GREEK CAPITAL LETTER DELTA}f1avg",
             "N/A" if ratio_number is None else f"{ratio_number:.3f}",
             f"\N{GREATER-THAN OR EQUAL TO} {FSK_DELTA_F2_RATIO_MIN:.1f}",
-            aggregate_verdict(
+            modulation_verdict(
+                ratio_number,
                 ratio_number is not None and ratio_number >= FSK_DELTA_F2_RATIO_MIN
             ),
             "delta_f2_ratio",

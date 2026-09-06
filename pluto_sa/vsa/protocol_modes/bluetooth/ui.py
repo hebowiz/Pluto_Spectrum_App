@@ -1562,7 +1562,29 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         if not 0 <= target < len(self._results):
             return
         self._selected_result_index = target
-        self._result = self._results[target]
+        selected = self._results[target]
+        sessions: list[VSASession] = []
+        for key in ("br_analysis_session", "analysis_session"):
+            candidate = selected.metadata.get(key)
+            if isinstance(candidate, VSASession) and all(
+                candidate is not current for current in sessions
+            ):
+                sessions.append(candidate)
+        for session in sessions:
+            session.generate_display_products()
+        primary = selected.metadata.get("analysis_session")
+        if isinstance(primary, VSASession):
+            display_result = (
+                primary.carrier_corrected_pattern_range_result
+                or primary.pattern_range_result
+                or primary.result
+            )
+            if display_result is not None and display_result is not selected.vsa_result:
+                selected = replace(selected, vsa_result=display_result)
+                mutable_results = list(self._results)
+                mutable_results[target] = selected
+                self._results = tuple(mutable_results)
+        self._result = selected
         session = self._result.metadata.get("analysis_session")
         if isinstance(session, VSASession):
             self._session = session
@@ -1689,6 +1711,17 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             limit_iq_power_display_dbm(power_dbm),
             pen=_TRACE,
         )
+        displayed_power_dbm = limit_iq_power_display_dbm(power_dbm)
+        finite_power_dbm = displayed_power_dbm[np.isfinite(displayed_power_dbm)]
+        if finite_power_dbm.size:
+            power_min = float(np.min(finite_power_dbm))
+            power_max = float(np.max(finite_power_dbm))
+            power_padding = max(1.0, 0.05 * max(power_max - power_min, 1.0))
+            self.power_plot.setYRange(
+                power_min - power_padding,
+                power_max + power_padding,
+                padding=0.0,
+            )
         selected_ranges: list[tuple[float, float]] = []
         power_symbol_times_ms: list[np.ndarray] = []
         if is_hdt and hdt_plot_data is not None:
@@ -1758,8 +1791,31 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 if analysis is session
                 else recording_sample_offset
             )
-            start_ms = (offset + pattern.result_start_sample) / recording.sample_rate_hz * 1e3
-            stop_ms = (offset + pattern.result_stop_sample) / recording.sample_rate_hz * 1e3
+            if (
+                result.packet.protocol_id == "bluetooth.le"
+                and analysis is session
+            ):
+                start_ms = (
+                    float(result.metadata["packet_start_sample"])
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
+                stop_ms = (
+                    float(result.metadata["packet_stop_sample"])
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
+            else:
+                start_ms = (
+                    (offset + pattern.result_start_sample)
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
+                stop_ms = (
+                    (offset + pattern.result_stop_sample)
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
             selected_ranges.append((start_ms, stop_ms))
             pattern_start_ms = (
                 offset + pattern.pattern_start_sample
@@ -1775,6 +1831,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 pattern_stop_ms=pattern_stop_ms,
             )
             symbol_time_s = np.asarray(pattern.symbol_time_s, dtype=np.float64)
+            if result.packet.protocol_id == "bluetooth.le" and analysis is session:
+                symbol_time_s = symbol_time_s[
+                    : int(result.metadata.get("packet_symbol_count", symbol_time_s.size))
+                ]
             if analysis is session and is_psk and not is_hdt:
                 devm_centers = np.asarray(
                     result.metadata.get("edr_devm_symbol_center_samples", ()),
@@ -1880,6 +1940,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.psk_modulation_plot.clear()
         self.fsk_symbol_plot.clear()
         self.psk_symbol_plot.clear()
+        self._configure_fsk_modulation_plot(iq_plane=is_hdt)
         fsk_session = br_session if is_psk else session
         fsk_vsa = br_vsa if is_psk and br_vsa is not None else vsa
         fsk_pattern = (
@@ -1905,6 +1966,28 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                     fsk_session.recording.sample_rate_hz,
                 )
             )
+            display_start_time_s = (
+                fsk_pattern.result_start_time_s
+                if fsk_pattern is not None
+                else None
+            )
+            display_stop_time_s = (
+                fsk_pattern.result_stop_time_s
+                if fsk_pattern is not None
+                else None
+            )
+            if (
+                result.packet.protocol_id == "bluetooth.le"
+                and fsk_session is session
+            ):
+                display_start_time_s = (
+                    float(result.metadata["packet_start_sample"])
+                    - recording_sample_offset
+                ) / recording.sample_rate_hz
+                display_stop_time_s = (
+                    float(result.metadata["packet_stop_sample"])
+                    - recording_sample_offset
+                ) / recording.sample_rate_hz
             fsk_frequency_hz, fsk_time_s = prepare_fsk_display_frequency(
                 fsk_display_result.iq,
                 sample_rate_hz=fsk_analysis_rate_hz,
@@ -1915,21 +1998,20 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                     is MeasurementFilterMode.AUTO
                     else None
                 ),
-                result_start_time_s=(
-                    fsk_pattern.result_start_time_s
-                    if fsk_pattern is not None
-                    else None
-                ),
-                result_stop_time_s=(
-                    fsk_pattern.result_stop_time_s
-                    if fsk_pattern is not None
-                    else None
-                ),
+                result_start_time_s=display_start_time_s,
+                result_stop_time_s=display_stop_time_s,
             )
             symbol_time_s = np.asarray(
                 fsk_pattern.symbol_time_s if fsk_pattern is not None else (),
                 dtype=np.float64,
             )
+            if (
+                result.packet.protocol_id == "bluetooth.le"
+                and fsk_session is session
+            ):
+                symbol_time_s = symbol_time_s[
+                    : int(result.metadata.get("packet_symbol_count", symbol_time_s.size))
+                ]
             fsk_display_data = build_fsk_display_data(
                 fsk_frequency_hz,
                 fsk_time_s,
@@ -2015,11 +2097,6 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 dtype=np.complex128,
             )
             self.fsk_modulation_plot.clear()
-            self.fsk_modulation_plot.setLabel("bottom", "I")
-            self.fsk_modulation_plot.setLabel("left", "Q")
-            self.fsk_modulation_plot.setAspectLocked(True, 1.0)
-            self.fsk_modulation_plot.setDownsampling(auto=False)
-            self.fsk_modulation_plot.setClipToView(False)
             self.fsk_modulation_plot.plot(
                 header_trajectory.real, header_trajectory.imag, pen=_TRACE
             )
@@ -2211,6 +2288,25 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._render_summary(result)
         self._render_packet(result)
         self._capture_analysis_plot_ranges()
+
+    def _configure_fsk_modulation_plot(self, *, iq_plane: bool) -> None:
+        """Restore the axis contract when the first tab changes PHY role."""
+
+        if iq_plane:
+            self.fsk_modulation_plot.setLabel("bottom", "I")
+            self.fsk_modulation_plot.setLabel("left", "Q")
+            self.fsk_modulation_plot.setAspectLocked(True, 1.0)
+            self.fsk_modulation_plot.setDownsampling(auto=False)
+            self.fsk_modulation_plot.setClipToView(False)
+            return
+        self.fsk_modulation_plot.setAspectLocked(False)
+        self.fsk_modulation_plot.setLabel("bottom", "Time (ms)")
+        self.fsk_modulation_plot.setLabel("left", "Frequency (kHz)")
+        self.fsk_modulation_plot.setDownsampling(auto=True, mode="peak")
+        self.fsk_modulation_plot.setClipToView(True)
+        # HDT's fixed I/Q range disables auto-ranging.  FSK owns only its X
+        # packet range, so restore automatic frequency scaling explicitly.
+        self.fsk_modulation_plot.enableAutoRange(axis="y", enable=True)
 
     @staticmethod
     def _set_iq_plane_range(plot: pg.PlotWidget) -> None:

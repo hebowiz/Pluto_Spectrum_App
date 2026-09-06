@@ -223,7 +223,60 @@ class VSASession:
             perf_counter() - stage_started
         ) * 1e3
 
-    def analyze(self) -> VSAAnalysisResult:
+    def _publish_selected_range_result(
+        self,
+        pattern_recording: IQRecording,
+        prepared_settings: VSASettings,
+    ) -> None:
+        """Build only the corrected selected-range product needed by metrics."""
+
+        if self.pattern_result is None:
+            return
+        corrected_recording = carrier_correct_recording(
+            pattern_recording,
+            self.pattern_result,
+            compensate_drift=self.demodulation.compensate_carrier_frequency_drift,
+        )
+        corrected_selected = corrected_recording.iq[
+            self.pattern_result.result_start_sample : self.pattern_result.result_stop_sample
+        ]
+        corrected_range_recording = replace(
+            corrected_recording,
+            iq=corrected_selected,
+            start_sample_index=(
+                corrected_recording.start_sample_index
+                + self.pattern_result.result_start_sample
+            ),
+            trigger_sample_index=None,
+            source=f"{corrected_recording.source} | Result Range",
+        )
+        stage_started = perf_counter()
+        self.carrier_corrected_pattern_range_result = self._analyzer.analyze(
+            corrected_range_recording, self.signal, prepared_settings
+        )
+        # Keep analyze()'s non-optional return contract for deferred sessions.
+        self.result = self.carrier_corrected_pattern_range_result
+        self.analysis_timings_ms["selected_range_analysis"] = (
+            perf_counter() - stage_started
+        ) * 1e3
+
+    def generate_display_products(self) -> None:
+        """Materialize corrected/range plot products after deferred analysis."""
+
+        if self.pattern_result is None or self.recording is None or self.signal is None:
+            return
+        if (
+            self.carrier_corrected_result is not None
+            and self.pattern_range_result is not None
+            and self.carrier_corrected_pattern_range_result is not None
+        ):
+            return
+        analysis_recording, prepared_settings = self._prepare_analysis_recording()
+        self._publish_demodulation_result(analysis_recording, prepared_settings)
+
+    def analyze_base_only(self) -> VSAAnalysisResult:
+        """Analyze IQ without invoking automatic pattern/data synchronization."""
+
         if self.recording is None:
             raise RuntimeError("no IQ recording is loaded")
         if self.signal is None:
@@ -241,13 +294,50 @@ class VSASession:
         }
         stage_started = perf_counter()
         self.result = self._analyzer.analyze(
-            analysis_recording,
-            self.signal,
-            prepared_settings,
+            analysis_recording, self.signal, prepared_settings
         )
         self.analysis_timings_ms["base_analysis"] = (
             perf_counter() - stage_started
         ) * 1e3
+        self.analysis_timings_ms["total_dsp"] = (
+            perf_counter() - total_started
+        ) * 1e3
+        self.pattern_result = None
+        self.pattern_range_result = None
+        self.carrier_corrected_result = None
+        self.carrier_corrected_pattern_range_result = None
+        self.pattern_error = None
+        return self.result
+
+    def analyze(self, *, generate_display_products: bool = True) -> VSAAnalysisResult:
+        if self.recording is None:
+            raise RuntimeError("no IQ recording is loaded")
+        if self.signal is None:
+            raise RuntimeError("no signal description is configured")
+        total_started = perf_counter()
+        (
+            self.capture_time_s,
+            self.capture_power_dbfs,
+            self.capture_power_dbm,
+        ) = capture_power_traces(self.recording)
+        stage_started = perf_counter()
+        analysis_recording, prepared_settings = self._prepare_analysis_recording()
+        self.analysis_timings_ms = {
+            "preprocess": (perf_counter() - stage_started) * 1e3,
+        }
+        if generate_display_products:
+            stage_started = perf_counter()
+            self.result = self._analyzer.analyze(
+                analysis_recording,
+                self.signal,
+                prepared_settings,
+            )
+            self.analysis_timings_ms["base_analysis"] = (
+                perf_counter() - stage_started
+            ) * 1e3
+        else:
+            self.result = None
+            self.analysis_timings_ms["base_analysis"] = 0.0
         self.pattern_result = None
         self.pattern_range_result = None
         self.carrier_corrected_result = None
@@ -296,7 +386,14 @@ class VSASession:
                     raise ValueError(
                         "pattern waveform matched but Pattern Symbols Correct is false"
                     )
-                self._publish_demodulation_result(pattern_recording, prepared_settings)
+                if generate_display_products:
+                    self._publish_demodulation_result(
+                        pattern_recording, prepared_settings
+                    )
+                else:
+                    self._publish_selected_range_result(
+                        pattern_recording, prepared_settings
+                    )
             except ValueError as error:
                 self.pattern_error = str(error)
                 allow_detected_fallback = (
@@ -319,9 +416,14 @@ class VSASession:
                         self.analysis_timings_ms["detected_data_sync"] = (
                             perf_counter() - stage_started
                         ) * 1e3
-                        self._publish_demodulation_result(
-                            pattern_recording, prepared_settings
-                        )
+                        if generate_display_products:
+                            self._publish_demodulation_result(
+                                pattern_recording, prepared_settings
+                            )
+                        else:
+                            self._publish_selected_range_result(
+                                pattern_recording, prepared_settings
+                            )
                     except ValueError as fallback_error:
                         self.pattern_error = f"{error}; {fallback_error}"
                         self.pattern_result = None
@@ -341,4 +443,6 @@ class VSASession:
         self.analysis_timings_ms["total_dsp"] = (
             perf_counter() - total_started
         ) * 1e3
+        if self.result is None:
+            raise RuntimeError("VSA analysis did not produce a result")
         return self.result

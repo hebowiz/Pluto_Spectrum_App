@@ -175,15 +175,21 @@ def peak_deviations(
     values = np.asarray(frequency_hz, dtype=np.float64)
     positions = np.asarray(sample_positions, dtype=np.float64)
     eligible = np.asarray(eligible_mask, dtype=bool)
-    bit_peaks = np.full(np.asarray(bits).size, np.nan, dtype=np.float64)
-    for index, bit in enumerate(np.asarray(bits, dtype=np.uint8)):
-        start = float(first_symbol_sample) + index * float(samples_per_symbol)
-        stop = start + float(samples_per_symbol)
-        selected = values[eligible & (positions >= start) & (positions < stop)]
+    bit_values = np.asarray(bits, dtype=np.uint8)
+    bit_peaks = np.full(bit_values.size, np.nan, dtype=np.float64)
+    starts = float(first_symbol_sample) + np.arange(
+        bit_values.size, dtype=np.float64
+    ) * float(samples_per_symbol)
+    stops = starts + float(samples_per_symbol)
+    first = np.searchsorted(positions, starts, side="left")
+    last = np.searchsorted(positions, stops, side="left")
+    for index, (bit, begin, end) in enumerate(zip(bit_values, first, last)):
+        local_eligible = eligible[int(begin) : int(end)]
+        selected = values[int(begin) : int(end)][local_eligible]
         if selected.size:
             bit_peaks[index] = float(np.max(selected) if bit else np.min(selected))
-    positive = bit_peaks[np.asarray(bits, dtype=bool)]
-    negative = bit_peaks[~np.asarray(bits, dtype=bool)]
+    positive = bit_peaks[bit_values.astype(bool)]
+    negative = bit_peaks[~bit_values.astype(bool)]
     positive = positive[np.isfinite(positive)]
     negative = negative[np.isfinite(negative)]
     positive_extent = (

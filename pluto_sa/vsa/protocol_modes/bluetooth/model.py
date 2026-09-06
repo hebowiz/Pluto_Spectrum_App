@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 import logging
@@ -462,18 +463,6 @@ def _sig_fsk_measurements(
             payload.raw_bits,
             payload_start_symbol=int(payload.start_bit),
         )
-        if modulation.payload_pattern is None:
-            eligibility = RFTestEligibility.from_reasons(
-                (
-                    *eligibility.reasons,
-                    "payload is not an RF test 11110000 or 10101010 pattern",
-                )
-            )
-            metrics[0] = BluetoothMetric(
-                "sig_eligibility",
-                "SIG RF Test Eligibility",
-                "N/A - " + "; ".join(eligibility.reasons),
-            )
         preamble_symbols = (
             4
             if filter_profile is BluetoothRFMeasurementFilterProfile.BR_1M
@@ -569,6 +558,10 @@ def _sig_fsk_measurements(
         },
         metadata={
             "payload_pattern": modulation.payload_pattern,
+            # Pattern qualification applies only to the Delta-f test items.
+            # Carrier frequency/drift and reference deviation observations do
+            # not require either prescribed modulation-characteristic pattern.
+            "modulation_pattern_eligible": modulation.payload_pattern is not None,
             "filter_profile": filter_profile.value,
             "aggregation_required": True,
         },
@@ -697,6 +690,7 @@ def _analyze_known_pattern(
     match_index: int = 1,
     match_selection: MatchSelectionPolicy = MatchSelectionPolicy.INDEX,
     iq_power_trigger: IQPowerTriggerSettings | None = None,
+    generate_display_products: bool = True,
 ) -> VSASession:
     session = VSASession(name="Bluetooth dedicated")
     session.set_recording(recording)
@@ -726,7 +720,7 @@ def _analyze_known_pattern(
         demodulation=demodulation,
         iq_power_trigger=iq_power_trigger,
     )
-    session.analyze()
+    session.analyze(generate_display_products=generate_display_products)
     if session.pattern_result is None:
         raise RuntimeError("Bluetooth synchronization pattern was not found")
     return session
@@ -777,7 +771,10 @@ def _edr_sync_search_bounds(
     )
     postroll = max(
         timing_tolerance,
-        int(round(8.0 * samples_per_psk_symbol)),
+        # Also retain the enhanced ACL header and two logical trailer slots.
+        # The already-required narrow synchronization pass can then discover
+        # Length without a second provisional full-payload PSK analysis.
+        int(round(20.0 * samples_per_psk_symbol)),
     )
     start = max(0, int(expected_start_sample - filter_preroll))
     stop = min(
@@ -799,6 +796,7 @@ def _analyze_edr_payload_at_sync(
     result_length: int,
     expected_sync_sample: int,
     minimum_correlation: float = 0.72,
+    generate_display_products: bool = True,
 ) -> VSASession:
     """Analyze the EDR payload match nearest an already-confirmed sync.
 
@@ -810,6 +808,29 @@ def _analyze_edr_payload_at_sync(
     pass must select the eligible match closest to that position.
     """
 
+    # The caller has already confirmed this sync in a narrow, deterministic
+    # post-header window.  In the packet-local crop the first eligible match
+    # is therefore the expected one in normal operation.  Selecting it
+    # directly avoids the old STRONGEST pass followed by a second INDEX pass.
+    # If an earlier accidental match is ever admitted, retain the original
+    # full-accuracy strongest/nearest path as a safety fallback.
+    first_session = _analyze_known_pattern(
+        recording,
+        signal,
+        sync,
+        result_length=result_length,
+        minimum_correlation=minimum_correlation,
+        match_index=1,
+        match_selection=MatchSelectionPolicy.INDEX,
+        generate_display_products=generate_display_products,
+    )
+    first_start = int(first_session.pattern_result.pattern_start_sample)
+    samples_per_symbol = recording.sample_rate_hz / signal.symbol_rate_hz
+    if abs(first_start - int(expected_sync_sample)) <= max(
+        1, int(round(0.5 * samples_per_symbol))
+    ):
+        return first_session
+
     session = _analyze_known_pattern(
         recording,
         signal,
@@ -818,6 +839,7 @@ def _analyze_edr_payload_at_sync(
         minimum_correlation=minimum_correlation,
         match_index=1,
         match_selection=MatchSelectionPolicy.STRONGEST,
+        generate_display_products=generate_display_products,
     )
     starts = tuple(
         int(value)
@@ -842,6 +864,7 @@ def _analyze_edr_payload_at_sync(
         minimum_correlation=minimum_correlation,
         match_index=nearest_index + 1,
         match_selection=MatchSelectionPolicy.INDEX,
+        generate_display_products=generate_display_products,
     )
 
 
@@ -897,15 +920,26 @@ def _exact_edr_result_symbols(
     idle samples or a following packet from entering the vector/EVM result.
     """
 
-    payload = _packet_field_by_id(packet.root_fields, "payload")
     length = _packet_field_by_id(packet.root_fields, "length")
-    if payload is None or length is None or not packet.integrity.complete:
+    if length is None:
         return None
     try:
-        int(length.value)
+        length_bytes = int(length.value)
     except (TypeError, ValueError):
         return None
-    edr_air_bits = int(payload.stop_bit) + 2 * int(bits_per_symbol) - 126
+    if length_bytes < 0:
+        return None
+    # From the confirmed EDR sync start: 10 sync symbols, the enhanced
+    # two-octet ACL header, payload, 16-bit CRC, and two trailer symbols.
+    # This remains valid for the deliberately short discovery pass, where the
+    # Length field is complete but the body/CRC is not yet present.
+    edr_air_bits = (
+        10 * int(bits_per_symbol)
+        + 16
+        + 8 * length_bytes
+        + 16
+        + 2 * int(bits_per_symbol)
+    )
     if edr_air_bits <= 0:
         return None
     return int(np.ceil(edr_air_bits / float(bits_per_symbol)))
@@ -920,16 +954,17 @@ def _exact_br_result_symbols(packet: PacketAnalysisResult) -> int | None:
     exact BR result-symbol count measured from the access-code start.
     """
 
-    payload = _packet_field_by_id(packet.root_fields, "payload")
     length = _packet_field_by_id(packet.root_fields, "length")
-    if payload is None or length is None or not packet.integrity.complete:
+    if length is None:
         return None
     try:
-        int(length.value)
+        length_bytes = int(length.value)
     except (TypeError, ValueError):
         return None
-    stop_bit = int(payload.stop_bit)
-    return stop_bit if stop_bit > 0 else None
+    if length_bytes < 0:
+        return None
+    header_bits = 8 if packet.packet_type == "DH1" else 16
+    return 126 + header_bits + 8 * length_bytes + 16
 
 
 _HDT_SYMBOL_RATE_HZ = 2_000_000.0
@@ -966,8 +1001,8 @@ def _hdt_sample_symbols(
     )
 
 
-def _hdt_training_matches(recording: IQRecording) -> tuple[tuple[int, float], ...]:
-    """Locate complete HDT training sequences and return first symbol centers."""
+def _prepare_hdt_filtered_iq(recording: IQRecording) -> np.ndarray:
+    """Return the full-resolution HDT measurement-filter output once per capture."""
 
     samples_per_symbol = recording.sample_rate_hz / _HDT_SYMBOL_RATE_HZ
     integer_sps = int(round(samples_per_symbol))
@@ -984,6 +1019,22 @@ def _hdt_training_matches(recording: IQRecording) -> tuple[tuple[int, float], ..
     )
     if not np.isclose(filtered_rate_hz, recording.sample_rate_hz):
         raise RuntimeError("Unexpected HDT matched-filter sample rate")
+    return np.asarray(filtered_iq, dtype=np.complex64)
+
+
+def _hdt_training_matches(
+    recording: IQRecording,
+    *,
+    filtered_iq: np.ndarray | None = None,
+) -> tuple[tuple[int, float], ...]:
+    """Locate complete HDT training sequences and return first symbol centers."""
+
+    samples_per_symbol = recording.sample_rate_hz / _HDT_SYMBOL_RATE_HZ
+    integer_sps = int(round(samples_per_symbol))
+    if integer_sps < 2 or not np.isclose(samples_per_symbol, integer_sps, atol=1e-6):
+        raise ValueError("HDT analysis requires an integer samples-per-symbol ratio")
+    if filtered_iq is None:
+        filtered_iq = _prepare_hdt_filtered_iq(recording)
     reference = hdt_rf_test_training_symbols().astype(np.complex128)
     short_reference = reference[:36]
     short_energy = float(np.sum(np.abs(short_reference) ** 2))
@@ -1028,6 +1079,84 @@ def _hdt_training_matches(recording: IQRecording) -> tuple[tuple[int, float], ..
     return tuple((center, score) for score, center in sorted(selected, key=lambda item: item[1]))
 
 
+_HDT_NEXT_STATES = np.arange(32, dtype=np.int16)
+_HDT_INPUT_BITS = (_HDT_NEXT_STATES & 1).astype(np.uint8)
+_HDT_PREDECESSOR_STATES = np.column_stack(
+    ((_HDT_NEXT_STATES >> 1), (_HDT_NEXT_STATES >> 1) + 16)
+).astype(np.int16)
+_HDT_TRELLIS_OUTPUT = np.empty((32, 2, 2), dtype=np.uint8)
+for _state in range(32):
+    _history = np.asarray(
+        [(_state >> index) & 1 for index in range(5)], dtype=np.uint8
+    )
+    for _bit in (0, 1):
+        _registers = np.concatenate(([_bit], _history))
+        _HDT_TRELLIS_OUTPUT[_state, _bit] = (
+            _registers[0] ^ _registers[2] ^ _registers[4] ^ _registers[5],
+            _registers[0]
+            ^ _registers[1]
+            ^ _registers[2]
+            ^ _registers[3]
+            ^ _registers[5],
+        )
+for _array in (
+    _HDT_NEXT_STATES,
+    _HDT_INPUT_BITS,
+    _HDT_PREDECESSOR_STATES,
+    _HDT_TRELLIS_OUTPUT,
+):
+    _array.setflags(write=False)
+
+_HDT_BRANCH_COST = np.zeros((4, 4, 32, 2), dtype=np.uint8)
+_hdt_expected_by_next_state = _HDT_TRELLIS_OUTPUT[
+    _HDT_PREDECESSOR_STATES, _HDT_INPUT_BITS[:, None]
+]
+for _mask_code in range(4):
+    _retained = np.asarray(
+        [bool(_mask_code & 2), bool(_mask_code & 1)], dtype=bool
+    )
+    for _observed_code in range(4):
+        _observed = np.asarray(
+            [(_observed_code >> 1) & 1, _observed_code & 1], dtype=np.uint8
+        )
+        _HDT_BRANCH_COST[_mask_code, _observed_code] = np.count_nonzero(
+            _hdt_expected_by_next_state[..., _retained] != _observed[_retained],
+            axis=2,
+        )
+_HDT_BRANCH_COST.setflags(write=False)
+
+
+def _hdt_viterbi_step(
+    costs: np.ndarray,
+    received: np.ndarray,
+    retained: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply one exact hard-decision K=6 trellis update for all states."""
+
+    retained = np.asarray(retained, dtype=bool)
+    received = np.asarray(received, dtype=np.uint8)
+    mask_code = (int(retained[0]) << 1) | int(retained[1])
+    observed_code = (int(received[0]) << 1) | int(received[1])
+    return _hdt_viterbi_step_codes(costs, mask_code, observed_code)
+
+
+def _hdt_viterbi_step_codes(
+    costs: np.ndarray,
+    mask_code: int,
+    observed_code: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    predecessors = _HDT_PREDECESSOR_STATES
+    bits = _HDT_INPUT_BITS
+    branch = _HDT_BRANCH_COST[mask_code, observed_code]
+    candidate_costs = costs[predecessors] + branch
+    # np.argmin selects predecessor column zero on a tie, matching the old
+    # ascending-state loop's strict ``candidate < next_cost`` update.
+    selected = np.argmin(candidate_costs, axis=1)
+    next_costs = candidate_costs[_HDT_NEXT_STATES, selected]
+    previous_states = predecessors[_HDT_NEXT_STATES, selected]
+    return next_costs, previous_states, bits
+
+
 def _viterbi_decode_hdt_control(encoded: np.ndarray) -> tuple[np.ndarray, int]:
     """Hard-decision K=6 Viterbi decode for one standard HDT Control Header."""
 
@@ -1039,29 +1168,10 @@ def _viterbi_decode_hdt_control(encoded: np.ndarray) -> tuple[np.ndarray, int]:
     costs[0] = 0
     history: list[tuple[np.ndarray, np.ndarray]] = []
     for received in values.reshape(-1, 2):
-        next_costs = np.full(32, infinity, dtype=np.int64)
-        previous_state = np.zeros(32, dtype=np.int16)
-        previous_bit = np.zeros(32, dtype=np.uint8)
-        for state in range(32):
-            if costs[state] >= infinity:
-                continue
-            taps = np.asarray([(state >> bit) & 1 for bit in range(5)], dtype=np.uint8)
-            for value in (0, 1):
-                registers = np.concatenate(([value], taps))
-                expected = (
-                    registers[0] ^ registers[2] ^ registers[4] ^ registers[5],
-                    registers[0] ^ registers[1] ^ registers[2] ^ registers[3] ^ registers[5],
-                )
-                next_state = ((state << 1) & 0x1F) | value
-                distance = int(expected[0] != received[0]) + int(
-                    expected[1] != received[1]
-                )
-                candidate = int(costs[state]) + distance
-                if candidate < next_costs[next_state]:
-                    next_costs[next_state] = candidate
-                    previous_state[next_state] = state
-                    previous_bit[next_state] = value
-        costs = next_costs
+        observed_code = (int(received[0]) << 1) | int(received[1])
+        costs, previous_state, previous_bit = _hdt_viterbi_step_codes(
+            costs, 3, observed_code
+        )
         history.append((previous_state, previous_bit))
     state = int(np.argmin(costs))
     decoded: list[int] = []
@@ -1132,34 +1242,16 @@ def _viterbi_decode_hdt_punctured(
     costs[0] = 0
     previous_states = np.zeros((step_count, 32), dtype=np.uint8)
     previous_bits = np.zeros((step_count, 32), dtype=np.uint8)
+    mask_pairs = mask.reshape(-1, 2)
+    observed_pairs = observed.reshape(-1, 2)
+    mask_codes = (mask_pairs[:, 0].astype(np.uint8) << 1) | mask_pairs[:, 1]
+    observed_codes = (
+        (observed_pairs[:, 0].astype(np.uint8) << 1) | observed_pairs[:, 1]
+    )
     for step in range(step_count):
-        next_costs = np.full(32, infinity, dtype=np.int64)
-        retained = mask[2 * step : 2 * step + 2]
-        current = observed[2 * step : 2 * step + 2]
-        for state in range(32):
-            if costs[state] >= infinity:
-                continue
-            history = np.asarray(
-                [(state >> index) & 1 for index in range(5)], dtype=np.uint8
-            )
-            for bit in (0, 1):
-                registers = np.concatenate(([bit], history))
-                expected = np.asarray(
-                    (
-                        registers[0] ^ registers[2] ^ registers[4] ^ registers[5],
-                        registers[0] ^ registers[1] ^ registers[2] ^ registers[3] ^ registers[5],
-                    ),
-                    dtype=np.uint8,
-                )
-                next_state = ((state << 1) & 0x1F) | bit
-                candidate = int(costs[state]) + int(
-                    np.count_nonzero(expected[retained] != current[retained])
-                )
-                if candidate < next_costs[next_state]:
-                    next_costs[next_state] = candidate
-                    previous_states[step, next_state] = state
-                    previous_bits[step, next_state] = bit
-        costs = next_costs
+        costs, previous_states[step], previous_bits[step] = _hdt_viterbi_step_codes(
+            costs, int(mask_codes[step]), int(observed_codes[step])
+        )
     state = 0
     decoded = np.empty(step_count, dtype=np.uint8)
     for step in range(step_count - 1, -1, -1):
@@ -1174,25 +1266,25 @@ def analyze_bluetooth_hdt_recording(
     profile: BluetoothAnalysisProfile,
     match_index: int = 1,
     _matches: tuple[tuple[int, float], ...] | None = None,
+    _filtered_iq: np.ndarray | None = None,
+    _include_generic_visualization: bool = True,
 ) -> BluetoothDedicatedResult:
     """Synchronize HDT, decode RI/Length, and evaluate its QPSK and payload regions."""
 
-    matches = _hdt_training_matches(recording) if _matches is None else _matches
+    filtered_iq = (
+        _prepare_hdt_filtered_iq(recording)
+        if _filtered_iq is None
+        else np.asarray(_filtered_iq, dtype=np.complex64)
+    )
+    matches = (
+        _hdt_training_matches(recording, filtered_iq=filtered_iq)
+        if _matches is None
+        else _matches
+    )
     if not 1 <= int(match_index) <= len(matches):
         raise RuntimeError("Bluetooth HDT synchronization pattern was not found")
     coarse_first_center, _detection_correlation = matches[int(match_index) - 1]
     samples_per_symbol = recording.sample_rate_hz / _HDT_SYMBOL_RATE_HZ
-    filtered_iq, filtered_rate_hz = prepare_psk_iq(
-        recording.iq,
-        sample_rate_hz=recording.sample_rate_hz,
-        symbol_rate_hz=_HDT_SYMBOL_RATE_HZ,
-        tx_filter="Root Raised Cosine",
-        filter_parameter=0.4,
-        samples_per_symbol=int(round(samples_per_symbol)),
-        apply_measurement_filter=True,
-    )
-    if not np.isclose(filtered_rate_hz, recording.sample_rate_hz):
-        raise RuntimeError("Unexpected HDT matched-filter sample rate")
     filtered_recording = replace(recording, iq=filtered_iq)
     training_reference = hdt_rf_test_training_symbols()
     hdt_reference = estimate_hdt_reference(
@@ -1447,7 +1539,11 @@ def analyze_bluetooth_hdt_recording(
     # Generic VSA remains a visualization product only.  SIG EVM, packet
     # decoding and the fixed reference above do not consume its resynchronised
     # decisions or carrier/timing estimates.
-    if definition.modulation in {"8PSK", "16QAM"} and payload_symbol_count >= 4:
+    if (
+        _include_generic_visualization
+        and definition.modulation in {"8PSK", "16QAM"}
+        and payload_symbol_count >= 4
+    ):
         seed_count = min(24, payload_symbol_count)
         seed_labels = measurement_payload_labels[:seed_count]
         pattern_symbols = reverse_symbol_bits(
@@ -1479,12 +1575,24 @@ def analyze_bluetooth_hdt_recording(
         analysis_sample_offset = crop_start
     else:
         fallback_session = VSASession(name="Bluetooth HDT QPSK")
-        fallback_session.set_recording(recording)
+        padding = int(round(8.0 * samples_per_symbol))
+        crop_start = max(0, payload_start - padding)
+        crop_stop = min(recording.sample_count, payload_stop + padding)
+        fallback_recording = replace(
+            recording,
+            iq=recording.iq[crop_start:crop_stop],
+            start_sample_index=recording.start_sample_index + crop_start,
+            trigger_sample_index=None,
+        )
+        analysis_sample_offset = crop_start
+        fallback_session.set_recording(fallback_recording)
         fallback_session.set_signal(payload_signal)
-        fallback_session.analyze()
+        # HDT plots and EVM consume hdt_plot_data below.  Automatic Generic
+        # VSA detected-data synchronization here was a redundant display-only
+        # pass and dominated HDT2/HDT3 multi-packet runtime.
+        fallback_session.analyze_base_only()
         payload_session = fallback_session
         vsa_result = fallback_session.result
-        analysis_sample_offset = 0
     if vsa_result is None:
         raise RuntimeError("Bluetooth HDT payload analysis produced no VSA result")
 
@@ -1996,7 +2104,8 @@ def analyze_bluetooth_hdt_recordings(
 ) -> tuple[BluetoothDedicatedResult, ...]:
     """Return every complete HDT packet found in a capture."""
 
-    matches = _hdt_training_matches(recording)
+    filtered_iq = _prepare_hdt_filtered_iq(recording)
+    matches = _hdt_training_matches(recording, filtered_iq=filtered_iq)
     results: list[BluetoothDedicatedResult] = []
     for match_index in range(1, len(matches) + 1):
         if cancelled is not None and cancelled():
@@ -2008,6 +2117,12 @@ def analyze_bluetooth_hdt_recordings(
                     profile=profile,
                     match_index=match_index,
                     _matches=matches,
+                    _filtered_iq=filtered_iq,
+                    # HDT's plots consume the Appendix-C corrected arrays in
+                    # hdt_plot_data.  The separate Generic VSA pattern search
+                    # is retained only for packet one (the initially selected
+                    # packet) and is not a measurement dependency.
+                    _include_generic_visualization=match_index == 1,
                 )
             )
         except RuntimeError:
@@ -2029,6 +2144,7 @@ def analyze_bluetooth_classic_recording(
     match_index: int = 1,
     iq_power_trigger: IQPowerTriggerSettings | None = None,
     _recording_sample_offset: int = 0,
+    _generate_display_products: bool = True,
 ) -> BluetoothDedicatedResult:
     """Decode the BR header first and automatically select BR/EDR PHY.
 
@@ -2049,6 +2165,7 @@ def analyze_bluetooth_classic_recording(
         minimum_correlation=0.60,
         match_index=match_index,
         iq_power_trigger=iq_power_trigger,
+        generate_display_products=_generate_display_products,
     )
     # Burst Search and its trigger windows are authoritative.  Decode the BR
     # header from the same selected candidate, rather than allowing the
@@ -2154,7 +2271,11 @@ def analyze_bluetooth_classic_recording(
                 sync_recording,
                 edr_signal,
                 sync,
-                result_length=int(sync.size) + 2,
+                result_length=(
+                    int(sync.size)
+                    + int(np.ceil(16.0 / width))
+                    + 2
+                ),
                 minimum_correlation=0.72,
                 match_index=1,
                 # Guard/ramp transients can produce an earlier, merely
@@ -2164,6 +2285,7 @@ def analyze_bluetooth_classic_recording(
                 # boundary, so STRONGEST is safe and is the correct local
                 # maximum-likelihood decision.
                 match_selection=MatchSelectionPolicy.STRONGEST,
+                generate_display_products=_generate_display_products,
             )
             detected_sync_start = (
                 sync_search_start
@@ -2196,24 +2318,12 @@ def analyze_bluetooth_classic_recording(
                 start_sample_index=recording.start_sample_index + crop_start,
                 trigger_sample_index=None,
             )
-            candidate_session = _analyze_edr_payload_at_sync(
-                edr_recording,
-                edr_signal,
-                sync,
-                result_length=result_length,
-                expected_sync_sample=detected_sync_start - crop_start,
-                minimum_correlation=0.72,
-            )
-            payload_sync_start = (
-                crop_start
-                + int(candidate_session.pattern_result.pattern_start_sample)
-            )
-            if abs(payload_sync_start - detected_sync_start) > sync_timing_tolerance:
-                raise RuntimeError(
-                    "EDR payload analysis did not remain anchored to the "
-                    "post-header synchronization word"
-                )
-            correlation = float(candidate_session.pattern_result.correlation)
+            # Reuse the narrow synchronization result to decode only the
+            # enhanced ACL Length.  The subsequent packet-local pass still
+            # performs the complete fine synchronization/optimizer over the
+            # exact result extent, so RF and DEVM precision are unchanged.
+            candidate_session = sync_session
+            correlation = float(sync_session.pattern_result.correlation)
             if correlation >= 0.72:
                 # First pass establishes EDR sync and decodes the enhanced
                 # ACL header.  Its Length field is authoritative for the
@@ -2248,14 +2358,25 @@ def analyze_bluetooth_classic_recording(
                 exact_result_symbols = _exact_edr_result_symbols(
                     provisional_packet, bits_per_symbol=width
                 )
-                if exact_result_symbols is not None:
-                    candidate_session = _analyze_edr_payload_at_sync(
-                        edr_recording,
-                        edr_signal,
-                        sync,
-                        result_length=exact_result_symbols,
-                        expected_sync_sample=detected_sync_start - crop_start,
-                        minimum_correlation=0.72,
+                if exact_result_symbols is None:
+                    raise RuntimeError("EDR enhanced ACL Length was not decoded")
+                candidate_session = _analyze_edr_payload_at_sync(
+                    edr_recording,
+                    edr_signal,
+                    sync,
+                    result_length=exact_result_symbols,
+                    expected_sync_sample=detected_sync_start - crop_start,
+                    minimum_correlation=0.72,
+                    generate_display_products=_generate_display_products,
+                )
+                payload_sync_start = (
+                    crop_start
+                    + int(candidate_session.pattern_result.pattern_start_sample)
+                )
+                if abs(payload_sync_start - detected_sync_start) > sync_timing_tolerance:
+                    raise RuntimeError(
+                        "EDR payload analysis did not remain anchored to the "
+                        "post-header synchronization word"
                     )
                 phy = edr_candidate
                 analysis_session = candidate_session
@@ -2273,10 +2394,14 @@ def analyze_bluetooth_classic_recording(
             recording,
             _classic_signal(BluetoothClassicPhy.BR),
             access,
-            result_length=result_length,
+            # The first BR payload pass only discovers the ACL Length.  Keep
+            # the complete access/header plus the largest payload-header
+            # width; the following pass still analyzes the exact full packet.
+            result_length=126 + 16,
             minimum_correlation=0.60,
             match_index=match_index,
             iq_power_trigger=iq_power_trigger,
+            generate_display_products=_generate_display_products,
         )
         provisional_pattern = br_packet_session.pattern_result
         provisional_packet = analyze_demodulated_packet_bits(
@@ -2304,6 +2429,7 @@ def analyze_bluetooth_classic_recording(
                 minimum_correlation=0.60,
                 match_index=match_index,
                 iq_power_trigger=iq_power_trigger,
+                generate_display_products=_generate_display_products,
             )
         analysis_session = br_packet_session
 
@@ -2980,6 +3106,7 @@ def analyze_bluetooth_le_recording(
     match_index: int = 1,
     iq_power_trigger: IQPowerTriggerSettings | None = None,
     _recording_sample_offset: int = 0,
+    _generate_display_products: bool = True,
 ) -> BluetoothDedicatedResult:
     """Synchronize and decode one uncoded LE 1M/2M packet from IQ."""
 
@@ -2993,6 +3120,7 @@ def analyze_bluetooth_le_recording(
         minimum_correlation=0.60,
         match_index=match_index,
         iq_power_trigger=iq_power_trigger,
+        generate_display_products=_generate_display_products,
     )
     pattern = session.pattern_result
     bits = _trim_le_packet_bits(
@@ -3008,6 +3136,10 @@ def analyze_bluetooth_le_recording(
         "crc_enabled": True,
         "crc_init": int(crc_init) & 0xFFFFFF,
     }
+    local_packet_start_sample = int(pattern.result_start_sample)
+    local_packet_stop_sample = local_packet_start_sample + int(
+        round(bits.size * recording.sample_rate_hz / _le_signal(phy).symbol_rate_hz)
+    )
     packet = analyze_demodulated_packet_bits(
         bits,
         protocol_id="bluetooth.le",
@@ -3015,8 +3147,8 @@ def analyze_bluetooth_le_recording(
         context=context,
         packet_index=0,
         center_frequency_hz=recording.center_frequency_hz,
-        start_sample=pattern.result_start_sample,
-        stop_sample=pattern.result_stop_sample,
+        start_sample=local_packet_start_sample,
+        stop_sample=local_packet_stop_sample,
     )
     vsa_result = (
         session.carrier_corrected_pattern_range_result
@@ -3027,10 +3159,8 @@ def analyze_bluetooth_le_recording(
         raise RuntimeError("Bluetooth LE PHY analysis produced no VSA result")
     duration_ms = bits.size / float(_le_signal(phy).symbol_rate_hz) * 1e3
     recording_sample_offset = max(0, int(_recording_sample_offset))
-    packet_start_sample = recording_sample_offset + int(pattern.result_start_sample)
-    packet_stop_sample = packet_start_sample + int(
-        round(bits.size * recording.sample_rate_hz / _le_signal(phy).symbol_rate_hz)
-    )
+    packet_start_sample = recording_sample_offset + local_packet_start_sample
+    packet_stop_sample = recording_sample_offset + local_packet_stop_sample
     try:
         rate_error = float(vsa_result.metadata.get("symbol_rate_error_ppm"))
     except (TypeError, ValueError):
@@ -3094,6 +3224,7 @@ def analyze_bluetooth_le_recording(
             "analysis_sample_offset": recording_sample_offset,
             "packet_start_sample": packet_start_sample,
             "packet_stop_sample": packet_stop_sample,
+            "packet_symbol_count": int(bits.size),
             "selected_match_index": int(pattern.metadata.get("selected_match_index", match_index)),
             "eligible_match_count": int(pattern.metadata.get("eligible_match_count", 1)),
             "rf_measurements": rf_measurements,
@@ -3127,9 +3258,10 @@ def analyze_bluetooth_classic_recordings(
     results = [first]
     capture_result = first.metadata["br_analysis_session"].result
     margin_samples = max(1, int(round(recording.sample_rate_hz * 16.0e-6)))
-    for index, candidate_start in enumerate(candidate_starts[1:], start=2):
+    def analyze_candidate(item: tuple[int, int]) -> BluetoothDedicatedResult | None:
+        index, candidate_start = item
         if cancelled is not None and cancelled():
-            break
+            return None
         try:
             crop_start = max(0, int(candidate_start) - margin_samples)
             crop_stop = (
@@ -3147,6 +3279,7 @@ def analyze_bluetooth_classic_recordings(
                 local,
                 match_index=1,
                 _recording_sample_offset=crop_start,
+                _generate_display_products=False,
                 **kwargs,
             )
             metadata = dict(item.metadata)
@@ -3158,11 +3291,18 @@ def analyze_bluetooth_classic_recordings(
                 }
             )
             item = replace(item, metadata=metadata)
-            results.append(item)
+            return item
         except (RuntimeError, ValueError):
             # A BR access-code candidate can fail the PHY/header integrity
             # checks.  It must not hide later valid packets in the capture.
-            continue
+            return None
+
+    pending = list(enumerate(candidate_starts[1:], start=2))
+    if pending:
+        with ThreadPoolExecutor(max_workers=min(4, len(pending))) as executor:
+            for item in executor.map(analyze_candidate, pending):
+                if item is not None:
+                    results.append(item)
     first_metadata = dict(first.metadata)
     first_metadata.update(
         {"selected_match_index": 1, "eligible_match_count": count, "capture_result": capture_result}
@@ -3197,9 +3337,10 @@ def analyze_bluetooth_le_recordings(
     results = [first]
     capture_result = first.metadata["analysis_session"].result
     margin_samples = max(1, int(round(recording.sample_rate_hz * 16.0e-6)))
-    for index, candidate_start in enumerate(candidate_starts[1:], start=2):
+    def analyze_candidate(item: tuple[int, int]) -> BluetoothDedicatedResult | None:
+        index, candidate_start = item
         if cancelled is not None and cancelled():
-            break
+            return None
         try:
             crop_start = max(0, int(candidate_start) - margin_samples)
             crop_stop = (
@@ -3217,6 +3358,7 @@ def analyze_bluetooth_le_recordings(
                 local,
                 match_index=1,
                 _recording_sample_offset=crop_start,
+                _generate_display_products=False,
                 **kwargs,
             )
             metadata = dict(item.metadata)
@@ -3228,9 +3370,16 @@ def analyze_bluetooth_le_recordings(
                 }
             )
             item = replace(item, metadata=metadata)
-            results.append(item)
+            return item
         except (RuntimeError, ValueError):
-            continue
+            return None
+
+    pending = list(enumerate(candidate_starts[1:], start=2))
+    if pending:
+        with ThreadPoolExecutor(max_workers=min(4, len(pending))) as executor:
+            for item in executor.map(analyze_candidate, pending):
+                if item is not None:
+                    results.append(item)
     first_metadata = dict(first.metadata)
     first_metadata.update(
         {"selected_match_index": 1, "eligible_match_count": count, "capture_result": capture_result}

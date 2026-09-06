@@ -140,8 +140,10 @@ class DectPacketResult:
             "bit_measurement_mask",
             "power_db",
         ):
-            value = np.array(getattr(self, name), copy=True)
-            value.setflags(write=False)
+            value = np.asarray(getattr(self, name))
+            if value.flags.writeable or not value.flags.owndata:
+                value = np.array(value, copy=True)
+                value.setflags(write=False)
             object.__setattr__(self, name, value)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
         object.__setattr__(self, "summary_rows", _summary_rows(self))
@@ -168,8 +170,17 @@ def _contiguous_ranges(mask: np.ndarray) -> tuple[tuple[int, int], ...]:
     return tuple((int(start), int(stop)) for start, stop in zip(starts, stops))
 
 
-def _burst_ranges(iq: np.ndarray, samples_per_symbol: float) -> tuple[tuple[int, int], ...]:
-    power = np.abs(np.asarray(iq, dtype=np.complex128)) ** 2
+def _burst_ranges(
+    iq: np.ndarray,
+    samples_per_symbol: float,
+    *,
+    power: np.ndarray | None = None,
+) -> tuple[tuple[int, int], ...]:
+    power = (
+        np.abs(np.asarray(iq, dtype=np.complex128)) ** 2
+        if power is None
+        else np.asarray(power, dtype=np.float64)
+    )
     window = max(1, int(round(samples_per_symbol / 2.0)))
     if window > 1:
         envelope = np.convolve(power, np.ones(window) / window, mode="same")
@@ -222,41 +233,66 @@ def _sync_packet(
     # Normal and prolonged preambles place p16 about 16 or 32 symbols after
     # the RF burst begins.  Leave additional room for the attack threshold.
     start_max = burst_start + 48.0 * nominal_sps
+    directions = (
+        ("RFP", RFP_SYNC_BITS[16:], RFP_SYNC_BITS[:16]),
+        ("PP", PP_SYNC_BITS[16:], PP_SYNC_BITS[:16]),
+    )
+    p16_values = np.arange(start_min, start_max + 0.01, 0.5)
+    symbol_axis = np.arange(16, dtype=np.float64) + 0.5
     for rate_ppm in np.linspace(-500.0, 500.0, 9):
         sps = nominal_sps / (1.0 + rate_ppm * 1e-6)
-        for p16 in np.arange(start_min, start_max + 0.01, 0.5):
-            centers = p16 + (np.arange(16, dtype=np.float64) + 0.5) * sps
-            observed = _sample_frequency(frequency, positions, centers)
-            if not np.all(np.isfinite(observed)):
+        centers = p16_values[:, None] + symbol_axis[None, :] * sps
+        observed = np.interp(
+            centers.ravel(), positions, frequency, left=np.nan, right=np.nan
+        ).reshape(centers.shape)
+        preamble_centers = p16_values[:, None] + (
+            np.arange(-16, 0, dtype=np.float64)[None, :] + 0.5
+        ) * sps
+        preamble_observed = np.interp(
+            preamble_centers.ravel(),
+            positions,
+            frequency,
+            left=np.nan,
+            right=np.nan,
+        ).reshape(preamble_centers.shape)
+        finite = np.all(np.isfinite(observed), axis=1) & np.all(
+            np.isfinite(preamble_observed), axis=1
+        )
+        centered = observed - np.mean(observed, axis=1, keepdims=True)
+        norms = np.linalg.norm(centered, axis=1)
+        finite &= norms > np.finfo(float).tiny
+        preamble_centered = preamble_observed - np.mean(
+            preamble_observed, axis=1, keepdims=True
+        )
+        preamble_norms = np.linalg.norm(preamble_centered, axis=1)
+        for direction, bits, preamble_bits in directions:
+            reference = 2.0 * bits.astype(np.float64) - 1.0
+            preamble_reference = 2.0 * preamble_bits.astype(np.float64) - 1.0
+            scores = (centered @ reference) / np.maximum(
+                norms * np.linalg.norm(reference), np.finfo(float).tiny
+            )
+            preamble_scores = (preamble_centered @ preamble_reference) / np.maximum(
+                preamble_norms * np.linalg.norm(preamble_reference),
+                np.finfo(float).tiny,
+            )
+            valid = finite & (preamble_scores >= 0.60)
+            if not np.any(valid):
                 continue
-            centered = observed - np.mean(observed)
-            norm = float(np.linalg.norm(centered))
-            if norm <= np.finfo(float).tiny:
-                continue
-            for direction, bits in (
-                ("RFP", RFP_SYNC_BITS[16:]),
-                ("PP", PP_SYNC_BITS[16:]),
-            ):
-                reference = 2.0 * bits.astype(np.float64) - 1.0
-                score = float(np.dot(centered, reference) / (norm * np.linalg.norm(reference)))
-                separation = float(
-                    np.mean(observed[bits == 1]) - np.mean(observed[bits == 0])
-                )
-                expected_s = RFP_SYNC_BITS if direction == "RFP" else PP_SYNC_BITS
-                preamble_centers = p16 + (
-                    np.arange(-16, 0, dtype=np.float64) + 0.5
-                ) * sps
-                preamble_observed = _sample_frequency(
-                    frequency, positions, preamble_centers
-                )
-                preamble_score = _pattern_correlation(
-                    preamble_observed, expected_s[:16]
-                )
-                if preamble_score < 0.60:
-                    continue
-                candidate = (score, direction, p16, sps, separation)
-                if best is None or candidate[0] > best[0]:
-                    best = candidate
+            valid_indices = np.flatnonzero(valid)
+            selected = int(valid_indices[np.argmax(scores[valid_indices])])
+            separation = float(
+                np.mean(observed[selected, bits == 1])
+                - np.mean(observed[selected, bits == 0])
+            )
+            candidate = (
+                float(scores[selected]),
+                direction,
+                float(p16_values[selected]),
+                float(sps),
+                separation,
+            )
+            if best is None or candidate[0] > best[0]:
+                best = candidate
     if best is None or best[0] < 0.72 or best[4] <= 50_000.0:
         raise RuntimeError("DECT S-field synchronization failed")
     score, direction, p16, sps, separation = best
@@ -366,10 +402,12 @@ def _bit_means(
     count: int,
 ) -> np.ndarray:
     results = np.full(count, np.nan, dtype=np.float64)
-    for index in range(count):
-        start = p0 + (index + 0.2) * sps
-        stop = p0 + (index + 0.8) * sps
-        selected = frequency[(positions >= start) & (positions < stop)]
+    starts = p0 + (np.arange(count, dtype=np.float64) + 0.2) * sps
+    stops = p0 + (np.arange(count, dtype=np.float64) + 0.8) * sps
+    first = np.searchsorted(positions, starts, side="left")
+    last = np.searchsorted(positions, stops, side="left")
+    for index, (begin, end) in enumerate(zip(first, last)):
+        selected = frequency[int(begin) : int(end)]
         if selected.size:
             results[index] = float(np.mean(selected))
     return results
@@ -856,8 +894,23 @@ def analyze_dect_recording(
             "DECT RF modulation analysis requires at least 3 MHz usable bandwidth"
         )
     frequency, positions = _instantaneous_frequency(recording.iq, sample_rate)
+    raw_power = np.abs(np.asarray(recording.iq, dtype=np.complex128)) ** 2
+    power_db = (
+        10.0
+        * np.log10(
+            np.maximum(
+                np.abs(recording.iq / recording.full_scale) ** 2,
+                np.finfo(float).tiny,
+            )
+        )
+        + recording.dbfs_to_dbm_offset_db
+    )
+    for shared in (frequency, positions, power_db):
+        shared.setflags(write=False)
     results: list[DectPacketResult] = []
-    for burst_start, burst_stop in _burst_ranges(recording.iq, nominal_sps):
+    for burst_start, burst_stop in _burst_ranges(
+        recording.iq, nominal_sps, power=raw_power
+    ):
         try:
             direction, p0, sps, _coarse_sync_word_score = _sync_packet(
                 frequency, positions, burst_start, nominal_sps
@@ -873,7 +926,6 @@ def analyze_dect_recording(
         )
         if preamble_score < 0.72 or sync_word_score < 0.72:
             continue
-        raw_power = np.abs(np.asarray(recording.iq, dtype=np.complex128)) ** 2
         power_length_hint = _packet_length_hint_from_envelope(
             raw_power, p0, sps, burst_stop
         )
@@ -1033,15 +1085,6 @@ def analyze_dect_recording(
             power_time_pass = bool(
                 attack_time < 10e-6 and release_time < 10e-6 and flatness <= 2.0
             )
-        power_db = (
-            10.0 * np.log10(
-                np.maximum(
-                    np.abs(recording.iq / recording.full_scale) ** 2,
-                    np.finfo(float).tiny,
-                )
-            )
-            + recording.dbfs_to_dbm_offset_db
-        )
         packet_analysis = DectClassicDecoder().decode(
             PacketDecodeInput(
                 bits,

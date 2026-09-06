@@ -97,6 +97,57 @@ def _hdt_recording(rate: HDTRate, payload_length: int = 64):
     ), generated, project
 
 
+def test_hdt_vectorized_trellis_step_matches_scalar_reference() -> None:
+    rng = np.random.default_rng(20260906)
+    costs = rng.integers(0, 100, size=32, dtype=np.int64)
+    for retained in (
+        np.asarray([False, True]),
+        np.asarray([True, False]),
+        np.asarray([True, True]),
+    ):
+        for observed_code in range(4):
+            received = np.asarray(
+                [(observed_code >> 1) & 1, observed_code & 1], dtype=np.uint8
+            )
+            expected_costs = np.full(32, 1_000_000, dtype=np.int64)
+            expected_states = np.zeros(32, dtype=np.int16)
+            expected_bits = np.zeros(32, dtype=np.uint8)
+            for state in range(32):
+                history = np.asarray(
+                    [(state >> index) & 1 for index in range(5)], dtype=np.uint8
+                )
+                for bit in (0, 1):
+                    registers = np.concatenate(([bit], history))
+                    encoded = np.asarray(
+                        [
+                            registers[0]
+                            ^ registers[2]
+                            ^ registers[4]
+                            ^ registers[5],
+                            registers[0]
+                            ^ registers[1]
+                            ^ registers[2]
+                            ^ registers[3]
+                            ^ registers[5],
+                        ],
+                        dtype=np.uint8,
+                    )
+                    next_state = ((state << 1) | bit) & 0x1F
+                    candidate = int(costs[state]) + int(
+                        np.count_nonzero(encoded[retained] != received[retained])
+                    )
+                    if candidate < expected_costs[next_state]:
+                        expected_costs[next_state] = candidate
+                        expected_states[next_state] = state
+                        expected_bits[next_state] = bit
+            actual = bluetooth_model._hdt_viterbi_step(
+                costs, received, retained
+            )
+            np.testing.assert_array_equal(actual[0], expected_costs)
+            np.testing.assert_array_equal(actual[1], expected_states)
+            np.testing.assert_array_equal(actual[2], expected_bits)
+
+
 def _session_with_le_bits() -> tuple[VSASession, dict[str, object]]:
     generated = BluetoothLEWaveformEngine().generate(bluetooth_le_project(BluetoothLEPhy.LE_1M))
     artifact = generated.packet_bits
@@ -1346,8 +1397,23 @@ def test_br_arbitrary_payload_keeps_reference_fsk_deviation_metrics() -> None:
 
     measurement = result.metadata["rf_measurements"][0]
     assert measurement.metadata["payload_pattern"] is None
-    assert measurement.eligibility.eligible is False
+    assert measurement.metadata["modulation_pattern_eligible"] is False
+    assert measurement.eligibility.eligible is True
     summary = {row.metric_id: row for row in result.summary_rows}
+    for metric_id in (
+        "delta_f1_avg",
+        "delta_f2_p999",
+        "delta_f2_ratio",
+    ):
+        assert summary[metric_id].value == "N/A"
+        assert summary[metric_id].result == "N/A"
+    for metric_id in (
+        "initial_carrier_frequency",
+        "carrier_frequency_drift",
+        "carrier_frequency_drift_rate",
+    ):
+        assert summary[metric_id].value != "N/A"
+        assert summary[metric_id].result in {"PASS", "FAIL"}
     for metric_id in (
         "mean_abs_fsk_deviation",
         "p999_fsk_deviation",
@@ -2207,3 +2273,164 @@ def test_dedicated_le_burst_search_gates_pattern_candidates() -> None:
     )
     assert len(results) == 2
     assert all(result.packet.integrity.crc_valid is True for result in results)
+
+
+def test_real_le_packet_end_uses_decoded_length_not_available_result_tail(
+    tmp_path,
+) -> None:
+    pg.mkQApp("Bluetooth LE exact packet-end regression")
+    recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "LE1M_packet_length.npz"
+    )
+    result = analyze_bluetooth_le_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        phy="LE 1M",
+        access_address=0x71764129,
+        channel_index=18,
+        crc_init=0x555555,
+        whitening_enabled=False,
+        result_length=4096,
+    )
+    pattern = result.metadata["analysis_session"].pattern_result
+    assert result.packet.integrity.crc_valid is True
+    assert result.metadata["packet_symbol_count"] == result.packet.raw_bits.size == 376
+    assert pattern.decoded_bits.size > result.packet.raw_bits.size
+    expected_stop = result.metadata["packet_start_sample"] + int(
+        round(
+            result.packet.raw_bits.size
+            * recording.sample_rate_hz
+            / 1_000_000.0
+        )
+    )
+    assert result.metadata["packet_stop_sample"] == expected_stop
+    assert result.packet.source.stop_sample == expected_stop
+
+    window = BluetoothAnalyzerWindow(
+        preferences=QtCore.QSettings(
+            str(tmp_path / "le-packet-end.ini"),
+            QtCore.QSettings.Format.IniFormat,
+        )
+    )
+    try:
+        window._recording = recording
+        window._classic_analysis_ready((result,))
+        expected_stop_ms = expected_stop / recording.sample_rate_hz * 1e3
+        result_regions = [
+            item
+            for item in window.power_plot.getPlotItem().items
+            if isinstance(item, pg.LinearRegionItem)
+        ]
+        assert any(
+            np.isclose(float(region.getRegion()[1]), expected_stop_ms)
+            for region in result_regions
+        )
+        fsk_items = window.fsk_modulation_plot.listDataItems()
+        marker = next(item for item in fsk_items if item.opts.get("symbol") is not None)
+        assert marker.xData.size == result.packet.raw_bits.size
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_real_3dh3_requires_edr_sync_before_br_fallback() -> None:
+    recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "3-DH3_misjudge.npz"
+    )
+    results = analyze_bluetooth_classic_recordings(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        lap=0xC6967E,
+        uap=0x6B,
+        clock_6_1=0x2B,
+        whitening_enabled=False,
+        result_length=4096,
+    )
+    assert results
+    assert all(result.packet.phy_name == "EDR 3M" for result in results)
+    assert all(result.packet.packet_type == "3-DH3" for result in results)
+    assert all(result.packet.integrity.crc_valid is True for result in results)
+    assert all(
+        result.metadata["analysis_session"].pattern_result.correlation > 0.99
+        for result in results
+    )
+
+
+def test_hdt_iq_power_reset_restores_both_axes(tmp_path) -> None:
+    pg.mkQApp("Bluetooth HDT IQ power reset regression")
+    recording, _, _ = _hdt_recording(HDTRate.HDT3, 32)
+    result = analyze_bluetooth_hdt_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+    )
+    window = BluetoothAnalyzerWindow(
+        preferences=QtCore.QSettings(
+            str(tmp_path / "hdt-reset.ini"), QtCore.QSettings.Format.IniFormat
+        )
+    )
+    try:
+        window._recording = recording
+        window._classic_analysis_ready((result,))
+        expected_x, expected_y = window._analysis_plot_ranges["iq_power"]
+        window.power_plot.setRange(xRange=[0.0, 0.1], yRange=[-2.0, 2.0])
+        window._reset_plot_scale("iq_power", window.power_plot)
+        actual_x, actual_y = window.power_plot.viewRange()
+        np.testing.assert_allclose(actual_x, expected_x)
+        np.testing.assert_allclose(actual_y, expected_y)
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_hdt_to_le_restores_fsk_modulation_axes(tmp_path) -> None:
+    pg.mkQApp("Bluetooth HDT to LE plot-axis regression")
+    hdt_recording, _, _ = _hdt_recording(HDTRate.HDT3, 32)
+    hdt_result = analyze_bluetooth_hdt_recording(
+        hdt_recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+    )
+    generated = BluetoothLEWaveformEngine().generate(
+        bluetooth_le_project(BluetoothLEPhy.LE_1M)
+    )
+    le_recording = IQRecording(
+        iq=generated.iq,
+        sample_rate_hz=generated.sample_rate_hz,
+        center_frequency_hz=2_440e6,
+    )
+    le_result = analyze_bluetooth_le_recording(
+        le_recording,
+        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+        phy="LE 1M",
+        access_address=0x8E89BED6,
+        channel_index=37,
+        crc_init=0x555555,
+        whitening_enabled=True,
+        result_length=512,
+    )
+    window = BluetoothAnalyzerWindow(
+        preferences=QtCore.QSettings(
+            str(tmp_path / "hdt-to-le-axes.ini"),
+            QtCore.QSettings.Format.IniFormat,
+        )
+    )
+    try:
+        window._recording = hdt_recording
+        window._classic_analysis_ready((hdt_result,))
+        assert window.fsk_modulation_plot.getAxis("bottom").labelText == "I"
+        assert window.fsk_modulation_plot.getAxis("left").labelText == "Q"
+        assert window.fsk_modulation_plot.getViewBox().state["aspectLocked"] == 1.0
+
+        window._recording = le_recording
+        window._classic_analysis_ready((le_result,))
+        assert (
+            window.fsk_modulation_plot.getAxis("bottom").labelText
+            == "Time (ms)"
+        )
+        assert (
+            window.fsk_modulation_plot.getAxis("left").labelText
+            == "Frequency (kHz)"
+        )
+        assert window.fsk_modulation_plot.getViewBox().state["aspectLocked"] is False
+    finally:
+        window.close()
+        window.deleteLater()

@@ -12,11 +12,30 @@ from pluto_sa.vsa.protocol_modes.dect import (
     analyze_dect_recording,
     generate_dect_packet,
 )
-from pluto_sa.vsa.protocol_modes.dect.analysis import _sync_packet
+from pluto_sa.vsa.protocol_modes.dect.analysis import _bit_means, _sync_packet
 from pluto_sa.vsa.sources import FileIQSource
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def test_vectorized_bit_windows_match_original_boolean_selection() -> None:
+    rng = np.random.default_rng(20260906)
+    positions = np.cumsum(rng.uniform(0.4, 1.6, size=2500))
+    frequency = rng.normal(0.0, 180_000.0, size=positions.size)
+    p0 = 70.25
+    sps = 8.015
+    count = 220
+    expected = np.full(count, np.nan, dtype=np.float64)
+    for index in range(count):
+        start = p0 + (index + 0.2) * sps
+        stop = p0 + (index + 0.8) * sps
+        selected = frequency[(positions >= start) & (positions < stop)]
+        if selected.size:
+            expected[index] = float(np.mean(selected))
+    np.testing.assert_array_equal(
+        _bit_means(frequency, positions, p0, sps, count), expected
+    )
 
 
 @pytest.mark.parametrize("direction", ("RFP", "PP"))
