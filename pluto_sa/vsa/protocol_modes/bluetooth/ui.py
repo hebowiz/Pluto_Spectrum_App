@@ -68,7 +68,7 @@ from .model import (
     analyze_bluetooth_le_recordings,
     analyze_bluetooth_session,
 )
-from .rf_measurement import HDTEVMResult, HDTPlotData
+from .rf_measurement import BluetoothFMMeasurementTrace, HDTEVMResult, HDTPlotData
 
 
 _TRACE = "#ffff00"
@@ -1988,19 +1988,37 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                     float(result.metadata["packet_stop_sample"])
                     - recording_sample_offset
                 ) / recording.sample_rate_hz
-            fsk_frequency_hz, fsk_time_s = prepare_fsk_display_frequency(
-                fsk_display_result.iq,
-                sample_rate_hz=fsk_analysis_rate_hz,
-                symbol_rate_hz=fsk_signal.symbol_rate_hz,
-                gaussian_bt=(
-                    fsk_signal.filter_parameter
-                    if fsk_session.demodulation.measurement_filter
-                    is MeasurementFilterMode.AUTO
-                    else None
-                ),
-                result_start_time_s=display_start_time_s,
-                result_stop_time_s=display_stop_time_s,
-            )
+            measurement_trace = result.metadata.get("fsk_measurement_trace")
+            if isinstance(measurement_trace, BluetoothFMMeasurementTrace):
+                trace_time_s = measurement_trace.time_s
+                trace_frequency_hz = measurement_trace.frequency_hz
+                if display_start_time_s is not None and display_stop_time_s is not None:
+                    guard_s = 16.0 / float(fsk_signal.symbol_rate_hz)
+                    trace_mask = (
+                        (trace_time_s >= float(display_start_time_s) - guard_s)
+                        & (trace_time_s <= float(display_stop_time_s) + guard_s)
+                    )
+                    fsk_time_s = trace_time_s[trace_mask]
+                    fsk_frequency_hz = trace_frequency_hz[trace_mask]
+                else:
+                    fsk_time_s = trace_time_s
+                    fsk_frequency_hz = trace_frequency_hz
+            else:
+                # Compatibility fallback for results created before the RF
+                # measurement trace became part of the dedicated result model.
+                fsk_frequency_hz, fsk_time_s = prepare_fsk_display_frequency(
+                    fsk_display_result.iq,
+                    sample_rate_hz=fsk_analysis_rate_hz,
+                    symbol_rate_hz=fsk_signal.symbol_rate_hz,
+                    gaussian_bt=(
+                        fsk_signal.filter_parameter
+                        if fsk_session.demodulation.measurement_filter
+                        is MeasurementFilterMode.AUTO
+                        else None
+                    ),
+                    result_start_time_s=display_start_time_s,
+                    result_stop_time_s=display_stop_time_s,
+                )
             symbol_time_s = np.asarray(
                 fsk_pattern.symbol_time_s if fsk_pattern is not None else (),
                 dtype=np.float64,
@@ -2162,6 +2180,21 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self._plot_unit_circle(self.fsk_symbol_plot)
             self._set_iq_plane_range(self.fsk_symbol_plot)
 
+        if not is_hdt and fsk_signal is not None:
+            # The display FM demodulator deliberately includes guard samples
+            # around the result range.  Phase differences in a low-power guard
+            # can be arbitrarily large and must not control the normal Y scale.
+            # Match Generic VSA's nominal-deviation scale; View All remains
+            # available when inspection of the complete trace is wanted.
+            deviation_hz = abs(float(fsk_signal.frequency_deviation_hz or 0.0))
+            if deviation_hz > 0.0:
+                limit_khz = 1.5 * deviation_hz / 1e3
+                self.fsk_modulation_plot.setYRange(
+                    -limit_khz,
+                    limit_khz,
+                    padding=0.0,
+                )
+
         if is_psk and is_hdt and hdt_evm is not None:
             trajectory = np.asarray(
                 hdt_evm.payload_corrected_waveform, dtype=np.complex128
@@ -2304,9 +2337,6 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.fsk_modulation_plot.setLabel("left", "Frequency (kHz)")
         self.fsk_modulation_plot.setDownsampling(auto=True, mode="peak")
         self.fsk_modulation_plot.setClipToView(True)
-        # HDT's fixed I/Q range disables auto-ranging.  FSK owns only its X
-        # packet range, so restore automatic frequency scaling explicitly.
-        self.fsk_modulation_plot.enableAutoRange(axis="y", enable=True)
 
     @staticmethod
     def _set_iq_plane_range(plot: pg.PlotWidget) -> None:

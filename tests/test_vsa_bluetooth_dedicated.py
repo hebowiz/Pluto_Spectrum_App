@@ -25,8 +25,11 @@ from pluto_sa.vsa.protocol_modes.bluetooth.model import (
 import pluto_sa.vsa.protocol_modes.bluetooth.model as bluetooth_model
 from pluto_sa.vsa.profiles.bluetooth_br import access_code_bits
 from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
+    BluetoothFMMeasurementTrace,
+    BluetoothRFMeasurementFilterProfile,
     BluetoothRFTestAccumulator,
 )
+import pluto_sa.vsa.protocol_modes.bluetooth.ui as bluetooth_ui
 from pluto_sa.vsa.protocol_modes.bluetooth.ui import BluetoothAnalyzerWindow, format_air_bits, infer_le_channel
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.session import VSASession
@@ -1241,6 +1244,16 @@ def test_le_rf_test_packet_produces_eligible_raw_sig_measurements(
     )
 
     measurement = result.metadata["rf_measurements"][0]
+    measurement_trace = result.metadata["fsk_measurement_trace"]
+    assert isinstance(measurement_trace, BluetoothFMMeasurementTrace)
+    assert measurement_trace.filter_profile is {
+        BluetoothLEPhy.LE_1M: BluetoothRFMeasurementFilterProfile.LE_1M,
+        BluetoothLEPhy.LE_2M: BluetoothRFMeasurementFilterProfile.LE_2M,
+    }[phy]
+    np.testing.assert_array_equal(
+        measurement_trace.frequency_hz,
+        measurement.arrays["frequency_hz"],
+    )
     assert measurement.eligibility.eligible is True
     assert measurement.metadata["payload_pattern"] == "10101010"
     assert measurement.metrics["delta_f2_avg_hz"] is not None
@@ -1482,6 +1495,12 @@ def test_br_sig_deviation_is_not_normalized_to_nominal() -> None:
             clock_6_1=settings.clock_6_1,
             whitening_enabled=False,
         )
+        measurement_trace = result.metadata["fsk_measurement_trace"]
+        assert isinstance(measurement_trace, BluetoothFMMeasurementTrace)
+        assert (
+            measurement_trace.filter_profile
+            is BluetoothRFMeasurementFilterProfile.BR_1M
+        )
         measured.append(
             float(
                 result.metadata["rf_measurements"][0].metrics[
@@ -1518,6 +1537,12 @@ def test_dedicated_edr_length_crc_and_type_meaning_use_air_bit_order() -> None:
         result_length=1024,
     )
     assert result.packet.packet_type == "2-DH1"
+    measurement_trace = result.metadata["fsk_measurement_trace"]
+    assert isinstance(measurement_trace, BluetoothFMMeasurementTrace)
+    assert (
+        measurement_trace.filter_profile
+        is BluetoothRFMeasurementFilterProfile.BR_1M
+    )
     assert result.packet.integrity.crc_valid is True
     header = next(field for field in result.packet.root_fields if field.field_id == "header")
     type_field = next(field for field in header.children if field.field_id == "type")
@@ -1545,8 +1570,10 @@ def test_dedicated_edr_length_crc_and_type_meaning_use_air_bit_order() -> None:
     )
     search_guard = max(
         round(2.0 * generated.sample_rate_hz / 1_000_000.0),
-        # EDR 2M is 2 bits/symbol at the common 1-Msym/s symbol clock.
-        round(8.0 * generated.sample_rate_hz / 1_000_000.0),
+        # The EDR synchronizer keeps 50 us of pre-roll for SRRC/carrier
+        # settling while independently enforcing the +/-8-symbol timing
+        # acceptance window.
+        round(50.0 * generated.sample_rate_hz / 1_000_000.0),
     )
     assert result.metadata["analysis_sample_offset"] <= expected_edr_search_start
     assert (
@@ -2036,7 +2063,9 @@ def test_bluetooth_multi_packet_ui_preserves_tabs_and_tracks_selected_fsk_range(
         window.deleteLater()
 
 
-def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(tmp_path) -> None:
+def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
+    tmp_path, monkeypatch
+) -> None:
     pg.mkQApp("Bluetooth dedicated EDR UI test")
     base = bluetooth_br_edr_project()
     settings = replace(
@@ -2112,6 +2141,17 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(tmp_path) -> N
         assert capture.trigger_level_dbm == -31.5
         assert capture.trigger_offset_s == -12e-6
         window._meas_config_dialog.hide()
+
+        def reject_duplicate_fsk_filter(*_args, **_kwargs):
+            raise AssertionError(
+                "Bluetooth Dedicated must reuse the RF measurement trace"
+            )
+
+        monkeypatch.setattr(
+            bluetooth_ui,
+            "prepare_fsk_display_frequency",
+            reject_duplicate_fsk_filter,
+        )
         window._recording = result.metadata["analysis_session"].recording
         window._classic_analysis_ready((result,))
         fsk_trace, fsk_markers = window.fsk_modulation_plot.listDataItems()[:2]
@@ -2122,6 +2162,11 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(tmp_path) -> N
         )
         fsk_symbol_values = window.fsk_symbol_plot.listDataItems()[0].yData
         np.testing.assert_array_equal(fsk_symbol_values, fsk_markers.yData)
+        window._set_fsk_symbol_plot_mode("Phase Difference")
+        np.testing.assert_allclose(
+            window.fsk_modulation_plot.viewRange()[1],
+            [-240.0, 240.0],
+        )
         assert window.modulation_tabs.isTabVisible(1)
         assert window.symbol_tabs.isTabVisible(1)
         assert len(window.spectrum_plot.listDataItems()) == 2
@@ -2333,9 +2378,13 @@ def test_real_le_packet_end_uses_decoded_length_not_available_result_tail(
         window.deleteLater()
 
 
-def test_real_3dh3_requires_edr_sync_before_br_fallback() -> None:
+@pytest.mark.parametrize(
+    "fixture_name",
+    ("3-DH3_misjudge.npz", "3-DH3_misjudge2.npz"),
+)
+def test_real_3dh3_requires_edr_sync_before_br_fallback(fixture_name) -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "3-DH3_misjudge.npz"
+        Path(__file__).with_name("fixtures") / fixture_name
     )
     results = analyze_bluetooth_classic_recordings(
         recording,
@@ -2350,10 +2399,55 @@ def test_real_3dh3_requires_edr_sync_before_br_fallback() -> None:
     assert all(result.packet.phy_name == "EDR 3M" for result in results)
     assert all(result.packet.packet_type == "3-DH3" for result in results)
     assert all(result.packet.integrity.crc_valid is True for result in results)
+    assert all(result.metadata["edr_sync_confirmed"] is True for result in results)
+    assert all(
+        float(result.metadata["edr_sync_correlation"]) > 0.99
+        for result in results
+    )
     assert all(
         result.metadata["analysis_session"].pattern_result.correlation > 0.99
         for result in results
     )
+
+
+def test_high_confidence_edr_sync_is_not_demoted_when_length_refinement_fails(
+    monkeypatch,
+) -> None:
+    base = bluetooth_br_edr_project()
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH3_3,
+        payload_length_bytes=54,
+    )
+    generated = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+    )
+    recording = IQRecording(
+        iq=generated.iq,
+        sample_rate_hz=generated.sample_rate_hz,
+        center_frequency_hz=base.center_frequency_hz,
+    )
+    monkeypatch.setattr(
+        bluetooth_model,
+        "_exact_edr_result_symbols",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = analyze_bluetooth_classic_recording(
+        recording,
+        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+        lap=settings.lap,
+        uap=settings.uap,
+        clock_6_1=settings.clock_6_1,
+        whitening_enabled=settings.whitening_enabled,
+        result_length=4096,
+    )
+
+    assert result.packet.phy_name == "EDR 3M"
+    assert result.packet.packet_type == "3-DH3"
+    assert result.metadata["edr_sync_confirmed"] is True
+    assert float(result.metadata["edr_sync_correlation"]) > 0.99
+    assert "Length was not decoded" in result.metadata["edr_candidate_error"]
 
 
 def test_hdt_iq_power_reset_restores_both_axes(tmp_path) -> None:

@@ -60,6 +60,8 @@ class VSASession:
     revision: int = 0
     _analyzer: VSAAnalyzer = field(default_factory=VSAAnalyzer, repr=False)
     _pattern_analyzer: PatternAnalyzer = field(default_factory=PatternAnalyzer, repr=False)
+    _prepared_recording: IQRecording | None = field(default=None, repr=False)
+    _prepared_settings: VSASettings | None = field(default=None, repr=False)
 
     def analysis_snapshot(self) -> "VSASession":
         """Return an isolated analysis job sharing only immutable input data."""
@@ -72,7 +74,12 @@ class VSASession:
             iq_power_trigger=self.iq_power_trigger,
             result_range=self.result_range,
             demodulation=self.demodulation,
+            capture_time_s=self.capture_time_s,
+            capture_power_dbfs=self.capture_power_dbfs,
+            capture_power_dbm=self.capture_power_dbm,
             revision=self.revision,
+            _prepared_recording=self._prepared_recording,
+            _prepared_settings=self._prepared_settings,
         )
 
     def adopt_analysis_results(self, completed: "VSASession") -> None:
@@ -103,6 +110,8 @@ class VSASession:
         self.capture_time_s = np.empty(0, dtype=np.float64)
         self.capture_power_dbfs = np.empty(0, dtype=np.float64)
         self.capture_power_dbm = np.empty(0, dtype=np.float64)
+        self._prepared_recording = None
+        self._prepared_settings = None
 
     def set_recording(self, recording: IQRecording) -> None:
         self.recording = recording
@@ -142,6 +151,11 @@ class VSASession:
         """Apply source-independent channel and DC processing exactly once."""
         if self.recording is None:
             raise RuntimeError("no IQ recording is loaded")
+        if (
+            self._prepared_recording is not None
+            and self._prepared_settings is not None
+        ):
+            return self._prepared_recording, self._prepared_settings
         prepared = self.recording
         if self.settings.analysis_bandwidth_hz is not None:
             prepared = extract_analysis_channel(
@@ -164,6 +178,8 @@ class VSASession:
             analysis_center_frequency_hz=None,
             analysis_bandwidth_hz=None,
         )
+        self._prepared_recording = prepared
+        self._prepared_settings = prepared_settings
         return prepared, prepared_settings
 
     def _publish_demodulation_result(
@@ -282,11 +298,12 @@ class VSASession:
         if self.signal is None:
             raise RuntimeError("no signal description is configured")
         total_started = perf_counter()
-        (
-            self.capture_time_s,
-            self.capture_power_dbfs,
-            self.capture_power_dbm,
-        ) = capture_power_traces(self.recording)
+        if self.capture_time_s.size != self.recording.sample_count:
+            (
+                self.capture_time_s,
+                self.capture_power_dbfs,
+                self.capture_power_dbm,
+            ) = capture_power_traces(self.recording)
         stage_started = perf_counter()
         analysis_recording, prepared_settings = self._prepare_analysis_recording()
         self.analysis_timings_ms = {
@@ -315,11 +332,12 @@ class VSASession:
         if self.signal is None:
             raise RuntimeError("no signal description is configured")
         total_started = perf_counter()
-        (
-            self.capture_time_s,
-            self.capture_power_dbfs,
-            self.capture_power_dbm,
-        ) = capture_power_traces(self.recording)
+        if self.capture_time_s.size != self.recording.sample_count:
+            (
+                self.capture_time_s,
+                self.capture_power_dbfs,
+                self.capture_power_dbm,
+            ) = capture_power_traces(self.recording)
         stage_started = perf_counter()
         analysis_recording, prepared_settings = self._prepare_analysis_recording()
         self.analysis_timings_ms = {

@@ -75,6 +75,7 @@ from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement.hdt import (
     estimate_hdt_reference,
 )
 from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
+    BluetoothFMMeasurementTrace,
     BluetoothRFMeasurementFilterProfile,
     BluetoothRFMeasurementResult,
     BluetoothRFTestAccumulator,
@@ -118,6 +119,16 @@ class BluetoothClassicPhy(StrEnum):
     BR = "BR"
     EDR_2M = "EDR 2M"
     EDR_3M = "EDR 3M"
+
+
+# A correctly placed 10-symbol EDR synchronization word is the PHY
+# discriminator for Classic TYPE values shared by BR and EDR.  Acquisition
+# may use a lower threshold, but this stronger threshold lets PHY identity
+# survive a later enhanced-header/Length decode failure without promoting
+# marginal BR noise to EDR.
+_EDR_SYNC_ACQUISITION_CORRELATION = 0.40
+_EDR_SYNC_FINAL_CORRELATION = 0.72
+_EDR_PHY_CONFIRMATION_CORRELATION = 0.90
 
 
 class BluetoothLEPhy(StrEnum):
@@ -415,7 +426,11 @@ def _sig_fsk_measurements(
     p0_sample: float | None = None,
     extra_eligibility_reasons: tuple[str, ...] = (),
     drift_block_symbols: int = 50,
-) -> tuple[tuple[BluetoothMetric, ...], tuple[BluetoothRFMeasurementResult, ...]]:
+) -> tuple[
+    tuple[BluetoothMetric, ...],
+    tuple[BluetoothRFMeasurementResult, ...],
+    BluetoothFMMeasurementTrace | None,
+]:
     """Measure BR/LE RF properties without decoder frequency-model fitting."""
 
     scale = 2.0 if filter_profile is BluetoothRFMeasurementFilterProfile.LE_2M else 1.0
@@ -432,6 +447,28 @@ def _sig_fsk_measurements(
     metrics: list[BluetoothMetric] = [
         BluetoothMetric("sig_eligibility", "SIG RF Test Eligibility", eligibility_text)
     ]
+    try:
+        trace = build_fm_measurement_trace(
+            recording.iq,
+            sample_rate_hz=recording.sample_rate_hz,
+            symbol_rate_hz=symbol_rate_hz,
+            p0_sample=(
+                float(packet_start_sample)
+                if p0_sample is None
+                else float(p0_sample)
+            ),
+            profile=filter_profile,
+        )
+    except (ValueError, RuntimeError) as error:
+        unavailable = RFTestEligibility.from_reasons(
+            (*eligibility.reasons, str(error))
+        )
+        return tuple(metrics), (
+            BluetoothRFMeasurementResult(
+                "bluetooth.fsk", unavailable, metadata={"reason": str(error)}
+            ),
+        ), None
+
     payload = _packet_field_by_id(packet.root_fields, "payload_body")
     if payload is None:
         payload = _packet_field_by_id(packet.root_fields, "payload")
@@ -445,19 +482,8 @@ def _sig_fsk_measurements(
                 unavailable,
                 metadata={"reason": "decoded payload is too short"},
             ),
-        )
+        ), trace
     try:
-        trace = build_fm_measurement_trace(
-            recording.iq,
-            sample_rate_hz=recording.sample_rate_hz,
-            symbol_rate_hz=symbol_rate_hz,
-            p0_sample=(
-                float(packet_start_sample)
-                if p0_sample is None
-                else float(p0_sample)
-            ),
-            profile=filter_profile,
-        )
         modulation = measure_modulation_characteristics(
             trace,
             payload.raw_bits,
@@ -504,7 +530,7 @@ def _sig_fsk_measurements(
             BluetoothRFMeasurementResult(
                 "bluetooth.fsk", unavailable, metadata={"reason": str(error)}
             ),
-        )
+        ), trace
 
     metrics.extend(
         (
@@ -566,7 +592,7 @@ def _sig_fsk_measurements(
             "aggregation_required": True,
         },
     )
-    return tuple(metrics), (result,)
+    return tuple(metrics), (result,), trace
 
 
 def _attach_rf_capture_aggregates(
@@ -765,16 +791,25 @@ def _edr_sync_search_bounds(
     # still a strictly local boundary test (and therefore cannot reach the
     # next packet), while covering the practical acquisition uncertainty.
     timing_tolerance = max(1, int(round(8.0 * samples_per_br_symbol)))
+    # Keep synchronization acceptance at +/-8 BR symbols, but give the PSK
+    # matched-filter and its two-pass carrier estimator independent settling
+    # context.  A short 8-symbol crop can contain the correct Sync inside the
+    # accepted timing window yet lose it during the carrier-centered SRRC
+    # pass.  Real Pluto 3-DH3 captures require about 50 us of preceding BR/
+    # guard context; this pre-roll does not widen the accepted Sync position.
     filter_preroll = max(
         timing_tolerance,
-        int(round(8.0 * samples_per_psk_symbol)),
+        # 50 microseconds at the 1 Msym/s BR clock.  Using PSK SPS here
+        # accidentally provided only 16.7 us for EDR 3M.
+        int(round(50.0 * samples_per_br_symbol)),
     )
     postroll = max(
         timing_tolerance,
-        # Also retain the enhanced ACL header and two logical trailer slots.
-        # The already-required narrow synchronization pass can then discover
-        # Length without a second provisional full-payload PSK analysis.
-        int(round(20.0 * samples_per_psk_symbol)),
+        # The short EDR sync still needs enough following signal for the
+        # two-pass carrier estimate to converge.  Real 3-DH3 needs up to
+        # 120 us of post-context; this does not widen the accepted
+        # sync-position tolerance below.
+        int(round(120.0 * samples_per_br_symbol)),
     )
     start = max(0, int(expected_start_sample - filter_preroll))
     stop = min(
@@ -2211,6 +2246,8 @@ def analyze_bluetooth_classic_recording(
     edr_candidate = _edr_candidate_for_type(br_frontend.header.packet_type)
     edr_error: str | None = None
     detected_edr_sync_start: int | None = None
+    edr_sync_correlation: float | None = None
+    edr_sync_confirmed = False
     expected_edr_sync_symbols = np.empty(0, dtype=np.int16)
     expected_edr_decoded_sync_symbols = np.empty(0, dtype=np.int16)
     if edr_candidate is not None:
@@ -2267,7 +2304,7 @@ def analyze_bluetooth_classic_recording(
                 ),
                 trigger_sample_index=None,
             )
-            sync_session = _analyze_known_pattern(
+            sync_session = _analyze_edr_payload_at_sync(
                 sync_recording,
                 edr_signal,
                 sync,
@@ -2276,17 +2313,30 @@ def analyze_bluetooth_classic_recording(
                     + int(np.ceil(16.0 / width))
                     + 2
                 ),
-                minimum_correlation=0.72,
-                match_index=1,
-                # Guard/ramp transients can produce an earlier, merely
-                # acceptable 10-symbol correlation.  FIRST then rejects a
-                # valid EDR packet as BR before reaching the true sync.  This
-                # recording is already restricted to the deterministic PHY
-                # boundary, so STRONGEST is safe and is the correct local
-                # maximum-likelihood decision.
-                match_selection=MatchSelectionPolicy.STRONGEST,
+                # The first pass only bootstraps carrier recovery.  Real
+                # 3-DH3 can be below the final threshold before the SRRC/CFO
+                # refinement and above 0.99 afterwards.
+                minimum_correlation=_EDR_SYNC_ACQUISITION_CORRELATION,
+                expected_sync_sample=edr_sync_start - sync_search_start,
                 generate_display_products=_generate_display_products,
             )
+            correlation = float(sync_session.pattern_result.correlation)
+            edr_sync_correlation = correlation
+            if not bool(
+                sync_session.pattern_result.metadata.get(
+                    "pattern_match_valid", True
+                )
+            ):
+                raise RuntimeError(
+                    sync_session.pattern_error
+                    or "EDR synchronization pattern was not found"
+                )
+            if correlation < _EDR_SYNC_FINAL_CORRELATION:
+                raise RuntimeError(
+                    "EDR synchronization correlation is below the final "
+                    f"threshold ({correlation:.3f} < "
+                    f"{_EDR_SYNC_FINAL_CORRELATION:.3f})"
+                )
             detected_sync_start = (
                 sync_search_start
                 + int(sync_session.pattern_result.pattern_start_sample)
@@ -2299,6 +2349,15 @@ def analyze_bluetooth_classic_recording(
                     "EDR synchronization was not found at the expected "
                     f"post-header boundary (timing error {sync_timing_error} samples)"
                 )
+            if correlation >= _EDR_PHY_CONFIRMATION_CORRELATION:
+                # PHY identity comes from the correctly placed EDR Sync, not
+                # from whether the following enhanced ACL Length happens to
+                # decode.  Retain this synchronized session as a safe result
+                # if later packet-length refinement fails.
+                edr_sync_confirmed = True
+                phy = edr_candidate
+                analysis_session = sync_session
+                analysis_sample_offset = sync_search_start
 
             # The narrow pass above decides BR versus EDR. Only after that
             # decision do we open a longer range for payload demodulation.
@@ -2323,64 +2382,78 @@ def analyze_bluetooth_classic_recording(
             # performs the complete fine synchronization/optimizer over the
             # exact result extent, so RF and DEVM precision are unchanged.
             candidate_session = sync_session
-            correlation = float(sync_session.pattern_result.correlation)
-            if correlation >= 0.72:
-                # First pass establishes EDR sync and decodes the enhanced
-                # ACL header.  Its Length field is authoritative for the
-                # packet end; the capture/result setting is only a generous
-                # discovery bound.
-                provisional_pattern = candidate_session.pattern_result
-                provisional_air_bits = _symbols_to_air_bits(
-                    provisional_pattern.decoded_symbols,
-                    candidate_session.signal.modulation.order,
-                )
-                provisional_packet = analyze_demodulated_packet_bits(
-                    np.concatenate(
-                        (
-                            br_frontend.access_code_bits,
-                            br_frontend.header_air_bits,
-                            provisional_air_bits,
-                        )
-                    ),
-                    protocol_id="bluetooth.br_edr",
-                    phy_name=edr_candidate.value,
-                    context={
-                        "uap": int(uap) & 0xFF,
-                        "clock_6_1": int(clock_6_1),
-                        "whitening_enabled": bool(whitening_enabled),
-                        "phy": edr_candidate.value,
-                    },
-                    packet_index=0,
-                    center_frequency_hz=recording.center_frequency_hz,
-                    start_sample=provisional_pattern.result_start_sample,
-                    stop_sample=provisional_pattern.result_stop_sample,
-                )
-                exact_result_symbols = _exact_edr_result_symbols(
-                    provisional_packet, bits_per_symbol=width
-                )
-                if exact_result_symbols is None:
-                    raise RuntimeError("EDR enhanced ACL Length was not decoded")
-                candidate_session = _analyze_edr_payload_at_sync(
-                    edr_recording,
-                    edr_signal,
-                    sync,
-                    result_length=exact_result_symbols,
-                    expected_sync_sample=detected_sync_start - crop_start,
-                    minimum_correlation=0.72,
-                    generate_display_products=_generate_display_products,
-                )
-                payload_sync_start = (
-                    crop_start
-                    + int(candidate_session.pattern_result.pattern_start_sample)
-                )
-                if abs(payload_sync_start - detected_sync_start) > sync_timing_tolerance:
-                    raise RuntimeError(
-                        "EDR payload analysis did not remain anchored to the "
-                        "post-header synchronization word"
+            # First pass establishes EDR sync and decodes the enhanced ACL
+            # header.  Its Length field is authoritative for the packet end;
+            # the capture/result setting is only a generous discovery bound.
+            provisional_pattern = candidate_session.pattern_result
+            provisional_air_bits = _symbols_to_air_bits(
+                provisional_pattern.decoded_symbols,
+                candidate_session.signal.modulation.order,
+            )
+            provisional_packet = analyze_demodulated_packet_bits(
+                np.concatenate(
+                    (
+                        br_frontend.access_code_bits,
+                        br_frontend.header_air_bits,
+                        provisional_air_bits,
                     )
-                phy = edr_candidate
-                analysis_session = candidate_session
-                analysis_sample_offset = crop_start
+                ),
+                protocol_id="bluetooth.br_edr",
+                phy_name=edr_candidate.value,
+                context={
+                    "uap": int(uap) & 0xFF,
+                    "clock_6_1": int(clock_6_1),
+                    "whitening_enabled": bool(whitening_enabled),
+                    "phy": edr_candidate.value,
+                },
+                packet_index=0,
+                center_frequency_hz=recording.center_frequency_hz,
+                start_sample=provisional_pattern.result_start_sample,
+                stop_sample=provisional_pattern.result_stop_sample,
+            )
+            exact_result_symbols = _exact_edr_result_symbols(
+                provisional_packet, bits_per_symbol=width
+            )
+            if exact_result_symbols is None:
+                raise RuntimeError("EDR enhanced ACL Length was not decoded")
+            candidate_session = _analyze_edr_payload_at_sync(
+                edr_recording,
+                edr_signal,
+                sync,
+                result_length=exact_result_symbols,
+                expected_sync_sample=detected_sync_start - crop_start,
+                minimum_correlation=_EDR_SYNC_ACQUISITION_CORRELATION,
+                generate_display_products=_generate_display_products,
+            )
+            payload_correlation = float(
+                candidate_session.pattern_result.correlation
+            )
+            if (
+                not bool(
+                    candidate_session.pattern_result.metadata.get(
+                        "pattern_match_valid", True
+                    )
+                )
+                or payload_correlation < _EDR_SYNC_FINAL_CORRELATION
+            ):
+                raise RuntimeError(
+                    "EDR payload synchronization did not satisfy the final "
+                    f"correlation threshold ({payload_correlation:.3f} < "
+                    f"{_EDR_SYNC_FINAL_CORRELATION:.3f})"
+                )
+            payload_sync_start = (
+                crop_start
+                + int(candidate_session.pattern_result.pattern_start_sample)
+            )
+            if abs(payload_sync_start - detected_sync_start) > sync_timing_tolerance:
+                raise RuntimeError(
+                    "EDR payload analysis did not remain anchored to the "
+                    "post-header synchronization word"
+                )
+            phy = edr_candidate
+            edr_sync_confirmed = True
+            analysis_session = candidate_session
+            analysis_sample_offset = crop_start
         except Exception as error:
             edr_error = str(error)
 
@@ -2550,9 +2623,10 @@ def analyze_bluetooth_classic_recording(
     )
     rf_metrics: tuple[BluetoothMetric, ...] = ()
     rf_measurements: tuple[BluetoothRFMeasurementResult, ...] = ()
+    fsk_measurement_trace: BluetoothFMMeasurementTrace | None = None
     edr_coordinate_metadata: dict[str, object] = {}
     if phy is BluetoothClassicPhy.BR:
-        rf_metrics, rf_measurements = _sig_fsk_measurements(
+        rf_metrics, rf_measurements, fsk_measurement_trace = _sig_fsk_measurements(
             recording,
             packet,
             profile=profile,
@@ -2594,6 +2668,7 @@ def analyze_bluetooth_classic_recording(
                 ),
                 profile=BluetoothRFMeasurementFilterProfile.BR_1M,
             )
+            fsk_measurement_trace = fm_trace
             initial = measure_initial_carrier_frequency(
                 fm_trace,
                 packet.raw_bits[72:126],
@@ -3075,6 +3150,8 @@ def analyze_bluetooth_classic_recording(
             "classic_phy_auto_detected": True,
             "br_access_correlation": br_frontend.demodulation.access_correlation,
             "edr_candidate_error": edr_error,
+            "edr_sync_correlation": edr_sync_correlation,
+            "edr_sync_confirmed": edr_sync_confirmed,
             "analysis_session": analysis_session,
             "br_analysis_session": br_analysis_session,
             "recording_sample_offset": recording_sample_offset,
@@ -3088,6 +3165,7 @@ def analyze_bluetooth_classic_recording(
                 )
             ),
             "rf_measurements": rf_measurements,
+            "fsk_measurement_trace": fsk_measurement_trace,
             **edr_coordinate_metadata,
         },
     )
@@ -3181,7 +3259,7 @@ def analyze_bluetooth_le_recording(
         if phy is BluetoothLEPhy.LE_2M
         else BluetoothRFMeasurementFilterProfile.LE_1M
     )
-    rf_metrics, rf_measurements = _sig_fsk_measurements(
+    rf_metrics, rf_measurements, fsk_measurement_trace = _sig_fsk_measurements(
         recording,
         packet,
         profile=profile,
@@ -3228,6 +3306,7 @@ def analyze_bluetooth_le_recording(
             "selected_match_index": int(pattern.metadata.get("selected_match_index", match_index)),
             "eligible_match_count": int(pattern.metadata.get("eligible_match_count", 1)),
             "rf_measurements": rf_measurements,
+            "fsk_measurement_trace": fsk_measurement_trace,
         },
     )
 

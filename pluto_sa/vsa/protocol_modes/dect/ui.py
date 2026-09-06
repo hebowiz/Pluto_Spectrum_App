@@ -69,6 +69,7 @@ from .modulation import DectModulationReference
 _CONFIG_KEY = "dect_dedicated/startup_meas_config"
 _CONFIG_SCHEMA = "pluto-vsa-dect-dedicated-config"
 _CONFIG_VERSION = 1
+_DECT_FSK_MODULATION_Y_LIMIT_KHZ = 500.0
 
 
 class _DectAnalysisThread(QtCore.QThread):
@@ -1170,6 +1171,11 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             ):
                 continue
             view_all_traces(plot)
+        self.deviation_plot.setYRange(
+            -_DECT_FSK_MODULATION_Y_LIMIT_KHZ,
+            _DECT_FSK_MODULATION_Y_LIMIT_KHZ,
+            padding=0.0,
+        )
         actual_start_ms = float(
             result.metadata.get("actual_preamble_start_sample", result.p0_sample)
         ) / recording.sample_rate_hz * 1e3

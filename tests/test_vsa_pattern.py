@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -1383,6 +1384,88 @@ def test_session_prepares_analysis_channel_once_and_reports_stage_timings(
     np.testing.assert_array_equal(
         session.pattern_result.decoded_symbols,
         expected[24:72],
+    )
+
+
+def test_packet_snapshots_reuse_preprocessing_and_preserve_analysis(monkeypatch):
+    recording, signal = GeneratedIQSource.psk(
+        modulation=ModulationKind.PI4_DQPSK,
+        symbol_count=160,
+        seed=123,
+    )
+    gap = np.zeros(64, dtype=np.complex64)
+    combined = IQRecording(
+        iq=np.concatenate((recording.iq, gap, recording.iq)),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+    pattern = _pattern_from_generated(recording, 20, 16)
+    original_extract = session_module.extract_analysis_channel
+    calls = []
+
+    def counted_extract(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original_extract(*args, **kwargs)
+
+    monkeypatch.setattr(session_module, "extract_analysis_channel", counted_extract)
+    session = VSASession(recording=combined, signal=signal)
+    session.update_settings(
+        analysis_center_frequency_hz=0.0,
+        analysis_bandwidth_hz=1_500_000.0,
+    )
+    session.configure_pattern_analysis(
+        PatternSearchSettings(
+            pattern=pattern,
+            mode=PatternSearchMode.ON,
+            match_selection=MatchSelectionPolicy.INDEX,
+            match_index=1,
+        ),
+        ResultRangeSettings(result_length=100),
+    )
+    session.analyze()
+
+    deferred = session.analysis_snapshot()
+    deferred.pattern_search = replace(
+        session.pattern_search,
+        match_selection=MatchSelectionPolicy.INDEX,
+        match_index=2,
+    )
+    deferred.analyze(generate_display_products=False)
+
+    full = session.analysis_snapshot()
+    full.pattern_search = deferred.pattern_search
+    full.analyze()
+
+    assert len(calls) == 1
+    assert deferred.capture_time_s is session.capture_time_s
+    assert deferred.capture_power_dbm is session.capture_power_dbm
+    assert deferred.pattern_result is not None
+    assert full.pattern_result is not None
+    assert deferred.pattern_range_result is None
+    assert deferred.carrier_corrected_result is None
+    assert deferred.pattern_result.pattern_start_sample == (
+        full.pattern_result.pattern_start_sample
+    )
+    assert deferred.pattern_result.pattern_start_sample == pytest.approx(
+        recording.sample_count + gap.size + 20 * 8,
+        abs=4,
+    )
+    np.testing.assert_array_equal(
+        deferred.pattern_result.decoded_symbols,
+        full.pattern_result.decoded_symbols,
+    )
+    np.testing.assert_allclose(
+        deferred.pattern_result.measured_symbols,
+        full.pattern_result.measured_symbols,
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert deferred.carrier_corrected_pattern_range_result is not None
+    assert full.carrier_corrected_pattern_range_result is not None
+    np.testing.assert_allclose(
+        deferred.carrier_corrected_pattern_range_result.iq,
+        full.carrier_corrected_pattern_range_result.iq,
+        rtol=0.0,
+        atol=0.0,
     )
 
 

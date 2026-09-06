@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
@@ -499,19 +500,34 @@ class _AnalysisThread(QtCore.QThread):
                     pattern.metadata.get("selected_match_index", search.match_index)
                 )
                 match_count = int(pattern.metadata.get("eligible_match_count", 1))
-                for match_index in range(1, match_count + 1):
-                    if match_index == focused_index:
-                        continue
+                pending = [
+                    match_index
+                    for match_index in range(1, match_count + 1)
+                    if match_index != focused_index
+                ]
+
+                def analyze_match(match_index: int) -> VSASession | None:
                     if self.isInterruptionRequested():
-                        break
+                        return None
                     packet = self.session.analysis_snapshot()
                     packet.pattern_search = replace(
                         search,
                         match_selection=MatchSelectionPolicy.INDEX,
                         match_index=match_index,
                     )
-                    packet.analyze()
-                    sessions.append(packet)
+                    # All-packet statistics only consume measurement results.
+                    # Plot products are materialized solely for the focused packet.
+                    packet.analyze(generate_display_products=False)
+                    return packet
+
+                if pending:
+                    with ThreadPoolExecutor(
+                        max_workers=min(4, len(pending)),
+                        thread_name_prefix="generic-vsa-packet",
+                    ) as executor:
+                        for packet in executor.map(analyze_match, pending):
+                            if packet is not None:
+                                sessions.append(packet)
         except Exception as error:
             self.analysis_failed.emit(self.generation, self.session, str(error))
             return

@@ -326,6 +326,10 @@ def test_plot_context_reset_only_restores_target_plot(tmp_path) -> None:
         window._results = (result,)
         window._render(result)
         expected_spectrum = np.asarray(window._analysis_plot_ranges["spectrum"][0])
+        np.testing.assert_allclose(
+            window._analysis_plot_ranges["gfsk_modulation"][1],
+            [-500.0, 500.0],
+        )
         window.power_plot.setXRange(10.0, 20.0, padding=0.0)
         window.spectrum_plot.setXRange(30.0, 40.0, padding=0.0)
         window._plot_context_actions["spectrum"]["reset"].trigger()
@@ -333,6 +337,12 @@ def test_plot_context_reset_only_restores_target_plot(tmp_path) -> None:
             window.spectrum_plot.viewRange()[0], expected_spectrum, atol=1e-9
         )
         np.testing.assert_allclose(window.power_plot.viewRange()[0], [10.0, 20.0])
+        window.deviation_plot.setYRange(-100.0, 100.0, padding=0.0)
+        window._plot_context_actions["gfsk_modulation"]["reset"].trigger()
+        np.testing.assert_allclose(
+            window.deviation_plot.viewRange()[1],
+            [-500.0, 500.0],
+        )
     finally:
         window._config_dialog.close()
         window.close()
