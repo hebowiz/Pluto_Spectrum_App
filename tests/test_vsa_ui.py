@@ -1585,6 +1585,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.symbol_display_action.setChecked(True)
         window.symbol_table_decimal_action.setChecked(True)
         window.measured_iq_power_action.setChecked(True)
+        window.analysis_spectrum_display_check.setChecked(False)
         window.raw_modulation_signal_action.setChecked(True)
         window.qam_raw_modulation_signal_action.setChecked(True)
         window.constellation_density_action.setChecked(True)
@@ -1602,6 +1603,8 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert "match_index" not in saved["pattern_search"]
         assert saved["pattern_search"]["allow_inverted_fsk_pattern"] is True
         assert saved["result_range"]["offset_symbols"] == -12
+        assert saved["input_frontend"]["apply_analysis_bandwidth_to_power"] is True
+        assert saved["input_frontend"]["apply_analysis_bandwidth_to_spectrum"] is False
 
         window._set_pattern_symbols([1, 1, 1, 1])
         window.pattern_allow_inverted_fsk_check.setChecked(False)
@@ -1623,6 +1626,7 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         window.symbol_display_action.setChecked(False)
         window.symbol_table_hex_action.setChecked(True)
         window.raw_iq_power_action.setChecked(True)
+        window.analysis_spectrum_display_check.setChecked(True)
         window.measured_modulation_signal_action.setChecked(True)
         window.qam_measured_modulation_signal_action.setChecked(True)
         window.constellation_flat_action.setChecked(True)
@@ -1686,6 +1690,8 @@ def test_pattern_table_config_round_trip_and_directory_preferences(tmp_path) -> 
         assert window.symbol_display_action.isChecked()
         assert window.symbol_table_decimal_action.isChecked()
         assert window.measured_iq_power_action.isChecked()
+        assert window.analysis_power_display_check.isChecked()
+        assert not window.analysis_spectrum_display_check.isChecked()
         assert window.raw_modulation_signal_action.isChecked()
         assert window.qam_raw_modulation_signal_action.isChecked()
         assert window.constellation_density_action.isChecked()

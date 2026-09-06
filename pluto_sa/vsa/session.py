@@ -8,6 +8,7 @@ from time import perf_counter
 import numpy as np
 
 from pluto_sa.vsa.analysis import VSAAnalyzer, capture_power_traces
+from pluto_sa.vsa.channel import AnalysisDisplayRecordings
 from pluto_sa.vsa.channel import extract_analysis_channel
 from pluto_sa.vsa.dc import apply_robust_dc_removal
 from pluto_sa.vsa.model import (
@@ -62,6 +63,7 @@ class VSASession:
     _pattern_analyzer: PatternAnalyzer = field(default_factory=PatternAnalyzer, repr=False)
     _prepared_recording: IQRecording | None = field(default=None, repr=False)
     _prepared_settings: VSASettings | None = field(default=None, repr=False)
+    _analysis_channel_recording: IQRecording | None = field(default=None, repr=False)
 
     def analysis_snapshot(self) -> "VSASession":
         """Return an isolated analysis job sharing only immutable input data."""
@@ -80,6 +82,7 @@ class VSASession:
             revision=self.revision,
             _prepared_recording=self._prepared_recording,
             _prepared_settings=self._prepared_settings,
+            _analysis_channel_recording=self._analysis_channel_recording,
         )
 
     def adopt_analysis_results(self, completed: "VSASession") -> None:
@@ -112,6 +115,7 @@ class VSASession:
         self.capture_power_dbm = np.empty(0, dtype=np.float64)
         self._prepared_recording = None
         self._prepared_settings = None
+        self._analysis_channel_recording = None
 
     def set_recording(self, recording: IQRecording) -> None:
         self.recording = recording
@@ -167,6 +171,7 @@ class VSASession:
                 ),
                 bandwidth_hz=self.settings.analysis_bandwidth_hz,
             )
+        self._analysis_channel_recording = prepared
         remove_dc = self.settings.remove_dc and bool(
             prepared.metadata.get("dc_removal_recommended", False)
         ) and not bool(prepared.metadata.get("experimental_lo_offset", False))
@@ -181,6 +186,17 @@ class VSASession:
         self._prepared_recording = prepared
         self._prepared_settings = prepared_settings
         return prepared, prepared_settings
+
+    def display_recordings(self) -> AnalysisDisplayRecordings:
+        """Return cached raw/analysis-channel planes for display selection."""
+
+        if self.recording is None:
+            raise RuntimeError("no IQ recording is loaded")
+        self._prepare_analysis_recording()
+        return AnalysisDisplayRecordings(
+            capture=self.recording,
+            analysis=self._analysis_channel_recording or self.recording,
+        )
 
     def _publish_demodulation_result(
         self,

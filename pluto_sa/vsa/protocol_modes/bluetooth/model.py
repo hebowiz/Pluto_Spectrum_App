@@ -12,6 +12,7 @@ from typing import Mapping
 
 import numpy as np
 
+from pluto_sa.vsa.dc import apply_robust_dc_removal
 from pluto_protocol.model import (
     FieldStatus,
     IssueSeverity,
@@ -129,6 +130,24 @@ class BluetoothClassicPhy(StrEnum):
 _EDR_SYNC_ACQUISITION_CORRELATION = 0.40
 _EDR_SYNC_FINAL_CORRELATION = 0.72
 _EDR_PHY_CONFIRMATION_CORRELATION = 0.90
+
+
+def _prepare_classic_frontend_recording(recording: IQRecording) -> IQRecording:
+    """Apply the shared zero-IF frontend correction once per capture.
+
+    VSASession already applies this correction internally for synchronization
+    and decoding.  Preparing the recording at the dedicated-analyzer boundary
+    also makes direct RF measurements such as EDR DEVM consume the same IQ.
+    An offset-LO analysis channel has rejected the hardware DC bin and must not
+    receive an additional constant-vector correction.
+    """
+
+    if (
+        bool(recording.metadata.get("dc_removal_recommended", False))
+        and not bool(recording.metadata.get("experimental_lo_offset", False))
+    ):
+        return apply_robust_dc_removal(recording)
+    return recording
 
 
 class BluetoothLEPhy(StrEnum):
@@ -2188,6 +2207,8 @@ def analyze_bluetooth_classic_recording(
     synchronization word to correlate in the following PSK region.
     """
 
+    recording = _prepare_classic_frontend_recording(recording)
+
     access = access_code_bits(int(lap) & 0xFFFFFF)
     # Keep a dedicated BR/GFSK result even for EDR packets.  The Bluetooth
     # workspace uses it for the access/header spectrum and modulation panes,
@@ -3320,6 +3341,10 @@ def analyze_bluetooth_classic_recordings(
 ) -> tuple[BluetoothDedicatedResult, ...]:
     """Analyze every eligible Classic/EDR packet in chronological order."""
 
+    # Estimate a zero-IF frontend DC vector from the complete capture before
+    # packet-local slicing.  Local packet crops may contain too little idle IQ
+    # to identify the receiver-noise cluster reliably.
+    recording = _prepare_classic_frontend_recording(recording)
     first = analyze_bluetooth_classic_recording(recording, match_index=1, **kwargs)
     first_pattern = first.metadata["br_analysis_session"].pattern_result
     candidate_starts = tuple(

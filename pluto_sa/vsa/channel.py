@@ -2,10 +2,31 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.signal import fftconvolve, firwin
 
 from pluto_sa.vsa.model import IQRecording
+
+
+@dataclass(frozen=True)
+class AnalysisDisplayRecordings:
+    """The capture and analysis-channel planes available to VSA displays.
+
+    Measurement filters are intentionally not represented here.  They belong
+    to protocol measurement paths, while this pair only selects whether a
+    display observes the raw capture or the common DDC/channel-LPF result.
+    """
+
+    capture: IQRecording
+    analysis: IQRecording
+
+    def power(self, apply_analysis_bandwidth: bool) -> IQRecording:
+        return self.analysis if apply_analysis_bandwidth else self.capture
+
+    def spectrum(self, apply_analysis_bandwidth: bool) -> IQRecording:
+        return self.analysis if apply_analysis_bandwidth else self.capture
 
 
 def validate_analysis_channel_capture(

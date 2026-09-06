@@ -15,8 +15,10 @@ from pluto_protocol.dect.common import dect_p_range
 from pluto_protocol.model import PacketField
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
+from pluto_sa.vsa.analysis import capture_power_traces, recording_spectrum_trace
 from pluto_sa.vsa.model import IQRecording
 from pluto_sa.vsa.channel import (
+    AnalysisDisplayRecordings,
     extract_requested_analysis_channel,
     validate_analysis_channel_capture,
 )
@@ -36,6 +38,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     dedicated_status_color,
     install_measurement_plot_menu,
     limit_iq_power_display_dbm,
+    make_analysis_bandwidth_display_controls,
     make_measurement_dock,
     make_measurement_plot,
     packet_time_view_range_ms,
@@ -115,6 +118,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._preferences = preferences or QtCore.QSettings("PlutoSA", "PlutoVSA-DECT")
         self._pluto_target = ""
         self._recording: IQRecording | None = None
+        self._capture_recording: IQRecording | None = None
         self._recording_revision = 0
         self._results: tuple[DectPacketResult, ...] = ()
         self._result: DectPacketResult | None = None
@@ -275,10 +279,14 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.rf_bandwidth_spin.setSuffix(" MHz")
         self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
         self.analysis_bandwidth_spin = QtWidgets.QDoubleSpinBox()
-        self.analysis_bandwidth_spin.setRange(3.0, 100.0)
+        self.analysis_bandwidth_spin.setRange(0.000001, 100.0)
         self.analysis_bandwidth_spin.setDecimals(6)
         self.analysis_bandwidth_spin.setValue(3.0)
         self.analysis_bandwidth_spin.setSuffix(" MHz")
+        (
+            self.analysis_power_display_check,
+            self.analysis_spectrum_display_check,
+        ) = make_analysis_bandwidth_display_controls()
         self.lo_offset_check = QtWidgets.QCheckBox("Enable")
         self.lo_offset_check.setToolTip(
             "Tune the Pluto LO away from the selected DECT carrier. "
@@ -314,6 +322,12 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         )
         self.lo_offset_check.toggled.connect(self._sync_analysis_channel_controls)
         self.lo_offset_spin.valueChanged.connect(self._sync_analysis_channel_controls)
+        self.analysis_power_display_check.toggled.connect(
+            self._display_source_changed
+        )
+        self.analysis_spectrum_display_check.toggled.connect(
+            self._display_source_changed
+        )
         self.capture_button.clicked.connect(self._toggle_capture)
         self.refresh_button.clicked.connect(self.refresh)
         self._plan_changed()
@@ -327,6 +341,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         elif not filter_enabled and self.lo_offset_check.isChecked():
             self.lo_offset_check.setChecked(False)
         self.analysis_bandwidth_spin.setEnabled(filter_enabled)
+        self.analysis_power_display_check.setEnabled(filter_enabled)
+        self.analysis_spectrum_display_check.setEnabled(filter_enabled)
         offset_enabled = self.lo_offset_check.isChecked()
         self.lo_offset_spin.setEnabled(offset_enabled)
         offset_mhz = self.lo_offset_spin.value() if offset_enabled else 0.0
@@ -339,6 +355,11 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             f"{center_mhz + offset_mhz:.6f} MHz"
             + (" (offset on)" if offset_enabled else " (offset off)")
         )
+
+    @QtCore.Slot(bool)
+    def _display_source_changed(self, _enabled: bool) -> None:
+        if self._result is not None:
+            self._render(self._result)
 
     @QtCore.Slot(bool)
     def _set_show_symbol_points(self, enabled: bool) -> None:
@@ -431,6 +452,14 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             ("RF Bandwidth", self.rf_bandwidth_spin),
             ("Analysis Channel", self.channel_filter_check),
             ("Analysis Bandwidth", self.analysis_bandwidth_spin),
+            (
+                "Apply Analysis Bandwidth to Power",
+                self.analysis_power_display_check,
+            ),
+            (
+                "Apply Analysis Bandwidth to Spectrum",
+                self.analysis_spectrum_display_check,
+            ),
             ("LO Offset", self.lo_offset_check),
             ("Offset Frequency", self.lo_offset_spin),
             ("Resolved LO", self.resolved_lo_label),
@@ -624,6 +653,12 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             "rf_bandwidth_mhz": self.rf_bandwidth_spin.value(),
             "analysis_channel_enabled": self.channel_filter_check.isChecked(),
             "analysis_bandwidth_mhz": self.analysis_bandwidth_spin.value(),
+            "apply_analysis_bandwidth_to_power": (
+                self.analysis_power_display_check.isChecked()
+            ),
+            "apply_analysis_bandwidth_to_spectrum": (
+                self.analysis_spectrum_display_check.isChecked()
+            ),
             "lo_offset_enabled": self.lo_offset_check.isChecked(),
             "lo_offset_mhz": self.lo_offset_spin.value(),
             "internal_gain_db": self.internal_gain_spin.value(),
@@ -674,6 +709,12 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             self.channel_filter_check.setChecked(
                 bool(settings.get("analysis_channel_enabled", False))
             )
+            self.analysis_power_display_check.setChecked(
+                bool(settings.get("apply_analysis_bandwidth_to_power", True))
+            )
+            self.analysis_spectrum_display_check.setChecked(
+                bool(settings.get("apply_analysis_bandwidth_to_spectrum", False))
+            )
             self.lo_offset_check.setChecked(
                 bool(settings.get("lo_offset_enabled", False))
             )
@@ -719,12 +760,19 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
 
     def stage_session(self, session: VSASession) -> None:
         if self._recording is not session.recording:
+            self._capture_recording = session.recording
             self._recording = session.recording
             self._recording_revision += 1
         self.export_iq_action.setEnabled(self._recording is not None)
         self.export_modulation_action.setEnabled(False)
 
-    def load_recording(self, recording: IQRecording) -> None:
+    def load_recording(
+        self,
+        recording: IQRecording,
+        *,
+        capture_recording: IQRecording | None = None,
+    ) -> None:
+        self._capture_recording = capture_recording or recording
         self._recording = recording
         self._recording_revision += 1
         self.export_iq_action.setEnabled(True)
@@ -770,7 +818,11 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.load_recording(recording)
 
     def _export_iq_recording(self) -> None:
-        export_iq_recording(self, self._recording, self._preferences)
+        export_iq_recording(
+            self,
+            self._capture_recording or self._recording,
+            self._preferences,
+        )
 
     def _export_modulation_debug_csv(self) -> None:
         result = self._result
@@ -959,12 +1011,13 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         if not isinstance(recording, IQRecording):
             self._capture_failed("capture returned an invalid IQ recording")
             return
+        capture_recording = recording
         try:
-            recording = extract_requested_analysis_channel(recording)
+            recording = extract_requested_analysis_channel(capture_recording)
         except ValueError as error:
             self._capture_failed(str(error))
             return
-        self.load_recording(recording)
+        self.load_recording(recording, capture_recording=capture_recording)
 
     @QtCore.Slot(str)
     def _capture_failed(self, message: str) -> None:
@@ -1062,12 +1115,24 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         recording = self._recording
         if recording is None:
             return
+        display_recordings = AnalysisDisplayRecordings(
+            capture=self._capture_recording or recording,
+            analysis=recording,
+        )
         for plot in self._plots():
             plot.clear()
-        time_ms = np.arange(recording.sample_count) / recording.sample_rate_hz * 1e3
+        apply_analysis_to_power = (
+            self.channel_filter_check.isChecked()
+            and self.analysis_power_display_check.isChecked()
+        )
+        power_recording = display_recordings.power(apply_analysis_to_power)
+        power_time_s, _power_dbfs, power_dbm = capture_power_traces(
+            power_recording
+        )
+        time_ms = power_time_s * 1e3
         self.power_plot.plot(
             time_ms,
-            limit_iq_power_display_dbm(result.power_db),
+            limit_iq_power_display_dbm(power_dbm),
             pen=pg.mkPen("y", width=1),
         )
         start_ms = result.p0_sample / recording.sample_rate_hz * 1e3
@@ -1090,22 +1155,20 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         )
         self._render_power_time_template(result, recording)
 
-        values = np.asarray(recording.iq[result.start_sample : result.stop_sample])
-        fft_size = max(4096, 1 << int(np.ceil(np.log2(max(16, values.size)))))
-        fft_size = min(fft_size, 65_536)
-        window = np.hanning(values.size)
-        transform = np.fft.fftshift(np.fft.fft(values * window, n=fft_size))
-        amplitude = np.abs(transform) / (
-            max(float(np.sum(window)), 1.0) * recording.full_scale
+        apply_analysis_to_spectrum = (
+            self.channel_filter_check.isChecked()
+            and self.analysis_spectrum_display_check.isChecked()
         )
-        spectrum = (
-            20.0 * np.log10(np.maximum(amplitude, np.finfo(float).tiny))
-            + recording.dbfs_to_dbm_offset_db
+        spectrum_recording = display_recordings.spectrum(
+            apply_analysis_to_spectrum
         )
-        frequency_mhz = (
-            np.fft.fftshift(np.fft.fftfreq(fft_size, 1.0 / recording.sample_rate_hz))
-            + recording.center_frequency_hz
-        ) / 1e6
+        frequency_hz, spectrum = recording_spectrum_trace(
+            spectrum_recording,
+            fft_size=65_536,
+            start_time_s=result.start_sample / recording.sample_rate_hz,
+            stop_time_s=result.stop_sample / recording.sample_rate_hz,
+        )
+        frequency_mhz = frequency_hz / 1e6
         self.spectrum_plot.plot(
             frequency_mhz, spectrum, pen=pg.mkPen("y", width=1)
         )

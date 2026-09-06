@@ -81,6 +81,46 @@ def _spectrum(iq: np.ndarray, sample_rate_hz: float, fft_size: int) -> tuple[np.
     return frequency, 20.0 * np.log10(np.maximum(amplitude, _EPSILON))
 
 
+def recording_spectrum_trace(
+    recording: IQRecording,
+    *,
+    fft_size: int = 4096,
+    start_time_s: float | None = None,
+    stop_time_s: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return an absolute-frequency spectrum of one recording plane.
+
+    This helper performs only the FFT display operation.  In particular it
+    does not apply an analysis channel or a protocol measurement filter; the
+    caller explicitly supplies either the capture or analysis recording.
+    """
+
+    start_sample = 0 if start_time_s is None else int(
+        np.floor(max(0.0, float(start_time_s)) * recording.sample_rate_hz)
+    )
+    stop_sample = recording.sample_count if stop_time_s is None else int(
+        np.ceil(max(0.0, float(stop_time_s)) * recording.sample_rate_hz)
+    )
+    start_sample = min(recording.sample_count - 1, max(0, start_sample))
+    stop_sample = min(recording.sample_count, max(start_sample + 1, stop_sample))
+    iq = np.asarray(recording.iq[start_sample:stop_sample], dtype=np.complex128)
+    sample_count = max(1, int(iq.size))
+    full_capture_fft_size = 1 << int(np.ceil(np.log2(sample_count)))
+    resolved_fft_size = min(
+        262_144,
+        max(int(fft_size), full_capture_fft_size),
+    )
+    frequency_hz, spectrum_dbfs = _spectrum(
+        iq / float(recording.full_scale),
+        float(recording.sample_rate_hz),
+        resolved_fft_size,
+    )
+    return (
+        frequency_hz + float(recording.center_frequency_hz),
+        spectrum_dbfs + float(recording.dbfs_to_dbm_offset_db),
+    )
+
+
 def _instantaneous_frequency(iq: np.ndarray, sample_rate_hz: float) -> np.ndarray:
     if iq.size == 1:
         return np.zeros(1, dtype=np.float64)

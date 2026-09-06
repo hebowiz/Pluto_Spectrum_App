@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -60,6 +61,11 @@ def test_dect_workspace_has_independent_carrier_list_and_capture_settings(tmp_pa
         assert capture.trigger_source.value == "power_level"
         assert capture.analysis_bandwidth_hz is None
         assert capture.lo_offset_hz == 0.0
+        assert window.analysis_power_display_check.isChecked()
+        assert not window.analysis_spectrum_display_check.isChecked()
+        saved = window._config_values()
+        assert saved["apply_analysis_bandwidth_to_power"] is True
+        assert saved["apply_analysis_bandwidth_to_spectrum"] is False
         window.lo_offset_check.setChecked(True)
         capture = window._capture_settings()
         assert window.channel_filter_check.isChecked()
@@ -69,6 +75,27 @@ def test_dect_workspace_has_independent_carrier_list_and_capture_settings(tmp_pa
         window._config_dialog.close()
         window.close()
         window.deleteLater()
+
+
+def test_dect_analysis_bandwidth_accepts_and_restores_sub_3_mhz(tmp_path) -> None:
+    window = _window(tmp_path)
+    preferences = window._preferences
+    try:
+        window.analysis_bandwidth_spin.setValue(1.5)
+        assert window.analysis_bandwidth_spin.value() == pytest.approx(1.5)
+        window._save_config()
+    finally:
+        window._config_dialog.close()
+        window.close()
+        window.deleteLater()
+
+    restored = DectAnalyzerWindow(pluto_source=_Source(), preferences=preferences)
+    try:
+        assert restored.analysis_bandwidth_spin.value() == pytest.approx(1.5)
+    finally:
+        restored._config_dialog.close()
+        restored.close()
+        restored.deleteLater()
 
 
 def test_jp_dect_plan_populates_all_named_carriers(tmp_path) -> None:
@@ -174,6 +201,50 @@ def test_dect_workspace_renders_measurement_and_packet_views(tmp_path) -> None:
         }
         gfsk_row = summary_items["GFSK Modulation Deviation"]
         assert window.summary_table.item(gfsk_row, 3).foreground().color().name() == "#43f5a5"
+    finally:
+        window._config_dialog.close()
+        window.close()
+        window.deleteLater()
+
+
+def test_dect_power_and_spectrum_select_capture_or_analysis_plane(tmp_path) -> None:
+    window = _window(tmp_path)
+    analysis_recording = generate_dect_packet(
+        center_frequency_hz=window._nominal_frequency_hz()
+    )
+    capture_recording = replace(
+        analysis_recording,
+        iq=np.asarray(0.5 * analysis_recording.iq, dtype=np.complex64),
+        center_frequency_hz=analysis_recording.center_frequency_hz + 2_000_000.0,
+    )
+    result = analyze_dect_recording(analysis_recording)[0]
+    try:
+        window._capture_recording = capture_recording
+        window._recording = analysis_recording
+        window._results = (result,)
+        window._result = result
+        window.channel_filter_check.setChecked(True)
+        window.analysis_power_display_check.setChecked(False)
+        window.analysis_spectrum_display_check.setChecked(False)
+        window._render(result)
+        raw_power = window.power_plot.listDataItems()[0].yData
+        raw_spectrum_x = window.spectrum_plot.listDataItems()[0].xData
+
+        window.analysis_power_display_check.setChecked(True)
+        window.analysis_spectrum_display_check.setChecked(True)
+        window._render(result)
+        analysis_power = window.power_plot.listDataItems()[0].yData
+        analysis_spectrum_x = window.spectrum_plot.listDataItems()[0].xData
+
+        assert np.nanmedian(analysis_power - raw_power) == pytest.approx(
+            20.0 * np.log10(2.0), abs=1e-3
+        )
+        assert np.mean(raw_spectrum_x) == pytest.approx(
+            capture_recording.center_frequency_hz / 1e6, abs=0.01
+        )
+        assert np.mean(analysis_spectrum_x) == pytest.approx(
+            analysis_recording.center_frequency_hz / 1e6, abs=0.01
+        )
     finally:
         window._config_dialog.close()
         window.close()

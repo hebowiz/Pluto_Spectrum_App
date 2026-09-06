@@ -18,6 +18,7 @@ import iio
 from pluto_common import discover_pluto_devices
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
+from pluto_sa.vsa.analysis import capture_power_traces, recording_spectrum_trace
 from pluto_sa.vsa.mapping import (
     BLUETOOTH_EDR_MAPPING,
     BLUETOOTH_HDT_MAPPING,
@@ -72,6 +73,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     configure_iq_power_plot,
     install_measurement_plot_menu,
     limit_iq_power_display_dbm,
+    make_analysis_bandwidth_display_controls,
     make_measurement_dock,
     make_measurement_plot,
     padded_range,
@@ -1185,10 +1187,28 @@ class VSAWindow(QtWidgets.QMainWindow):
         channel_form.addRow(self.channel_filter_check)
         channel_form.addRow("Analysis Center", self.analysis_center_spin)
         channel_form.addRow("Analysis Bandwidth", self.analysis_bandwidth_spin)
+        (
+            self.analysis_power_display_check,
+            self.analysis_spectrum_display_check,
+        ) = make_analysis_bandwidth_display_controls()
+        channel_form.addRow(
+            "Apply Analysis Bandwidth to Power",
+            self.analysis_power_display_check,
+        )
+        channel_form.addRow(
+            "Apply Analysis Bandwidth to Spectrum",
+            self.analysis_spectrum_display_check,
+        )
         source_layout.addLayout(channel_form)
         self.channel_filter_check.toggled.connect(self._sync_analysis_controls)
         self.analysis_bandwidth_spin.valueChanged.connect(
             self._sync_capture_settings
+        )
+        self.analysis_power_display_check.toggled.connect(
+            self._analysis_display_selection_changed
+        )
+        self.analysis_spectrum_display_check.toggled.connect(
+            self._refresh_display_only
         )
         self._sync_analysis_controls()
         source_layout.addStretch(1)
@@ -2165,6 +2185,12 @@ class VSAWindow(QtWidgets.QMainWindow):
                 "analysis_channel_enabled": self.channel_filter_check.isChecked(),
                 "analysis_center_mhz": self.analysis_center_spin.value(),
                 "analysis_bandwidth_mhz": self.analysis_bandwidth_spin.value(),
+                "apply_analysis_bandwidth_to_power": (
+                    self.analysis_power_display_check.isChecked()
+                ),
+                "apply_analysis_bandwidth_to_spectrum": (
+                    self.analysis_spectrum_display_check.isChecked()
+                ),
             },
             "signal_capture": {
                 "capture_length": self.capture_length_spin.value(),
@@ -2397,6 +2423,12 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             self.analysis_center_spin.setValue(float(source["analysis_center_mhz"]))
             self.analysis_bandwidth_spin.setValue(float(source["analysis_bandwidth_mhz"]))
+            self.analysis_power_display_check.setChecked(
+                bool(source.get("apply_analysis_bandwidth_to_power", True))
+            )
+            self.analysis_spectrum_display_check.setChecked(
+                bool(source.get("apply_analysis_bandwidth_to_spectrum", False))
+            )
             self.pattern_search_check.setChecked(bool(pattern["enabled"]))
             self.pattern_name_edit.setText(str(pattern["name"]))
             self._set_combo_text(self.pattern_format_combo, pattern["symbol_format"], "symbol format")
@@ -2898,9 +2930,14 @@ class VSAWindow(QtWidgets.QMainWindow):
         enabled = self.channel_filter_check.isChecked()
         self.analysis_center_spin.setEnabled(enabled)
         self.analysis_bandwidth_spin.setEnabled(enabled)
+        self.analysis_power_display_check.setEnabled(enabled)
+        self.analysis_spectrum_display_check.setEnabled(enabled)
         if not enabled and self.lo_offset_check.isChecked():
             self.lo_offset_check.setChecked(False)
         self._sync_lo_offset_controls()
+
+    def _analysis_display_selection_changed(self, enabled: bool) -> None:
+        self._refresh_display_only()
 
     def _sync_lo_offset_controls(self, _value: object = None) -> None:
         if not hasattr(self, "lo_offset_check"):
@@ -4133,7 +4170,24 @@ class VSAWindow(QtWidgets.QMainWindow):
             if pattern_result is not None
             else result.symbol_time_s
         )
-        if self.measured_iq_power_action.isChecked():
+        display_recordings = self.session.display_recordings()
+        apply_analysis_to_power = (
+            self.channel_filter_check.isChecked()
+            and self.analysis_power_display_check.isChecked()
+        )
+        power_recording = display_recordings.power(apply_analysis_to_power)
+        if apply_analysis_to_power:
+            (
+                capture_time_s,
+                _capture_power_dbfs,
+                capture_power_source_dbm,
+            ) = capture_power_traces(power_recording)
+        elif (
+            not self.channel_filter_check.isChecked()
+            and self.measured_iq_power_action.isChecked()
+        ):
+            # Preserve the pre-analysis-channel Measured display choice for
+            # configurations that do not enable an Analysis Bandwidth.
             capture_time_s = result.time_s
             capture_power_source_dbm = result.power_dbm
         else:
@@ -4185,21 +4239,30 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.clear()
         # Spectrum intentionally remains on the uncorrected measurement. CFO
         # correction is a demodulation-display concern, not a spectrum shift.
-        spectrum_result = self.session.pattern_range_result or result
-        analysis_center_hz = float(
-            spectrum_result.metadata.get("analysis_center_frequency_hz", 0.0) or 0.0
+        apply_analysis_to_spectrum = (
+            self.channel_filter_check.isChecked()
+            and self.analysis_spectrum_display_check.isChecked()
         )
-        if analysis_center_hz:
+        spectrum_result = self.session.pattern_range_result or result
+        if self.channel_filter_check.isChecked():
+            spectrum_frequency_hz, spectrum_dbm = recording_spectrum_trace(
+                display_recordings.spectrum(apply_analysis_to_spectrum),
+                fft_size=self.session.settings.fft_size,
+            )
+            spectrum_x = spectrum_frequency_hz / 1e6
+        else:
+            analysis_center_hz = float(
+                spectrum_result.metadata.get("analysis_center_frequency_hz", 0.0)
+                or display_recordings.analysis.center_frequency_hz
+            )
             spectrum_x = (
                 spectrum_result.spectrum_frequency_hz + analysis_center_hz
             ) / 1e6
-            self.spectrum_plot.setLabel("bottom", "Frequency (MHz)")
-        else:
-            spectrum_x = spectrum_result.spectrum_frequency_hz / 1e6
-            self.spectrum_plot.setLabel("bottom", "Relative Frequency (MHz)")
+            spectrum_dbm = spectrum_result.spectrum_dbm
+        self.spectrum_plot.setLabel("bottom", "Frequency (MHz)")
         self.spectrum_plot.plot(
             spectrum_x,
-            spectrum_result.spectrum_dbm,
+            spectrum_dbm,
             pen=pg.mkPen(_TRACE_COLOR, width=1),
         )
         self.modulation_plot.clear()

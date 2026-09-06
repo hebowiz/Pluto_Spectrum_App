@@ -35,6 +35,23 @@ DEDICATED_STATUS_COLORS = {
 }
 
 
+def make_analysis_bandwidth_display_controls(
+) -> tuple[QtWidgets.QCheckBox, QtWidgets.QCheckBox]:
+    """Create the common Power/Spectrum Analysis Bandwidth selectors."""
+
+    power = QtWidgets.QCheckBox()
+    power.setChecked(True)
+    power.setToolTip(
+        "Use the DDC and Analysis Channel LPF output for Power vs Time."
+    )
+    spectrum = QtWidgets.QCheckBox()
+    spectrum.setChecked(False)
+    spectrum.setToolTip(
+        "Use the DDC and Analysis Channel LPF output for Spectrum."
+    )
+    return power, spectrum
+
+
 class CenteredDedicatedTableDelegate(QtWidgets.QStyledItemDelegate):
     """Center cell text consistently across dedicated-mode tables."""
 

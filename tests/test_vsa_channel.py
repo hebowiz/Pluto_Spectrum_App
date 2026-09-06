@@ -1,13 +1,15 @@
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.analysis import VSAAnalyzer
+from pluto_sa.vsa.analysis import VSAAnalyzer, recording_spectrum_trace
 from pluto_sa.vsa.channel import (
+    AnalysisDisplayRecordings,
     extract_analysis_channel,
     extract_requested_analysis_channel,
     validate_analysis_channel_capture,
 )
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSASettings
+from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.profiles.bluetooth_br import (
     BluetoothBRProfile,
     access_code_bits,
@@ -199,3 +201,71 @@ def test_requested_live_analysis_channel_returns_to_nominal_center() -> None:
     assert selected.center_frequency_hz == requested_center_hz
     assert selected.metadata["analysis_center_offset_hz"] == -1_500_000.0
     assert selected.metadata["analysis_channel_applied"] is True
+
+
+def test_display_recording_planes_select_power_and_spectrum_independently() -> None:
+    capture = IQRecording(
+        np.ones(32, dtype=np.complex64),
+        sample_rate_hz=8_000_000.0,
+        center_frequency_hz=2_443_000_000.0,
+    )
+    analysis = IQRecording(
+        np.full(16, 2.0 + 0.0j, dtype=np.complex64),
+        sample_rate_hz=4_000_000.0,
+        center_frequency_hz=2_441_000_000.0,
+    )
+    planes = AnalysisDisplayRecordings(capture=capture, analysis=analysis)
+
+    assert planes.power(False) is capture
+    assert planes.power(True) is analysis
+    assert planes.spectrum(False) is capture
+    assert planes.spectrum(True) is analysis
+
+
+def test_raw_spectrum_uses_hardware_lo_frequency_axis() -> None:
+    sample_rate_hz = 8_000_000.0
+    hardware_lo_hz = 2_443_000_000.0
+    samples = np.arange(2048, dtype=np.float64)
+    recording = IQRecording(
+        np.exp(-2j * np.pi * 2_000_000.0 * samples / sample_rate_hz),
+        sample_rate_hz=sample_rate_hz,
+        center_frequency_hz=hardware_lo_hz,
+        metadata={"requested_center_frequency_hz": 2_441_000_000.0},
+    )
+
+    frequency_hz, spectrum_dbm = recording_spectrum_trace(recording)
+    peak_hz = frequency_hz[int(np.argmax(spectrum_dbm))]
+
+    assert peak_hz == pytest.approx(2_441_000_000.0, abs=2_000.0)
+    assert (frequency_hz[0] + frequency_hz[-1]) / 2.0 == pytest.approx(
+        hardware_lo_hz,
+        abs=2_000.0,
+    )
+
+
+def test_session_reuses_one_analysis_channel_recording_for_displays() -> None:
+    sample_rate_hz = 8_000_000.0
+    samples = np.arange(4096, dtype=np.float64)
+    recording = IQRecording(
+        np.exp(2j * np.pi * 1_000_000.0 * samples / sample_rate_hz),
+        sample_rate_hz=sample_rate_hz,
+        center_frequency_hz=100_000_000.0,
+        usable_bandwidth_hz=6_000_000.0,
+    )
+    session = VSASession(
+        recording=recording,
+        signal=SignalDescription(ModulationKind.FSK2, symbol_rate_hz=100_000.0),
+        settings=VSASettings(
+            remove_dc=False,
+            analysis_center_frequency_hz=101_000_000.0,
+            analysis_bandwidth_hz=1_000_000.0,
+        ),
+    )
+
+    first = session.display_recordings()
+    second = session.display_recordings()
+
+    assert first.capture is recording
+    assert first.analysis is second.analysis
+    assert first.analysis.metadata["analysis_channel_applied"] is True
+    assert first.analysis.center_frequency_hz == 101_000_000.0

@@ -1703,6 +1703,73 @@ def test_edr_sig_measurement_uses_five_us_guard_and_excludes_trailer() -> None:
     assert failing_summary["trailer"].result == "FAIL"
 
 
+def test_edr_sig_devm_uses_capture_level_zero_if_dc_correction() -> None:
+    base = bluetooth_br_edr_project()
+    settings = replace(
+        base.bluetooth_br,
+        packet_kind=BluetoothPacketKind.DH1_2,
+        payload_length_bytes=54,
+        whitening_enabled=False,
+    )
+    generated = BluetoothBRWaveformEngine().generate(
+        replace(base, bluetooth_br=settings, fields=bluetooth_br_fields(settings))
+    )
+
+    def analyze(iq: np.ndarray, *, remove_dc: bool):
+        result = analyze_bluetooth_classic_recording(
+            IQRecording(
+                iq=iq,
+                sample_rate_hz=generated.sample_rate_hz,
+                center_frequency_hz=base.center_frequency_hz,
+                metadata={"dc_removal_recommended": remove_dc},
+            ),
+            profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+            lap=settings.lap,
+            uap=settings.uap,
+            clock_6_1=settings.clock_6_1,
+            whitening_enabled=False,
+            result_length=1024,
+        )
+        measurement = next(
+            item
+            for item in result.metadata["rf_measurements"]
+            if item.test_case_id == "bluetooth.edr"
+        )
+        return result, measurement
+
+    # A finite Pluto burst capture contains an idle/noise cluster used by the
+    # robust frontend estimator.  Model that context around the generated
+    # packet rather than asking the estimator to separate a continuous signal
+    # centered exactly at zero IF.
+    padded_iq = np.pad(generated.iq, (4000, 4000))
+    baseline_result, baseline = analyze(padded_iq, remove_dc=False)
+    dc_offset = np.complex64(0.18 - 0.11j)
+    corrected_result, corrected = analyze(
+        np.asarray(padded_iq + dc_offset, dtype=np.complex64),
+        remove_dc=True,
+    )
+
+    assert baseline_result.packet.integrity.crc_valid is True
+    assert corrected_result.packet.integrity.crc_valid is True
+    prepared_recording = corrected_result.metadata["analysis_session"].recording
+    assert prepared_recording.metadata["software_dc_removal_applied"] is True
+    assert corrected.metrics["rms_devm_worst"] == pytest.approx(
+        baseline.metrics["rms_devm_worst"], abs=5e-3
+    )
+    offset_lo_recording = IQRecording(
+        iq=np.asarray(padded_iq + dc_offset, dtype=np.complex64),
+        sample_rate_hz=generated.sample_rate_hz,
+        metadata={
+            "dc_removal_recommended": True,
+            "experimental_lo_offset": True,
+        },
+    )
+    assert (
+        bluetooth_model._prepare_classic_frontend_recording(offset_lo_recording)
+        is offset_lo_recording
+    )
+
+
 def test_edr_sig_devm_retains_symbol_dependent_phase_and_amplitude_error() -> None:
     base = bluetooth_br_edr_project()
     settings = replace(
@@ -2171,6 +2238,40 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
         assert window.symbol_tabs.isTabVisible(1)
         assert len(window.spectrum_plot.listDataItems()) == 2
         assert len(window.spectrum_legend.items) == 2
+        analysis_recording = window._recording
+        assert analysis_recording is not None
+        capture_recording = replace(
+            analysis_recording,
+            center_frequency_hz=analysis_recording.center_frequency_hz
+            + 2_000_000.0,
+        )
+        window._capture_recording = capture_recording
+        window.channel_filter_check.setChecked(True)
+        window.analysis_spectrum_display_check.setChecked(False)
+        window._render(result)
+        capture_spectra = window.spectrum_plot.listDataItems()
+        assert len(capture_spectra) == 2
+        assert all(
+            np.mean(trace.xData)
+            == pytest.approx(capture_recording.center_frequency_hz / 1e6, abs=0.01)
+            for trace in capture_spectra
+        )
+        window.analysis_spectrum_display_check.setChecked(True)
+        window._render(result)
+        analysis_spectra = window.spectrum_plot.listDataItems()
+        assert len(analysis_spectra) == 2
+        assert all(
+            np.mean(trace.xData)
+            == pytest.approx(analysis_recording.center_frequency_hz / 1e6, abs=0.01)
+            for trace in analysis_spectra
+        )
+        assert {item[1].text for item in window.spectrum_legend.items} == {
+            "FSK",
+            "PSK",
+        }
+        window.channel_filter_check.setChecked(False)
+        window._capture_recording = None
+        window._render(result)
         assert set(window._plot_context_actions) == {
             "iq_power",
             "spectrum",
@@ -2225,6 +2326,8 @@ def test_bluetooth_config_is_separate_and_restored(tmp_path) -> None:
     first = BluetoothAnalyzerWindow(preferences=preferences)
     try:
         assert first.center_spin.value() == 2440.0
+        assert first.analysis_power_display_check.isChecked()
+        assert not first.analysis_spectrum_display_check.isChecked()
         first.center_spin.setValue(2426.0)
         first.protocol_combo.setCurrentIndex(1)
         first.phy_combo.setCurrentText("LE 2M")
@@ -2234,6 +2337,8 @@ def test_bluetooth_config_is_separate_and_restored(tmp_path) -> None:
         first._set_fsk_symbol_plot_mode("Phase Difference")
         first.channel_filter_check.setChecked(True)
         first.analysis_bandwidth_spin.setValue(1.75)
+        first.analysis_power_display_check.setChecked(True)
+        first.analysis_spectrum_display_check.setChecked(False)
         first.lo_offset_check.setChecked(True)
         first.lo_offset_spin.setValue(1.6)
         first._save_startup_meas_config()
@@ -2256,6 +2361,8 @@ def test_bluetooth_config_is_separate_and_restored(tmp_path) -> None:
         assert second._fsk_symbol_plot_mode == "Phase Difference"
         assert second.channel_filter_check.isChecked()
         assert second.analysis_bandwidth_spin.value() == 1.75
+        assert second.analysis_power_display_check.isChecked()
+        assert not second.analysis_spectrum_display_check.isChecked()
         assert second.lo_offset_check.isChecked()
         assert second.lo_offset_spin.value() == 1.6
         capture = second._capture_settings()
@@ -2264,6 +2371,30 @@ def test_bluetooth_config_is_separate_and_restored(tmp_path) -> None:
     finally:
         second.close()
         second.deleteLater()
+
+
+def test_bluetooth_config_accept_does_not_start_analysis(
+    tmp_path, monkeypatch
+) -> None:
+    pg.mkQApp("Bluetooth config close does not analyze")
+    refresh_calls: list[bool] = []
+    monkeypatch.setattr(
+        BluetoothAnalyzerWindow,
+        "refresh",
+        lambda _self: refresh_calls.append(True),
+    )
+    preferences = QtCore.QSettings(
+        str(tmp_path / "bluetooth-config-close.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    window = BluetoothAnalyzerWindow(preferences=preferences)
+    try:
+        window._meas_config_dialog.accept()
+        QtWidgets.QApplication.processEvents()
+        assert refresh_calls == []
+    finally:
+        window.close()
+        window.deleteLater()
 
 
 def test_dedicated_le_analyzer_returns_every_packet_in_capture() -> None:
