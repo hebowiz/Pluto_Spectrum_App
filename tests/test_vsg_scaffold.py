@@ -56,16 +56,117 @@ from pluto_vsg.persistence import (
 from pluto_vsg.profiles import (
     bluetooth_br_edr_project,
     bluetooth_br_fields,
+    bluetooth_hdt_project,
     bluetooth_le_project,
 )
 from pluto_vsg.ui.main_window import (
     PlutoVSGWindow,
+    _BluetoothHDTSettingsDialog,
     _BluetoothLESettingsDialog,
     _BluetoothSettingsDialog,
     _PlutoOutputDialog,
     _cw_generation_result,
     _instantaneous_frequency_khz,
 )
+
+
+def _tab_names(dialog) -> list[str]:
+    return [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())]
+
+
+def test_bluetooth_packet_settings_share_two_tab_structure() -> None:
+    pg.mkQApp("Bluetooth VSG common packet settings tabs")
+    parent = QtWidgets.QWidget()
+    dialogs = (
+        _BluetoothSettingsDialog(bluetooth_br_edr_project(), parent),
+        _BluetoothLESettingsDialog(bluetooth_le_project(), parent),
+        _BluetoothHDTSettingsDialog(bluetooth_hdt_project(), parent),
+    )
+    try:
+        assert all(_tab_names(dialog) == ["RF / Timing", "Fields"] for dialog in dialogs)
+        assert all(
+            "us" in dialog._timing_controls[0].time_label.text()
+            for dialog in dialogs
+        )
+    finally:
+        for dialog in dialogs:
+            dialog.close()
+        parent.close()
+
+
+def test_new_menu_uses_shared_le_and_plain_hdt_packet_actions() -> None:
+    pg.mkQApp("Pluto VSG unified Bluetooth New menu")
+    window = PlutoVSGWindow()
+    try:
+        assert window.new_le_action.text() == "New Bluetooth LE Packet"
+        assert window.new_hdt_action.text() == "New Bluetooth HDT Packet"
+        assert not hasattr(window, "new_le1m_action")
+        assert not hasattr(window, "new_le2m_action")
+        window.new_le_action.trigger()
+        assert window.project.bluetooth_le is not None
+        assert window.project.bluetooth_le.phy == BluetoothLEPhy.LE_1M
+    finally:
+        window.close()
+
+
+def test_le_carrier_list_and_offset_define_generated_frequency() -> None:
+    pg.mkQApp("Bluetooth LE VSG carrier offset")
+    parent = QtWidgets.QWidget()
+    dialog = _BluetoothLESettingsDialog(bluetooth_le_project(), parent)
+    try:
+        channel_37 = dialog.carrier_combo.findData(2_402_000_000.0)
+        dialog.carrier_combo.setCurrentIndex(channel_37)
+        dialog.frequency_offset_spin.setValue(125.0)
+        dialog._accept_settings()
+        assert dialog.project.center_frequency_hz == 2_402_125_000.0
+        assert "2402.125000 MHz" in dialog.actual_frequency_label.text()
+    finally:
+        dialog.close()
+        parent.close()
+
+
+def test_hdt_period_replaces_direct_post_idle_and_preserves_ramp() -> None:
+    pg.mkQApp("Bluetooth HDT VSG period settings")
+    parent = QtWidgets.QWidget()
+    dialog = _BluetoothHDTSettingsDialog(bluetooth_hdt_project(), parent)
+    try:
+        assert not hasattr(dialog, "post_idle_spin")
+        dialog.period_spin.setValue(dialog.period_spin.minimum() + 40.0)
+        dialog.rise_spin.setValue(2.5)
+        dialog._accept_settings()
+        assert dialog.project.period_symbols == dialog.period_spin.value()
+        assert dialog.project.bluetooth_hdt.post_idle_symbols == 0
+        assert dialog.project.power_envelope.rise_symbols == 2.5
+        assert "us" in dialog.post_idle_value.text()
+    finally:
+        dialog.close()
+        parent.close()
+
+
+def test_classic_and_hdt_carrier_offsets_preserve_rf_semantics() -> None:
+    pg.mkQApp("Bluetooth VSG carrier offset semantics")
+    parent = QtWidgets.QWidget()
+    classic = _BluetoothSettingsDialog(bluetooth_br_edr_project(), parent)
+    hdt = _BluetoothHDTSettingsDialog(bluetooth_hdt_project(), parent)
+    try:
+        classic.carrier_combo.setCurrentIndex(
+            classic.carrier_combo.findData(2_402_000_000.0)
+        )
+        classic.cfo_spin.setValue(25.0)
+        classic._accept_settings()
+        assert classic.project.center_frequency_hz == 2_402_000_000.0
+        assert classic.project.bluetooth_br.carrier_frequency_offset_hz == 25_000.0
+
+        hdt.carrier_combo.setCurrentIndex(
+            hdt.carrier_combo.findData(2_402_000_000.0)
+        )
+        hdt.frequency_offset_spin.setValue(25.0)
+        hdt._accept_settings()
+        assert hdt.project.center_frequency_hz == 2_402_025_000.0
+    finally:
+        classic.close()
+        hdt.close()
+        parent.close()
 
 
 def test_default_vsg_project_is_valid() -> None:

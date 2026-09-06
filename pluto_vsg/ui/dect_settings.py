@@ -19,6 +19,7 @@ from pluto_vsg.model import (
     validate_project,
 )
 from pluto_vsg.profiles.dect import DECT_B_FIELD_BITS, dect_fields
+from pluto_vsg.ui.packet_settings import SymbolTimeControl, packet_settings_tabs
 
 
 def _bit_text(bits) -> str:
@@ -85,6 +86,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
         self.samples_per_symbol_combo.setCurrentIndex(
             max(0, self.samples_per_symbol_combo.findData(project.samples_per_symbol))
         )
+        self.sample_rate_value = QtWidgets.QLabel()
         self.repeat_spin = QtWidgets.QSpinBox()
         self.repeat_spin.setRange(1, 1000)
         self.repeat_spin.setValue(project.repeat_count)
@@ -106,6 +108,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
         self.period_spin.setDecimals(3)
         self.period_spin.setSuffix(" symbols")
         self.period_spin.setValue(effective_period_symbols(project))
+        self.post_idle_value = QtWidgets.QLabel()
         self.rise_spin = self._double_spin(
             0.0, 1000.0, project.power_envelope.rise_symbols, " symbols"
         )
@@ -175,9 +178,21 @@ class DectSettingsDialog(QtWidgets.QDialog):
         self.packet_layout_label.setWordWrap(True)
         self._populate_ta(int(header[:3] or "0", 2))
 
-        tabs = QtWidgets.QTabWidget()
-        tabs.addTab(self._rf_tab(), "RF / Packet")
-        tabs.addTab(self._fields_tab(), "Fields")
+        self._timing_controls = tuple(
+            SymbolTimeControl(control, lambda: 1_152_000.0)
+            for control in (
+                self.pre_idle_spin,
+                self.period_spin,
+                self.rise_spin,
+                self.rise_delay_spin,
+                self.fall_spin,
+                self.fall_delay_spin,
+            )
+        )
+        self.tabs = packet_settings_tabs(
+            self._rf_rows(),
+            self._field_rows(),
+        )
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -185,7 +200,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(tabs)
+        layout.addWidget(self.tabs)
         layout.addWidget(buttons)
 
         self.plan_combo.currentIndexChanged.connect(
@@ -204,6 +219,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
             lambda _enabled: self._update_derived()
         )
         self.b_source_combo.currentIndexChanged.connect(self._update_derived)
+        self.period_spin.valueChanged.connect(self._update_period_constraints)
         for signal in (
             self.packet_type_combo.currentIndexChanged,
             self.prolonged_check.toggled,
@@ -249,43 +265,35 @@ class DectSettingsDialog(QtWidgets.QDialog):
         control.setCurrentIndex(control.findData(int(value)))
         return control
 
-    @staticmethod
-    def _form(rows: tuple[tuple[str, QtWidgets.QWidget], ...]) -> QtWidgets.QWidget:
-        widget = QtWidgets.QWidget()
-        layout = QtWidgets.QFormLayout(widget)
-        layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        for label, control in rows:
-            layout.addRow(label, control)
-        return widget
-
-    def _rf_tab(self) -> QtWidgets.QWidget:
-        return self._form(
-            (
+    def _rf_rows(self) -> tuple[tuple[str, QtWidgets.QWidget], ...]:
+        timing = self._timing_controls
+        return (
                 ("Carrier Plan", self.plan_combo),
                 ("Carrier", self.carrier_combo),
                 ("Frequency Offset", self.offset_spin),
                 ("Generated RF Frequency", self.actual_frequency_label),
-                ("Direction", self.direction_combo),
-                ("Packet Type", self.packet_type_combo),
+                ("Modulation", QtWidgets.QLabel("GFSK / 1.152 Msym/s")),
+                ("Packet Type / Length", self.packet_type_combo),
                 ("Prolonged Preamble", self.prolonged_check),
                 ("Samples / Symbol", self.samples_per_symbol_combo),
+                ("Sample Rate", self.sample_rate_value),
                 ("Repeat Count", self.repeat_spin),
                 ("Peak Frequency Deviation", self.deviation_spin),
                 ("Gaussian B*T", self.bt_spin),
-                ("Pre Idle", self.pre_idle_spin),
-                ("Packet Period", self.period_spin),
-                ("Ramp Up Time", self.rise_spin),
-                ("Ramp Up Start rel. Packet", self.rise_delay_spin),
-                ("Ramp Down Time", self.fall_spin),
-                ("Ramp Down Start rel. Packet End", self.fall_delay_spin),
+                ("Pre Idle", timing[0]),
+                ("Packet Period", timing[1]),
+                ("Derived Post Idle", self.post_idle_value),
+                ("Ramp Up Time", timing[2]),
+                ("Ramp Up Start rel. Packet", timing[3]),
+                ("Ramp Down Time", timing[4]),
+                ("Ramp Down Start rel. Packet End", timing[5]),
                 ("Ramp Shape", self.ramp_combo),
                 ("Derived Layout", self.packet_layout_label),
-            )
         )
 
-    def _fields_tab(self) -> QtWidgets.QWidget:
-        content = self._form(
-            (
+    def _field_rows(self) -> tuple[tuple[str, QtWidgets.QWidget], ...]:
+        return (
+                ("Direction", self.direction_combo),
                 ("Preamble (Direction-derived)", self.preamble_value),
                 ("Packet Sync Word (Direction-derived)", self.sync_value),
                 ("A Header / TA", self.ta_combo),
@@ -300,16 +308,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
                 ("X-field (4 bits)", self.x_field_edit),
                 ("Z-field Auto", self.z_repeat_auto),
                 ("Z-field (4 bits)", self.z_field_edit),
-            )
         )
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(content)
-        container = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(scroll)
-        return container
 
     def _populate_carriers(self, preferred: object = None) -> None:
         plan_id = str(self.plan_combo.currentData())
@@ -377,7 +376,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
             f"S 32 + A 64"
             + (f" + B {b_count} + X 4" if has_b else "")
             + (" + Z 4" if has_z else "")
-            + f" = {total} symbols from p0"
+            + f" = {total} symbols / {total / 1.152:.6g} us from p0"
         )
 
     def _update_period_constraints(self, _value=None) -> None:
@@ -399,6 +398,13 @@ class DectSettingsDialog(QtWidgets.QDialog):
         )
         self._minimum_period_symbols = minimum_period_symbols(candidate)
         self.period_spin.setMinimum(self._minimum_period_symbols)
+        self.sample_rate_value.setText(f"{1.152 * sps:.3f} MS/s")
+        post_idle = max(0.0, self.period_spin.value() - self._minimum_period_symbols)
+        self.post_idle_value.setText(
+            f"{post_idle:.3f} symbols = {post_idle / 1.152:.6g} us"
+        )
+        for control in self._timing_controls:
+            control.refresh()
 
     def _settings(self) -> DectSettings:
         return DectSettings(

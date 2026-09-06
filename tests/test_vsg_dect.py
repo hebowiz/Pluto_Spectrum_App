@@ -191,6 +191,11 @@ def test_dect_settings_dialog_uses_carrier_list_and_updates_fields() -> None:
     pg.mkQApp("DECT VSG settings test")
     dialog = DectSettingsDialog(dect_project())
     try:
+        assert [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())] == [
+            "RF / Timing",
+            "Fields",
+        ]
+        assert dialog.tabs.widget(0).isAncestorOf(dialog.prolonged_check)
         dialog.plan_combo.setCurrentIndex(dialog.plan_combo.findData("j_dect"))
         dialog.carrier_combo.setCurrentIndex(dialog.carrier_combo.findData("F0"))
         dialog.offset_spin.setValue(12.5)
@@ -218,6 +223,8 @@ def test_dect_settings_dialog_uses_carrier_list_and_updates_fields() -> None:
         assert project.power_envelope.fall_delay_symbols == 0.5
         assert [field.name for field in project.fields][-2:] == ["X-field", "Z-field"]
         assert "1893.900500 MHz" in dialog.actual_frequency_label.text()
+        assert "us" in dialog._timing_controls[0].time_label.text()
+        assert "us" in dialog.post_idle_value.text()
     finally:
         dialog.close()
 

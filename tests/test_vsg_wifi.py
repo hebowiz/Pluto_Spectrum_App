@@ -68,8 +68,18 @@ def test_wifi_dedicated_ui_and_main_window_dispatch() -> None:
     parent = PlutoVSGWindow()
     dialog = _WiFiSettingsDialog(project, parent)
     try:
+        assert [dialog.tabs.tabText(index) for index in range(dialog.tabs.count())] == [
+            "RF / Timing",
+            "Fields",
+        ]
         assert dialog.rate_combo.count() == 8
         assert dialog.source_combo.findData(WiFiPSDUSource.BEACON) >= 0
+        dialog.channel_combo.setCurrentIndex(
+            dialog.channel_combo.findData(2_412_000_000.0)
+        )
+        dialog.frequency_offset_spin.setValue(-250.0)
+        dialog._accept_settings()
+        assert dialog.project.center_frequency_hz == 2_411_750_000.0
         parent.project = project
         parent._refresh_project_view()
         parent.generate_waveform()

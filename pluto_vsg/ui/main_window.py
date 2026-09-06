@@ -85,6 +85,14 @@ from pluto_vsg.ui.style import (
 )
 from pluto_vsg.ui.composer_view import PacketComposerView
 from pluto_vsg.ui.dect_settings import DectSettingsDialog
+from pluto_vsg.ui.packet_settings import (
+    SymbolTimeControl,
+    bluetooth_classic_carriers,
+    bluetooth_le_carriers,
+    carrier_selector,
+    packet_settings_tabs,
+    wifi_24ghz_carriers,
+)
 
 
 def _instantaneous_frequency_khz(
@@ -162,7 +170,17 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
         self.seed_mode_combo.setCurrentIndex(self.seed_mode_combo.findData(WiFiScramblerSeedMode(settings.scrambler_seed_mode)))
         self.seed_spin = QtWidgets.QSpinBox(); self.seed_spin.setRange(1, 127); self.seed_spin.setValue(settings.scrambler_seed)
         self.seed_spin.setDisplayIntegerBase(16); self.seed_spin.setPrefix("0x")
-        self.channel_spin = QtWidgets.QSpinBox(); self.channel_spin.setRange(1, 13); self.channel_spin.setValue(settings.channel)
+        nominal_wifi_hz = (2407 + 5 * int(settings.channel)) * 1e6
+        self.channel_combo = carrier_selector(
+            wifi_24ghz_carriers(), nominal_wifi_hz
+        )
+        self.frequency_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.frequency_offset_spin.setRange(-3000.0, 3000.0)
+        self.frequency_offset_spin.setDecimals(3)
+        self.frequency_offset_spin.setSuffix(" kHz")
+        self.frequency_offset_spin.setValue(
+            (project.center_frequency_hz - nominal_wifi_hz) / 1e3
+        )
         self.center_label = QtWidgets.QLabel()
         self.source_combo = QtWidgets.QComboBox()
         for source in WiFiPSDUSource:
@@ -180,30 +198,56 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
         self.fcs_check = QtWidgets.QCheckBox("Append IEEE 802.11 FCS automatically"); self.fcs_check.setChecked(settings.fcs_auto)
         self.derived_label = QtWidgets.QLabel(); self.derived_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
 
-        tabs = QtWidgets.QTabWidget()
-        def add_tab(title: str, rows: tuple[tuple[str, QtWidgets.QWidget], ...]) -> None:
-            page = QtWidgets.QWidget(); form = QtWidgets.QFormLayout(page)
-            for label, widget in rows: form.addRow(label, widget)
-            tabs.addTab(page, title)
-        add_tab("PHY", (("Format", QtWidgets.QLabel("Non-HT OFDM (802.11a/g)")), ("Bandwidth", QtWidgets.QLabel("20 MHz")), ("Data Rate", self.rate_combo), ("Sample Rate", self.sample_rate_combo), ("Scrambler Seed", self.seed_mode_combo), ("Fixed Seed", self.seed_spin)))
-        add_tab("RF / Timing", (("2.4 GHz Channel", self.channel_spin), ("Center Frequency", self.center_label), ("Packet Period", self.period_spin), ("Repeat Count", self.repeat_spin)))
-        add_tab("Packet", (("Frame Source", self.source_combo), ("Raw PSDU [hex]", self.raw_hex_edit), ("Pattern / PRBS Length [byte]", self.length_spin), ("Pattern [hex]", self.pattern_edit)))
-        add_tab("MAC / Beacon", (("SSID", self.ssid_edit), ("BSSID", self.bssid_edit), ("Sequence Number", self.sequence_spin), ("Beacon Interval", self.beacon_interval_spin), ("FCS", self.fcs_check)))
-        add_tab("Derived", (("Calculated PHY values", self.derived_label),))
+        self.tabs = packet_settings_tabs(
+            (
+                ("Carrier", self.channel_combo),
+                ("Frequency Offset", self.frequency_offset_spin),
+                ("Generated RF Frequency", self.center_label),
+                ("Format", QtWidgets.QLabel("Non-HT OFDM (802.11a/g)")),
+                ("Bandwidth", QtWidgets.QLabel("20 MHz")),
+                ("Data Rate / Modulation", self.rate_combo),
+                ("Sample Rate", self.sample_rate_combo),
+                ("Pattern / PRBS Length [byte]", self.length_spin),
+                ("Packet Period", self.period_spin),
+                ("Repeat Count", self.repeat_spin),
+                ("Ramp", QtWidgets.QLabel("Disabled (automatic OFDM packet boundary)")),
+                ("Calculated PHY values", self.derived_label),
+            ),
+            (
+                ("Project Name", self.name_edit),
+                ("Scrambler Seed", self.seed_mode_combo),
+                ("Fixed Seed", self.seed_spin),
+                ("Frame Source", self.source_combo),
+                ("Raw PSDU [hex]", self.raw_hex_edit),
+                ("Pattern [hex]", self.pattern_edit),
+                ("SSID", self.ssid_edit),
+                ("BSSID", self.bssid_edit),
+                ("Sequence Number", self.sequence_spin),
+                ("Beacon Interval", self.beacon_interval_spin),
+                ("FCS", self.fcs_check),
+            ),
+        )
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("Apply and Generate")
         buttons.accepted.connect(self._accept_settings); buttons.rejected.connect(self.reject)
-        layout = QtWidgets.QVBoxLayout(self); layout.addWidget(self.name_edit); layout.addWidget(tabs); layout.addWidget(buttons)
-        for signal in (self.rate_combo.currentIndexChanged, self.sample_rate_combo.currentIndexChanged, self.seed_mode_combo.currentIndexChanged, self.channel_spin.valueChanged, self.source_combo.currentIndexChanged, self.length_spin.valueChanged, self.period_spin.valueChanged, self.beacon_interval_spin.valueChanged):
+        layout = QtWidgets.QVBoxLayout(self); layout.addWidget(self.tabs); layout.addWidget(buttons)
+        for signal in (self.rate_combo.currentIndexChanged, self.sample_rate_combo.currentIndexChanged, self.seed_mode_combo.currentIndexChanged, self.channel_combo.currentIndexChanged, self.frequency_offset_spin.valueChanged, self.source_combo.currentIndexChanged, self.length_spin.valueChanged, self.period_spin.valueChanged, self.beacon_interval_spin.valueChanged):
             signal.connect(self._refresh)
         self.raw_hex_edit.textChanged.connect(self._refresh); self.ssid_edit.textChanged.connect(self._refresh); self.bssid_edit.textChanged.connect(self._refresh)
-        self.resize(720, 520); self._refresh()
+        self.resize(860, 760); self._refresh()
 
     def _settings(self) -> WiFiSettings:
-        return replace(self._project.wifi, legacy_rate_mbps=int(self.rate_combo.currentData()), oversample_factor=int(self.sample_rate_combo.currentData()), scrambler_seed_mode=WiFiScramblerSeedMode(self.seed_mode_combo.currentData()), scrambler_seed=self.seed_spin.value(), psdu_source=WiFiPSDUSource(self.source_combo.currentData()), raw_psdu_hex=self.raw_hex_edit.toPlainText(), payload_length_bytes=self.length_spin.value(), payload_pattern_hex=self.pattern_edit.text(), channel=self.channel_spin.value(), ssid=self.ssid_edit.text(), bssid=self.bssid_edit.text(), sequence_number=self.sequence_spin.value(), beacon_interval_tu=self.beacon_interval_spin.value(), fcs_auto=self.fcs_check.isChecked(), packet_period_us=self.period_spin.value())
+        nominal_hz = float(self.channel_combo.currentData())
+        channel = int(round((nominal_hz / 1e6 - 2407.0) / 5.0))
+        return replace(self._project.wifi, legacy_rate_mbps=int(self.rate_combo.currentData()), oversample_factor=int(self.sample_rate_combo.currentData()), scrambler_seed_mode=WiFiScramblerSeedMode(self.seed_mode_combo.currentData()), scrambler_seed=self.seed_spin.value(), psdu_source=WiFiPSDUSource(self.source_combo.currentData()), raw_psdu_hex=self.raw_hex_edit.toPlainText(), payload_length_bytes=self.length_spin.value(), payload_pattern_hex=self.pattern_edit.text(), channel=channel, ssid=self.ssid_edit.text(), bssid=self.bssid_edit.text(), sequence_number=self.sequence_spin.value(), beacon_interval_tu=self.beacon_interval_spin.value(), fcs_auto=self.fcs_check.isChecked(), packet_period_us=self.period_spin.value())
 
     def _refresh(self, _value=None) -> None:
-        self.center_label.setText(f"{2407 + 5 * self.channel_spin.value()} MHz")
+        nominal_hz = float(self.channel_combo.currentData())
+        actual_hz = nominal_hz + self.frequency_offset_spin.value() * 1e3
+        self.center_label.setText(
+            f"{actual_hz / 1e6:.6f} MHz = {nominal_hz / 1e6:.3f} MHz "
+            f"{self.frequency_offset_spin.value():+.3f} kHz"
+        )
         source = WiFiPSDUSource(self.source_combo.currentData())
         self.raw_hex_edit.setEnabled(source == WiFiPSDUSource.RAW_HEX)
         self.length_spin.setEnabled(source in {WiFiPSDUSource.PATTERN, WiFiPSDUSource.PRBS9})
@@ -224,6 +268,13 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
     def _accept_settings(self) -> None:
         try:
             settings = self._settings(); candidate = wifi_project(settings)
+            candidate = replace(
+                candidate,
+                center_frequency_hz=(
+                    float(self.channel_combo.currentData())
+                    + self.frequency_offset_spin.value() * 1e3
+                ),
+            )
             candidate = replace(candidate, name=self.name_edit.text().strip(), repeat_count=self.repeat_spin.value())
             issues = validate_project(candidate)
             if issues: raise ValueError("\n".join(issue.message for issue in issues))
@@ -242,7 +293,6 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             raise ValueError("Bluetooth LE settings are required")
         self._project = project
         self.setWindowTitle("Bluetooth LE Packet Settings")
-        form = QtWidgets.QFormLayout()
         self.name_edit = QtWidgets.QLineEdit(project.name)
         self.phy_combo = QtWidgets.QComboBox()
         for phy in BluetoothLEPhy:
@@ -286,8 +336,22 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         self.whitening_channel_spin = self._integer_spin(
             0, 39, settings.whitening_channel_index
         )
-        self.center_spin = self._double_spin(0.0, 6000.0, project.center_frequency_hz / 1e6, 6)
+        le_carriers = bluetooth_le_carriers()
+        le_nominal_hz = min(
+            (frequency for _label, frequency in le_carriers),
+            key=lambda frequency: abs(frequency - project.center_frequency_hz),
+        )
+        self.carrier_combo = carrier_selector(le_carriers, le_nominal_hz)
+        self.frequency_offset_spin = self._double_spin(
+            -3000.0, 3000.0,
+            (project.center_frequency_hz - float(self.carrier_combo.currentData())) / 1e3,
+            3,
+        )
+        self.frequency_offset_spin.setSuffix(" kHz")
+        self.actual_frequency_label = QtWidgets.QLabel()
         self.sps_spin = self._integer_spin(4, 64, project.samples_per_symbol)
+        self.sample_rate_label = QtWidgets.QLabel()
+        self.packet_duration_label = QtWidgets.QLabel()
         self.repeat_spin = self._integer_spin(1, 1000, project.repeat_count)
         self.deviation_spin = self._double_spin(1.0, 2000.0, settings.frequency_deviation_hz / 1e3, 3)
         self.bt_spin = self._double_spin(0.05, 2.0, settings.gaussian_bt, 3)
@@ -306,42 +370,62 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         self.ramp_combo = QtWidgets.QComboBox()
         self.ramp_combo.addItems(["Cosine", "Linear"])
         self.ramp_combo.setCurrentText(project.power_envelope.shape)
-        for label, widget in (
-            ("Project Name", self.name_edit),
+        self._timing_controls = tuple(
+            SymbolTimeControl(control, self._symbol_rate_hz)
+            for control in (
+                self.pre_idle_spin,
+                self.period_spin,
+                self.rise_spin,
+                self.rise_delay_spin,
+                self.fall_spin,
+                self.fall_delay_spin,
+            )
+        )
+        self.tabs = packet_settings_tabs(
+            (
+            ("Carrier", self.carrier_combo),
+            ("Frequency Offset", self.frequency_offset_spin),
+            ("Generated RF Frequency", self.actual_frequency_label),
             ("PHY", self.phy_combo),
+            ("Modulation", QtWidgets.QLabel("GFSK")),
+            ("Payload Length [byte]", self.length_spin),
+            ("Packet Length", self.packet_duration_label),
+            ("Samples / Symbol", self.sps_spin),
+            ("Sample Rate", self.sample_rate_label),
+            ("Repeat Count", self.repeat_spin),
+            ("FSK Deviation [kHz]", self.deviation_spin),
+            ("Gaussian B*T", self.bt_spin),
+            ("Pre Idle", self._timing_controls[0]),
+            ("Packet Period", self._timing_controls[1]),
+            ("Derived Post Idle", self.post_idle_value),
+            ("Ramp Up", self._timing_controls[2]),
+            ("Ramp Up Start rel. Packet", self._timing_controls[3]),
+            ("Ramp Down", self._timing_controls[4]),
+            ("Ramp Down Start rel. Packet End", self._timing_controls[5]),
+            ("Ramp Shape", self.ramp_combo),
+            ),
+            (
+            ("Project Name", self.name_edit),
             ("RF Test Payload Preset", preset_row),
             ("Preamble [air-order bits]", self.preamble_edit),
             ("Access Address / Sync [air-order bits]", self.sync_edit),
             ("PDU Header [air-order bits]", self.header_edit),
-            ("Payload Length [byte]", self.length_spin),
             ("Payload Source", self.payload_source_combo),
             ("Payload Pattern [bin]", self.payload_pattern_edit),
             ("CRC-24", self.crc_check),
             ("CRCInit [hex]", self.crc_init_edit),
             ("Whitening", self.whitening_check),
             ("Whitening Channel Index", self.whitening_channel_spin),
-            ("Center Frequency [MHz]", self.center_spin),
-            ("Samples / Symbol", self.sps_spin),
-            ("Repeat Count", self.repeat_spin),
-            ("FSK Deviation [kHz]", self.deviation_spin),
-            ("Gaussian B*T", self.bt_spin),
-            ("Pre Idle [symbols]", self.pre_idle_spin),
-            ("Period [symbols]", self.period_spin),
-            ("Post Idle [symbols] (reference)", self.post_idle_value),
-            ("Ramp Up [symbols]", self.rise_spin),
-            ("Ramp Up Start rel. Packet [symbols]", self.rise_delay_spin),
-            ("Ramp Down [symbols]", self.fall_spin),
-            ("Ramp Down Start rel. Packet End [symbols]", self.fall_delay_spin),
-            ("Ramp Shape", self.ramp_combo),
-        ):
-            form.addRow(label, widget)
+            ),
+        )
         note = QtWidgets.QLabel(
             "All packet fields remain editable. Applying an RF Test Packet preset "
             "loads the Core test Sync Word/header/payload, CRCInit 0x555555, "
             "Whitening Off and the standard packet interval into these controls."
         )
         note.setWordWrap(True)
-        form.addRow(note)
+        fields_page = self.tabs.widget(1).widget()
+        fields_page.layout().addRow(note)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
             | QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -352,10 +436,12 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         buttons.accepted.connect(self._accept_settings)
         buttons.rejected.connect(self.reject)
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addLayout(form)
+        layout.addWidget(self.tabs)
         layout.addWidget(buttons)
-        self.resize(620, 650)
+        self.resize(860, 760)
         self.phy_combo.currentIndexChanged.connect(self._phy_changed)
+        self.carrier_combo.currentIndexChanged.connect(self._update_rf_preview)
+        self.frequency_offset_spin.valueChanged.connect(self._update_rf_preview)
         self.payload_source_combo.currentIndexChanged.connect(
             self._payload_source_changed
         )
@@ -392,6 +478,27 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
     def _phy_changed(self) -> None:
         phy = BluetoothLEPhy(self.phy_combo.currentData())
         self.deviation_spin.setValue(250.0 if phy == BluetoothLEPhy.LE_1M else 500.0)
+        self._update_rf_preview()
+
+    def _symbol_rate_hz(self) -> float:
+        return (
+            1_000_000.0
+            if BluetoothLEPhy(self.phy_combo.currentData()) == BluetoothLEPhy.LE_1M
+            else 2_000_000.0
+        )
+
+    def _update_rf_preview(self, _value=None) -> None:
+        nominal_hz = float(self.carrier_combo.currentData())
+        actual_hz = nominal_hz + self.frequency_offset_spin.value() * 1e3
+        self.actual_frequency_label.setText(
+            f"{actual_hz / 1e6:.6f} MHz = {nominal_hz / 1e6:.3f} MHz "
+            f"{self.frequency_offset_spin.value():+.3f} kHz"
+        )
+        self.sample_rate_label.setText(
+            f"{self._symbol_rate_hz() * self.sps_spin.value() / 1e6:.3f} MS/s"
+        )
+        for control in self._timing_controls:
+            control.refresh()
 
     def _payload_source_changed(self) -> None:
         source = BluetoothLEPayloadSourceKind(self.payload_source_combo.currentData())
@@ -431,7 +538,10 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
 
     def _update_post_idle_reference(self) -> None:
         post_idle = max(0.0, self.period_spin.value() - self._minimum_period_symbols)
-        self.post_idle_value.setText(f"{post_idle:.3f}")
+        self.post_idle_value.setText(
+            f"{post_idle:.3f} symbols = "
+            f"{post_idle / self._symbol_rate_hz() * 1e6:.6g} us"
+        )
 
     def _update_period_constraints(self, _value=None) -> None:
         phy = BluetoothLEPhy(self.phy_combo.currentData())
@@ -457,8 +567,14 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             ),
         )
         self._minimum_period_symbols = minimum_period_symbols(candidate)
+        packet_symbols = sum(field.symbol_count for field in candidate.fields)
+        self.packet_duration_label.setText(
+            f"{packet_symbols} symbols / "
+            f"{packet_symbols / symbol_rate_hz * 1e6:.6g} us"
+        )
         self.period_spin.setMinimum(self._minimum_period_symbols)
         self._update_post_idle_reference()
+        self._update_rf_preview()
 
     def _accept_settings(self) -> None:
         phy = BluetoothLEPhy(self.phy_combo.currentData())
@@ -502,7 +618,10 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         project = replace(
             self._project,
             name=self.name_edit.text(),
-            center_frequency_hz=self.center_spin.value() * 1e6,
+            center_frequency_hz=(
+                float(self.carrier_combo.currentData())
+                + self.frequency_offset_spin.value() * 1e3
+            ),
             samples_per_symbol=self.sps_spin.value(),
             sample_rate_hz=symbol_rate_hz * self.sps_spin.value(),
             repeat_count=self.repeat_spin.value(),
@@ -550,7 +669,21 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         settings = project.bluetooth_hdt
         if settings is None:
             raise ValueError("Bluetooth HDT settings are required")
-        form = QtWidgets.QFormLayout(self)
+        self.name_value = QtWidgets.QLabel(project.name)
+        hdt_carriers = bluetooth_classic_carriers()
+        hdt_nominal_hz = min(
+            (frequency for _label, frequency in hdt_carriers),
+            key=lambda frequency: abs(frequency - project.center_frequency_hz),
+        )
+        self.carrier_combo = carrier_selector(hdt_carriers, hdt_nominal_hz)
+        self.frequency_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.frequency_offset_spin.setRange(-3000.0, 3000.0)
+        self.frequency_offset_spin.setDecimals(3)
+        self.frequency_offset_spin.setSuffix(" kHz")
+        self.frequency_offset_spin.setValue(
+            (project.center_frequency_hz - float(self.carrier_combo.currentData())) / 1e3
+        )
+        self.actual_frequency_label = QtWidgets.QLabel()
         self.rate_combo = QtWidgets.QComboBox()
         for rate in HDTRate:
             definition = hdt_definition(rate)
@@ -563,24 +696,161 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self.source_combo.setCurrentIndex(self.source_combo.findData(PayloadSourceKind(settings.payload_source)))
         self.pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern)
         self.rolloff_spin = QtWidgets.QDoubleSpinBox(); self.rolloff_spin.setRange(0.01, 1.0); self.rolloff_spin.setDecimals(3); self.rolloff_spin.setValue(settings.rrc_rolloff)
+        self.sps_spin = QtWidgets.QSpinBox(); self.sps_spin.setRange(4, 64); self.sps_spin.setValue(project.samples_per_symbol)
+        self.sample_rate_label = QtWidgets.QLabel()
+        self.packet_duration_label = QtWidgets.QLabel()
         self.repeat_spin = QtWidgets.QSpinBox(); self.repeat_spin.setRange(1, 1000); self.repeat_spin.setValue(project.repeat_count)
         self.pre_idle_spin = QtWidgets.QSpinBox(); self.pre_idle_spin.setRange(0, 100000); self.pre_idle_spin.setValue(settings.pre_idle_symbols)
-        self.post_idle_spin = QtWidgets.QSpinBox(); self.post_idle_spin.setRange(0, 100000); self.post_idle_spin.setValue(settings.post_idle_symbols)
-        form.addRow("HDT Rate", self.rate_combo); form.addRow("Payload Length (byte)", self.length_spin)
-        form.addRow("Payload Source", self.source_combo); form.addRow("Payload Pattern", self.pattern_edit)
-        form.addRow("SRRC Roll-off", self.rolloff_spin); form.addRow("Repeat Count", self.repeat_spin)
-        form.addRow("Pre Idle (symbols)", self.pre_idle_spin); form.addRow("Post Idle (symbols)", self.post_idle_spin)
+        self._minimum_period_symbols = minimum_period_symbols(project)
+        self.period_spin = QtWidgets.QDoubleSpinBox(); self.period_spin.setRange(0.0, 1_000_000.0); self.period_spin.setDecimals(3); self.period_spin.setValue(effective_period_symbols(project))
+        self.post_idle_value = QtWidgets.QLabel()
+        self.rise_spin = QtWidgets.QDoubleSpinBox(); self.rise_spin.setRange(0.0, 1000.0); self.rise_spin.setValue(project.power_envelope.rise_symbols)
+        self.rise_delay_spin = QtWidgets.QDoubleSpinBox(); self.rise_delay_spin.setRange(-1000.0, 1000.0); self.rise_delay_spin.setValue(project.power_envelope.rise_delay_symbols)
+        self.fall_spin = QtWidgets.QDoubleSpinBox(); self.fall_spin.setRange(0.0, 1000.0); self.fall_spin.setValue(project.power_envelope.fall_symbols)
+        self.fall_delay_spin = QtWidgets.QDoubleSpinBox(); self.fall_delay_spin.setRange(-1000.0, 1000.0); self.fall_delay_spin.setValue(project.power_envelope.fall_delay_symbols)
+        self.ramp_combo = QtWidgets.QComboBox(); self.ramp_combo.addItems(["Cosine", "Linear"]); self.ramp_combo.setCurrentText(project.power_envelope.shape)
+        self.training_value = QtWidgets.QLabel("Enabled (required / automatic)")
+        self._timing_controls = tuple(
+            SymbolTimeControl(control, lambda: 2_000_000.0)
+            for control in (
+                self.pre_idle_spin,
+                self.period_spin,
+                self.rise_spin,
+                self.rise_delay_spin,
+                self.fall_spin,
+                self.fall_delay_spin,
+            )
+        )
+        self.tabs = packet_settings_tabs(
+            (
+                ("Carrier", self.carrier_combo),
+                ("Frequency Offset", self.frequency_offset_spin),
+                ("Generated RF Frequency", self.actual_frequency_label),
+                ("HDT Rate / Modulation", self.rate_combo),
+                ("Payload Length [byte]", self.length_spin),
+                ("Packet Length", self.packet_duration_label),
+                ("Samples / Symbol", self.sps_spin),
+                ("Sample Rate", self.sample_rate_label),
+                ("SRRC Roll-off", self.rolloff_spin),
+                ("Repeat Count", self.repeat_spin),
+                ("Pre Idle", self._timing_controls[0]),
+                ("Packet Period", self._timing_controls[1]),
+                ("Derived Post Idle", self.post_idle_value),
+                ("Ramp Up", self._timing_controls[2]),
+                ("Ramp Up Start rel. Packet", self._timing_controls[3]),
+                ("Ramp Down", self._timing_controls[4]),
+                ("Ramp Down Start rel. Packet End", self._timing_controls[5]),
+                ("Ramp Shape", self.ramp_combo),
+            ),
+            (
+                ("Project Name", self.name_value),
+                ("Training / Preamble", self.training_value),
+                ("Payload Source", self.source_combo),
+                ("Payload Pattern", self.pattern_edit),
+            ),
+        )
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self._accept_settings); buttons.rejected.connect(self.reject); form.addRow(buttons)
+        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("Apply and Generate")
+        buttons.accepted.connect(self._accept_settings); buttons.rejected.connect(self.reject)
+        layout = QtWidgets.QVBoxLayout(self); layout.addWidget(self.tabs); layout.addWidget(buttons)
+        self.resize(860, 760)
+        for signal in (
+            self.rate_combo.currentIndexChanged,
+            self.length_spin.valueChanged,
+            self.sps_spin.valueChanged,
+            self.pre_idle_spin.valueChanged,
+            self.rise_spin.valueChanged,
+            self.rise_delay_spin.valueChanged,
+            self.fall_spin.valueChanged,
+            self.fall_delay_spin.valueChanged,
+        ):
+            signal.connect(self._update_period_constraints)
+        self.carrier_combo.currentIndexChanged.connect(self._update_preview)
+        self.frequency_offset_spin.valueChanged.connect(self._update_preview)
+        self.source_combo.currentIndexChanged.connect(self._source_changed)
+        self.period_spin.valueChanged.connect(self._update_post_idle_reference)
+        self._source_changed()
+        self._update_period_constraints()
+
+    def _source_changed(self, _value=None) -> None:
+        self.pattern_edit.setEnabled(
+            PayloadSourceKind(self.source_combo.currentData()) is not PayloadSourceKind.PRBS9
+        )
+
+    def _update_preview(self, _value=None) -> None:
+        nominal_hz = float(self.carrier_combo.currentData())
+        actual_hz = nominal_hz + self.frequency_offset_spin.value() * 1e3
+        self.actual_frequency_label.setText(
+            f"{actual_hz / 1e6:.6f} MHz = {nominal_hz / 1e6:.3f} MHz "
+            f"{self.frequency_offset_spin.value():+.3f} kHz"
+        )
+        self.sample_rate_label.setText(f"{2.0 * self.sps_spin.value():.3f} MS/s")
+        for control in self._timing_controls:
+            control.refresh()
+
+    def _update_post_idle_reference(self, _value=None) -> None:
+        post_idle = max(0.0, self.period_spin.value() - self._minimum_period_symbols)
+        self.post_idle_value.setText(
+            f"{post_idle:.3f} symbols = {post_idle / 2.0:.6g} us"
+        )
+
+    def _update_period_constraints(self, _value=None) -> None:
+        settings = replace(
+            self._project.bluetooth_hdt,
+            rate=HDTRate(self.rate_combo.currentData()),
+            payload_length_bytes=self.length_spin.value(),
+            pre_idle_symbols=self.pre_idle_spin.value(),
+            post_idle_symbols=0,
+        )
+        candidate = replace(
+            self._project,
+            sample_rate_hz=2_000_000.0 * self.sps_spin.value(),
+            samples_per_symbol=self.sps_spin.value(),
+            fields=bluetooth_hdt_fields(settings),
+            bluetooth_hdt=settings,
+            power_envelope=replace(
+                self._project.power_envelope,
+                rise_symbols=self.rise_spin.value(),
+                rise_delay_symbols=self.rise_delay_spin.value(),
+                fall_symbols=self.fall_spin.value(),
+                fall_delay_symbols=self.fall_delay_spin.value(),
+            ),
+        )
+        self._minimum_period_symbols = minimum_period_symbols(candidate)
+        packet_symbols = sum(field.symbol_count for field in candidate.fields)
+        self.packet_duration_label.setText(
+            f"{packet_symbols} symbols / {packet_symbols / 2.0:.6g} us"
+        )
+        self.period_spin.setMinimum(self._minimum_period_symbols)
+        self._update_post_idle_reference()
+        self._update_preview()
 
     def _accept_settings(self) -> None:
-        settings = BluetoothHDTSettings(
+        settings = replace(self._project.bluetooth_hdt,
             rate=HDTRate(self.rate_combo.currentData()), payload_length_bytes=self.length_spin.value(),
             payload_source=PayloadSourceKind(self.source_combo.currentData()), payload_pattern=self.pattern_edit.text(),
             rrc_rolloff=self.rolloff_spin.value(), pre_idle_symbols=self.pre_idle_spin.value(),
-            post_idle_symbols=self.post_idle_spin.value(),
+            post_idle_symbols=0, training_enabled=True,
         )
-        self._project = replace(self._project, name=f"Bluetooth {settings.rate.value} RF Test Packet", repeat_count=self.repeat_spin.value(), fields=bluetooth_hdt_fields(settings), bluetooth_hdt=settings)
+        self._project = replace(
+            self._project,
+            name=f"Bluetooth {settings.rate.value} RF Test Packet",
+            center_frequency_hz=(float(self.carrier_combo.currentData()) + self.frequency_offset_spin.value() * 1e3),
+            sample_rate_hz=2_000_000.0 * self.sps_spin.value(),
+            samples_per_symbol=self.sps_spin.value(),
+            repeat_count=self.repeat_spin.value(),
+            period_symbols=self.period_spin.value(),
+            fields=bluetooth_hdt_fields(settings),
+            bluetooth_hdt=settings,
+            power_envelope=replace(
+                self._project.power_envelope,
+                rise_symbols=self.rise_spin.value(),
+                rise_delay_symbols=self.rise_delay_spin.value(),
+                fall_symbols=self.fall_spin.value(),
+                fall_delay_symbols=self.fall_delay_spin.value(),
+                shape=self.ramp_combo.currentText(),
+            ),
+        )
         issues = validate_project(self._project)
         if issues:
             QtWidgets.QMessageBox.warning(self, "Bluetooth HDT Settings", "\n".join(f"{i.path}: {i.message}" for i in issues)); return
@@ -599,14 +869,15 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             raise ValueError("Bluetooth settings are required")
         self._project = project
         self.setWindowTitle("Bluetooth BR / EDR Settings")
-        form_widget = QtWidgets.QWidget()
-        form = QtWidgets.QFormLayout(form_widget)
 
         self.name_edit = QtWidgets.QLineEdit(project.name)
-        self.center_spin = self._double_spin(
-            0.0, 6000.0, project.center_frequency_hz / 1e6, 6
+        self.carrier_combo = carrier_selector(
+            bluetooth_classic_carriers(), project.center_frequency_hz
         )
+        self.actual_frequency_label = QtWidgets.QLabel()
         self.sps_spin = self._integer_spin(4, 64, project.samples_per_symbol)
+        self.sample_rate_label = QtWidgets.QLabel()
+        self.packet_duration_label = QtWidgets.QLabel()
         self.repeat_spin = self._integer_spin(1, 1000, project.repeat_count)
         self.lap_edit = QtWidgets.QLineEdit(f"{settings.lap:06X}")
         self.uap_edit = QtWidgets.QLineEdit(f"{settings.uap:02X}")
@@ -667,6 +938,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.cfo_spin = self._double_spin(
             -1000.0, 1000.0, settings.carrier_frequency_offset_hz / 1e3, 3
         )
+        self.cfo_spin.setSuffix(" kHz")
         self.bt_spin = self._double_spin(0.05, 2.0, settings.gaussian_bt, 3)
         self.edr_guard_spin = self._integer_spin(0, 1000, settings.edr_guard_symbols)
         self.edr_guard_power_spin = self._double_spin(
@@ -724,58 +996,73 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         ramp_timing_help.setWordWrap(True)
         ramp_timing_help.setStyleSheet("color: #b8b8b8;")
 
-        for label, widget in (
-            ("Project Name", self.name_edit),
-            ("Center Frequency [MHz]", self.center_spin),
-            ("Samples / Symbol", self.sps_spin),
-            ("Repeat Count", self.repeat_spin),
-            ("LAP [hex]", self.lap_edit),
-            ("UAP [hex]", self.uap_edit),
-            ("CLK 6-1 [hex]", self.clock_edit),
-        ):
-            form.addRow(label, widget)
-
         header_group = QtWidgets.QGroupBox("Packet Header")
         header_form = QtWidgets.QFormLayout(header_group)
         for label, widget in (
             ("LT_ADDR", self.lt_addr_spin),
-            ("Packet Type / TYPE", self.packet_type_combo),
             ("FLOW", self.flow_combo),
             ("ARQN", self.arqn_combo),
             ("SEQN", self.seqn_combo),
             ("HEC", self.hec_value),
         ):
             header_form.addRow(label, widget)
-        form.addRow(header_group)
-
-        for label, widget in (
-            ("RF Test Payload Preset", rf_test_row),
+        self._timing_controls = tuple(
+            SymbolTimeControl(control, lambda: 1_000_000.0)
+            for control in (
+                self.pre_idle_spin,
+                self.period_spin,
+                self.rise_spin,
+                self.rise_delay_spin,
+                self.fall_spin,
+                self.fall_delay_spin,
+                self.edr_guard_spin,
+                self.edr_guard_ramp_in_spin,
+                self.edr_guard_ramp_out_spin,
+            )
+        )
+        self.tabs = packet_settings_tabs(
+            (
+            ("Carrier", self.carrier_combo),
+            ("Carrier Offset", self.cfo_spin),
+            ("Generated RF Frequency", self.actual_frequency_label),
+            ("Packet Type / Modulation", self.packet_type_combo),
             ("Payload Length [byte]", self.payload_length_spin),
+            ("Packet Length", self.packet_duration_label),
+            ("Samples / Symbol", self.sps_spin),
+            ("Sample Rate", self.sample_rate_label),
+            ("Repeat Count", self.repeat_spin),
+            ("FSK Deviation [kHz]", self.deviation_spin),
+            ("Gaussian B*T", self.bt_spin),
+            ("EDR Guard", self._timing_controls[6]),
+            ("EDR Guard Power rel. GFSK", self.edr_guard_power_spin),
+            ("EDR Guard Ramp In", self._timing_controls[7]),
+            ("EDR Guard Ramp Out", self._timing_controls[8]),
+            ("EDR Guard Ramp Shape", self.edr_guard_ramp_shape_combo),
+            ("EDR SRRC Roll-off", self.edr_rolloff_spin),
+            ("EDR Power rel. GFSK [dB]", self.edr_power_spin),
+            ("Pre Idle", self._timing_controls[0]),
+            ("Packet Period", self._timing_controls[1]),
+            ("Derived Post Idle", self.post_idle_value),
+            ("Ramp Up", self._timing_controls[2]),
+            ("Ramp Up Start rel. Packet", self._timing_controls[3]),
+            ("Ramp Down", self._timing_controls[4]),
+            ("Ramp Down Start rel. Packet End", self._timing_controls[5]),
+            ("Ramp Shape", self.ramp_combo),
+            ("Ramp Timing", ramp_timing_help),
+            ),
+            (
+            ("Project Name", self.name_edit),
+            ("LAP [hex]", self.lap_edit),
+            ("UAP [hex]", self.uap_edit),
+            ("CLK 6-1 [hex]", self.clock_edit),
+            ("Header Fields", header_group),
+            ("RF Test Payload Preset", rf_test_row),
             ("Payload Source", self.payload_source_combo),
             ("Source Behavior", self.payload_source_help),
             ("Payload Data [bin]", self.pattern_edit),
             ("Whitening", self.whitening_check),
-            ("FSK Deviation [kHz]", self.deviation_spin),
-            ("Carrier Offset [kHz]", self.cfo_spin),
-            ("Gaussian B*T", self.bt_spin),
-            ("EDR Guard [symbols]", self.edr_guard_spin),
-            ("EDR Guard Power rel. GFSK", self.edr_guard_power_spin),
-            ("EDR Guard Ramp In [symbols]", self.edr_guard_ramp_in_spin),
-            ("EDR Guard Ramp Out [symbols]", self.edr_guard_ramp_out_spin),
-            ("EDR Guard Ramp Shape", self.edr_guard_ramp_shape_combo),
-            ("EDR SRRC Roll-off", self.edr_rolloff_spin),
-            ("EDR Power rel. GFSK [dB]", self.edr_power_spin),
-            ("Pre Idle [symbols]", self.pre_idle_spin),
-            ("Period [symbols]", self.period_spin),
-            ("Post Idle [symbols] (reference)", self.post_idle_value),
-            ("Ramp Up [symbols]", self.rise_spin),
-            ("Ramp Up Start rel. Packet [symbols]", self.rise_delay_spin),
-            ("Ramp Down [symbols]", self.fall_spin),
-            ("Ramp Down Start rel. Packet End [symbols]", self.fall_delay_spin),
-            ("Ramp Shape", self.ramp_combo),
-            ("Ramp Timing", ramp_timing_help),
-        ):
-            form.addRow(label, widget)
+            ),
+        )
 
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -788,13 +1075,9 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         )
         apply_button.setText("Apply and Generate")
         layout = QtWidgets.QVBoxLayout(self)
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        scroll.setWidget(form_widget)
-        layout.addWidget(scroll)
+        layout.addWidget(self.tabs)
         layout.addWidget(buttons)
-        self.resize(620, 780)
+        self.resize(860, 760)
         self.uap_edit.textChanged.connect(self._update_header_preview)
         self.lt_addr_spin.valueChanged.connect(self._update_header_preview)
         self.flow_combo.currentIndexChanged.connect(self._update_header_preview)
@@ -803,6 +1086,8 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.packet_type_combo.currentIndexChanged.connect(
             self._packet_type_changed
         )
+        self.carrier_combo.currentIndexChanged.connect(self._update_rf_preview)
+        self.cfo_spin.valueChanged.connect(self._update_rf_preview)
         for signal in (
             self.payload_length_spin.valueChanged,
             self.sps_spin.valueChanged,
@@ -872,7 +1157,20 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
 
     def _update_post_idle_reference(self) -> None:
         post_idle = max(0.0, self.period_spin.value() - self._minimum_period_symbols)
-        self.post_idle_value.setText(f"{post_idle:.3f}")
+        self.post_idle_value.setText(
+            f"{post_idle:.3f} symbols = {post_idle:.6g} us"
+        )
+
+    def _update_rf_preview(self, _value=None) -> None:
+        nominal_hz = float(self.carrier_combo.currentData())
+        actual_hz = nominal_hz + self.cfo_spin.value() * 1e3
+        self.actual_frequency_label.setText(
+            f"{actual_hz / 1e6:.6f} MHz = {nominal_hz / 1e6:.3f} MHz "
+            f"{self.cfo_spin.value():+.3f} kHz"
+        )
+        self.sample_rate_label.setText(f"{self.sps_spin.value():.3f} MS/s")
+        for control in self._timing_controls:
+            control.refresh()
 
     def _update_period_constraints(self, _value=None) -> None:
         settings = replace(
@@ -897,8 +1195,13 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             ),
         )
         self._minimum_period_symbols = minimum_period_symbols(candidate)
+        packet_symbols = sum(field.symbol_count for field in candidate.fields)
+        self.packet_duration_label.setText(
+            f"{packet_symbols} symbols / {packet_symbols:.6g} us"
+        )
         self.period_spin.setMinimum(self._minimum_period_symbols)
         self._update_post_idle_reference()
+        self._update_rf_preview()
 
     def _accept_settings(self) -> None:
         try:
@@ -942,7 +1245,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         project = replace(
             self._project,
             name=self.name_edit.text(),
-            center_frequency_hz=self.center_spin.value() * 1e6,
+            center_frequency_hz=float(self.carrier_combo.currentData()),
             sample_rate_hz=self.sps_spin.value() * 1e6,
             samples_per_symbol=self.sps_spin.value(),
             repeat_count=self.repeat_spin.value(),
@@ -1563,15 +1866,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.redo_action.setShortcut(QtGui.QKeySequence.StandardKey.Redo)
         self.new_action = QtGui.QAction("New Bluetooth BR / EDR Project", self)
         self.new_action.triggered.connect(self._new_bluetooth_project)
-        self.new_le1m_action = QtGui.QAction("New Bluetooth LE 1M Packet", self)
-        self.new_le1m_action.triggered.connect(
-            lambda: self._new_bluetooth_le_project(BluetoothLEPhy.LE_1M)
-        )
-        self.new_le2m_action = QtGui.QAction("New Bluetooth LE 2M Packet", self)
-        self.new_le2m_action.triggered.connect(
-            lambda: self._new_bluetooth_le_project(BluetoothLEPhy.LE_2M)
-        )
-        self.new_hdt_action = QtGui.QAction("New Bluetooth HDT Test Packet", self)
+        self.new_le_action = QtGui.QAction("New Bluetooth LE Packet", self)
+        self.new_le_action.triggered.connect(self._new_bluetooth_le_project)
+        self.new_hdt_action = QtGui.QAction("New Bluetooth HDT Packet", self)
         self.new_hdt_action.triggered.connect(self._new_bluetooth_hdt_project)
         self.new_wifi_action = QtGui.QAction("New Wi-Fi Packet", self)
         self.new_wifi_action.triggered.connect(self._new_wifi_project)
@@ -1640,8 +1937,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         new_menu.addActions(
             [
                 self.new_action,
-                self.new_le1m_action,
-                self.new_le2m_action,
+                self.new_le_action,
                 self.new_hdt_action,
                 self.new_wifi_action,
                 self.new_dect_action,
@@ -1836,9 +2132,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.generate_waveform()
         self._configuration_maybe_changed(previous_signature)
 
-    def _new_bluetooth_le_project(self, phy: BluetoothLEPhy) -> None:
+    def _new_bluetooth_le_project(self) -> None:
         previous_signature = self._pluto_configuration_signature()
-        self.project = bluetooth_le_project(phy)
+        # LE 1M/2M share one settings dialog; start at the broadly compatible
+        # 1M default and select PHY inside that dialog.
+        self.project = bluetooth_le_project(BluetoothLEPhy.LE_1M)
         self.project_path = None
         self.undo_stack.clear()
         self._refresh_project_view()
