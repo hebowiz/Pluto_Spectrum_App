@@ -3310,14 +3310,15 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _pluto_capture_failed(self, message: str) -> None:
         self._pluto_capture_started_at = None
-        was_continuous = self._continuous_run_requested
-        self._continuous_run_requested = False
-        self.statusBar().showMessage(f"Pluto capture failed: {message}")
+        continuous = self._continuous_run_requested
+        self.statusBar().showMessage(
+            f"Pluto capture failed: {message}"
+            + (" - retrying Continuous" if continuous else "")
+        )
         if self._shutdown_requested:
             return
-        QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", message)
-        if was_continuous:
-            self._finish_continuous_run()
+        if not continuous:
+            QtWidgets.QMessageBox.critical(self, "Pluto Capture Error", message)
 
     def _pluto_capture_cancelled(self) -> None:
         self._pluto_capture_started_at = None
@@ -3329,7 +3330,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._pluto_capture_thread = None
         self._active_capture_continuous = False
         if self._continuous_capture_settings is not None:
-            if not self._continuous_run_requested and self._analysis_thread is None:
+            if self._continuous_run_requested and self._analysis_thread is None:
+                QtCore.QTimer.singleShot(250, self._start_next_continuous_capture)
+            elif not self._continuous_run_requested and self._analysis_thread is None:
                 self._finish_continuous_run()
             return
         self.run_single_action.setText("Run Single")
@@ -3776,8 +3779,9 @@ class VSAWindow(QtWidgets.QMainWindow):
     ) -> None:
         if generation != self._analysis_generation:
             return
-        if bool(self._active_analysis_context.get("continuous", False)):
-            self._continuous_run_requested = False
+        continuous = bool(self._active_analysis_context.get("continuous", False))
+        if continuous:
+            self._active_analysis_context["retry_delay_ms"] = 250
         if isinstance(completed, VSASession):
             try:
                 self.session.adopt_analysis_results(completed)
@@ -3787,7 +3791,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._update_summary()
             self._update_plots(reset_ranges=True)
             self._update_match_navigation_actions()
-        self.statusBar().showMessage(f"Analysis failed: {message}")
+        self.statusBar().showMessage(
+            f"Analysis failed: {message}"
+            + (" - retrying Continuous" if continuous else "")
+        )
 
     def _analysis_stopped(self) -> None:
         completed_context = self._active_analysis_context
@@ -3799,7 +3806,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         if self._pending_analysis is None:
             if bool(completed_context.get("continuous", False)):
                 if self._continuous_run_requested:
-                    QtCore.QTimer.singleShot(0, self._start_next_continuous_capture)
+                    delay_ms = int(completed_context.get("retry_delay_ms", 0))
+                    QtCore.QTimer.singleShot(
+                        delay_ms, self._start_next_continuous_capture
+                    )
                 else:
                     self._finish_continuous_run()
             return

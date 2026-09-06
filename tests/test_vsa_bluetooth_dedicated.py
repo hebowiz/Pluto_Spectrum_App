@@ -2397,6 +2397,77 @@ def test_bluetooth_config_accept_does_not_start_analysis(
         window.deleteLater()
 
 
+def test_bluetooth_continuous_repeats_until_user_stop(tmp_path, monkeypatch) -> None:
+    pg.mkQApp("Bluetooth continuous capture loop test")
+
+    class Source:
+        def __init__(self) -> None:
+            self.capture_count = 0
+            self.buffered: list[bool] = []
+            self.stop_count = 0
+
+        def capture_single(
+            self, settings, *, cancelled=None, armed=None, prefer_buffered=False
+        ):
+            self.capture_count += 1
+            self.buffered.append(bool(prefer_buffered))
+            if armed is not None:
+                armed()
+            return IQRecording(
+                np.ones(256, dtype=np.complex64),
+                sample_rate_hz=settings.requested_sample_rate_hz,
+                center_frequency_hz=settings.center_frequency_hz,
+            )
+
+        def stop_stream(self) -> None:
+            self.stop_count += 1
+
+        def close(self) -> None:
+            pass
+
+    source = Source()
+    window = BluetoothAnalyzerWindow(
+        pluto_source=source,
+        preferences=QtCore.QSettings(
+            str(tmp_path / "bluetooth-continuous.ini"),
+            QtCore.QSettings.Format.IniFormat,
+        ),
+    )
+
+    accepted_recordings: list[object] = []
+
+    def accept_recording(_recording, *, capture_recording=None) -> None:
+        accepted_recordings.append(_recording)
+        if len(accepted_recordings) == 2:
+            window._toggle_continuous_capture()
+
+    monkeypatch.setattr(window, "load_recording", accept_recording)
+    try:
+        window._toggle_continuous_capture()
+        for _index in range(500):
+            QtWidgets.QApplication.processEvents()
+            thread = window._capture_thread
+            if thread is not None:
+                thread.wait(10)
+            QtCore.QThread.msleep(2)
+            if (
+                not window._continuous_run_requested
+                and window._capture_thread is None
+                and window.run_continuous_action.isEnabled()
+            ):
+                break
+        else:
+            raise AssertionError("Bluetooth Continuous did not stop")
+        assert source.capture_count == 2
+        assert len(accepted_recordings) == 2
+        assert window._continuous_capture_count == 2
+        assert source.buffered == [True, True]
+        assert source.stop_count == 1
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_dedicated_le_analyzer_returns_every_packet_in_capture() -> None:
     generated = BluetoothLEWaveformEngine().generate(bluetooth_le_project(BluetoothLEPhy.LE_1M))
     spacer = np.zeros(128, dtype=np.complex64)

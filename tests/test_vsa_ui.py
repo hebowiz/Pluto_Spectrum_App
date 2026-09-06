@@ -2256,6 +2256,37 @@ def test_pluto_continuous_applies_backpressure_and_updates_all_packets(
         QtWidgets.QApplication.processEvents()
 
 
+def test_pluto_continuous_keeps_running_after_transient_failures(
+    tmp_path, monkeypatch
+) -> None:
+    pg.mkQApp("VSA Pluto Continuous transient failure test")
+    window = VSAWindow(
+        preferences=_isolated_preferences(tmp_path, "pluto-continuous-retry")
+    )
+    dialogs: list[str] = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "critical",
+        lambda _parent, _title, message: dialogs.append(str(message)),
+    )
+    try:
+        window._continuous_run_requested = True
+        window._active_analysis_context = {"continuous": True}
+        window._pluto_capture_failed("temporary USB timeout")
+        assert window._continuous_run_requested
+        assert dialogs == []
+
+        generation = window._analysis_generation
+        window._analysis_failed(generation, None, "packet not found")
+        assert window._continuous_run_requested
+        assert "retrying Continuous" in window.statusBar().currentMessage()
+    finally:
+        window._continuous_run_requested = False
+        window._meas_config_dialog.close()
+        window.close()
+        window.deleteLater()
+
+
 def test_run_single_action_stops_pending_power_trigger_wait(tmp_path) -> None:
     pg.mkQApp("VSA Pluto cancellation test")
     started = threading.Event()

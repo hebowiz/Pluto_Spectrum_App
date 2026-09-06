@@ -132,6 +132,12 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._accumulated_packet_tokens: set[tuple[int, int, int]] = set()
         self._capture_thread: PlutoSingleCaptureThread | None = None
         self._analysis_thread: _DectAnalysisThread | None = None
+        self._continuous_run_requested = False
+        self._continuous_capture_settings: PlutoCaptureSettings | None = None
+        self._continuous_capture_count = 0
+        self._continuous_retry_delay_ms = 0
+        self._active_capture_continuous = False
+        self._active_analysis_continuous = False
         self._analysis_plot_ranges: dict[
             str, tuple[list[float], list[float]]
         ] = {}
@@ -176,6 +182,11 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.run_action = run_menu.addAction("Run Single")
         self.run_action.setShortcut(QtGui.QKeySequence("F6"))
         self.run_action.triggered.connect(self._toggle_capture)
+        self.run_continuous_action = run_menu.addAction("Run Continuous")
+        self.run_continuous_action.setShortcut(QtGui.QKeySequence("F7"))
+        self.run_continuous_action.triggered.connect(
+            self._toggle_continuous_capture
+        )
         refresh = run_menu.addAction("Refresh Analysis")
         refresh.setShortcut(QtGui.QKeySequence("F5"))
         refresh.triggered.connect(self.refresh)
@@ -241,9 +252,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         reset.triggered.connect(self._reset_plot_scales)
 
         config_menu = self.menuBar().addMenu("Meas Config")
-        config = config_menu.addAction("Open Meas Config...")
-        config.setShortcut(QtGui.QKeySequence("Ctrl+M"))
-        config.triggered.connect(self._show_config)
+        self.open_config_action = config_menu.addAction("Open Meas Config...")
+        self.open_config_action.setShortcut(QtGui.QKeySequence("Ctrl+M"))
+        self.open_config_action.triggered.connect(self._show_config)
 
         mode_menu = self.menuBar().addMenu("Analysis Mode")
         mode_menu.addAction("Generic FSK / PSK VSA...").triggered.connect(
@@ -312,6 +323,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.trigger_level_spin.setSuffix(" dBm")
         self.device_label = QtWidgets.QLabel("Pluto: Auto")
         self.capture_button = QtWidgets.QPushButton("Single Capture")
+        self.continuous_capture_button = QtWidgets.QPushButton(
+            "Continuous Capture"
+        )
         self.refresh_button = QtWidgets.QPushButton("Refresh Result")
         self.plan_combo.currentIndexChanged.connect(self._plan_changed)
         self.carrier_combo.currentIndexChanged.connect(
@@ -329,6 +343,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             self._display_source_changed
         )
         self.capture_button.clicked.connect(self._toggle_capture)
+        self.continuous_capture_button.clicked.connect(
+            self._toggle_continuous_capture
+        )
         self.refresh_button.clicked.connect(self.refresh)
         self._plan_changed()
         self._sync_analysis_channel_controls()
@@ -473,6 +490,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         run_page = QtWidgets.QWidget()
         run_layout = QtWidgets.QVBoxLayout(run_page)
         run_layout.addWidget(self.capture_button)
+        run_layout.addWidget(self.continuous_capture_button)
         run_layout.addWidget(self.refresh_button)
         run_layout.addStretch(1)
 
@@ -967,6 +985,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         )
 
     def _toggle_capture(self) -> None:
+        if self._continuous_run_requested:
+            return
         if self._analysis_thread is not None and self._analysis_thread.isRunning():
             self._analysis_thread.requestInterruption()
             self.statusBar().showMessage("Stopping DECT analysis...")
@@ -986,11 +1006,63 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         except ValueError as error:
             QtWidgets.QMessageBox.critical(self, "DECT Capture", str(error))
             return
+        self._start_capture(settings, continuous=False)
+
+    def _toggle_continuous_capture(self) -> None:
+        if self._continuous_run_requested:
+            self._continuous_run_requested = False
+            capture = self._capture_thread
+            if capture is not None and capture.isRunning():
+                capture.cancel()
+            self.run_continuous_action.setEnabled(False)
+            self.continuous_capture_button.setEnabled(False)
+            self.statusBar().showMessage(
+                "Stopping DECT Continuous after the active operation..."
+            )
+            if capture is None and self._analysis_thread is None:
+                self._finish_continuous_capture()
+            return
+        if self._capture_thread is not None or self._analysis_thread is not None:
+            self.statusBar().showMessage(
+                "Wait for the current DECT capture/analysis"
+            )
+            return
+        settings = self._capture_settings()
+        try:
+            validate_analysis_channel_capture(
+                sample_rate_hz=settings.requested_sample_rate_hz,
+                usable_bandwidth_hz=settings.nominal_usable_bandwidth_hz,
+                lo_offset_hz=settings.lo_offset_hz,
+                analysis_bandwidth_hz=settings.analysis_bandwidth_hz,
+            )
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "DECT Capture", str(error))
+            return
+        self._continuous_run_requested = True
+        self._continuous_capture_settings = settings
+        self._continuous_capture_count = 0
+        self._continuous_retry_delay_ms = 0
+        self.run_action.setEnabled(False)
+        self.capture_button.setEnabled(False)
+        self.run_continuous_action.setText("Stop Continuous")
+        self.continuous_capture_button.setText("Stop Continuous")
+        self.open_config_action.setEnabled(False)
+        self._config_dialog.setEnabled(False)
+        self._start_capture(settings, continuous=True)
+
+    def _start_capture(
+        self,
+        settings: PlutoCaptureSettings,
+        *,
+        continuous: bool,
+    ) -> None:
+        self._active_capture_continuous = bool(continuous)
         thread = PlutoSingleCaptureThread(
             self._pluto_source,
             settings,
             f"Waiting for DECT burst at {settings.center_frequency_hz / 1e6:.3f} MHz",
             self,
+            prefer_buffered=continuous,
         )
         thread.capture_armed.connect(self.statusBar().showMessage)
         thread.capture_ready.connect(self._capture_ready)
@@ -1002,9 +1074,45 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         thread.finished.connect(thread.deleteLater)
         self._capture_thread = thread
         self.capture_button.setText("Stop Capture")
-        self.run_action.setText("Stop")
+        if not continuous:
+            self.run_action.setText("Stop")
         self.statusBar().showMessage("Preparing Pluto for DECT IQ capture...")
         thread.start()
+
+    def _start_next_continuous_capture(self) -> None:
+        if not self._continuous_run_requested or self._shutdown_requested:
+            self._finish_continuous_capture()
+            return
+        if self._capture_thread is not None or self._analysis_thread is not None:
+            QtCore.QTimer.singleShot(10, self._start_next_continuous_capture)
+            return
+        settings = self._continuous_capture_settings
+        if settings is None:
+            self._finish_continuous_capture()
+            return
+        self._start_capture(settings, continuous=True)
+
+    def _finish_continuous_capture(self) -> None:
+        self._continuous_run_requested = False
+        self._continuous_capture_settings = None
+        self._active_capture_continuous = False
+        stop_stream = getattr(self._pluto_source, "stop_stream", None)
+        if callable(stop_stream):
+            stop_stream()
+        self.run_continuous_action.setText("Run Continuous")
+        self.continuous_capture_button.setText("Continuous Capture")
+        self.run_continuous_action.setEnabled(True)
+        self.continuous_capture_button.setEnabled(True)
+        self.run_action.setEnabled(True)
+        self.capture_button.setEnabled(True)
+        self.open_config_action.setEnabled(True)
+        self._config_dialog.setEnabled(True)
+        self.statusBar().showMessage(
+            "DECT Continuous stopped - "
+            f"{self._continuous_capture_count} capture(s)"
+        )
+        if self._shutdown_requested and self.shutdown_busy_reason() is None:
+            self.shutdown_ready.emit()
 
     @QtCore.Slot(object)
     def _capture_ready(self, recording: object) -> None:
@@ -1017,17 +1125,35 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         except ValueError as error:
             self._capture_failed(str(error))
             return
+        self._continuous_retry_delay_ms = 0
+        if self._active_capture_continuous:
+            self._continuous_capture_count += 1
         self.load_recording(recording, capture_recording=capture_recording)
 
     @QtCore.Slot(str)
     def _capture_failed(self, message: str) -> None:
-        self.statusBar().showMessage(f"DECT capture failed: {message}")
-        if not self._shutdown_requested:
+        if self._continuous_run_requested:
+            self._continuous_retry_delay_ms = 250
+        self.statusBar().showMessage(
+            f"DECT capture failed: {message}"
+            + (" - retrying Continuous" if self._continuous_run_requested else "")
+        )
+        if not self._shutdown_requested and not self._continuous_run_requested:
             QtWidgets.QMessageBox.critical(self, "DECT Capture", message)
 
     @QtCore.Slot()
     def _capture_stopped(self) -> None:
         self._capture_thread = None
+        self._active_capture_continuous = False
+        if self._continuous_capture_settings is not None:
+            if self._continuous_run_requested and self._analysis_thread is None:
+                QtCore.QTimer.singleShot(
+                    self._continuous_retry_delay_ms,
+                    self._start_next_continuous_capture,
+                )
+            elif not self._continuous_run_requested and self._analysis_thread is None:
+                self._finish_continuous_capture()
+            return
         stop_stream = getattr(self._pluto_source, "stop_stream", None)
         if callable(stop_stream):
             stop_stream()
@@ -1045,6 +1171,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         if self._analysis_thread is not None and self._analysis_thread.isRunning():
             self.statusBar().showMessage("DECT analysis is already running")
             return
+        self._active_analysis_continuous = self._active_capture_continuous
         thread = _DectAnalysisThread(
             self._recording, self._nominal_frequency_hz(), self
         )
@@ -1079,6 +1206,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                 )
         self._selected_result_index = 0
         self._result = payload[0]
+        if self._active_analysis_continuous:
+            self._continuous_retry_delay_ms = 0
         self.export_modulation_action.setEnabled(True)
         self._render(self._result)
         self.statusBar().showMessage(
@@ -1088,11 +1217,26 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(str)
     def _analysis_failed(self, message: str) -> None:
-        self.statusBar().showMessage(f"DECT analysis failed: {message}")
+        if self._continuous_run_requested:
+            self._continuous_retry_delay_ms = 250
+        self.statusBar().showMessage(
+            f"DECT analysis failed: {message}"
+            + (" - retrying Continuous" if self._continuous_run_requested else "")
+        )
 
     @QtCore.Slot()
     def _analysis_stopped(self) -> None:
         self._analysis_thread = None
+        self._active_analysis_continuous = False
+        if self._continuous_capture_settings is not None:
+            if self._continuous_run_requested:
+                QtCore.QTimer.singleShot(
+                    self._continuous_retry_delay_ms,
+                    self._start_next_continuous_capture,
+                )
+            else:
+                self._finish_continuous_capture()
+            return
         self.capture_button.setText("Single Capture")
         self.run_action.setText("Run Single")
         if self._shutdown_requested and self.shutdown_busy_reason() is None:
@@ -1512,6 +1656,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
 
     def request_shutdown(self) -> None:
         self._shutdown_requested = True
+        self._continuous_run_requested = False
         if self._capture_thread is not None and self._capture_thread.isRunning():
             self._capture_thread.cancel()
         if self._analysis_thread is not None and self._analysis_thread.isRunning():
