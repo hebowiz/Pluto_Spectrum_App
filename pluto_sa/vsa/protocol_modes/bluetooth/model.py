@@ -85,6 +85,8 @@ from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
     RFTestEligibility,
     RFTestVerdict,
     build_fm_measurement_trace,
+    estimate_p0_from_zero_crossings,
+    frequency_deviation_yield_floor,
     measure_edr_devm,
     measure_edr_guard_time,
     measure_burst_power,
@@ -478,6 +480,8 @@ def _sig_fsk_measurements(
             ),
             profile=filter_profile,
         )
+        p0_timing = estimate_p0_from_zero_crossings(trace, packet.raw_bits)
+        trace = replace(trace, p0_sample=p0_timing.p0_sample)
     except (ValueError, RuntimeError) as error:
         unavailable = RFTestEligibility.from_reasons(
             (*eligibility.reasons, str(error))
@@ -562,20 +566,29 @@ def _sig_fsk_measurements(
         )
     )
     if modulation.delta_f1_avg_hz is not None:
-        metrics.append(
-            BluetoothMetric("sig_delta_f1_avg", "SIG Delta f1avg", _display(modulation.delta_f1_avg_hz, "kHz", 1e3))
+        metrics.extend(
+            (
+                BluetoothMetric("sig_delta_f1_avg", "SIG Delta f1avg", _display(modulation.delta_f1_avg_hz, "kHz", 1e3)),
+                BluetoothMetric("sig_delta_f1_min", "SIG Delta f1 min", _display(float(np.min(modulation.delta_f1_max_hz)), "kHz", 1e3)),
+                BluetoothMetric("sig_delta_f1_max", "SIG Delta f1 max", _display(float(np.max(modulation.delta_f1_max_hz)), "kHz", 1e3)),
+            )
         )
 
     if modulation.delta_f2_avg_hz is not None:
-        metrics.append(
-            BluetoothMetric("sig_delta_f2_avg", "SIG Delta f2avg", _display(modulation.delta_f2_avg_hz, "kHz", 1e3))
+        metrics.extend(
+            (
+                BluetoothMetric("sig_delta_f2_avg", "SIG Delta f2avg", _display(modulation.delta_f2_avg_hz, "kHz", 1e3)),
+                BluetoothMetric("sig_delta_f2_min", "SIG Delta f2 min", _display(float(np.min(modulation.delta_f2_max_hz)), "kHz", 1e3)),
+                BluetoothMetric("sig_delta_f2_max", "SIG Delta f2 max", _display(float(np.max(modulation.delta_f2_max_hz)), "kHz", 1e3)),
+            )
         )
     if modulation.delta_f2_max_hz.size:
+        yield_floor = frequency_deviation_yield_floor(modulation.delta_f2_max_hz)
         metrics.append(
             BluetoothMetric(
                 "sig_delta_f2_p999",
                 "SIG Delta f2max 99.9% Floor",
-                _display(float(np.percentile(modulation.delta_f2_max_hz, 0.1)), "kHz", 1e3),
+                _display(yield_floor, "kHz", 1e3),
             )
         )
     result = BluetoothRFMeasurementResult(
@@ -584,7 +597,12 @@ def _sig_fsk_measurements(
         verdict=RFTestVerdict.NOT_APPLICABLE,
         metrics={
             "delta_f1_avg_hz": modulation.delta_f1_avg_hz,
+            "delta_f1_min_hz": None if not modulation.delta_f1_max_hz.size else float(np.min(modulation.delta_f1_max_hz)),
+            "delta_f1_max_hz": None if not modulation.delta_f1_max_hz.size else float(np.max(modulation.delta_f1_max_hz)),
             "delta_f2_avg_hz": modulation.delta_f2_avg_hz,
+            "delta_f2_min_hz": None if not modulation.delta_f2_max_hz.size else float(np.min(modulation.delta_f2_max_hz)),
+            "delta_f2_max_hz": None if not modulation.delta_f2_max_hz.size else float(np.max(modulation.delta_f2_max_hz)),
+            "delta_f2_p999_floor_hz": frequency_deviation_yield_floor(modulation.delta_f2_max_hz),
             "initial_carrier_error_hz": initial.error_hz,
             "max_drift_from_f0_hz": drift.max_drift_from_f0_hz,
             "max_drift_rate_hz": drift.max_drift_rate_hz,
@@ -595,11 +613,16 @@ def _sig_fsk_measurements(
             "ppk_dbm": power.peak_dbm,
         },
         arrays={
+            "delta_f1_max_hz": modulation.delta_f1_max_hz,
             "delta_f2_max_hz": modulation.delta_f2_max_hz,
+            "delta_f1_payload_bit_indices": modulation.delta_f1_bit_indices,
+            "delta_f2_payload_bit_indices": modulation.delta_f2_bit_indices,
             "fn_hz": drift.fn_hz,
             "frequency_hz": trace.frequency_hz,
             "observed_fsk_deviation_hz": observed_deviation.deviations_hz,
             "f0_selected_bit_indices": initial.selected_bit_indices,
+            "p0_zero_crossing_samples": p0_timing.zero_crossing_samples,
+            "p0_transition_bit_indices": p0_timing.transition_bit_indices,
         },
         metadata={
             "payload_pattern": modulation.payload_pattern,
@@ -609,6 +632,11 @@ def _sig_fsk_measurements(
             "modulation_pattern_eligible": modulation.payload_pattern is not None,
             "filter_profile": filter_profile.value,
             "aggregation_required": True,
+            "p0_method": "RF.TS/RFPHY.TS all packet zero-crossing average",
+            "p0_sample": p0_timing.p0_sample,
+            "p0_coarse_sample": p0_timing.coarse_p0_sample,
+            "p0_correction_samples": p0_timing.correction_samples,
+            "p0_zero_crossing_count": int(p0_timing.zero_crossing_samples.size),
         },
     )
     return tuple(metrics), (result,), trace
@@ -2689,6 +2717,11 @@ def analyze_bluetooth_classic_recording(
                 ),
                 profile=BluetoothRFMeasurementFilterProfile.BR_1M,
             )
+            p0_timing = estimate_p0_from_zero_crossings(
+                fm_trace,
+                packet.raw_bits[:126],
+            )
+            fm_trace = replace(fm_trace, p0_sample=p0_timing.p0_sample)
             fsk_measurement_trace = fm_trace
             initial = measure_initial_carrier_frequency(
                 fm_trace,
@@ -3114,6 +3147,12 @@ def analyze_bluetooth_classic_recording(
                         "omega_i_selected_header_bit_indices": (
                             initial.selected_bit_indices
                         ),
+                        "p0_zero_crossing_samples": (
+                            p0_timing.zero_crossing_samples
+                        ),
+                        "p0_transition_bit_indices": (
+                            p0_timing.transition_bit_indices
+                        ),
                     },
                     metadata={
                         "trailer_excluded_from_devm": True,
@@ -3135,6 +3174,13 @@ def analyze_bluetooth_classic_recording(
                         ),
                         "trailer_first_symbol_center_sample": (
                             edr_trailer_first_center_sample
+                        ),
+                        "p0_method": "RF.TS all packet zero-crossing average",
+                        "p0_sample": p0_timing.p0_sample,
+                        "p0_coarse_sample": p0_timing.coarse_p0_sample,
+                        "p0_correction_samples": p0_timing.correction_samples,
+                        "p0_zero_crossing_count": int(
+                            p0_timing.zero_crossing_samples.size
                         ),
                     },
                 ),

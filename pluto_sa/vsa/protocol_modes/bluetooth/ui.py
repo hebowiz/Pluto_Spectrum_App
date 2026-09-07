@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 
@@ -79,6 +79,104 @@ _STARTUP_CONFIG_KEY = "bluetooth_dedicated/startup_meas_config"
 _STARTUP_CONFIG_SCHEMA = "pluto-vsa-bluetooth-dedicated-config"
 _STARTUP_CONFIG_VERSION = 1
 _FREQUENCY_CONSTELLATION_X_LIMIT = FREQUENCY_CONSTELLATION_X_LIMIT
+
+
+@dataclass(frozen=True)
+class _EDRDiagnosticPlotData:
+    time_ms: np.ndarray
+    measured_phase_pi: np.ndarray
+    reference_phase_pi: np.ndarray
+    phase_error_pi: np.ndarray
+    devm_percent: np.ndarray
+
+
+def _edr_diagnostic_plot_data(
+    result: BluetoothDedicatedResult,
+    *,
+    sample_rate_hz: float,
+) -> _EDRDiagnosticPlotData | None:
+    """Build time-based plots from the exact block inputs used by DEVM."""
+
+    measurement = next(
+        (
+            item
+            for item in result.metadata.get("rf_measurements", ())
+            if getattr(item, "test_case_id", "") == "bluetooth.edr"
+        ),
+        None,
+    )
+    if measurement is None or sample_rate_hz <= 0.0:
+        return None
+    centers = np.asarray(
+        measurement.arrays.get("block_physical_symbol_center_samples", ()),
+        dtype=np.float64,
+    )
+    received = np.asarray(
+        measurement.arrays.get("block_corrected_received_symbols", ()),
+        dtype=np.complex128,
+    )
+    reference = np.asarray(
+        measurement.arrays.get("block_reference_symbols", ()),
+        dtype=np.complex128,
+    )
+    devm = np.asarray(
+        measurement.arrays.get("symbol_devm", ()), dtype=np.float64
+    )
+    if (
+        centers.ndim != 2
+        or received.ndim != 2
+        or reference.ndim != 2
+        or centers.shape[1] < 2
+    ):
+        return None
+    block_count = min(centers.shape[0], received.shape[0], reference.shape[0])
+    symbol_count = min(
+        centers.shape[1] - 1,
+        received.shape[1] - 1,
+        reference.shape[1] - 1,
+    )
+    if block_count <= 0 or symbol_count <= 0:
+        return None
+    devm_count = min(devm.size, block_count * symbol_count)
+    if devm_count <= 0:
+        return None
+    block_count = min(block_count, devm_count // symbol_count)
+    centers = centers[:block_count, : symbol_count + 1]
+    received = received[:block_count, : symbol_count + 1]
+    reference = reference[:block_count, : symbol_count + 1]
+    devm = devm[: block_count * symbol_count].reshape(block_count, symbol_count)
+    recording_offset = float(result.metadata.get("recording_sample_offset", 0))
+    time_blocks_ms = (
+        (centers[:, 1:] + recording_offset) / float(sample_rate_hz) * 1e3
+    )
+    measured_phase_pi = np.angle(
+        received[:, 1:] * np.conj(received[:, :-1])
+    ) / np.pi
+    reference_phase_pi = np.angle(
+        reference[:, 1:] * np.conj(reference[:, :-1])
+    ) / np.pi
+    phase_error_pi = np.angle(
+        (
+            received[:, 1:]
+            * np.conj(received[:, :-1])
+            * np.conj(reference[:, 1:] * np.conj(reference[:, :-1]))
+        )
+    ) / np.pi
+
+    # NaN separates independently optimized 50-symbol blocks so the display
+    # does not invent a connecting segment across a block boundary.
+    gap = np.full((block_count, 1), np.nan, dtype=np.float64)
+    return _EDRDiagnosticPlotData(
+        time_ms=np.concatenate((time_blocks_ms, gap), axis=1).reshape(-1),
+        measured_phase_pi=np.concatenate(
+            (measured_phase_pi, gap), axis=1
+        ).reshape(-1),
+        reference_phase_pi=np.concatenate(
+            (reference_phase_pi, gap), axis=1
+        ).reshape(-1),
+        phase_error_pi=np.concatenate((phase_error_pi, gap), axis=1).reshape(-1),
+        devm_percent=np.concatenate((100.0 * devm, gap), axis=1).reshape(-1),
+    )
 
 
 def _hdt_modulation_name(name: str) -> str:
@@ -850,6 +948,8 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             ("spectrum", self.spectrum_plot),
             ("fsk_modulation", self.fsk_modulation_plot),
             ("psk_modulation", self.psk_modulation_plot),
+            ("psk_phase_difference", self.psk_phase_difference_plot),
+            ("psk_devm", self.psk_devm_plot),
             ("fsk_symbol", self.fsk_symbol_plot),
             ("psk_symbol", self.psk_symbol_plot),
         )
@@ -933,8 +1033,19 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.modulation_tabs = QtWidgets.QTabWidget()
         self.fsk_modulation_plot = make_measurement_plot("Frequency (kHz)", "Time (ms)")
         self.psk_modulation_plot = make_measurement_plot("Q", "I")
+        self.psk_phase_difference_plot = make_measurement_plot(
+            "Phase Difference (rad/pi)", "Time (ms)"
+        )
+        self.psk_phase_difference_plot.addLegend(offset=(10, 10))
+        self.psk_devm_plot = make_measurement_plot("DEVM (%)", "Time (ms)")
         self.modulation_tabs.addTab(self.fsk_modulation_plot, "FSK - Instantaneous Frequency")
         self.modulation_tabs.addTab(self.psk_modulation_plot, "PSK - Vector")
+        self.modulation_tabs.addTab(
+            self.psk_phase_difference_plot, "PSK - Phase Difference"
+        )
+        self.modulation_tabs.addTab(self.psk_devm_plot, "PSK - DEVM")
+        self.modulation_tabs.setTabVisible(2, False)
+        self.modulation_tabs.setTabVisible(3, False)
         self.modulation_plot = self.fsk_modulation_plot
         self.modulation_dock = self._dock("Modulation", self.modulation_tabs)
         self.splitDockWidget(self.power_dock, self.modulation_dock, QtCore.Qt.Orientation.Vertical)
@@ -2212,6 +2323,8 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
 
         self.fsk_modulation_plot.clear()
         self.psk_modulation_plot.clear()
+        self.psk_phase_difference_plot.clear()
+        self.psk_devm_plot.clear()
         self.fsk_symbol_plot.clear()
         self.psk_symbol_plot.clear()
         self._configure_fsk_modulation_plot(iq_plane=is_hdt)
@@ -2297,6 +2410,18 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 fsk_pattern.symbol_time_s if fsk_pattern is not None else (),
                 dtype=np.float64,
             )
+            if (
+                isinstance(measurement_trace, BluetoothFMMeasurementTrace)
+                and symbol_time_s.size
+            ):
+                # RF.TS/RFPHY.TS p0 is the common timing anchor for the SIG
+                # measurement windows and dedicated FSK displays.  Decoder
+                # refinement remains internal and cannot move this grid.
+                symbol_time_s = (
+                    measurement_trace.p0_sample
+                    + (np.arange(symbol_time_s.size, dtype=np.float64) + 0.5)
+                    * measurement_trace.samples_per_symbol
+                ) / measurement_trace.sample_rate_hz
             if (
                 result.packet.protocol_id == "bluetooth.le"
                 and fsk_session is session
@@ -2584,10 +2709,73 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self._plot_symbol_vectors(self.psk_symbol_plot, symbols)
             self._plot_unit_circle(self.psk_symbol_plot)
             self._set_iq_plane_range(self.psk_symbol_plot)
+            diagnostic = _edr_diagnostic_plot_data(
+                result, sample_rate_hz=recording.sample_rate_hz
+            )
+            if diagnostic is not None:
+                self.psk_phase_difference_plot.plot(
+                    diagnostic.time_ms,
+                    diagnostic.measured_phase_pi,
+                    pen=_TRACE,
+                    name="Measured",
+                )
+                self.psk_phase_difference_plot.plot(
+                    diagnostic.time_ms,
+                    diagnostic.reference_phase_pi,
+                    pen=pg.mkPen(0, 220, 220, 190, width=1),
+                    name="Reference",
+                )
+                self.psk_phase_difference_plot.plot(
+                    diagnostic.time_ms,
+                    diagnostic.phase_error_pi,
+                    pen=pg.mkPen(255, 96, 192, 210, width=1),
+                    name="Phase Error",
+                )
+                if self._show_symbol_points:
+                    finite_phase = np.isfinite(diagnostic.time_ms)
+                    plot_trace_symbol_points(
+                        self.psk_phase_difference_plot,
+                        diagnostic.time_ms[finite_phase],
+                        diagnostic.measured_phase_pi[finite_phase],
+                    )
+                self.psk_phase_difference_plot.setYRange(
+                    -1.05, 1.05, padding=0.0
+                )
+                self.psk_devm_plot.plot(
+                    diagnostic.time_ms,
+                    diagnostic.devm_percent,
+                    pen=_TRACE,
+                )
+                if self._show_symbol_points:
+                    finite_devm = np.isfinite(diagnostic.time_ms)
+                    plot_trace_symbol_points(
+                        self.psk_devm_plot,
+                        diagnostic.time_ms[finite_devm],
+                        diagnostic.devm_percent[finite_devm],
+                    )
+                finite_devm_values = diagnostic.devm_percent[
+                    np.isfinite(diagnostic.devm_percent)
+                ]
+                devm_upper = (
+                    max(5.0, 1.10 * float(np.max(finite_devm_values)))
+                    if finite_devm_values.size
+                    else 5.0
+                )
+                self.psk_devm_plot.setYRange(0.0, devm_upper, padding=0.0)
+        is_edr = is_psk and not is_hdt
         self.modulation_tabs.setTabVisible(1, is_psk)
+        self.modulation_tabs.setTabVisible(2, is_edr)
+        self.modulation_tabs.setTabVisible(3, is_edr)
         self.symbol_tabs.setTabVisible(1, is_psk)
+        visible_modulation_tabs = {0}
+        if is_psk:
+            visible_modulation_tabs.add(1)
+        if is_edr:
+            visible_modulation_tabs.update((2, 3))
         self.modulation_tabs.setCurrentIndex(
-            modulation_tab_index if is_psk and modulation_tab_index == 1 else 0
+            modulation_tab_index
+            if modulation_tab_index in visible_modulation_tabs
+            else 0
         )
         self.symbol_tabs.setCurrentIndex(
             symbol_tab_index if is_psk and symbol_tab_index == 1 else 0

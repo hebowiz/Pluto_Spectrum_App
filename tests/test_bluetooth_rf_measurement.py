@@ -17,7 +17,10 @@ from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
     BluetoothRFMeasurementResult,
     RFTestEligibility,
     RFTestVerdict,
+    estimate_p0_from_zero_crossings,
+    frequency_deviation_yield_floor,
     measure_burst_power,
+    measure_modulation_characteristics,
     measure_observed_fsk_deviation,
     measure_pre_packet_emissions,
     rf_test_channel_filter_taps,
@@ -95,6 +98,148 @@ def test_observed_fsk_deviation_removes_cfo_without_payload_pattern() -> None:
     assert measured.percentile_99_9_hz == pytest.approx(200_000.0)
     assert measured.max_abs_hz == pytest.approx(200_000.0)
     assert measured.deviations_hz.size == 4 * 32
+
+
+def test_sig_p0_uses_average_of_all_packet_zero_crossings() -> None:
+    sample_rate_hz = 8e6
+    symbol_rate_hz = 1e6
+    samples_per_symbol = 8
+    bits = np.asarray([1, 0, 1, 1, 0, 1, 0, 0, 1], dtype=np.uint8)
+    true_p0_sample = 11.35
+    sample_axis = np.arange(96, dtype=np.float64)
+    # A smooth transition through the nominal carrier at every bit boundary.
+    levels = 2.0 * bits.astype(np.float64) - 1.0
+    boundaries = true_p0_sample + np.arange(bits.size + 1) * samples_per_symbol
+    frequency_hz = np.empty(sample_axis.size, dtype=np.float64)
+    centers = true_p0_sample + (np.arange(bits.size) + 0.5) * samples_per_symbol
+    frequency_hz[:] = np.interp(
+        sample_axis,
+        centers,
+        levels * 160_000.0,
+        left=levels[0] * 160_000.0,
+        right=levels[-1] * 160_000.0,
+    )
+    trace = BluetoothFMMeasurementTrace(
+        time_s=sample_axis / sample_rate_hz,
+        frequency_hz=frequency_hz,
+        p0_sample=true_p0_sample + 0.8,
+        sample_rate_hz=sample_rate_hz,
+        symbol_rate_hz=symbol_rate_hz,
+        samples_per_symbol=float(samples_per_symbol),
+        filter_profile=BluetoothRFMeasurementFilterProfile.BR_1M,
+    )
+
+    timing = estimate_p0_from_zero_crossings(trace, bits)
+
+    assert timing.p0_sample == pytest.approx(true_p0_sample, abs=1e-12)
+    assert timing.correction_samples == pytest.approx(-0.8, abs=1e-12)
+    np.testing.assert_array_equal(
+        timing.transition_bit_indices,
+        np.flatnonzero(bits[1:] != bits[:-1]) + 1,
+    )
+    np.testing.assert_allclose(
+        timing.zero_crossing_samples,
+        boundaries[timing.transition_bit_indices],
+        atol=1e-12,
+    )
+
+
+def _fsk_modulation_trace(
+    bit_samples_hz: np.ndarray,
+    profile: BluetoothRFMeasurementFilterProfile,
+) -> BluetoothFMMeasurementTrace:
+    samples = np.asarray(bit_samples_hz, dtype=np.float64)
+    sample_rate_hz = float(samples.shape[1]) * 1e6
+    frequency_hz = samples.reshape(-1)
+    return BluetoothFMMeasurementTrace(
+        time_s=np.arange(frequency_hz.size, dtype=np.float64) / sample_rate_hz,
+        frequency_hz=frequency_hz,
+        p0_sample=0.0,
+        sample_rate_hz=sample_rate_hz,
+        symbol_rate_hz=1e6,
+        samples_per_symbol=float(samples.shape[1]),
+        filter_profile=profile,
+    )
+
+
+@pytest.mark.parametrize(
+    ("profile", "repetitions", "expected_indices"),
+    (
+        (
+            BluetoothRFMeasurementFilterProfile.BR_1M,
+            3,
+            np.asarray((5, 6, 9, 10, 13, 14, 17, 18)),
+        ),
+        (
+            BluetoothRFMeasurementFilterProfile.LE_1M,
+            3,
+            np.asarray((5, 6, 9, 10, 13, 14, 17, 18)),
+        ),
+    ),
+)
+def test_sig_delta_f1_uses_only_inner_bits_of_each_eight_bit_sequence(
+    profile: BluetoothRFMeasurementFilterProfile,
+    repetitions: int,
+    expected_indices: np.ndarray,
+) -> None:
+    bits = np.tile(np.asarray((1, 1, 1, 1, 0, 0, 0, 0)), repetitions)
+    magnitudes = np.tile(
+        np.asarray((100, 150, 160, 100, 100, 150, 160, 100)) * 1e3,
+        repetitions,
+    )
+    levels = np.where(bits == 1, magnitudes, -magnitudes)
+    trace = _fsk_modulation_trace(np.repeat(levels[:, None], 64, axis=1), profile)
+
+    measured = measure_modulation_characteristics(
+        trace,
+        bits,
+        payload_start_symbol=0,
+    )
+
+    assert measured.delta_f1_avg_hz == pytest.approx(155_000.0)
+    np.testing.assert_array_equal(measured.delta_f1_bit_indices, expected_indices)
+    np.testing.assert_allclose(
+        measured.delta_f1_max_hz,
+        np.tile((150_000.0, 160_000.0, 150_000.0, 160_000.0), 2),
+    )
+
+
+def test_frequency_deviation_yield_floor_is_an_observed_compliant_value() -> None:
+    values = np.arange(2_000, dtype=np.float64)
+
+    floor = frequency_deviation_yield_floor(values)
+
+    assert floor == 2.0
+    assert np.mean(values >= floor) >= 0.999
+    assert np.mean(values >= 3.0) < 0.999
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected_indices"),
+    (
+        (BluetoothRFMeasurementFilterProfile.BR_1M, np.arange(1, 17)),
+        (BluetoothRFMeasurementFilterProfile.LE_1M, np.arange(4, 20)),
+    ),
+)
+def test_sig_delta_f2_uses_full_bit_maxima_and_prescribed_payload_range(
+    profile: BluetoothRFMeasurementFilterProfile,
+    expected_indices: np.ndarray,
+) -> None:
+    bits = np.tile(np.asarray((1, 0)), 12)
+    signs = np.where(bits == 1, 1.0, -1.0)
+    samples = np.repeat((signs * 100_000.0)[:, None], 64, axis=1)
+    samples[:, 31] = signs * 180_000.0
+    trace = _fsk_modulation_trace(samples, profile)
+
+    measured = measure_modulation_characteristics(
+        trace,
+        bits,
+        payload_start_symbol=0,
+    )
+
+    assert measured.delta_f2_avg_hz == pytest.approx(180_000.0)
+    np.testing.assert_allclose(measured.delta_f2_max_hz, 180_000.0)
+    np.testing.assert_array_equal(measured.delta_f2_bit_indices, expected_indices)
 
 
 def test_hdt_pre_packet_emissions_uses_linear_power_thresholds() -> None:
@@ -315,6 +460,7 @@ def test_rf_accumulator_combines_fsk_patterns_and_all_delta_f2_samples() -> None
             "bluetooth.fsk",
             RFTestEligibility(True),
             metrics={"delta_f1_avg_hz": 160_000.0, "delta_f2_avg_hz": None},
+            arrays={"delta_f1_max_hz": np.array([150_000.0, 170_000.0])},
             metadata={"payload_pattern": "11110000", "filter_profile": "br_1m"},
         )
     )
@@ -336,12 +482,44 @@ def test_rf_accumulator_combines_fsk_patterns_and_all_delta_f2_samples() -> None
     assert aggregate.metrics["delta_f1_avg_hz"] == pytest.approx(160_000.0)
     assert aggregate.metrics["delta_f2_avg_hz"] == pytest.approx(140_000.0)
     assert aggregate.metrics["delta_f2_ratio"] == pytest.approx(0.875)
-    assert aggregate.metrics["delta_f2_p999_floor_hz"] == pytest.approx(100_040.0)
+    assert aggregate.metrics["delta_f1_min_hz"] == pytest.approx(150_000.0)
+    assert aggregate.metrics["delta_f1_max_hz"] == pytest.approx(170_000.0)
+    assert aggregate.metrics["delta_f2_min_hz"] == pytest.approx(100_000.0)
+    assert aggregate.metrics["delta_f2_max_hz"] == pytest.approx(130_000.0)
+    assert aggregate.metrics["delta_f2_p999_floor_hz"] == pytest.approx(100_000.0)
     assert aggregate.verdict is RFTestVerdict.FAIL
     np.testing.assert_array_equal(
         aggregate.arrays["delta_f2_max_hz"],
         np.array([100_000.0, 120_000.0, 130_000.0]),
     )
+
+
+def test_rf_accumulator_uses_cmw_worst_packet_modulation_ratio() -> None:
+    accumulator = BluetoothRFTestAccumulator()
+    for value in (150_000.0, 170_000.0):
+        accumulator.add(
+            BluetoothRFMeasurementResult(
+                "bluetooth.fsk",
+                RFTestEligibility(True),
+                metrics={"delta_f1_avg_hz": value, "delta_f2_avg_hz": None},
+                arrays={"delta_f1_max_hz": np.array([value])},
+                metadata={"payload_pattern": "11110000", "filter_profile": "br_1m"},
+            )
+        )
+    for value in (140_000.0, 130_000.0):
+        accumulator.add(
+            BluetoothRFMeasurementResult(
+                "bluetooth.fsk",
+                RFTestEligibility(True),
+                metrics={"delta_f1_avg_hz": None, "delta_f2_avg_hz": value},
+                arrays={"delta_f2_max_hz": np.array([value])},
+                metadata={"payload_pattern": "10101010", "filter_profile": "br_1m"},
+            )
+        )
+
+    aggregate = accumulator.aggregate_fsk()
+
+    assert aggregate.metrics["delta_f2_ratio"] == pytest.approx(130.0 / 170.0)
 
 
 def test_rf_accumulator_tracks_hdt_packet_evm_qualification() -> None:

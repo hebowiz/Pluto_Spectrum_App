@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .fm import frequency_deviation_yield_floor
 from .model import (
     BluetoothRFMeasurementResult,
     RFTestEligibility,
@@ -265,6 +266,16 @@ class BluetoothRFTestAccumulator:
             if f2_max_arrays
             else np.empty(0, dtype=np.float64)
         )
+        f1_max_arrays = [
+            result.arrays.get("delta_f1_max_hz", np.empty(0))
+            for result in fsk
+            if result.metrics.get("delta_f1_avg_hz") is not None
+        ]
+        f1_max = (
+            np.concatenate(f1_max_arrays)
+            if f1_max_arrays
+            else np.empty(0, dtype=np.float64)
+        )
         if not f1.size:
             reasons = (*reasons, "requires at least one 11110000 packet")
         if not f2.size:
@@ -272,14 +283,14 @@ class BluetoothRFTestAccumulator:
         eligibility = RFTestEligibility.from_reasons(reasons)
         f1_avg = float(np.mean(f1)) if f1.size else None
         f2_avg = float(np.mean(f2)) if f2.size else None
+        # CMW/RF.TS uses the worst packet pairing, not the ratio between
+        # statistics-cycle means.
         ratio = (
-            f2_avg / f1_avg
-            if f1_avg is not None and f2_avg is not None and f1_avg > 0.0
+            float(np.min(f2)) / float(np.max(f1))
+            if f1.size and f2.size and float(np.max(f1)) > 0.0
             else None
         )
-        f2_p999_floor = (
-            float(np.percentile(f2_max, 0.1)) if f2_max.size else None
-        )
+        f2_p999_floor = frequency_deviation_yield_floor(f2_max)
         filter_profiles = {
             str(result.metadata.get("filter_profile", "")) for result in fsk
         }
@@ -305,12 +316,17 @@ class BluetoothRFTestAccumulator:
                 "delta_f1_packet_count": int(f1.size),
                 "delta_f2_packet_count": int(f2.size),
                 "delta_f1_avg_hz": f1_avg,
+                "delta_f1_min_hz": float(np.min(f1_max)) if f1_max.size else None,
+                "delta_f1_max_hz": float(np.max(f1_max)) if f1_max.size else None,
                 "delta_f2_avg_hz": f2_avg,
+                "delta_f2_min_hz": float(np.min(f2_max)) if f2_max.size else None,
+                "delta_f2_max_hz": float(np.max(f2_max)) if f2_max.size else None,
                 "delta_f2_p999_floor_hz": f2_p999_floor,
                 "delta_f2_ratio": ratio,
             },
             arrays={
                 "delta_f1_packet_hz": f1,
+                "delta_f1_max_hz": f1_max,
                 "delta_f2_packet_hz": f2,
                 "delta_f2_max_hz": f2_max,
             },

@@ -36,6 +36,7 @@ from .rf_measurement.limits import (
     OUTPUT_POWER_LIMIT_DEPENDENCY,
 )
 from .rf_measurement.model import BluetoothRFMeasurementResult
+from .rf_measurement.fm import frequency_deviation_yield_floor
 
 if TYPE_CHECKING:
     from .model import BluetoothDedicatedResult, BluetoothMetric
@@ -192,16 +193,23 @@ def build_fsk_summary(
         aggregate = None
     per_metrics = measurement.metrics if measurement is not None else {}
     aggregate_metrics = aggregate.metrics if aggregate is not None else {}
-    f1 = aggregate_metrics.get("delta_f1_avg_hz", per_metrics.get("delta_f1_avg_hz"))
+    def cycle_metric(name: str) -> object:
+        value = aggregate_metrics.get(name)
+        return per_metrics.get(name) if value is None else value
+
+    f1 = cycle_metric("delta_f1_avg_hz")
+    f1_min = cycle_metric("delta_f1_min_hz")
+    f1_max = cycle_metric("delta_f1_max_hz")
+    f2_avg = cycle_metric("delta_f2_avg_hz")
+    f2_min = cycle_metric("delta_f2_min_hz")
+    f2_max = cycle_metric("delta_f2_max_hz")
     per_f2 = (
         np.asarray(measurement.arrays.get("delta_f2_max_hz", ()), dtype=np.float64)
         if measurement is not None
         else np.empty(0, dtype=np.float64)
     )
     per_f2 = per_f2[np.isfinite(per_f2)]
-    per_f2_floor = (
-        float(np.percentile(per_f2, 0.1)) if per_f2.size else None
-    )
+    per_f2_floor = frequency_deviation_yield_floor(per_f2)
     f2_floor = aggregate_metrics.get("delta_f2_p999_floor_hz", per_f2_floor)
     ratio = aggregate_metrics.get("delta_f2_ratio")
     f1_count = int(
@@ -299,6 +307,36 @@ def build_fsk_summary(
                 f1_number is not None and f1_low <= f1_number <= f1_high
             ),
             "delta_f1_avg",
+        ),
+        BluetoothSummaryRow(
+            RF_PHY_MEASUREMENTS,
+            "\N{GREEK CAPITAL LETTER DELTA}f1 min",
+            _display_unsigned(f1_min, "kHz", 1e3),
+            metric_id="delta_f1_min",
+        ),
+        BluetoothSummaryRow(
+            RF_PHY_MEASUREMENTS,
+            "\N{GREEK CAPITAL LETTER DELTA}f1 max",
+            _display_unsigned(f1_max, "kHz", 1e3),
+            metric_id="delta_f1_max",
+        ),
+        BluetoothSummaryRow(
+            RF_PHY_MEASUREMENTS,
+            "\N{GREEK CAPITAL LETTER DELTA}f2 avg",
+            _display_unsigned(f2_avg, "kHz", 1e3),
+            metric_id="delta_f2_avg",
+        ),
+        BluetoothSummaryRow(
+            RF_PHY_MEASUREMENTS,
+            "\N{GREEK CAPITAL LETTER DELTA}f2 min",
+            _display_unsigned(f2_min, "kHz", 1e3),
+            metric_id="delta_f2_min",
+        ),
+        BluetoothSummaryRow(
+            RF_PHY_MEASUREMENTS,
+            "\N{GREEK CAPITAL LETTER DELTA}f2 max",
+            _display_unsigned(f2_max, "kHz", 1e3),
+            metric_id="delta_f2_max",
         ),
         BluetoothSummaryRow(
             RF_PHY_MEASUREMENTS,

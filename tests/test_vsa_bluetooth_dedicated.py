@@ -912,6 +912,8 @@ def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> 
         assert window.modulation_tabs.tabText(0) == "QPSK Header"
         assert window.modulation_tabs.tabText(1) == "16QAM Payload"
         assert window.modulation_tabs.isTabVisible(1)
+        assert not window.modulation_tabs.isTabVisible(2)
+        assert not window.modulation_tabs.isTabVisible(3)
         assert window.symbol_tabs.isTabVisible(1)
         assert len(window.fsk_symbol_plot.listDataItems()) > 0
         assert len(window.psk_symbol_plot.listDataItems()) > 0
@@ -1254,6 +1256,12 @@ def test_le_rf_test_packet_produces_eligible_raw_sig_measurements(
         measurement_trace.frequency_hz,
         measurement.arrays["frequency_hz"],
     )
+    assert measurement.metadata["p0_method"].startswith("RF.TS/RFPHY.TS")
+    assert measurement.metadata["p0_zero_crossing_count"] > 0
+    assert np.isfinite(measurement.metadata["p0_sample"])
+    assert measurement.metadata["p0_correction_samples"] == pytest.approx(
+        -0.5, abs=0.1
+    )
     assert measurement.eligibility.eligible is True
     assert measurement.metadata["payload_pattern"] == "10101010"
     assert measurement.metrics["delta_f2_avg_hz"] is not None
@@ -1263,6 +1271,11 @@ def test_le_rf_test_packet_produces_eligible_raw_sig_measurements(
     assert [row.metric_id for row in result.summary_rows] == [
         "output_power",
         "delta_f1_avg",
+        "delta_f1_min",
+        "delta_f1_max",
+        "delta_f2_avg",
+        "delta_f2_min",
+        "delta_f2_max",
         "delta_f2_p999",
         "delta_f2_ratio",
         "initial_carrier_frequency",
@@ -1339,11 +1352,21 @@ def test_br_rf_test_packet_produces_eligible_raw_sig_measurements() -> None:
 
     measurement = result.metadata["rf_measurements"][0]
     assert measurement.eligibility.eligible is True
+    assert measurement.metadata["p0_method"].startswith("RF.TS/RFPHY.TS")
+    assert measurement.metadata["p0_zero_crossing_count"] > 0
+    assert measurement.metadata["p0_correction_samples"] == pytest.approx(
+        -0.5, abs=0.1
+    )
     assert measurement.metadata["payload_pattern"] == "10101010"
     assert measurement.metrics["delta_f2_avg_hz"] is not None
     assert [row.metric_id for row in result.summary_rows] == [
         "output_power",
         "delta_f1_avg",
+        "delta_f1_min",
+        "delta_f1_max",
+        "delta_f2_avg",
+        "delta_f2_min",
+        "delta_f2_max",
         "delta_f2_p999",
         "delta_f2_ratio",
         "initial_carrier_frequency",
@@ -1420,6 +1443,15 @@ def test_br_arbitrary_payload_keeps_reference_fsk_deviation_metrics() -> None:
     ):
         assert summary[metric_id].value == "N/A"
         assert summary[metric_id].result == "N/A"
+    for metric_id in (
+        "delta_f1_min",
+        "delta_f1_max",
+        "delta_f2_avg",
+        "delta_f2_min",
+        "delta_f2_max",
+    ):
+        assert summary[metric_id].value == "N/A"
+        assert summary[metric_id].result == "\N{EM DASH}"
     for metric_id in (
         "initial_carrier_frequency",
         "carrier_frequency_drift",
@@ -2227,6 +2259,17 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
             np.interp(fsk_markers.xData, fsk_trace.xData, fsk_trace.yData),
             atol=1e-9,
         )
+        measurement_trace = result.metadata["fsk_measurement_trace"]
+        expected_fsk_marker_time_ms = (
+            measurement_trace.p0_sample
+            + (np.arange(fsk_markers.xData.size, dtype=np.float64) + 0.5)
+            * measurement_trace.samples_per_symbol
+        ) / measurement_trace.sample_rate_hz * 1e3
+        np.testing.assert_allclose(
+            fsk_markers.xData,
+            expected_fsk_marker_time_ms,
+            atol=1e-12,
+        )
         fsk_symbol_values = window.fsk_symbol_plot.listDataItems()[0].yData
         np.testing.assert_array_equal(fsk_symbol_values, fsk_markers.yData)
         window._set_fsk_symbol_plot_mode("Phase Difference")
@@ -2235,7 +2278,66 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
             [-240.0, 240.0],
         )
         assert window.modulation_tabs.isTabVisible(1)
+        assert window.modulation_tabs.isTabVisible(2)
+        assert window.modulation_tabs.isTabVisible(3)
+        assert window.modulation_tabs.tabText(2) == "PSK - Phase Difference"
+        assert window.modulation_tabs.tabText(3) == "PSK - DEVM"
         assert window.symbol_tabs.isTabVisible(1)
+        assert (
+            window.psk_phase_difference_plot.getAxis("bottom").labelText
+            == "Time (ms)"
+        )
+        assert window.psk_devm_plot.getAxis("bottom").labelText == "Time (ms)"
+        measurement = result.metadata["rf_measurements"][0]
+        block_centers = measurement.arrays[
+            "block_physical_symbol_center_samples"
+        ]
+        block_received = measurement.arrays[
+            "block_corrected_received_symbols"
+        ]
+        block_reference = measurement.arrays["block_reference_symbols"]
+        expected_time_ms = (
+            block_centers[0, 1:] / window._recording.sample_rate_hz * 1e3
+        )
+        expected_measured_phase = np.angle(
+            block_received[0, 1:] * np.conj(block_received[0, :-1])
+        ) / np.pi
+        expected_reference_phase = np.angle(
+            block_reference[0, 1:] * np.conj(block_reference[0, :-1])
+        ) / np.pi
+        expected_phase_error = np.angle(
+            (
+                block_received[0, 1:]
+                * np.conj(block_received[0, :-1])
+                * np.conj(
+                    block_reference[0, 1:]
+                    * np.conj(block_reference[0, :-1])
+                )
+            )
+        ) / np.pi
+        phase_measured, phase_reference, phase_error = (
+            window.psk_phase_difference_plot.listDataItems()[:3]
+        )
+        np.testing.assert_allclose(
+            phase_measured.xData[:50], expected_time_ms
+        )
+        np.testing.assert_allclose(
+            phase_measured.yData[:50], expected_measured_phase
+        )
+        np.testing.assert_allclose(
+            phase_reference.yData[:50], expected_reference_phase
+        )
+        np.testing.assert_allclose(
+            phase_error.yData[:50], expected_phase_error
+        )
+        np.testing.assert_allclose(
+            window.psk_devm_plot.listDataItems()[0].xData[:50],
+            expected_time_ms,
+        )
+        np.testing.assert_allclose(
+            window.psk_devm_plot.listDataItems()[0].yData[:50],
+            100.0 * measurement.arrays["symbol_devm"][:50],
+        )
         assert len(window.spectrum_plot.listDataItems()) == 2
         assert len(window.spectrum_legend.items) == 2
         analysis_recording = window._recording
@@ -2277,6 +2379,8 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
             "spectrum",
             "fsk_modulation",
             "psk_modulation",
+            "psk_phase_difference",
+            "psk_devm",
             "fsk_symbol",
             "psk_symbol",
         }
