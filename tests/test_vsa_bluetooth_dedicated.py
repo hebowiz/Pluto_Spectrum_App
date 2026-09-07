@@ -2202,6 +2202,9 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
             "Analysis Mode",
         ]
         assert window.run_action.shortcut().toString() == "F6"
+        assert window.clear_measurement_history_action.text() == (
+            "Clear Measurement History"
+        )
         assert window.open_iq_action.text() == "Open IQ..."
         assert window.open_iq_action.shortcut() == QtGui.QKeySequence(
             QtGui.QKeySequence.StandardKey.Open

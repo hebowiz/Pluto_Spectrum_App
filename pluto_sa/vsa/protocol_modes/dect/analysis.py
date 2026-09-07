@@ -10,6 +10,7 @@ import numpy as np
 from scipy.optimize import least_squares
 
 from pluto_protocol.dect.classic import DectClassicDecoder
+from pluto_protocol.dect.rf_modulation import identify_rf_pattern
 from pluto_protocol.model import (
     PacketAnalysisResult,
     PacketDecodeInput,
@@ -30,8 +31,10 @@ from .generator import (
 )
 from .modulation import (
     DectFrequencyReferences,
+    DECTDeviationBitResult,
     DectModulationReference,
     cts60_trace,
+    deviation_bit_results,
     eligible_peak_sample_mask,
     frequency_references,
     instantaneous_frequency,
@@ -115,6 +118,7 @@ class DectPacketResult:
     instantaneous_frequency_hz: np.ndarray
     instantaneous_frequency_sample: np.ndarray
     bit_measurement_mask: np.ndarray
+    deviation_bit_results: tuple[DECTDeviationBitResult, ...]
     power_db: np.ndarray
     summary_rows: tuple[DectSummaryRow, ...] = field(init=False)
     metadata: Mapping[str, object] = field(default_factory=dict)
@@ -696,16 +700,15 @@ def _loopback_range_with_offset(
     return offset + 32, offset + symbol_count
 
 
-def _classify_pattern(loopback: np.ndarray) -> tuple[str, bool]:
-    if loopback.size < 32:
-        return "Insufficient payload", False
-    case_a = np.resize(np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.uint8), loopback.size)
-    alternating = np.resize(np.array([0, 1], dtype=np.uint8), loopback.size)
-    if float(np.mean(loopback == case_a)) >= 0.98:
-        return "Case A (00001111)", True
-    if float(np.mean(loopback == alternating)) >= 0.98:
-        return "Case B (0101)", True
-    return "Observed arbitrary payload", False
+def _classify_pattern(loopback: np.ndarray, packet_type: str = "") -> tuple[str, bool, object]:
+    identification = identify_rf_pattern(loopback, packet_type)
+    # Only exact Case A and exact ETSI figure patterns are Part 1/2 eligible.
+    eligible = bool(
+        identification.case == "A"
+        or (identification.case == "B" and identification.exact_etsi_pattern)
+    )
+    label = "Case A (00001111)" if identification.case == "A" else identification.label
+    return label, eligible, identification
 
 
 def _measurement_mask(
@@ -715,7 +718,7 @@ def _measurement_mask(
     loopback_stop: int,
 ) -> np.ndarray:
     mask = np.zeros(bits.size, dtype=bool)
-    if modulation_case.startswith("Case A"):
+    if modulation_case.startswith(("Case A", "Case B")):
         start = loopback_start
         while start < loopback_stop:
             stop = start + 1
@@ -724,10 +727,6 @@ def _measurement_mask(
             if stop - start >= 4:
                 mask[start + 1 : stop - 1] = True
             start = stop
-    elif modulation_case.startswith("Case B"):
-        mask[1:15] = True
-        if loopback_stop - loopback_start > 2:
-            mask[loopback_start + 1 : loopback_stop - 1] = True
     else:
         mask[loopback_start:loopback_stop] = True
     return mask
@@ -774,20 +773,31 @@ def _summary_rows(result: DectPacketResult) -> tuple[DectSummaryRow, ...]:
     carrier_result = "MEASURING" if result.carrier_test_eligible else "N/A"
     carrier_value = _display_signed(result.carrier_error_hz, "kHz", 1e3) if result.carrier_test_eligible else "N/A"
     lower = 259_000.0 if result.modulation_case.startswith("Case A") else 202_000.0
-    minimum_deviation = float(result.metadata.get("minimum_measured_deviation_hz", np.nan))
-    maximum_deviation = float(result.metadata.get("maximum_measured_deviation_hz", np.nan))
-    deviation_pass = bool(
-        np.isfinite(minimum_deviation)
-        and np.isfinite(maximum_deviation)
-        and lower < minimum_deviation
-        and maximum_deviation < 403_000.0
+    positive = np.asarray(
+        [item.deviation_hz for item in result.deviation_bit_results if item.valid and item.bit_value == 1],
+        dtype=np.float64,
     )
-    deviation_result = ("PASS" if deviation_pass else "FAIL") if result.modulation_test_eligible else "N/A"
-    deviation_value = (
-        f"+{result.positive_deviation_hz / 1e3:.1f} / "
-        f"{result.negative_deviation_hz / 1e3:.1f} kHz"
-        if result.modulation_test_eligible else "N/A"
+    negative = np.asarray(
+        [-item.deviation_hz for item in result.deviation_bit_results if item.valid and item.bit_value == 0],
+        dtype=np.float64,
     )
+    positive_pass = bool(positive.size and np.all((positive > lower) & (positive < 403_000.0)))
+    negative_pass = bool(negative.size and np.all((negative > lower) & (negative < 403_000.0)))
+    single_pass = positive_pass and negative_pass
+    overall_result = "FAIL" if result.modulation_test_eligible and not single_pass else "MEASURING"
+    positive_result = "FAIL" if result.modulation_test_eligible and not positive_pass else "MEASURING"
+    negative_result = "FAIL" if result.modulation_test_eligible and not negative_pass else "MEASURING"
+    if not result.modulation_test_eligible:
+        overall_result = positive_result = negative_result = "N/A"
+    def range_text(values: np.ndarray, sign: str = "") -> str:
+        if not values.size:
+            return "N/A"
+        return f"{sign}{np.min(values) / 1e3:.1f} to {sign}{np.max(values) / 1e3:.1f} kHz"
+    def margin_text(values: np.ndarray) -> str:
+        if not values.size:
+            return "N/A"
+        margin = min(float(np.min(values) - lower), float(403_000.0 - np.max(values)))
+        return f"{margin / 1e3:+.1f} kHz"
     timing_limit = 10.0 if result.direction == "RFP" else 25.0
     timing_result = "PASS" if abs(result.symbol_rate_error_ppm) <= timing_limit else "FAIL"
     if result.power_time_pass is None:
@@ -818,9 +828,13 @@ def _summary_rows(result: DectPacketResult) -> tuple[DectSummaryRow, ...]:
         DectSummaryRow(
             "RF PHY Measurements",
             "GFSK Modulation Deviation",
-            deviation_value,
+            (
+                f"+{result.positive_deviation_hz / 1e3:.1f} / "
+                f"{result.negative_deviation_hz / 1e3:.1f} kHz"
+                if result.modulation_test_eligible else "N/A"
+            ),
             f"{lower / 1e3:.0f} kHz < |Df| < 403 kHz",
-            deviation_result,
+            overall_result,
         ),
         DectSummaryRow(
             "RF PHY Measurements",
@@ -829,11 +843,20 @@ def _summary_rows(result: DectPacketResult) -> tuple[DectSummaryRow, ...]:
             f"±{timing_limit:.0f} ppm",
             timing_result,
         ),
+        DectSummaryRow("RF PHY Measurements", "Modulation Test Pattern", result.modulation_case, "ETSI Part 1 / Part 2", "PASS" if result.modulation_test_eligible else "N/A"),
+        DectSummaryRow("RF PHY Measurements", "Positive Peak Deviation", range_text(positive, "+"), f"{lower / 1e3:.0f} kHz < Df < 403 kHz", positive_result),
+        DectSummaryRow("RF PHY Measurements", "Negative Peak Deviation", range_text(negative, "-"), f"{lower / 1e3:.0f} kHz < |Df| < 403 kHz", negative_result),
+        DectSummaryRow("RF PHY Measurements", "Positive Worst Margin", margin_text(positive), "> 0 kHz", positive_result),
+        DectSummaryRow("RF PHY Measurements", "Negative Worst Margin", margin_text(negative), "> 0 kHz", negative_result),
+        DectSummaryRow("RF PHY Measurements", "Pattern Status", str(result.metadata.get("pattern_status", "N/A")), "Exact Air-side pattern", "PASS" if result.modulation_test_eligible else "N/A"),
         DectSummaryRow("RF PHY Measurements", "RF Carrier Frequency Accuracy", carrier_value, "±50 kHz", carrier_result),
         DectSummaryRow("Reference Information", "Direction", result.direction),
         DectSummaryRow("Reference Information", "Preamble Mode", result.preamble_mode),
         DectSummaryRow("Reference Information", "Detected packet type", result.packet_type),
         DectSummaryRow("Reference Information", "Payload pattern", result.modulation_case),
+        DectSummaryRow("Reference Information", "Pattern Errors", f"{int(result.metadata.get('pattern_errors', 0))} / {int(result.metadata.get('loopback_bit_count', 0))}"),
+        DectSummaryRow("Reference Information", "Maximum |DSV|", str(int(result.metadata.get("pattern_dsv_max", 0)))),
+        DectSummaryRow("Reference Information", "Single Packet Modulation", "PASS" if single_pass and result.modulation_test_eligible else "FAIL" if result.modulation_test_eligible else "Not applicable"),
         DectSummaryRow("Reference Information", "Preamble correlation", f"{100.0 * result.preamble_correlation:.2f} %"),
         DectSummaryRow("Reference Information", "Sync Word correlation", f"{100.0 * result.sync_word_correlation:.2f} %"),
         DectSummaryRow("Reference Information", "S-field correlation", f"{100.0 * result.sync_score:.2f} %"),
@@ -983,7 +1006,19 @@ def analyze_dect_recording(
             packet_type, symbol_count, bit_offset
         )
         loopback = bits[loopback_start:loopback_stop]
-        modulation_case, eligible = _classify_pattern(loopback)
+        # EN 300 176-1 clause 7.3(e): carrier frequency is the average of
+        # measured absolute frequencies of the loopback bits.  Keep the
+        # two-level midpoint above solely as the demodulation threshold.
+        loopback_frequencies = bit_means[loopback_start:loopback_stop]
+        loopback_frequencies = loopback_frequencies[np.isfinite(loopback_frequencies)]
+        measured_carrier = (
+            float(np.mean(loopback_frequencies))
+            if loopback_frequencies.size
+            else float(carrier)
+        )
+        modulation_case, eligible, pattern_identification = _classify_pattern(
+            loopback, packet_type
+        )
         measurement_mask = _measurement_mask(
             bits, modulation_case, loopback_start, loopback_stop
         )
@@ -1014,17 +1049,28 @@ def analyze_dect_recording(
             samples_per_symbol=sps,
             # EN 300 176-1 parts 1-3 use the carrier measured by the carrier
             # procedure.  The selectable CTS60 display reference is separate.
-            reference_hz=carrier,
+            reference_hz=measured_carrier,
+        )
+        per_bit_deviations = deviation_bit_results(
+            bit_peaks,
+            bits,
+            measurement_mask,
+            first_symbol_sample=actual_start,
+            samples_per_symbol=sps,
+            sample_rate_hz=sample_rate,
+            reference_hz=measured_carrier,
+            modulation_case=modulation_case,
+            first_symbol_number=-bit_offset,
         )
         measured_positive = bit_peaks[measurement_mask & (bits == 1)]
         measured_negative = bit_peaks[measurement_mask & (bits == 0)]
         measured_deviations = np.concatenate(
-            (measured_positive - carrier, carrier - measured_negative)
+            (measured_positive - measured_carrier, measured_carrier - measured_negative)
         )
         measured_deviations = measured_deviations[np.isfinite(measured_deviations)]
         if not measured_deviations.size:
             measured_deviations = np.abs(
-                frequency[eligible_sample_mask] - carrier
+                frequency[eligible_sample_mask] - measured_carrier
             )
         cts_frequency, cts_positions, cts_symbols, cts_fractions = cts60_trace(
             frequency,
@@ -1113,8 +1159,8 @@ def analyze_dect_recording(
                 sync_word_correlation=sync_word_score,
                 packet_type=packet_type,
                 nominal_frequency_hz=nominal_frequency,
-                measured_frequency_hz=nominal_frequency + carrier,
-                carrier_error_hz=carrier,
+                measured_frequency_hz=nominal_frequency + measured_carrier,
+                carrier_error_hz=measured_carrier,
                 carrier_test_eligible=modulation_case.startswith("Case A"),
                 modulation_case=modulation_case,
                 modulation_test_eligible=eligible,
@@ -1156,6 +1202,7 @@ def analyze_dect_recording(
                 instantaneous_frequency_hz=frequency,
                 instantaneous_frequency_sample=positions,
                 bit_measurement_mask=measurement_mask,
+                deviation_bit_results=per_bit_deviations,
                 power_db=power_db,
                 metadata={
                     "burst_start_sample": burst_start,
@@ -1177,9 +1224,26 @@ def analyze_dect_recording(
                     "drift_compensation_applied": False,
                     "modulation_reference": DectModulationReference.MEASURED.value,
                     "modulation_reference_hz": selected_reference,
+                    "clause_7_carrier_reference_hz": measured_carrier,
                     "loopback_bit_range": (loopback_start, loopback_stop),
-                    "minimum_measured_deviation_hz": float(np.min(measured_deviations)),
-                    "maximum_measured_deviation_hz": float(np.max(measured_deviations)),
+                    "loopback_bit_count": int(loopback.size),
+                    "minimum_measured_deviation_hz": (
+                        float(np.min(measured_deviations)) if measured_deviations.size else float("nan")
+                    ),
+                    "maximum_measured_deviation_hz": (
+                        float(np.max(measured_deviations)) if measured_deviations.size else float("nan")
+                    ),
+                    "pattern_errors": pattern_identification.pattern_errors,
+                    "pattern_status": (
+                        "Valid"
+                        if eligible
+                        else "Generic / Part 2 not applicable"
+                        if pattern_identification.case == "B"
+                        else "Not applicable"
+                    ),
+                    "pattern_exact_etsi": pattern_identification.exact_etsi_pattern,
+                    "pattern_figure": pattern_identification.figure,
+                    "pattern_dsv_max": pattern_identification.dsv_max,
                 },
             )
         )

@@ -14,6 +14,7 @@ from pluto_sa.vsa.protocol_modes.dect import (
     analyze_dect_recording,
     generate_dect_packet,
 )
+from pluto_sa.vsa.protocol_modes.dect.ui import _DectModulationObservation
 from pluto_sa.vsa.model import IQRecording
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.ui.display_processing import fit_binary_fsk_display_drift
@@ -283,7 +284,7 @@ def test_dect_workspace_renders_measurement_and_packet_views(tmp_path) -> None:
             if window.summary_table.item(row, 0) is not None
         }
         gfsk_row = summary_items["GFSK Modulation Deviation"]
-        assert window.summary_table.item(gfsk_row, 3).foreground().color().name() == "#43f5a5"
+        assert window.summary_table.item(gfsk_row, 3).foreground().color().name() == "#ffd166"
     finally:
         window._config_dialog.close()
         window.close()
@@ -531,6 +532,54 @@ def test_carrier_verdict_waits_for_required_packet_accumulation(tmp_path) -> Non
         }
         assert items["RF Carrier Frequency Accuracy"][1] == "PASS"
         assert items["Carrier Packets Evaluated"][0] == "10 / 10"
+    finally:
+        window._config_dialog.close()
+        window.close()
+        window.deleteLater()
+
+
+def test_modulation_history_separates_polarities_and_can_be_cleared(tmp_path) -> None:
+    window = _window(tmp_path)
+    recording = generate_dect_packet(
+        center_frequency_hz=window._nominal_frequency_hz()
+    )
+    result = replace(
+        analyze_dect_recording(recording)[0],
+        modulation_case="Case B / Figure 29",
+        modulation_test_eligible=True,
+    )
+    try:
+        key = window._modulation_key(result)
+        window._modulation_history[key] = [
+            _DectModulationObservation(
+                positive_passed=True,
+                negative_passed=False,
+                positive_min_hz=336_300.0,
+                positive_max_hz=381_800.0,
+                negative_min_hz=337_100.0,
+                negative_max_hz=405_600.0,
+            )
+        ]
+        window._result = result
+        window._render_summary(result)
+        items = {
+            window.summary_table.item(row, 0).text(): window.summary_table.item(
+                row, 3
+            ).text()
+            for row in range(window.summary_table.rowCount())
+            if window.summary_table.item(row, 0) is not None
+            and window.summary_table.item(row, 3) is not None
+        }
+        assert items["GFSK Modulation Deviation"] == "FAIL"
+        assert items["Positive Peak Deviation"] == "MEASURING"
+        assert items["Negative Peak Deviation"] == "FAIL"
+        assert window.clear_measurement_history_action.text() == (
+            "Clear Measurement History"
+        )
+        window.clear_measurement_history_action.trigger()
+        assert not window._modulation_history
+        assert not window._carrier_history
+        assert not window._accumulated_packet_tokens
     finally:
         window._config_dialog.close()
         window.close()

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import csv
 import json
 from pathlib import Path
@@ -76,6 +76,16 @@ _CONFIG_VERSION = 1
 _DECT_FSK_MODULATION_Y_LIMIT_KHZ = 500.0
 
 
+@dataclass(frozen=True)
+class _DectModulationObservation:
+    positive_passed: bool
+    negative_passed: bool
+    positive_min_hz: float
+    positive_max_hz: float
+    negative_min_hz: float
+    negative_max_hz: float
+
+
 class _DectAnalysisThread(QtCore.QThread):
     analysis_ready = QtCore.Signal(object)
     analysis_failed = QtCore.Signal(str)
@@ -130,6 +140,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._fsk_symbol_plot_mode = "Constellation Frequency"
         self._modulation_reference = DectModulationReference.MEASURED
         self._carrier_history: dict[tuple[float, str, str], list[float]] = {}
+        self._modulation_history: dict[
+            tuple[float, str, str, str], list[_DectModulationObservation]
+        ] = {}
         self._accumulated_packet_tokens: set[tuple[int, int, int]] = set()
         self._capture_thread: PlutoSingleCaptureThread | None = None
         self._analysis_thread: _DectAnalysisThread | None = None
@@ -199,7 +212,10 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             lambda: self._select_result(1)
         )
         run_menu.addSeparator()
-        run_menu.addAction("Reset Measurement Statistics").triggered.connect(
+        self.clear_measurement_history_action = run_menu.addAction(
+            "Clear Measurement History"
+        )
+        self.clear_measurement_history_action.triggered.connect(
             self._reset_measurement_statistics
         )
 
@@ -1207,6 +1223,35 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                 self._carrier_history.setdefault(key, []).append(
                     result.carrier_error_hz
                 )
+            if result.modulation_test_eligible:
+                lower = 259_000.0 if result.modulation_case.startswith("Case A") else 202_000.0
+                positive = np.asarray(
+                    [item.deviation_hz for item in result.deviation_bit_results if item.valid and item.bit_value == 1],
+                    dtype=np.float64,
+                )
+                negative = np.asarray(
+                    [-item.deviation_hz for item in result.deviation_bit_results if item.valid and item.bit_value == 0],
+                    dtype=np.float64,
+                )
+                positive_pass = bool(
+                    positive.size
+                    and np.all((positive > lower) & (positive < 403_000.0))
+                )
+                negative_pass = bool(
+                    negative.size
+                    and np.all((negative > lower) & (negative < 403_000.0))
+                )
+                key = self._modulation_key(result)
+                self._modulation_history.setdefault(key, []).append(
+                    _DectModulationObservation(
+                        positive_passed=positive_pass,
+                        negative_passed=negative_pass,
+                        positive_min_hz=float(np.min(positive)),
+                        positive_max_hz=float(np.max(positive)),
+                        negative_min_hz=float(np.min(negative)),
+                        negative_max_hz=float(np.max(negative)),
+                    )
+                )
         self._selected_result_index = 0
         self._result = payload[0]
         if self._active_analysis_continuous:
@@ -1507,6 +1552,65 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                     f"{len(history)} / {required}",
                 )
             )
+        if result.modulation_test_eligible:
+            history = self._modulation_history.get(self._modulation_key(result), [])
+            required = carrier_repetition_count(result.packet_type)
+            positive_verdict = (
+                "FAIL" if any(not value.positive_passed for value in history)
+                else "PASS" if len(history) >= required
+                else "MEASURING"
+            )
+            negative_verdict = (
+                "FAIL" if any(not value.negative_passed for value in history)
+                else "PASS" if len(history) >= required
+                else "MEASURING"
+            )
+            overall_verdict = (
+                "FAIL"
+                if "FAIL" in {positive_verdict, negative_verdict}
+                else "PASS"
+                if positive_verdict == negative_verdict == "PASS"
+                else "MEASURING"
+            )
+            if history:
+                positive_min = min(value.positive_min_hz for value in history)
+                positive_max = max(value.positive_max_hz for value in history)
+                negative_min = min(value.negative_min_hz for value in history)
+                negative_max = max(value.negative_max_hz for value in history)
+                lower = 259_000.0 if result.modulation_case.startswith("Case A") else 202_000.0
+                positive_margin = min(positive_min - lower, 403_000.0 - positive_max)
+                negative_margin = min(negative_min - lower, 403_000.0 - negative_max)
+                aggregate_values = {
+                    "GFSK Modulation Deviation": f"+{positive_max / 1e3:.1f} / -{negative_max / 1e3:.1f} kHz",
+                    "Positive Peak Deviation": f"+{positive_min / 1e3:.1f} to +{positive_max / 1e3:.1f} kHz",
+                    "Negative Peak Deviation": f"-{negative_min / 1e3:.1f} to -{negative_max / 1e3:.1f} kHz",
+                    "Positive Worst Margin": f"{positive_margin / 1e3:+.1f} kHz",
+                    "Negative Worst Margin": f"{negative_margin / 1e3:+.1f} kHz",
+                }
+                verdicts = {
+                    "GFSK Modulation Deviation": overall_verdict,
+                    "Positive Peak Deviation": positive_verdict,
+                    "Negative Peak Deviation": negative_verdict,
+                    "Positive Worst Margin": positive_verdict,
+                    "Negative Worst Margin": negative_verdict,
+                }
+                rows = [
+                    replace(
+                        row,
+                        value=aggregate_values[row.test_item],
+                        result=verdicts[row.test_item],
+                    )
+                    if row.test_item in aggregate_values
+                    else row
+                    for row in rows
+                ]
+            rows.append(
+                DectSummaryRow(
+                    "Reference Information",
+                    "Modulation Packets Evaluated",
+                    f"{len(history)} / {required}",
+                )
+            )
         for row in rows:
             if row.section != last_section:
                 section_row = self.summary_table.rowCount()
@@ -1540,12 +1644,24 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             result.packet_type,
         )
 
+    @staticmethod
+    def _modulation_key(result: DectPacketResult) -> tuple[float, str, str, str]:
+        return (
+            result.nominal_frequency_hz,
+            result.direction,
+            result.packet_type,
+            result.modulation_case,
+        )
+
     def _reset_measurement_statistics(self) -> None:
         self._carrier_history.clear()
+        self._modulation_history.clear()
         self._accumulated_packet_tokens.clear()
         if self._result is not None:
             self._render_summary(self._result)
-        self.statusBar().showMessage("DECT measurement statistics reset")
+        self.statusBar().showMessage(
+            "DECT measurement history cleared; current packet retained"
+        )
 
     def _render_packet_analysis(self, result: DectPacketResult) -> None:
         self.decode_tree.clear()

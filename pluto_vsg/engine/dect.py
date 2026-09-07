@@ -5,6 +5,15 @@ from __future__ import annotations
 import numpy as np
 
 from pluto_protocol.dect.common import r_crc_bits, x_crc_bits
+from pluto_protocol.dect.rf_modulation import (
+    CASE_B_DEFINITIONS,
+    DectScramblingMode,
+    apply_scrambling,
+    case_a_bits,
+    case_b_bits,
+    case_b_format_for_packet,
+    scrambling_sequence,
+)
 from pluto_protocol.model import GeneratedPacketBits
 from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
 from pluto_vsg.engine.base import FieldBoundary, GenerationResult
@@ -16,7 +25,7 @@ from pluto_vsg.engine.bluetooth_br import (
 )
 from pluto_vsg.model import (
     DectPacketType,
-    PayloadSourceKind,
+    DectBFieldSource,
     WaveformProject,
     waveform_timing_samples,
     validate_project,
@@ -34,17 +43,40 @@ def _bits(text: str) -> np.ndarray:
     return np.asarray([int(bit) for bit in normalized], dtype=np.uint8)
 
 
-def _b_field_bits(project: WaveformProject, count: int) -> np.ndarray:
+def _required_test_air_bits(source: DectBFieldSource, packet_type: DectPacketType, count: int) -> np.ndarray | None:
+    if source is DectBFieldSource.CASE_A:
+        return case_a_bits(count)
+    if source is DectBFieldSource.CASE_B_ETSI:
+        format = case_b_format_for_packet(packet_type.value, count)
+        if format is None:
+            raise ValueError("Case B (ETSI) is not defined for this packet format")
+        return case_b_bits(format)
+    return None
+
+
+def _b_field_bits(project: WaveformProject, count: int) -> tuple[np.ndarray, np.ndarray]:
     settings = project.dect
     assert settings is not None
-    source = PayloadSourceKind(settings.b_field_source)
-    if source is PayloadSourceKind.PRBS9:
+    source = DectBFieldSource(settings.b_field_source)
+    packet_type = DectPacketType(settings.packet_type)
+    required_air = _required_test_air_bits(source, packet_type, count)
+    mode = DectScramblingMode(settings.scrambling_mode)
+    if required_air is not None:
+        if mode is DectScramblingMode.STANDARD:
+            if settings.scrambling_phase is None:
+                raise ValueError("DECT standard scrambling requires a known frame phase")
+            pre_scramble = required_air ^ scrambling_sequence(count, settings.scrambling_phase)
+            return pre_scramble, apply_scrambling(pre_scramble, mode, settings.scrambling_phase)
+        return required_air.copy(), required_air
+    if source is DectBFieldSource.PRBS9:
         sequence = prbs9_period()
     else:
         sequence = _bits(settings.b_field_pattern)
-    if source is PayloadSourceKind.FIXED:
-        return np.full(count, int(sequence[0]), dtype=np.uint8)
-    return sequence[np.arange(count) % sequence.size]
+    if source is DectBFieldSource.FIXED:
+        logical = np.full(count, int(sequence[0]), dtype=np.uint8)
+    else:
+        logical = sequence[np.arange(count) % sequence.size]
+    return logical, apply_scrambling(logical, mode, settings.scrambling_phase)
 
 
 def _x_test_data(packet_type: DectPacketType, b_bits: np.ndarray) -> np.ndarray:
@@ -68,6 +100,17 @@ def dect_packet_bits(project: WaveformProject) -> tuple[np.ndarray, dict[str, np
     header = _bits(settings.a_header_bits)
     tail = _bits(settings.a_tail_bits)
     a_information = np.concatenate((header, tail))
+    source = DectBFieldSource(settings.b_field_source)
+    a_test_air = np.empty(0, dtype=np.uint8)
+    if packet_type is DectPacketType.P00 and source in {
+        DectBFieldSource.CASE_A,
+        DectBFieldSource.CASE_B_ETSI,
+    }:
+        a_test_air = _required_test_air_bits(source, packet_type, 32)
+        assert a_test_air is not None
+        a_information = a_information.copy()
+        a_information[16:48] = a_test_air
+        header, tail = a_information[:8], a_information[8:]
     r_crc = r_crc_bits(a_information) if settings.r_crc_auto else _bits(settings.r_crc_bits)
     a_field = np.concatenate((a_information, r_crc))
     parts = [preamble, sync_word, a_field]
@@ -77,10 +120,11 @@ def dect_packet_bits(project: WaveformProject) -> tuple[np.ndarray, dict[str, np
 
     b_count = DECT_B_FIELD_BITS.get(packet_type)
     b_field = np.empty(0, dtype=np.uint8)
+    pre_scramble_b_field = np.empty(0, dtype=np.uint8)
     x_field = np.empty(0, dtype=np.uint8)
     z_field = np.empty(0, dtype=np.uint8)
     if b_count is not None:
-        b_field = _b_field_bits(project, b_count)
+        pre_scramble_b_field, b_field = _b_field_bits(project, b_count)
         x_field = (
             x_crc_bits(_x_test_data(packet_type, b_field))
             if settings.x_crc_auto
@@ -90,6 +134,16 @@ def dect_packet_bits(project: WaveformProject) -> tuple[np.ndarray, dict[str, np
         if packet_type in {DectPacketType.P32Z, DectPacketType.P80Z}:
             z_field = x_field.copy() if settings.z_repeat_auto else _bits(settings.z_field_bits)
             parts.append(z_field)
+    if source is DectBFieldSource.CASE_A:
+        test_pattern_label = "Case A"
+    elif source is DectBFieldSource.CASE_B_ETSI:
+        test_count = 32 if packet_type is DectPacketType.P00 else int(b_count or 0)
+        format = case_b_format_for_packet(packet_type.value, test_count)
+        test_pattern_label = (
+            CASE_B_DEFINITIONS[format].label if format is not None else source.value
+        )
+    else:
+        test_pattern_label = "Normal data"
     return np.concatenate(parts), {
         "prolonged_preamble_bits": prolonged,
         "preamble_bits": preamble,
@@ -99,6 +153,12 @@ def dect_packet_bits(project: WaveformProject) -> tuple[np.ndarray, dict[str, np
         "r_crc_bits": r_crc,
         "a_field_bits": a_field,
         "b_field_bits": b_field,
+        "pre_scramble_b_field_bits": pre_scramble_b_field,
+        "air_b_field_bits": b_field,
+        "loopback_test_bits": a_test_air if a_test_air.size else b_field,
+        "rf_modulation_test_pattern": test_pattern_label,
+        "scrambling_mode": DectScramblingMode(settings.scrambling_mode).value,
+        "scrambling_phase": settings.scrambling_phase,
         "x_field_bits": x_field,
         "z_field_bits": z_field,
     }
@@ -206,6 +266,11 @@ class DectWaveformEngine:
                     "packet_type": packet_type.value,
                     "preamble_mode": "Prolonged" if settings.prolonged_preamble else "Normal",
                     "p0_internal_bit": 16 if settings.prolonged_preamble else 0,
+                    "rf_modulation_test_pattern": field_bits[
+                        "rf_modulation_test_pattern"
+                    ],
+                    "scrambling_mode": field_bits["scrambling_mode"],
+                    "scrambling_phase": field_bits["scrambling_phase"],
                 },
             ),
             metadata={

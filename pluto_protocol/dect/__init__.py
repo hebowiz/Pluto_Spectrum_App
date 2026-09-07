@@ -15,6 +15,18 @@ from pluto_protocol.dect.common import (
     x_crc_bits,
     x_crc_valid,
 )
+from pluto_protocol.dect.rf_modulation import (
+    CASE_B_DEFINITIONS,
+    DectCaseBFormat,
+    DectRFPattern,
+    DectScramblingMode,
+    DECT_RF_MODULATION_LIMITS_HZ,
+    case_a_bits,
+    case_b_bits,
+    identify_rf_pattern,
+    deviation_in_limits,
+    maximum_dsv,
+)
 
 __all__ = [
     "DECT_CARRIER_PLANS",
@@ -28,4 +40,14 @@ __all__ = [
     "r_crc_valid",
     "x_crc_bits",
     "x_crc_valid",
+    "CASE_B_DEFINITIONS",
+    "DectCaseBFormat",
+    "DectRFPattern",
+    "DectScramblingMode",
+    "DECT_RF_MODULATION_LIMITS_HZ",
+    "case_a_bits",
+    "case_b_bits",
+    "identify_rf_pattern",
+    "deviation_in_limits",
+    "maximum_dsv",
 ]

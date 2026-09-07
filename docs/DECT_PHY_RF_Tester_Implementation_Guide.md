@@ -2377,3 +2377,25 @@ Interference / Blocking
 と明記したDSP処理は、自作VSA向けのengineering proposalであり、規格指定アルゴリズムではありません。
 
 規格適合性を正式に判定する場合は、必ず原文の最新版・適用地域の法規・測定不確かさを含めて確認してください。
+# RF carrier modulation Case A / Case B implementation note
+
+Pluto VSA/VSG uses ETSI EN 300 176-1 V2.4.1 clause 11 as the
+authoritative definition. Test-pattern recognition is performed on the
+transmitted (pre-descramble) air bits.
+
+- Case A: `00001111` repeated; strict limits are 259 kHz < |deviation| < 403 kHz.
+- Case B: non-Case-A binary data with maximum absolute DSV no greater than 64;
+  strict limits are 202 kHz < |deviation| < 403 kHz.
+- Part 2 conformance uses Figure 27 for A-field-only, Figure 28 for half-slot,
+  Figure 29 for 320-bit full-slot, Figure 30 for variable `j=640`, and Figure
+  31 for the 800-bit double-slot. Generic Case B data is identified for
+  reference but is not promoted to a Part 2 conformance result.
+- Each eligible constant-level run excludes its first and last bit. Peak
+  frequency deviation is then retained per eligible bit from the measured FM
+  waveform (measurement bandwidth at least 3 MHz), relative to the carrier
+  frequency measured by the carrier procedure.
+- Required packet counts are respectively 100, 40, 10, 5 and 5. A single
+  packet result is kept separate from the accumulated conformance verdict.
+- VSG Case A/B settings describe required air bits. With standard B-field
+  scrambling selected, the logical input is pre-compensated with the known
+  frame phase so the transmitted bits still equal the selected ETSI pattern.

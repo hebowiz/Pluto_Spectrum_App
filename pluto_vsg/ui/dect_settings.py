@@ -8,11 +8,16 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_protocol.dect.carriers import DECT_CARRIER_PLANS, carrier_by_identity
 from pluto_protocol.dect.classic import BA_NAMES, PP_S_FIELD, RFP_S_FIELD, TA_NAMES
+from pluto_protocol.dect.rf_modulation import (
+    CASE_B_DEFINITIONS,
+    DectScramblingMode,
+    case_b_format_for_packet,
+)
 from pluto_vsg.model import (
+    DectBFieldSource,
     DectDirection,
     DectPacketType,
     DectSettings,
-    PayloadSourceKind,
     WaveformProject,
     effective_period_symbols,
     minimum_period_symbols,
@@ -159,15 +164,28 @@ class DectSettingsDialog(QtWidgets.QDialog):
         self.r_crc_value = QtWidgets.QLabel("Automatic from A Header + Tail")
         self.b_source_combo = QtWidgets.QComboBox()
         for label, source in (
-            ("Constant (first bit)", PayloadSourceKind.FIXED),
-            ("Repeating bit pattern", PayloadSourceKind.PATTERN),
-            ("PRBS-9", PayloadSourceKind.PRBS9),
+            ("Constant (first bit)", DectBFieldSource.FIXED),
+            ("Repeating bit pattern", DectBFieldSource.PATTERN),
+            ("PRBS-9", DectBFieldSource.PRBS9),
+            ("Case A — 00001111 (Air-side)", DectBFieldSource.CASE_A),
+            ("Case B (ETSI, packet-derived)", DectBFieldSource.CASE_B_ETSI),
         ):
             self.b_source_combo.addItem(label, source)
         self.b_source_combo.setCurrentIndex(
-            self.b_source_combo.findData(PayloadSourceKind(settings.b_field_source))
+            self.b_source_combo.findData(DectBFieldSource(settings.b_field_source))
         )
         self.b_pattern_edit = self._bits_edit(settings.b_field_pattern, 4096)
+        self.test_pattern_value = QtWidgets.QLabel()
+        self.test_pattern_value.setWordWrap(True)
+        self.scrambling_combo = QtWidgets.QComboBox()
+        for mode in DectScramblingMode:
+            self.scrambling_combo.addItem(mode.value, mode)
+        self.scrambling_combo.setCurrentIndex(
+            self.scrambling_combo.findData(DectScramblingMode(settings.scrambling_mode))
+        )
+        self.scrambling_phase_spin = QtWidgets.QSpinBox()
+        self.scrambling_phase_spin.setRange(0, 7)
+        self.scrambling_phase_spin.setValue(int(settings.scrambling_phase or 0))
         self.x_crc_auto = QtWidgets.QCheckBox("Calculate format-specific X-CRC")
         self.x_crc_auto.setChecked(settings.x_crc_auto)
         self.x_field_edit = self._bits_edit(settings.x_field_bits, 4)
@@ -219,6 +237,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
             lambda _enabled: self._update_derived()
         )
         self.b_source_combo.currentIndexChanged.connect(self._update_derived)
+        self.scrambling_combo.currentIndexChanged.connect(self._update_derived)
         self.period_spin.valueChanged.connect(self._update_period_constraints)
         for signal in (
             self.packet_type_combo.currentIndexChanged,
@@ -304,6 +323,9 @@ class DectSettingsDialog(QtWidgets.QDialog):
                 ("R-CRC", self.r_crc_value),
                 ("B-field Source", self.b_source_combo),
                 ("B-field Data / Pattern", self.b_pattern_edit),
+                ("RF Modulation Test Pattern", self.test_pattern_value),
+                ("B-field Scrambling", self.scrambling_combo),
+                ("Scrambling Frame Phase", self.scrambling_phase_spin),
                 ("X-field Auto", self.x_crc_auto),
                 ("X-field (4 bits)", self.x_field_edit),
                 ("Z-field Auto", self.z_repeat_auto),
@@ -364,13 +386,30 @@ class DectSettingsDialog(QtWidgets.QDialog):
         b_count = DECT_B_FIELD_BITS.get(packet_type, 0)
         has_b = b_count > 0
         has_z = packet_type in {DectPacketType.P32Z, DectPacketType.P80Z}
-        for widget in (self.b_source_combo, self.b_pattern_edit, self.x_crc_auto):
+        self.b_source_combo.setEnabled(True)
+        for widget in (self.b_pattern_edit, self.x_crc_auto):
             widget.setEnabled(has_b)
         self.x_field_edit.setEnabled(has_b and not self.x_crc_auto.isChecked())
         self.z_repeat_auto.setEnabled(has_z)
         self.z_field_edit.setEnabled(has_z and not self.z_repeat_auto.isChecked())
-        source = PayloadSourceKind(self.b_source_combo.currentData())
-        self.b_pattern_edit.setEnabled(has_b and source is not PayloadSourceKind.PRBS9)
+        source = DectBFieldSource(self.b_source_combo.currentData())
+        self.b_pattern_edit.setEnabled(
+            has_b and source in {DectBFieldSource.FIXED, DectBFieldSource.PATTERN}
+        )
+        mode = DectScramblingMode(self.scrambling_combo.currentData())
+        self.scrambling_phase_spin.setEnabled(has_b and mode is DectScramblingMode.STANDARD)
+        if source is DectBFieldSource.CASE_A:
+            self.test_pattern_value.setText("Case A / 00001111 repeat / Air-side")
+        elif source is DectBFieldSource.CASE_B_ETSI:
+            test_count = 32 if packet_type is DectPacketType.P00 else b_count
+            format = case_b_format_for_packet(packet_type.value, test_count)
+            self.test_pattern_value.setText(
+                "Unsupported for this packet format"
+                if format is None
+                else f"{CASE_B_DEFINITIONS[format].label} / Air-side"
+            )
+        else:
+            self.test_pattern_value.setText("Normal / user data")
         total = {DectPacketType.P00: 96, DectPacketType.P32: 420, DectPacketType.P32Z: 424, DectPacketType.P80: 900, DectPacketType.P80Z: 904}[packet_type]
         self.packet_layout_label.setText(
             f"S 32 + A 64"
@@ -422,8 +461,10 @@ class DectSettingsDialog(QtWidgets.QDialog):
             a_tail_bits=str(self.a_tail_combo.currentData()),
             r_crc_auto=True,
             r_crc_bits=self._base_project.dect.r_crc_bits,
-            b_field_source=PayloadSourceKind(self.b_source_combo.currentData()),
+            b_field_source=DectBFieldSource(self.b_source_combo.currentData()),
             b_field_pattern=self.b_pattern_edit.text(),
+            scrambling_mode=DectScramblingMode(self.scrambling_combo.currentData()),
+            scrambling_phase=self.scrambling_phase_spin.value(),
             x_crc_auto=self.x_crc_auto.isChecked(),
             x_field_bits=self.x_field_edit.text(),
             z_repeat_auto=self.z_repeat_auto.isChecked(),

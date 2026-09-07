@@ -16,6 +16,7 @@ from pluto_sa.vsa.protocol_modes.dect import analyze_dect_recording
 from pluto_vsg.engine import DectWaveformEngine
 from pluto_vsg.model import (
     DectDirection,
+    DectBFieldSource,
     DectPacketType,
     PayloadSourceKind,
     StandardProfile,
@@ -25,6 +26,7 @@ from pluto_vsg.persistence import project_from_dict, project_to_dict
 from pluto_vsg.profiles import dect_fields, dect_project
 from pluto_vsg.protocol import analyze_generation_result
 from pluto_vsg.ui.dect_settings import DectSettingsDialog
+from pluto_protocol.dect.rf_modulation import DectScramblingMode
 from pluto_vsg.ui.main_window import PlutoVSGWindow
 
 
@@ -202,6 +204,13 @@ def test_dect_settings_dialog_uses_carrier_list_and_updates_fields() -> None:
         dialog.packet_type_combo.setCurrentIndex(
             dialog.packet_type_combo.findData(DectPacketType.P32Z)
         )
+        dialog.b_source_combo.setCurrentIndex(
+            dialog.b_source_combo.findData(DectBFieldSource.CASE_B_ETSI)
+        )
+        dialog.scrambling_combo.setCurrentIndex(
+            dialog.scrambling_combo.findData(DectScramblingMode.STANDARD)
+        )
+        dialog.scrambling_phase_spin.setValue(5)
         dialog.ta_combo.setCurrentIndex(dialog.ta_combo.findData(0b110))
         dialog.q1_combo.setCurrentIndex(dialog.q1_combo.findData(1))
         dialog.ba_combo.setCurrentIndex(dialog.ba_combo.findData(0b011))
@@ -214,6 +223,10 @@ def test_dect_settings_dialog_uses_carrier_list_and_updates_fields() -> None:
         project = dialog.project
         assert project.center_frequency_hz == 1_893_888_000.0
         assert project.dect.carrier_frequency_offset_hz == 12_500.0
+        assert project.dect.b_field_source is DectBFieldSource.CASE_B_ETSI
+        assert project.dect.scrambling_mode is DectScramblingMode.STANDARD
+        assert project.dect.scrambling_phase == 5
+        assert "Figure 29" in dialog.test_pattern_value.text()
         assert project.dect.a_header_bits == "11010110"
         assert project.dect.post_idle_symbols == 0
         assert project.period_symbols == 600.0

@@ -410,6 +410,13 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         next_action = run_menu.addAction("Next Packet")
         next_action.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Right))
         next_action.triggered.connect(lambda: self._select_result(1))
+        run_menu.addSeparator()
+        self.clear_measurement_history_action = run_menu.addAction(
+            "Clear Measurement History"
+        )
+        self.clear_measurement_history_action.triggered.connect(
+            self._reset_measurement_statistics
+        )
 
         display_menu = self.menuBar().addMenu("Display Config")
         self.symbols_action = display_menu.addAction("Show Symbol Points")
@@ -2868,6 +2875,45 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                     QtGui.QBrush(result_color)
                 )
         self.summary_table.resizeRowsToContents()
+
+    def _reset_measurement_statistics(self) -> None:
+        """Discard capture-wide SIG aggregates but retain the visible packet."""
+
+        reset_results: list[BluetoothDedicatedResult] = []
+        aggregate_keys = {
+            "rf_capture_aggregate",
+            "hdt_rms_evm_packets_evaluated",
+            "hdt_rms_evm_packets_required",
+            "hdt_rms_evm_aggregate_status",
+        }
+        for result in self._results:
+            hdt_required = int(
+                result.metadata.get("hdt_rms_evm_packets_required", 1500)
+            )
+            metadata = {
+                key: value
+                for key, value in result.metadata.items()
+                if key not in aggregate_keys
+            }
+            metrics = tuple(
+                replace(metric, display=f"1 / {hdt_required}")
+                if metric.metric_id == "sig_hdt_evm_packets_evaluated"
+                else metric
+                for metric in result.metrics
+                if metric.metric_id != "sig_capture_aggregate"
+            )
+            reset_results.append(
+                replace(result, metadata=metadata, metrics=metrics)
+            )
+        self._results = tuple(reset_results)
+        if self._results:
+            index = min(self._selected_result_index, len(self._results) - 1)
+            self._selected_result_index = index
+            self._result = self._results[index]
+            self._render_summary(self._result)
+        self.statusBar().showMessage(
+            "Bluetooth measurement history cleared; current packet retained"
+        )
 
     @staticmethod
     def _field_bit_range(field: PacketField, bit_offset: int) -> str:

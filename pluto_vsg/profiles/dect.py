@@ -7,13 +7,13 @@ from pluto_protocol.dect.classic import PP_S_FIELD, RFP_S_FIELD
 from pluto_vsg.model import (
     DataSourceKind,
     DectDirection,
+    DectBFieldSource,
     DectPacketType,
     DectSettings,
     FieldDefinition,
     FilterKind,
     ModulationDefinition,
     ModulationKind,
-    PayloadSourceKind,
     StandardProfile,
     WaveformProject,
 )
@@ -110,17 +110,19 @@ def dect_fields(settings: DectSettings) -> tuple[FieldDefinition, ...]:
     )
     b_count = DECT_B_FIELD_BITS.get(packet_type)
     if b_count is not None:
-        source = PayloadSourceKind(settings.b_field_source)
+        source = DectBFieldSource(settings.b_field_source)
+        test_label = source.value
         fields.append(
             field(
                 "B-field",
                 b_count,
-                "PRBS-9" if source is PayloadSourceKind.PRBS9 else settings.b_field_pattern,
+                test_label if source in {DectBFieldSource.CASE_A, DectBFieldSource.CASE_B_ETSI}
+                else "PRBS-9" if source is DectBFieldSource.PRBS9 else settings.b_field_pattern,
                 (
                     DataSourceKind.PRBS
-                    if source is PayloadSourceKind.PRBS9
+                    if source is DectBFieldSource.PRBS9
                     else DataSourceKind.FIXED
-                    if source is PayloadSourceKind.FIXED
+                    if source in {DectBFieldSource.FIXED, DectBFieldSource.CASE_A, DectBFieldSource.CASE_B_ETSI}
                     else DataSourceKind.PATTERN
                 ),
             )

@@ -36,6 +36,18 @@ class DectFrequencyReferences:
         return self.nominal_hz
 
 
+@dataclass(frozen=True)
+class DECTDeviationBitResult:
+    dect_symbol: int
+    bit_value: int
+    start_time_s: float
+    stop_time_s: float
+    peak_frequency_hz: float
+    deviation_hz: float
+    case: str
+    valid: bool
+
+
 def instantaneous_frequency(
     iq: np.ndarray, sample_rate_hz: float
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -137,7 +149,7 @@ def eligible_peak_sample_mask(
         stop = float(first_symbol_sample) + bit_stop * float(samples_per_symbol)
         mask[:] |= (positions >= start) & (positions < stop)
 
-    if str(modulation_case).startswith("Case A"):
+    if str(modulation_case).startswith(("Case A", "Case B")):
         run_start = start_bit
         while run_start < stop_bit:
             run_stop = run_start + 1
@@ -148,12 +160,6 @@ def eligible_peak_sample_mask(
             if run_stop - run_start >= 4:
                 include(run_start + 1, run_stop - 1)
             run_start = run_stop
-    elif str(modulation_case).startswith("Case B"):
-        # Part 3 defines one continuous window from one bit after the first
-        # transition to one bit before the last transition, and applies it to
-        # both the first 16 S-field bits and the loopback field.
-        include(1, 15)
-        include(start_bit + 1, stop_bit - 1)
     else:
         # Arbitrary data are reference information only, not an ETSI verdict.
         include(start_bit, stop_bit)
@@ -199,3 +205,39 @@ def peak_deviations(
         float(np.min(negative) - reference_hz) if negative.size else float("nan")
     )
     return positive_extent, negative_extent, bit_peaks
+
+
+def deviation_bit_results(
+    bit_peaks: np.ndarray,
+    bits: np.ndarray,
+    measurement_mask: np.ndarray,
+    *,
+    first_symbol_sample: float,
+    samples_per_symbol: float,
+    sample_rate_hz: float,
+    reference_hz: float,
+    modulation_case: str,
+    first_symbol_number: int = 0,
+) -> tuple[DECTDeviationBitResult, ...]:
+    """Preserve every eligible clause-11 per-bit peak for diagnostics."""
+
+    peaks = np.asarray(bit_peaks, dtype=np.float64)
+    values = np.asarray(bits, dtype=np.uint8)
+    mask = np.asarray(measurement_mask, dtype=bool)
+    results: list[DECTDeviationBitResult] = []
+    for index in np.flatnonzero(mask):
+        peak = float(peaks[index])
+        valid = bool(np.isfinite(peak))
+        results.append(
+            DECTDeviationBitResult(
+                dect_symbol=int(index) + int(first_symbol_number),
+                bit_value=int(values[index]),
+                start_time_s=(float(first_symbol_sample) + index * float(samples_per_symbol)) / float(sample_rate_hz),
+                stop_time_s=(float(first_symbol_sample) + (index + 1) * float(samples_per_symbol)) / float(sample_rate_hz),
+                peak_frequency_hz=peak,
+                deviation_hz=(peak - float(reference_hz)) if valid else float("nan"),
+                case=str(modulation_case),
+                valid=valid,
+            )
+        )
+    return tuple(results)

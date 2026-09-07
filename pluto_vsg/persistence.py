@@ -16,6 +16,7 @@ from pluto_vsg.model import (
     BluetoothPacketKind,
     DataSourceKind,
     DectDirection,
+    DectBFieldSource,
     DectPacketType,
     DectSettings,
     FieldDefinition,
@@ -32,6 +33,7 @@ from pluto_vsg.model import (
     WiFiSettings,
     validate_project,
 )
+from pluto_protocol.dect.rf_modulation import DectScramblingMode
 from pluto_protocol.bluetooth.hdt import HDTRate
 
 
@@ -120,8 +122,11 @@ def project_to_dict(project: WaveformProject) -> dict[str, object]:
             **asdict(project.dect),
             "direction": DectDirection(project.dect.direction).value,
             "packet_type": DectPacketType(project.dect.packet_type).value,
-            "b_field_source": PayloadSourceKind(
+            "b_field_source": DectBFieldSource(
                 project.dect.b_field_source
+            ).value,
+            "scrambling_mode": DectScramblingMode(
+                project.dect.scrambling_mode
             ).value,
         }
     return {
@@ -214,8 +219,11 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
                 **dect_payload,
                 "direction": DectDirection(str(dect_payload["direction"])),
                 "packet_type": DectPacketType(str(dect_payload["packet_type"])),
-                "b_field_source": PayloadSourceKind(
+                "b_field_source": DectBFieldSource(
                     str(dect_payload["b_field_source"])
+                ),
+                "scrambling_mode": DectScramblingMode(
+                    str(dect_payload.get("scrambling_mode", DectScramblingMode.NONE.value))
                 ),
             }
         )

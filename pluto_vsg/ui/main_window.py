@@ -43,6 +43,7 @@ from pluto_vsg.model import (
     BluetoothLEPayloadSourceKind,
     BluetoothLEPhy,
     BluetoothPacketKind,
+    DectBFieldSource,
     DectPacketType,
     PayloadSourceKind,
     StandardProfile,
@@ -2177,7 +2178,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 return
             settings = replace(
                 current,
-                b_field_source=PayloadSourceKind.PATTERN,
+                b_field_source=DectBFieldSource.PATTERN,
                 b_field_pattern="00001111",
                 r_crc_auto=True,
                 x_crc_auto=True,
@@ -2449,7 +2450,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                     ("Gaussian B*T", f"{dect_settings.gaussian_bt:.3f}"),
                     (
                         "B-field Source",
-                        PayloadSourceKind(dect_settings.b_field_source).value,
+                        DectBFieldSource(dect_settings.b_field_source).value,
+                    ),
+                    (
+                        "B-field Scrambling",
+                        f"{dect_settings.scrambling_mode.value} / phase {dect_settings.scrambling_phase}"
+                        if str(dect_settings.scrambling_mode.value) == "Standard"
+                        else "None",
                     ),
                     (
                         "R/X/Z Generation",

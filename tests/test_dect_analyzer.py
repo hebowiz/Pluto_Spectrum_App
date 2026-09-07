@@ -70,12 +70,12 @@ def test_generated_p32_sync_and_rf_measurements(direction: str) -> None:
     assert carrier_row.result == "MEASURING"
 
 
-def test_alternating_payload_uses_case_b_deviation_limit() -> None:
+def test_alternating_payload_is_generic_case_b_not_part2_conformance() -> None:
     result = analyze_dect_recording(
         generate_dect_packet(payload_pattern="0101")
     )[0]
-    assert result.modulation_case == "Case B (0101)"
-    assert result.modulation_test_eligible
+    assert result.modulation_case == "Case B / Generic"
+    assert not result.modulation_test_eligible
     row = next(
         row for row in result.summary_rows if row.test_item == "GFSK Modulation Deviation"
     )
@@ -86,7 +86,7 @@ def test_arbitrary_payload_reports_reference_values_without_rf_test_verdict() ->
     result = analyze_dect_recording(
         generate_dect_packet(payload_pattern="prbs9")
     )[0]
-    assert result.modulation_case == "Observed arbitrary payload"
+    assert result.modulation_case == "Case B / Generic"
     assert not result.carrier_test_eligible
     assert not result.modulation_test_eligible
     rows = {row.test_item: row for row in result.summary_rows}
@@ -323,7 +323,7 @@ def test_committed_dect_prbs9_fixture_is_analyzable_as_reference() -> None:
     result = analyze_dect_recording(recording)[0]
     assert result.direction == "RFP"
     assert result.packet_type == "P32"
-    assert result.modulation_case == "Observed arbitrary payload"
+    assert result.modulation_case == "Case B / Generic"
     assert result.carrier_test_eligible is False
     assert result.modulation_test_eligible is False
     rows = {row.test_item: row for row in result.summary_rows}

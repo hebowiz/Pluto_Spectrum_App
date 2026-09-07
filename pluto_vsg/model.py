@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from pluto_protocol.bluetooth.hdt import HDTRate
+from pluto_protocol.dect.rf_modulation import DectRFPattern, DectScramblingMode
 
 
 class StandardProfile(StrEnum):
@@ -61,6 +62,14 @@ class DectPacketType(StrEnum):
     P32Z = "P32Z"
     P80 = "P80"
     P80Z = "P80Z"
+
+
+class DectBFieldSource(StrEnum):
+    FIXED = "Fixed"
+    PATTERN = "Pattern"
+    PRBS9 = "PRBS-9"
+    CASE_A = DectRFPattern.CASE_A.value
+    CASE_B_ETSI = DectRFPattern.CASE_B_ETSI.value
 
 
 class BluetoothPacketKind(StrEnum):
@@ -253,8 +262,10 @@ class DectSettings:
     a_tail_bits: str = "0000000000000000000000000000000000000000"
     r_crc_auto: bool = True
     r_crc_bits: str = "0000000000000000"
-    b_field_source: PayloadSourceKind = PayloadSourceKind.PATTERN
+    b_field_source: DectBFieldSource = DectBFieldSource.PATTERN
     b_field_pattern: str = "00001111"
+    scrambling_mode: DectScramblingMode = DectScramblingMode.NONE
+    scrambling_phase: int | None = 0
     x_crc_auto: bool = True
     x_field_bits: str = "0000"
     z_repeat_auto: bool = True
@@ -763,8 +774,12 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
         if not dect_settings.r_crc_auto:
             validate_binary("r_crc_bits", dect_settings.r_crc_bits, 16)
         if DectPacketType(dect_settings.packet_type) is not DectPacketType.P00:
-            source = PayloadSourceKind(dect_settings.b_field_source)
-            if source is not PayloadSourceKind.PRBS9:
+            source = DectBFieldSource(dect_settings.b_field_source)
+            if source not in {
+                DectBFieldSource.PRBS9,
+                DectBFieldSource.CASE_A,
+                DectBFieldSource.CASE_B_ETSI,
+            }:
                 pattern = (
                     str(dect_settings.b_field_pattern)
                     .replace(" ", "")
@@ -785,6 +800,15 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 and not dect_settings.z_repeat_auto
             ):
                 validate_binary("z_field_bits", dect_settings.z_field_bits, 4)
+        if DectScramblingMode(dect_settings.scrambling_mode) is DectScramblingMode.STANDARD:
+            phase = dect_settings.scrambling_phase
+            if phase is None or not 0 <= int(phase) <= 7:
+                issues.append(
+                    ValidationIssue(
+                        "dect.scrambling_phase",
+                        "Standard scrambling requires a known frame phase from 0 to 7.",
+                    )
+                )
         if dect_settings.frequency_deviation_hz <= 0.0:
             issues.append(
                 ValidationIssue(
