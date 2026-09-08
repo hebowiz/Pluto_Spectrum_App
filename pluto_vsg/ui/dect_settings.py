@@ -6,6 +6,11 @@ from dataclasses import replace
 
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from pluto_common.numeric_input import (
+    DeferredDoubleSpinBox,
+    DeferredSpinBox,
+    ensure_valid_numeric_inputs,
+)
 from pluto_protocol.dect.carriers import DECT_CARRIER_PLANS, carrier_by_identity
 from pluto_protocol.dect.classic import BA_NAMES, PP_S_FIELD, RFP_S_FIELD, TA_NAMES
 from pluto_protocol.dect.rf_modulation import (
@@ -31,11 +36,15 @@ def _bit_text(bits) -> str:
     return "".join(str(int(bit)) for bit in bits)
 
 
+_TEST_BURST_TX_A_TAIL_HEX = "0x70736E6363"
+_TEST_BURST_TX_A_TAIL_BITS = f"{int(_TEST_BURST_TX_A_TAIL_HEX, 16):040b}"
+
 _A_TAIL_CHOICES = (
     ("All zeros", "0" * 40),
     ("All ones", "1" * 40),
     ("Alternating 01", "01" * 20),
     ("Alternating 10", "10" * 20),
+    ("Test Burst Tx", _TEST_BURST_TX_A_TAIL_BITS),
 )
 
 
@@ -64,7 +73,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
             max(0, self.plan_combo.findData(settings.carrier_plan_id))
         )
         self.carrier_combo = QtWidgets.QComboBox()
-        self.offset_spin = QtWidgets.QDoubleSpinBox()
+        self.offset_spin = DeferredDoubleSpinBox()
         self.offset_spin.setRange(-3000.0, 3000.0)
         self.offset_spin.setDecimals(3)
         self.offset_spin.setSuffix(" kHz")
@@ -92,23 +101,23 @@ class DectSettingsDialog(QtWidgets.QDialog):
             max(0, self.samples_per_symbol_combo.findData(project.samples_per_symbol))
         )
         self.sample_rate_value = QtWidgets.QLabel()
-        self.repeat_spin = QtWidgets.QSpinBox()
+        self.repeat_spin = DeferredSpinBox()
         self.repeat_spin.setRange(1, 1000)
         self.repeat_spin.setValue(project.repeat_count)
-        self.deviation_spin = QtWidgets.QDoubleSpinBox()
+        self.deviation_spin = DeferredDoubleSpinBox()
         self.deviation_spin.setRange(1.0, 1500.0)
         self.deviation_spin.setDecimals(3)
         self.deviation_spin.setSuffix(" kHz")
         self.deviation_spin.setValue(settings.frequency_deviation_hz / 1e3)
-        self.bt_spin = QtWidgets.QDoubleSpinBox()
+        self.bt_spin = DeferredDoubleSpinBox()
         self.bt_spin.setRange(0.05, 2.0)
         self.bt_spin.setDecimals(3)
         self.bt_spin.setValue(settings.gaussian_bt)
-        self.pre_idle_spin = QtWidgets.QSpinBox()
+        self.pre_idle_spin = DeferredSpinBox()
         self.pre_idle_spin.setRange(0, 10000)
         self.pre_idle_spin.setValue(settings.pre_idle_symbols)
         self._minimum_period_symbols = minimum_period_symbols(project)
-        self.period_spin = QtWidgets.QDoubleSpinBox()
+        self.period_spin = DeferredDoubleSpinBox()
         self.period_spin.setRange(0.0, 1_000_000.0)
         self.period_spin.setDecimals(3)
         self.period_spin.setSuffix(" symbols")
@@ -152,15 +161,28 @@ class DectSettingsDialog(QtWidgets.QDialog):
         self.ba_combo.setCurrentIndex(self.ba_combo.findData(int(header[4:7] or "0", 2)))
         self.q2_combo = self._bit_combo(int(header[7:8] or "0"))
         self.a_tail_combo = QtWidgets.QComboBox()
+        self.a_tail_combo.addItem("Custom", None)
         for label, bits in _A_TAIL_CHOICES:
-            self.a_tail_combo.addItem(f"{label} ({bits})", bits)
-        tail_index = self.a_tail_combo.findData(settings.a_tail_bits)
-        if tail_index < 0:
             self.a_tail_combo.addItem(
-                f"Loaded project value ({settings.a_tail_bits})", settings.a_tail_bits
+                f"{label} (0x{int(bits, 2):010X})", bits
             )
-            tail_index = self.a_tail_combo.count() - 1
-        self.a_tail_combo.setCurrentIndex(tail_index)
+        tail_index = self.a_tail_combo.findData(settings.a_tail_bits)
+        self.a_tail_combo.setCurrentIndex(max(0, tail_index))
+        self.a_tail_edit = QtWidgets.QLineEdit(
+            self._format_a_tail_value(settings.a_tail_bits)
+        )
+        self.a_tail_edit.setMaxLength(42)
+        self.a_tail_edit.setFont(fixed_font)
+        self.a_tail_edit.setPlaceholderText(
+            "0x0000000000 or exactly 40 binary digits"
+        )
+        self.a_tail_edit.setValidator(
+            QtGui.QRegularExpressionValidator(
+                QtCore.QRegularExpression(
+                    "(?:0[xX][0-9A-Fa-f]{0,10}|[01 _]{0,40})"
+                )
+            )
+        )
         self.r_crc_value = QtWidgets.QLabel("Automatic from A Header + Tail")
         self.b_source_combo = QtWidgets.QComboBox()
         for label, source in (
@@ -183,7 +205,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
         self.scrambling_combo.setCurrentIndex(
             self.scrambling_combo.findData(DectScramblingMode(settings.scrambling_mode))
         )
-        self.scrambling_phase_spin = QtWidgets.QSpinBox()
+        self.scrambling_phase_spin = DeferredSpinBox()
         self.scrambling_phase_spin.setRange(0, 7)
         self.scrambling_phase_spin.setValue(int(settings.scrambling_phase or 0))
         self.x_crc_auto = QtWidgets.QCheckBox("Calculate format-specific X-CRC")
@@ -238,6 +260,10 @@ class DectSettingsDialog(QtWidgets.QDialog):
         )
         self.b_source_combo.currentIndexChanged.connect(self._update_derived)
         self.scrambling_combo.currentIndexChanged.connect(self._update_derived)
+        self.a_tail_combo.currentIndexChanged.connect(
+            self._a_tail_preset_changed
+        )
+        self.a_tail_edit.textEdited.connect(self._a_tail_value_edited)
         self.period_spin.valueChanged.connect(self._update_period_constraints)
         for signal in (
             self.packet_type_combo.currentIndexChanged,
@@ -268,7 +294,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
     def _double_spin(
         minimum: float, maximum: float, value: float, suffix: str = ""
     ) -> QtWidgets.QDoubleSpinBox:
-        control = QtWidgets.QDoubleSpinBox()
+        control = DeferredDoubleSpinBox()
         control.setRange(minimum, maximum)
         control.setDecimals(3)
         control.setSuffix(suffix)
@@ -319,7 +345,8 @@ class DectSettingsDialog(QtWidgets.QDialog):
                 ("A Header / Q1-BCK", self.q1_combo),
                 ("A Header / BA", self.ba_combo),
                 ("A Header / Q2", self.q2_combo),
-                ("A Tail Pattern", self.a_tail_combo),
+                ("A Tail Preset", self.a_tail_combo),
+                ("A Tail Value (40-bit)", self.a_tail_edit),
                 ("R-CRC", self.r_crc_value),
                 ("B-field Source", self.b_source_combo),
                 ("B-field Data / Pattern", self.b_pattern_edit),
@@ -342,6 +369,37 @@ class DectSettingsDialog(QtWidgets.QDialog):
         index = self.carrier_combo.findData(previous)
         self.carrier_combo.setCurrentIndex(max(0, index))
         self._update_derived()
+
+    @staticmethod
+    def _format_a_tail_value(bits: str) -> str:
+        normalized = str(bits).replace(" ", "").replace("_", "")
+        if len(normalized) == 40 and all(bit in "01" for bit in normalized):
+            return f"0x{int(normalized, 2):010X}"
+        return str(bits)
+
+    @staticmethod
+    def _a_tail_bits(value: str) -> str:
+        normalized = str(value).replace(" ", "").replace("_", "")
+        if normalized.lower().startswith("0x"):
+            hexadecimal = normalized[2:]
+            if len(hexadecimal) == 10 and all(
+                character in "0123456789abcdefABCDEF"
+                for character in hexadecimal
+            ):
+                return f"{int(hexadecimal, 16):040b}"
+        return normalized
+
+    def _a_tail_preset_changed(self, _index: int) -> None:
+        bits = self.a_tail_combo.currentData()
+        if bits is None:
+            return
+        self.a_tail_edit.setText(self._format_a_tail_value(str(bits)))
+
+    def _a_tail_value_edited(self, _text: str) -> None:
+        if self.a_tail_combo.currentData() is not None:
+            blocker = QtCore.QSignalBlocker(self.a_tail_combo)
+            self.a_tail_combo.setCurrentIndex(0)
+            del blocker
 
     def _direction_changed(self) -> None:
         field = (
@@ -458,7 +516,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
                 + f"{int(self.ba_combo.currentData()):03b}"
                 + str(int(self.q2_combo.currentData()))
             ),
-            a_tail_bits=str(self.a_tail_combo.currentData()),
+            a_tail_bits=self._a_tail_bits(self.a_tail_edit.text()),
             r_crc_auto=True,
             r_crc_bits=self._base_project.dect.r_crc_bits,
             b_field_source=DectBFieldSource(self.b_source_combo.currentData()),
@@ -509,6 +567,8 @@ class DectSettingsDialog(QtWidgets.QDialog):
         return project
 
     def _accept(self) -> None:
+        if not ensure_valid_numeric_inputs(self, title="Invalid DECT Setting"):
+            return
         project = self.project
         issues = validate_project(project)
         if issues:

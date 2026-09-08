@@ -12,6 +12,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from pluto_common.numeric_input import DeferredDoubleSpinBox
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.standards.adsb1090.analysis import ADSB1090Analyzer
 from pluto_sa.standards.adsb1090.decoder import (
@@ -266,12 +267,12 @@ class _ReceiverLocationDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("ADS-B Receiver Location")
         layout = QtWidgets.QFormLayout(self)
-        self.latitude_spin = QtWidgets.QDoubleSpinBox()
+        self.latitude_spin = DeferredDoubleSpinBox()
         self.latitude_spin.setRange(-90.0, 90.0)
         self.latitude_spin.setDecimals(6)
         self.latitude_spin.setSingleStep(0.0001)
         self.latitude_spin.setValue(0.0 if latitude is None else latitude)
-        self.longitude_spin = QtWidgets.QDoubleSpinBox()
+        self.longitude_spin = DeferredDoubleSpinBox()
         self.longitude_spin.setRange(-180.0, 180.0)
         self.longitude_spin.setDecimals(6)
         self.longitude_spin.setSingleStep(0.0001)
@@ -738,19 +739,19 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.sample_rate_combo.addItem("16 MS/s", 16)
         toolbar.addWidget(self.sample_rate_combo)
         toolbar.addWidget(QtWidgets.QLabel("   Capture:"))
-        self.capture_length_spin = QtWidgets.QDoubleSpinBox()
+        self.capture_length_spin = DeferredDoubleSpinBox()
         self.capture_length_spin.setRange(1.0, 2000.0)
         self.capture_length_spin.setValue(250.0)
         self.capture_length_spin.setSuffix(" ms")
         toolbar.addWidget(self.capture_length_spin)
         toolbar.addWidget(QtWidgets.QLabel("   Internal Gain:"))
-        self.internal_gain_spin = QtWidgets.QDoubleSpinBox()
+        self.internal_gain_spin = DeferredDoubleSpinBox()
         self.internal_gain_spin.setRange(0.0, 70.0)
         self.internal_gain_spin.setValue(50.0)
         self.internal_gain_spin.setSuffix(" dB")
         toolbar.addWidget(self.internal_gain_spin)
         toolbar.addWidget(QtWidgets.QLabel("   Preamble SNR Threshold:"))
-        self.preamble_snr_spin = QtWidgets.QDoubleSpinBox()
+        self.preamble_snr_spin = DeferredDoubleSpinBox()
         self.preamble_snr_spin.setRange(-20.0, 40.0)
         self.preamble_snr_spin.setDecimals(1)
         self.preamble_snr_spin.setSingleStep(0.5)

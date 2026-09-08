@@ -16,6 +16,7 @@ from scipy.ndimage import gaussian_filter
 import iio
 
 from pluto_common import discover_pluto_devices
+from pluto_common.numeric_input import DeferredDoubleSpinBox, DeferredSpinBox
 from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.analysis import capture_power_traces, recording_spectrum_trace
@@ -1117,12 +1118,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         pluto_selector_layout.setContentsMargins(0, 0, 0, 0)
         pluto_selector_layout.addWidget(self.pluto_uri_edit, 1)
         pluto_selector_layout.addWidget(self.pluto_refresh_button)
-        self.capture_center_spin = QtWidgets.QDoubleSpinBox()
+        self.capture_center_spin = DeferredDoubleSpinBox()
         self.capture_center_spin.setRange(70.0, 6000.0)
         self.capture_center_spin.setDecimals(6)
         self.capture_center_spin.setValue(2441.0)
         self.capture_center_spin.setSuffix(" MHz")
-        self.capture_rf_bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.capture_rf_bandwidth_spin = DeferredDoubleSpinBox()
         self.capture_rf_bandwidth_spin.setRange(0.2, 56.0)
         self.capture_rf_bandwidth_spin.setDecimals(3)
         self.capture_rf_bandwidth_spin.setValue(8.0)
@@ -1132,22 +1133,22 @@ class VSAWindow(QtWidgets.QMainWindow):
             "Tune the Pluto LO away from the requested center. "
             "Requires the Analysis Channel filter."
         )
-        self.lo_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.lo_offset_spin = DeferredDoubleSpinBox()
         self.lo_offset_spin.setRange(-50.0, 50.0)
         self.lo_offset_spin.setDecimals(6)
         self.lo_offset_spin.setValue(1.5)
         self.lo_offset_spin.setSuffix(" MHz")
         self.lo_offset_status_label = QtWidgets.QLabel()
-        self.internal_gain_spin = QtWidgets.QSpinBox()
+        self.internal_gain_spin = DeferredSpinBox()
         self.internal_gain_spin.setRange(0, 40)
         self.internal_gain_spin.setValue(30)
         self.internal_gain_spin.setSuffix(" dB")
-        self.external_attenuation_spin = QtWidgets.QDoubleSpinBox()
+        self.external_attenuation_spin = DeferredDoubleSpinBox()
         self.external_attenuation_spin.setRange(-200.0, 200.0)
         self.external_attenuation_spin.setDecimals(1)
         self.external_attenuation_spin.setValue(30.0)
         self.external_attenuation_spin.setSuffix(" dB")
-        self.external_gain_spin = QtWidgets.QDoubleSpinBox()
+        self.external_gain_spin = DeferredDoubleSpinBox()
         self.external_gain_spin.setRange(-200.0, 200.0)
         self.external_gain_spin.setDecimals(1)
         self.external_gain_spin.setValue(0.0)
@@ -1175,11 +1176,11 @@ class VSAWindow(QtWidgets.QMainWindow):
             control.valueChanged.connect(self._sync_capture_settings)
         self.lo_offset_check.toggled.connect(self._sync_lo_offset_controls)
         self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
-        self.analysis_center_spin = QtWidgets.QDoubleSpinBox()
+        self.analysis_center_spin = DeferredDoubleSpinBox()
         self.analysis_center_spin.setRange(-100_000.0, 100_000.0)
         self.analysis_center_spin.setDecimals(6)
         self.analysis_center_spin.setSuffix(" MHz")
-        self.analysis_bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.analysis_bandwidth_spin = DeferredDoubleSpinBox()
         self.analysis_bandwidth_spin.setRange(0.000001, 100.0)
         self.analysis_bandwidth_spin.setDecimals(6)
         self.analysis_bandwidth_spin.setValue(1.5)
@@ -1220,12 +1221,12 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.modulation_combo = QtWidgets.QComboBox()
         for modulation in _MODULATIONS:
             self.modulation_combo.addItem(modulation.value, modulation.value)
-        self.symbol_rate_spin = QtWidgets.QDoubleSpinBox()
+        self.symbol_rate_spin = DeferredDoubleSpinBox()
         self.symbol_rate_spin.setRange(1.0, 100_000_000.0)
         self.symbol_rate_spin.setDecimals(0)
         self.symbol_rate_spin.setValue(1_000_000.0)
         self.symbol_rate_spin.setSuffix(" Sym/s")
-        self.deviation_spin = QtWidgets.QDoubleSpinBox()
+        self.deviation_spin = DeferredDoubleSpinBox()
         self.deviation_spin.setRange(1.0, 50_000_000.0)
         self.deviation_spin.setDecimals(0)
         self.deviation_spin.setValue(250_000.0)
@@ -1241,7 +1242,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         self.tx_filter_combo = QtWidgets.QComboBox()
         self.tx_filter_combo.addItems(("None", "Gaussian", "Root Raised Cosine"))
-        self.filter_parameter_spin = QtWidgets.QDoubleSpinBox()
+        self.filter_parameter_spin = DeferredDoubleSpinBox()
         self.filter_parameter_spin.setRange(0.01, 2.0)
         self.filter_parameter_spin.setDecimals(3)
         self.filter_parameter_spin.setValue(0.5)
@@ -1260,7 +1261,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
         capture_page = QtWidgets.QWidget()
         capture_form = QtWidgets.QFormLayout(capture_page)
-        self.capture_length_spin = QtWidgets.QDoubleSpinBox()
+        self.capture_length_spin = DeferredDoubleSpinBox()
         self.capture_length_spin.setRange(0.001, 1_000_000.0)
         self.capture_length_spin.setDecimals(3)
         self.capture_length_spin.setValue(3.0)
@@ -1310,7 +1311,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.acquisition_trigger_source_combo.addItem(
             "I/Q Power", TriggerKind.POWER_LEVEL.value
         )
-        self.acquisition_trigger_level_spin = QtWidgets.QDoubleSpinBox()
+        self.acquisition_trigger_level_spin = DeferredDoubleSpinBox()
         self.acquisition_trigger_level_spin.setRange(-200.0, 100.0)
         self.acquisition_trigger_level_spin.setDecimals(2)
         self.acquisition_trigger_level_spin.setValue(-20.0)
@@ -1320,7 +1321,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self.acquisition_trigger_slope_combo.addItem(
                 slope.value.capitalize(), slope.value
             )
-        self.acquisition_trigger_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.acquisition_trigger_offset_spin = DeferredDoubleSpinBox()
         self.acquisition_trigger_offset_spin.setRange(-1_000_000.0, 1_000_000.0)
         self.acquisition_trigger_offset_spin.setDecimals(3)
         self.acquisition_trigger_offset_spin.setSuffix(" sym")
@@ -1330,7 +1331,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             "automatically retains 16 symbols to protect the first burst ramp "
             "and preamble."
         )
-        self.acquisition_trigger_hysteresis_spin = QtWidgets.QDoubleSpinBox()
+        self.acquisition_trigger_hysteresis_spin = DeferredDoubleSpinBox()
         self.acquisition_trigger_hysteresis_spin.setRange(0.0, 50.0)
         self.acquisition_trigger_hysteresis_spin.setDecimals(1)
         self.acquisition_trigger_hysteresis_spin.setValue(3.0)
@@ -1350,17 +1351,17 @@ class VSAWindow(QtWidgets.QMainWindow):
             "Detect every rising power event in the current I/Q capture and "
             "run pattern search once inside each active interval."
         )
-        self.iq_power_trigger_level_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_level_spin = DeferredDoubleSpinBox()
         self.iq_power_trigger_level_spin.setRange(-200.0, 100.0)
         self.iq_power_trigger_level_spin.setDecimals(2)
         self.iq_power_trigger_level_spin.setValue(-20.0)
         self.iq_power_trigger_level_spin.setSuffix(" dBm")
-        self.iq_power_trigger_hysteresis_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_hysteresis_spin = DeferredDoubleSpinBox()
         self.iq_power_trigger_hysteresis_spin.setRange(0.0, 60.0)
         self.iq_power_trigger_hysteresis_spin.setDecimals(2)
         self.iq_power_trigger_hysteresis_spin.setValue(3.0)
         self.iq_power_trigger_hysteresis_spin.setSuffix(" dB")
-        self.iq_power_trigger_average_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_average_spin = DeferredDoubleSpinBox()
         self.iq_power_trigger_average_spin.setRange(0.0, 1_000.0)
         self.iq_power_trigger_average_spin.setDecimals(2)
         self.iq_power_trigger_average_spin.setValue(1.0)
@@ -1369,7 +1370,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             "Moving average applied to linear I/Q envelope power before "
             "threshold comparison."
         )
-        self.iq_power_trigger_dropout_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_dropout_spin = DeferredDoubleSpinBox()
         self.iq_power_trigger_dropout_spin.setRange(0.0, 1_000_000.0)
         self.iq_power_trigger_dropout_spin.setDecimals(2)
         self.iq_power_trigger_dropout_spin.setValue(8.0)
@@ -1378,12 +1379,12 @@ class VSAWindow(QtWidgets.QMainWindow):
             "Power must remain below Level - Hysteresis for this duration "
             "before another trigger can be detected."
         )
-        self.iq_power_trigger_holdoff_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_holdoff_spin = DeferredDoubleSpinBox()
         self.iq_power_trigger_holdoff_spin.setRange(0.0, 1_000_000.0)
         self.iq_power_trigger_holdoff_spin.setDecimals(2)
         self.iq_power_trigger_holdoff_spin.setValue(0.0)
         self.iq_power_trigger_holdoff_spin.setSuffix(" sym")
-        self.iq_power_trigger_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.iq_power_trigger_offset_spin = DeferredDoubleSpinBox()
         self.iq_power_trigger_offset_spin.setRange(-1_000_000.0, 1_000_000.0)
         self.iq_power_trigger_offset_spin.setDecimals(3)
         self.iq_power_trigger_offset_spin.setValue(0.0)
@@ -1455,7 +1456,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             pattern_table_buttons.addWidget(button)
         self.pattern_threshold_auto = QtWidgets.QCheckBox("Auto (90%)")
         self.pattern_threshold_auto.setChecked(True)
-        self.pattern_threshold_spin = QtWidgets.QDoubleSpinBox()
+        self.pattern_threshold_spin = DeferredDoubleSpinBox()
         self.pattern_threshold_spin.setRange(0.1, 100.0)
         self.pattern_threshold_spin.setValue(90.0)
         self.pattern_threshold_spin.setSuffix(" %")
@@ -1500,7 +1501,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
         range_page = QtWidgets.QWidget()
         range_form = QtWidgets.QFormLayout(range_page)
-        self.result_length_spin = QtWidgets.QSpinBox()
+        self.result_length_spin = DeferredSpinBox()
         self.result_length_spin.setRange(1, 1_000_000)
         self.result_length_spin.setValue(256)
         self.result_reference_combo = QtWidgets.QComboBox()
@@ -1511,9 +1512,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.result_alignment_combo = QtWidgets.QComboBox()
         for alignment in ResultRangeAlignment:
             self.result_alignment_combo.addItem(alignment.value, alignment.value)
-        self.result_offset_spin = QtWidgets.QSpinBox()
+        self.result_offset_spin = DeferredSpinBox()
         self.result_offset_spin.setRange(-1_000_000, 1_000_000)
-        self.reference_symbol_number_spin = QtWidgets.QSpinBox()
+        self.reference_symbol_number_spin = DeferredSpinBox()
         self.reference_symbol_number_spin.setRange(-1_000_000, 1_000_000)
         self.reference_symbol_number_spin.setEnabled(False)
         self.reference_symbol_number_spin.setToolTip(

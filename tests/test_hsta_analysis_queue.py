@@ -368,11 +368,7 @@ def test_trigger_level_dialog_pauses_and_resumes_continuous_capture(
         assert calls == ["timer_stop", "stream_stop", "queues_clear"]
         return -20.0, False
 
-    monkeypatch.setattr(
-        main_window_module.QtWidgets.QInputDialog,
-        "getDouble",
-        cancel_dialog,
-    )
+    monkeypatch.setattr(main_window_module, "get_deferred_double", cancel_dialog)
 
     RealtimeSpectrumWindow._on_hsta_trigger_level_clicked(owner)
 
@@ -428,8 +424,8 @@ def test_hsta_rbw_change_stops_stream_before_receiver_reconfiguration(
     )
 
     monkeypatch.setattr(
-        main_window_module.QtWidgets.QInputDialog,
-        "getDouble",
+        main_window_module,
+        "get_deferred_double",
         lambda *args, **kwargs: (100.0, True),
     )
 
@@ -484,8 +480,8 @@ def test_hsta_internal_gain_change_pauses_receiver_before_gain_write(
         owner,
     )
     monkeypatch.setattr(
-        main_window_module.QtWidgets.QInputDialog,
-        "getInt",
+        main_window_module,
+        "get_deferred_int",
         lambda *args, **kwargs: (25, True),
     )
 

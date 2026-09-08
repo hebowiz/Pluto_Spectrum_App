@@ -11,6 +11,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from pluto_common.numeric_input import DeferredDoubleSpinBox
 from pluto_protocol.dect.common import dect_p_range
 from pluto_protocol.model import PacketField
 from pluto_sa.config.input_frontend import InputPowerCorrection
@@ -293,7 +294,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         for plan in DECT_CARRIER_PLANS:
             self.plan_combo.addItem(plan.label, plan.plan_id)
         self.carrier_combo = QtWidgets.QComboBox()
-        self.capture_length_spin = QtWidgets.QDoubleSpinBox()
+        self.capture_length_spin = DeferredDoubleSpinBox()
         self.capture_length_spin.setRange(1.0, 100.0)
         self.capture_length_spin.setValue(2.0)
         self.capture_length_spin.setSuffix(" ms")
@@ -301,12 +302,12 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         for sps in (4, 8, 16, 32):
             self.oversampling_combo.addItem(f"{sps} S/sym", sps)
         self.oversampling_combo.setCurrentIndex(1)
-        self.rf_bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.rf_bandwidth_spin = DeferredDoubleSpinBox()
         self.rf_bandwidth_spin.setRange(3.0, 20.0)
         self.rf_bandwidth_spin.setValue(6.0)
         self.rf_bandwidth_spin.setSuffix(" MHz")
         self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
-        self.analysis_bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.analysis_bandwidth_spin = DeferredDoubleSpinBox()
         self.analysis_bandwidth_spin.setRange(0.000001, 100.0)
         self.analysis_bandwidth_spin.setDecimals(6)
         self.analysis_bandwidth_spin.setValue(3.0)
@@ -320,21 +321,21 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             "Tune the Pluto LO away from the selected DECT carrier. "
             "Requires the Analysis Channel filter."
         )
-        self.lo_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.lo_offset_spin = DeferredDoubleSpinBox()
         self.lo_offset_spin.setRange(-50.0, 50.0)
         self.lo_offset_spin.setDecimals(6)
         self.lo_offset_spin.setValue(2.0)
         self.lo_offset_spin.setSuffix(" MHz")
         self.resolved_lo_label = QtWidgets.QLabel()
-        self.internal_gain_spin = QtWidgets.QDoubleSpinBox()
+        self.internal_gain_spin = DeferredDoubleSpinBox()
         self.internal_gain_spin.setRange(0.0, 70.0)
         self.internal_gain_spin.setValue(30.0)
         self.internal_gain_spin.setSuffix(" dB")
-        self.external_att_spin = QtWidgets.QDoubleSpinBox()
+        self.external_att_spin = DeferredDoubleSpinBox()
         self.external_att_spin.setRange(-100.0, 100.0)
         self.external_att_spin.setValue(30.0)
         self.external_att_spin.setSuffix(" dB")
-        self.trigger_level_spin = QtWidgets.QDoubleSpinBox()
+        self.trigger_level_spin = DeferredDoubleSpinBox()
         self.trigger_level_spin.setRange(-150.0, 30.0)
         self.trigger_level_spin.setValue(-25.0)
         self.trigger_level_spin.setSuffix(" dBm")

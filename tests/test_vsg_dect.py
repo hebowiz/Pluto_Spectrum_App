@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_protocol.dect import DECT_CARRIER_PLANS
 from pluto_sa.vsa.model import IQRecording
@@ -251,10 +251,23 @@ def test_sync_is_direction_derived_and_a_field_uses_choice_controls() -> None:
         assert isinstance(dialog.ta_combo, QtWidgets.QComboBox)
         assert isinstance(dialog.ba_combo, QtWidgets.QComboBox)
         assert isinstance(dialog.a_tail_combo, QtWidgets.QComboBox)
+        assert isinstance(dialog.a_tail_edit, QtWidgets.QLineEdit)
         assert not hasattr(dialog, "preamble_edit")
         assert not hasattr(dialog, "sync_edit")
-        assert not hasattr(dialog, "a_tail_edit")
         assert not hasattr(dialog, "r_crc_edit")
+
+        test_burst_index = dialog.a_tail_combo.findText(
+            "Test Burst Tx", QtCore.Qt.MatchFlag.MatchStartsWith
+        )
+        assert test_burst_index >= 0
+        dialog.a_tail_combo.setCurrentIndex(test_burst_index)
+        assert dialog.a_tail_edit.text() == "0x70736E6363"
+        assert dialog.project.dect.a_tail_bits == f"{0x70736E6363:040b}"
+
+        dialog.a_tail_edit.setText("0x123456789A")
+        dialog.a_tail_edit.textEdited.emit(dialog.a_tail_edit.text())
+        assert dialog.a_tail_combo.currentText() == "Custom"
+        assert dialog.project.dect.a_tail_bits == f"{0x123456789A:040b}"
 
         dialog.direction_combo.setCurrentIndex(
             dialog.direction_combo.findData(DectDirection.PP)

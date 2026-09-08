@@ -18,6 +18,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.numeric_input import get_deferred_double, get_deferred_int
 from pluto_common.runtime_paths import application_data_dir, is_frozen_application
 
 from pluto_sa.config.spectrum_config import (
@@ -3729,7 +3730,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         label: str,
         value_mhz: float,
     ) -> tuple[float, bool]:
-        return QtWidgets.QInputDialog.getDouble(
+        return get_deferred_double(
             self,
             title,
             label,
@@ -3762,7 +3763,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _on_cf_step_clicked(self) -> None:
         if self._is_calibration_mode():
             return
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "CF Step",
             "Center Step [MHz]",
@@ -3843,7 +3844,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self.config.center_freq_hz + self.config.display_span_hz // 2
             ) / 1e6
 
-        start_value, accepted = QtWidgets.QInputDialog.getDouble(
+        start_value, accepted = get_deferred_double(
             self,
             "Start/Stop",
             "Start Frequency [MHz]",
@@ -3860,7 +3861,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             (MAX_WIDEBAND_STOP_HZ / 1e6) if self._is_wideband_mode() else PLUTO_MAX_CENTER_FREQ_MHZ,
         )
 
-        stop_value, accepted = QtWidgets.QInputDialog.getDouble(
+        stop_value, accepted = get_deferred_double(
             self,
             "Start/Stop",
             "Stop Frequency [MHz]",
@@ -3918,7 +3919,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             if self.config.analyzer_mode == AnalyzerMode.REALTIME_SA
             else ((MAX_WIDEBAND_STOP_HZ - MIN_WIDEBAND_START_HZ) / 1e6)
         )
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Freq Span",
             "Display Span [MHz]",
@@ -3955,7 +3956,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _on_ref_level_clicked(self) -> None:
         if self._is_calibration_mode():
             return
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Ref Level",
             "Ref Level [dBm]",
@@ -3979,7 +3980,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _on_range_clicked(self) -> None:
         if self._is_calibration_mode():
             return
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Range",
             "Display Range [dB]",
@@ -4003,7 +4004,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _on_int_gain_clicked(self) -> None:
         if self._is_calibration_mode():
             return
-        value, accepted = QtWidgets.QInputDialog.getInt(
+        value, accepted = get_deferred_int(
             self,
             "Int Gain",
             "Internal Gain [dB]",
@@ -4024,7 +4025,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _on_ext_att_clicked(self) -> None:
         if self._is_calibration_mode():
             return
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Ext ATT",
             "External ATT [dB]",
@@ -4046,7 +4047,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _on_ext_gain_clicked(self) -> None:
         if self._is_calibration_mode():
             return
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Ext Gain",
             "External Gain [dB]",
@@ -4074,7 +4075,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         is_time_analyzer_mode = self._is_time_analyzer_mode() and not is_high_speed_ta_mode
         is_sweep_mode = self.config.analyzer_mode == AnalyzerMode.SWEEP_SA
         current_value = 0.0 if self.config.rbw_hz is None else self.config.rbw_hz / 1e3
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "RBW",
             "RBW [kHz] (0 = None)",
@@ -4141,7 +4142,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         previous_state = self._current_sweep_state()
         is_high_speed_ta = self._is_high_speed_time_analyzer_mode()
         current_time_span_s = float(self.config.time_analyzer_time_span_s)
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Time Span",
             "Time Span [ms]" if is_high_speed_ta else "Time Span [s]",
@@ -4319,7 +4320,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         previous_state = self._current_sweep_state()
         if self._is_high_speed_time_analyzer_mode():
             current_ms = float(self.config.time_analyzer_time_span_s) * 1e3
-            value, accepted = QtWidgets.QInputDialog.getDouble(
+            value, accepted = get_deferred_double(
                 self,
                 "Swp Time",
                 "Sweep Time [ms]",
@@ -4349,7 +4350,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 self._update_continuous_button()
             return
 
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Swp Time",
             "Sweep Time [ms]",
@@ -4373,7 +4374,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _on_sweep_points_clicked(self) -> None:
         previous_state = self._current_sweep_state()
-        value, accepted = QtWidgets.QInputDialog.getInt(
+        value, accepted = get_deferred_int(
             self,
             "Swp Pts",
             "Sweep Points",
@@ -4409,7 +4410,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._refresh_status_label()
 
     def _on_history_clicked(self) -> None:
-        value, accepted = QtWidgets.QInputDialog.getInt(
+        value, accepted = get_deferred_int(
             self,
             "History",
             "Waterfall History",
@@ -4556,7 +4557,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _on_trace_average_count_clicked(self, trace_index: int) -> None:
         trace_state = self._trace_state(trace_index)
-        value, accepted = QtWidgets.QInputDialog.getInt(
+        value, accepted = get_deferred_int(
             self,
             trace_state.name,
             "Average Count",
@@ -5725,7 +5726,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             return
         if self._is_time_analyzer_mode():
             start_s, stop_s = self._time_marker_bounds_sec()
-            value, accepted = QtWidgets.QInputDialog.getDouble(
+            value, accepted = get_deferred_double(
                 self,
                 marker_state.name,
                 "Time [s]",
@@ -5766,7 +5767,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         marker_state = self._marker_state(marker_index)
         if self._is_time_analyzer_mode():
             if self._is_high_speed_time_analyzer_mode():
-                value_ms, accepted = QtWidgets.QInputDialog.getDouble(
+                value_ms, accepted = get_deferred_double(
                     self,
                     marker_state.name,
                     "Step [ms]",
@@ -5779,7 +5780,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     return
                 marker_state.time_step_sec = self._clamp_float(float(value_ms) * 1e-3, 1e-6, 1_000.0)
             else:
-                value, accepted = QtWidgets.QInputDialog.getDouble(
+                value, accepted = get_deferred_double(
                     self,
                     marker_state.name,
                     "Step [s]",
@@ -5793,7 +5794,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 marker_state.time_step_sec = self._clamp_float(float(value), 0.001, 1_000.0)
             self._update_marker_control_state(marker_index)
             return
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             marker_state.name,
             "Step [kHz]",
@@ -7670,7 +7671,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self._high_speed_ta_generation += 1
             self._stop_high_speed_ta_stream(stop_analysis_thread=False)
             self._clear_high_speed_ta_analysis_queues()
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Trigger Level",
             "Level [dBm]",
@@ -7691,7 +7692,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_trigger_controls()
 
     def _on_hsta_trigger_position_clicked(self) -> None:
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Trigger Position",
             "Pre-trigger position [%]",
@@ -7707,7 +7708,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_trigger_controls()
 
     def _on_hsta_trigger_auto_timeout_clicked(self) -> None:
-        value, accepted = QtWidgets.QInputDialog.getDouble(
+        value, accepted = get_deferred_double(
             self,
             "Auto Timeout",
             "Timeout [ms]",

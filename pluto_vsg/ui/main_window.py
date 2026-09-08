@@ -12,6 +12,11 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.numeric_input import (
+    DeferredDoubleSpinBox,
+    DeferredSpinBox,
+    ensure_valid_numeric_inputs,
+)
 from pluto_common.runtime_paths import diagnostic_log_path
 
 from pluto_sa.vsa.profiles.bluetooth_br import header_error_check
@@ -169,13 +174,13 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
         for mode in WiFiScramblerSeedMode:
             self.seed_mode_combo.addItem(mode.value, mode)
         self.seed_mode_combo.setCurrentIndex(self.seed_mode_combo.findData(WiFiScramblerSeedMode(settings.scrambler_seed_mode)))
-        self.seed_spin = QtWidgets.QSpinBox(); self.seed_spin.setRange(1, 127); self.seed_spin.setValue(settings.scrambler_seed)
+        self.seed_spin = DeferredSpinBox(); self.seed_spin.setRange(1, 127); self.seed_spin.setValue(settings.scrambler_seed)
         self.seed_spin.setDisplayIntegerBase(16); self.seed_spin.setPrefix("0x")
         nominal_wifi_hz = (2407 + 5 * int(settings.channel)) * 1e6
         self.channel_combo = carrier_selector(
             wifi_24ghz_carriers(), nominal_wifi_hz
         )
-        self.frequency_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.frequency_offset_spin = DeferredDoubleSpinBox()
         self.frequency_offset_spin.setRange(-3000.0, 3000.0)
         self.frequency_offset_spin.setDecimals(3)
         self.frequency_offset_spin.setSuffix(" kHz")
@@ -188,14 +193,14 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
             self.source_combo.addItem(source.value, source)
         self.source_combo.setCurrentIndex(self.source_combo.findData(WiFiPSDUSource(settings.psdu_source)))
         self.raw_hex_edit = QtWidgets.QPlainTextEdit(settings.raw_psdu_hex); self.raw_hex_edit.setMaximumHeight(100)
-        self.length_spin = QtWidgets.QSpinBox(); self.length_spin.setRange(1, 4095); self.length_spin.setValue(settings.payload_length_bytes)
+        self.length_spin = DeferredSpinBox(); self.length_spin.setRange(1, 4095); self.length_spin.setValue(settings.payload_length_bytes)
         self.pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern_hex)
-        self.period_spin = QtWidgets.QDoubleSpinBox(); self.period_spin.setRange(1.0, 10_000_000.0); self.period_spin.setDecimals(1); self.period_spin.setValue(settings.packet_period_us); self.period_spin.setSuffix(" us")
-        self.repeat_spin = QtWidgets.QSpinBox(); self.repeat_spin.setRange(1, 1000); self.repeat_spin.setValue(project.repeat_count)
+        self.period_spin = DeferredDoubleSpinBox(); self.period_spin.setRange(1.0, 10_000_000.0); self.period_spin.setDecimals(1); self.period_spin.setValue(settings.packet_period_us); self.period_spin.setSuffix(" us")
+        self.repeat_spin = DeferredSpinBox(); self.repeat_spin.setRange(1, 1000); self.repeat_spin.setValue(project.repeat_count)
         self.ssid_edit = QtWidgets.QLineEdit(settings.ssid)
         self.bssid_edit = QtWidgets.QLineEdit(settings.bssid)
-        self.sequence_spin = QtWidgets.QSpinBox(); self.sequence_spin.setRange(0, 4095); self.sequence_spin.setValue(settings.sequence_number)
-        self.beacon_interval_spin = QtWidgets.QSpinBox(); self.beacon_interval_spin.setRange(1, 65535); self.beacon_interval_spin.setValue(settings.beacon_interval_tu); self.beacon_interval_spin.setSuffix(" TU")
+        self.sequence_spin = DeferredSpinBox(); self.sequence_spin.setRange(0, 4095); self.sequence_spin.setValue(settings.sequence_number)
+        self.beacon_interval_spin = DeferredSpinBox(); self.beacon_interval_spin.setRange(1, 65535); self.beacon_interval_spin.setValue(settings.beacon_interval_tu); self.beacon_interval_spin.setSuffix(" TU")
         self.fcs_check = QtWidgets.QCheckBox("Append IEEE 802.11 FCS automatically"); self.fcs_check.setChecked(settings.fcs_auto)
         self.derived_label = QtWidgets.QLabel(); self.derived_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -267,6 +272,8 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
             self.derived_label.setText(str(error))
 
     def _accept_settings(self) -> None:
+        if not ensure_valid_numeric_inputs(self, title="Invalid Wi-Fi Setting"):
+            return
         try:
             settings = self._settings(); candidate = wifi_project(settings)
             candidate = replace(
@@ -326,7 +333,7 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             )
         )
         self.payload_pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern)
-        self.length_spin = QtWidgets.QSpinBox()
+        self.length_spin = DeferredSpinBox()
         self.length_spin.setRange(0, 255)
         self.length_spin.setValue(settings.payload_length_bytes)
         self.crc_check = QtWidgets.QCheckBox()
@@ -462,7 +469,7 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _double_spin(minimum: float, maximum: float, value: float, decimals: int) -> QtWidgets.QDoubleSpinBox:
-        control = QtWidgets.QDoubleSpinBox()
+        control = DeferredDoubleSpinBox()
         control.setRange(minimum, maximum)
         control.setDecimals(decimals)
         control.setValue(value)
@@ -471,7 +478,7 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _integer_spin(minimum: int, maximum: int, value: int) -> QtWidgets.QSpinBox:
-        control = QtWidgets.QSpinBox()
+        control = DeferredSpinBox()
         control.setRange(minimum, maximum)
         control.setValue(value)
         return control
@@ -578,6 +585,10 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         self._update_rf_preview()
 
     def _accept_settings(self) -> None:
+        if not ensure_valid_numeric_inputs(
+            self, title="Invalid Bluetooth LE Setting"
+        ):
+            return
         phy = BluetoothLEPhy(self.phy_combo.currentData())
         try:
             crc_init = int(self.crc_init_edit.text().strip(), 16)
@@ -677,7 +688,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             key=lambda frequency: abs(frequency - project.center_frequency_hz),
         )
         self.carrier_combo = carrier_selector(hdt_carriers, hdt_nominal_hz)
-        self.frequency_offset_spin = QtWidgets.QDoubleSpinBox()
+        self.frequency_offset_spin = DeferredDoubleSpinBox()
         self.frequency_offset_spin.setRange(-3000.0, 3000.0)
         self.frequency_offset_spin.setDecimals(3)
         self.frequency_offset_spin.setSuffix(" kHz")
@@ -690,25 +701,25 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             definition = hdt_definition(rate)
             self.rate_combo.addItem(f"{rate.value} / {definition.modulation} / code {definition.payload_code_rate}", rate)
         self.rate_combo.setCurrentIndex(self.rate_combo.findData(HDTRate(settings.rate)))
-        self.length_spin = QtWidgets.QSpinBox(); self.length_spin.setRange(0, 509); self.length_spin.setValue(settings.payload_length_bytes)
+        self.length_spin = DeferredSpinBox(); self.length_spin.setRange(0, 509); self.length_spin.setValue(settings.payload_length_bytes)
         self.source_combo = QtWidgets.QComboBox()
         for source in PayloadSourceKind:
             self.source_combo.addItem(source.value, source)
         self.source_combo.setCurrentIndex(self.source_combo.findData(PayloadSourceKind(settings.payload_source)))
         self.pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern)
-        self.rolloff_spin = QtWidgets.QDoubleSpinBox(); self.rolloff_spin.setRange(0.01, 1.0); self.rolloff_spin.setDecimals(3); self.rolloff_spin.setValue(settings.rrc_rolloff)
-        self.sps_spin = QtWidgets.QSpinBox(); self.sps_spin.setRange(4, 64); self.sps_spin.setValue(project.samples_per_symbol)
+        self.rolloff_spin = DeferredDoubleSpinBox(); self.rolloff_spin.setRange(0.01, 1.0); self.rolloff_spin.setDecimals(3); self.rolloff_spin.setValue(settings.rrc_rolloff)
+        self.sps_spin = DeferredSpinBox(); self.sps_spin.setRange(4, 64); self.sps_spin.setValue(project.samples_per_symbol)
         self.sample_rate_label = QtWidgets.QLabel()
         self.packet_duration_label = QtWidgets.QLabel()
-        self.repeat_spin = QtWidgets.QSpinBox(); self.repeat_spin.setRange(1, 1000); self.repeat_spin.setValue(project.repeat_count)
-        self.pre_idle_spin = QtWidgets.QSpinBox(); self.pre_idle_spin.setRange(0, 100000); self.pre_idle_spin.setValue(settings.pre_idle_symbols)
+        self.repeat_spin = DeferredSpinBox(); self.repeat_spin.setRange(1, 1000); self.repeat_spin.setValue(project.repeat_count)
+        self.pre_idle_spin = DeferredSpinBox(); self.pre_idle_spin.setRange(0, 100000); self.pre_idle_spin.setValue(settings.pre_idle_symbols)
         self._minimum_period_symbols = minimum_period_symbols(project)
-        self.period_spin = QtWidgets.QDoubleSpinBox(); self.period_spin.setRange(0.0, 1_000_000.0); self.period_spin.setDecimals(3); self.period_spin.setValue(effective_period_symbols(project))
+        self.period_spin = DeferredDoubleSpinBox(); self.period_spin.setRange(0.0, 1_000_000.0); self.period_spin.setDecimals(3); self.period_spin.setValue(effective_period_symbols(project))
         self.post_idle_value = QtWidgets.QLabel()
-        self.rise_spin = QtWidgets.QDoubleSpinBox(); self.rise_spin.setRange(0.0, 1000.0); self.rise_spin.setValue(project.power_envelope.rise_symbols)
-        self.rise_delay_spin = QtWidgets.QDoubleSpinBox(); self.rise_delay_spin.setRange(-1000.0, 1000.0); self.rise_delay_spin.setValue(project.power_envelope.rise_delay_symbols)
-        self.fall_spin = QtWidgets.QDoubleSpinBox(); self.fall_spin.setRange(0.0, 1000.0); self.fall_spin.setValue(project.power_envelope.fall_symbols)
-        self.fall_delay_spin = QtWidgets.QDoubleSpinBox(); self.fall_delay_spin.setRange(-1000.0, 1000.0); self.fall_delay_spin.setValue(project.power_envelope.fall_delay_symbols)
+        self.rise_spin = DeferredDoubleSpinBox(); self.rise_spin.setRange(0.0, 1000.0); self.rise_spin.setValue(project.power_envelope.rise_symbols)
+        self.rise_delay_spin = DeferredDoubleSpinBox(); self.rise_delay_spin.setRange(-1000.0, 1000.0); self.rise_delay_spin.setValue(project.power_envelope.rise_delay_symbols)
+        self.fall_spin = DeferredDoubleSpinBox(); self.fall_spin.setRange(0.0, 1000.0); self.fall_spin.setValue(project.power_envelope.fall_symbols)
+        self.fall_delay_spin = DeferredDoubleSpinBox(); self.fall_delay_spin.setRange(-1000.0, 1000.0); self.fall_delay_spin.setValue(project.power_envelope.fall_delay_symbols)
         self.ramp_combo = QtWidgets.QComboBox(); self.ramp_combo.addItems(["Cosine", "Linear"]); self.ramp_combo.setCurrentText(project.power_envelope.shape)
         self.training_value = QtWidgets.QLabel("Enabled (required / automatic)")
         self._timing_controls = tuple(
@@ -827,6 +838,10 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self._update_preview()
 
     def _accept_settings(self) -> None:
+        if not ensure_valid_numeric_inputs(
+            self, title="Invalid Bluetooth HDT Setting"
+        ):
+            return
         settings = replace(self._project.bluetooth_hdt,
             rate=HDTRate(self.rate_combo.currentData()), payload_length_bytes=self.length_spin.value(),
             payload_source=PayloadSourceKind(self.source_combo.currentData()), payload_pattern=self.pattern_edit.text(),
@@ -1112,7 +1127,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
     def _double_spin(
         minimum: float, maximum: float, value: float, decimals: int
     ) -> QtWidgets.QDoubleSpinBox:
-        control = QtWidgets.QDoubleSpinBox()
+        control = DeferredDoubleSpinBox()
         control.setRange(minimum, maximum)
         control.setDecimals(decimals)
         control.setValue(value)
@@ -1121,7 +1136,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
 
     @staticmethod
     def _integer_spin(minimum: int, maximum: int, value: int) -> QtWidgets.QSpinBox:
-        control = QtWidgets.QSpinBox()
+        control = DeferredSpinBox()
         control.setRange(minimum, maximum)
         control.setValue(value)
         return control
@@ -1205,6 +1220,10 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self._update_rf_preview()
 
     def _accept_settings(self) -> None:
+        if not ensure_valid_numeric_inputs(
+            self, title="Invalid Bluetooth Setting"
+        ):
+            return
         try:
             lap = int(self.lap_edit.text().strip(), 16)
             uap = int(self.uap_edit.text().strip(), 16)
@@ -1388,13 +1407,13 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         selector_layout.addWidget(self.uri_combo, 1)
         selector_layout.addWidget(self.refresh_devices_button)
         self._populate_devices(_PLUTO_DEVICE_CACHE, settings.connection_uri or "")
-        self.bandwidth_spin = QtWidgets.QDoubleSpinBox()
+        self.bandwidth_spin = DeferredDoubleSpinBox()
         self.bandwidth_spin.setRange(0.2, 56.0)
         self.bandwidth_spin.setDecimals(3)
         self.bandwidth_spin.setSuffix(" MHz")
         self.bandwidth_spin.setValue(settings.rf_bandwidth_hz / 1e6)
         self.bandwidth_spin.setKeyboardTracking(False)
-        self.output_power_spin = QtWidgets.QDoubleSpinBox()
+        self.output_power_spin = DeferredDoubleSpinBox()
         self.output_power_spin.setDecimals(2)
         self.output_power_spin.setSingleStep(0.5)
         self.output_power_spin.setSuffix(" dBm")
@@ -1437,19 +1456,19 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         )
         self.output_power_spin.valueChanged.connect(self._update_applied_gain_label)
         self._update_output_level_constraints(initial_output_power_dbm)
-        self.lead_in_guard_spin = QtWidgets.QDoubleSpinBox()
+        self.lead_in_guard_spin = DeferredDoubleSpinBox()
         self.lead_in_guard_spin.setRange(0.0, 1000.0)
         self.lead_in_guard_spin.setDecimals(3)
         self.lead_in_guard_spin.setSuffix(" ms")
         self.lead_in_guard_spin.setValue(settings.lead_in_guard_s * 1e3)
         self.lead_in_guard_spin.setKeyboardTracking(False)
-        self.dma_preroll_spin = QtWidgets.QDoubleSpinBox()
+        self.dma_preroll_spin = DeferredDoubleSpinBox()
         self.dma_preroll_spin.setRange(0.0, 1000.0)
         self.dma_preroll_spin.setDecimals(3)
         self.dma_preroll_spin.setSuffix(" ms")
         self.dma_preroll_spin.setValue(settings.dma_preroll_s * 1e3)
         self.dma_preroll_spin.setKeyboardTracking(False)
-        self.stop_guard_spin = QtWidgets.QDoubleSpinBox()
+        self.stop_guard_spin = DeferredDoubleSpinBox()
         self.stop_guard_spin.setRange(10.0, 5000.0)
         self.stop_guard_spin.setDecimals(3)
         self.stop_guard_spin.setSuffix(" ms")
@@ -1644,6 +1663,10 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.peak_rf_level_label.setText(f"{peak_rf_dbm:+.2f} dBm (estimated)")
 
     def _accept_settings(self) -> None:
+        if not ensure_valid_numeric_inputs(
+            self, title="Invalid Pluto Output Setting"
+        ):
+            return
         uri = self.uri_combo.currentData()
         if uri is None:
             uri = self.uri_combo.currentText().strip()

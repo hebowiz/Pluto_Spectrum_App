@@ -6,6 +6,11 @@ from collections.abc import Sequence
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from pluto_common.numeric_input import (
+    ensure_valid_numeric_inputs,
+    revert_invalid_numeric_inputs,
+)
+
 
 class HierarchicalMeasConfigDialog(QtWidgets.QDialog):
     """Generic VSA-style Config Top menu shared by analysis workspaces."""
@@ -85,6 +90,15 @@ class HierarchicalMeasConfigDialog(QtWidgets.QDialog):
         is_top = int(index) == 0
         self.back_button.setVisible(not is_top)
         self.page_title.setText("" if is_top else self.page_names[int(index)])
+
+    def accept(self) -> None:
+        if not ensure_valid_numeric_inputs(self, title="Invalid Measurement Setting"):
+            return
+        super().accept()
+
+    def reject(self) -> None:
+        revert_invalid_numeric_inputs(self)
+        super().reject()
 
     def open_top(self) -> int:
         self.show_page(0)
