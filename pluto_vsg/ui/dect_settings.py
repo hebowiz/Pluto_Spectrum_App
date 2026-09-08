@@ -313,10 +313,6 @@ class DectSettingsDialog(QtWidgets.QDialog):
     def _rf_rows(self) -> tuple[tuple[str, QtWidgets.QWidget], ...]:
         timing = self._timing_controls
         return (
-                ("Carrier Plan", self.plan_combo),
-                ("Carrier", self.carrier_combo),
-                ("Frequency Offset", self.offset_spin),
-                ("Generated RF Frequency", self.actual_frequency_label),
                 ("Modulation", QtWidgets.QLabel("GFSK / 1.152 Msym/s")),
                 ("Packet Type / Length", self.packet_type_combo),
                 ("Prolonged Preamble", self.prolonged_check),
@@ -527,9 +523,11 @@ class DectSettingsDialog(QtWidgets.QDialog):
             x_field_bits=self.x_field_edit.text(),
             z_repeat_auto=self.z_repeat_auto.isChecked(),
             z_field_bits=self.z_field_edit.text(),
-            carrier_plan_id=str(self.plan_combo.currentData()),
-            carrier_channel=str(self.carrier_combo.currentData()),
-            carrier_frequency_offset_hz=self.offset_spin.value() * 1e3,
+            carrier_plan_id=self._base_project.dect.carrier_plan_id,
+            carrier_channel=self._base_project.dect.carrier_channel,
+            carrier_frequency_offset_hz=(
+                self._base_project.dect.carrier_frequency_offset_hz
+            ),
             frequency_deviation_hz=self.deviation_spin.value() * 1e3,
             gaussian_bt=self.bt_spin.value(),
             pre_idle_symbols=self.pre_idle_spin.value(),
@@ -539,7 +537,6 @@ class DectSettingsDialog(QtWidgets.QDialog):
     @property
     def project(self) -> WaveformProject:
         settings = self._settings()
-        carrier = carrier_by_identity(settings.carrier_plan_id, settings.carrier_channel)
         packet_type = DectPacketType(settings.packet_type)
         sps = int(self.samples_per_symbol_combo.currentData())
         project = replace(
@@ -549,7 +546,9 @@ class DectSettingsDialog(QtWidgets.QDialog):
             samples_per_symbol=sps,
             repeat_count=self.repeat_spin.value(),
             period_symbols=self.period_spin.value(),
-            center_frequency_hz=carrier.center_frequency_hz,
+            # Carrier selection belongs to the main VSG Frequency Settings
+            # dialog. Packet-field edits must preserve a manual Frequency.
+            center_frequency_hz=self._base_project.center_frequency_hz,
             fields=dect_fields(settings),
             dect=settings,
             power_envelope=replace(

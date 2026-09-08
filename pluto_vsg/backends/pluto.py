@@ -205,6 +205,9 @@ class PlutoOutputBackend:
         )
         self._waveform_block_rms_dbfs: dict[str, float] = {}
         self._resolved_hardware_gain_db = settings.resolved_hardware_gain_db
+        self._requested_hardware_gain_db = self._resolved_hardware_gain_db
+        self._applied_hardware_gain_db: float | None = None
+        self._gain_lock = threading.Lock()
         self._dac_peak_code = 0.0
         self._preload_guard_s = 0.0
         self._stop_event = threading.Event()
@@ -848,15 +851,43 @@ class PlutoOutputBackend:
 
         deadline = time.perf_counter() + max(0.0, float(duration_s))
         while not self._stop_event.is_set():
+            self._apply_pending_hardware_gain()
             remaining = deadline - time.perf_counter()
             if remaining <= 0.0:
                 return
             if remaining > 0.004:
-                self._stop_event.wait(remaining - 0.002)
+                # Poll at a modest rate so main-window power changes are
+                # applied during a long finite schedule as well as cyclic TX.
+                self._stop_event.wait(min(remaining - 0.002, 0.025))
             else:
                 # Sub-millisecond packet windows need a short busy wait;
                 # Sleep/Event waits commonly overshoot by 15.6 ms on Windows.
                 pass
+
+    def request_hardware_gain_db(self, gain_db: float) -> None:
+        """Queue a gain update for the TX owner thread without touching IIO here."""
+
+        value = float(gain_db)
+        if not np.isfinite(value) or value < _PLUTO_MUTED_GAIN_DB or value > 0.0:
+            raise ValueError(
+                f"Pluto Tx gain must be {_PLUTO_MUTED_GAIN_DB:g} to 0 dB"
+            )
+        with self._gain_lock:
+            self._requested_hardware_gain_db = value
+
+    def _apply_pending_hardware_gain(self) -> None:
+        sdr = self._sdr
+        if sdr is None:
+            return
+        with self._gain_lock:
+            requested = self._requested_hardware_gain_db
+        if self._applied_hardware_gain_db is not None and np.isclose(
+            requested, self._applied_hardware_gain_db, atol=0.001, rtol=0.0
+        ):
+            return
+        sdr.tx_hardwaregain_chan0 = requested
+        self._applied_hardware_gain_db = requested
+        self._record_event("runtime_gain_applied")
 
     @staticmethod
     def _commit_noncyclic_stream(sdr) -> bool:
@@ -933,6 +964,7 @@ class PlutoOutputBackend:
             self._record_event("muted_lo_settled")
 
             sdr.tx_hardwaregain_chan0 = self._resolved_hardware_gain_db
+            self._applied_hardware_gain_db = self._resolved_hardware_gain_db
             self._record_event("requested_gain_applied")
             if self._stop_event.is_set():
                 return
@@ -943,7 +975,8 @@ class PlutoOutputBackend:
                 sdr.tx(self._superframe)
                 self._record_event("cyclic_push_completed")
                 self._record_event("continuous_playback_started")
-                self._stop_event.wait()
+                while not self._stop_event.wait(0.025):
+                    self._apply_pending_hardware_gain()
                 self._record_event("continuous_stop_received")
             else:
                 # Non-cyclic push starts from sample zero exactly once. The

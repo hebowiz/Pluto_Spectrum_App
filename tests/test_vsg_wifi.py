@@ -88,7 +88,7 @@ def test_wifi_dedicated_ui_and_main_window_dispatch() -> None:
         assert parent.settings_action.text().startswith("Wi-Fi")
         parent._pluto_bandwidth_hz = 8_000_000.0
         pluto_settings = parent._current_pluto_settings()
-        assert pluto_settings.rf_bandwidth_hz == 20_000_000.0
+        assert pluto_settings.rf_bandwidth_hz == pluto_settings.sample_rate_hz
         assert pluto_settings.waveform_active_rms_dbfs == parent.result.metadata["active_rms_dbfs"]
     finally:
         dialog.close(); parent.close(); app.processEvents()

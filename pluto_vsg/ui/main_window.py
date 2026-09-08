@@ -16,6 +16,7 @@ from pluto_common.numeric_input import (
     DeferredDoubleSpinBox,
     DeferredSpinBox,
     ensure_valid_numeric_inputs,
+    get_deferred_double,
 )
 from pluto_common.runtime_paths import diagnostic_log_path
 
@@ -91,6 +92,12 @@ from pluto_vsg.ui.style import (
 )
 from pluto_vsg.ui.composer_view import PacketComposerView
 from pluto_vsg.ui.dect_settings import DectSettingsDialog
+from pluto_vsg.ui.frequency_settings import (
+    FrequencySettingsDialog,
+    default_frequency_selection,
+    effective_rf_frequency_hz,
+    with_manual_rf_frequency,
+)
 from pluto_vsg.ui.packet_settings import (
     SymbolTimeControl,
     bluetooth_classic_carriers,
@@ -206,9 +213,6 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
 
         self.tabs = packet_settings_tabs(
             (
-                ("Carrier", self.channel_combo),
-                ("Frequency Offset", self.frequency_offset_spin),
-                ("Generated RF Frequency", self.center_label),
                 ("Format", QtWidgets.QLabel("Non-HT OFDM (802.11a/g)")),
                 ("Bandwidth", QtWidgets.QLabel("20 MHz")),
                 ("Data Rate / Modulation", self.rate_combo),
@@ -391,9 +395,6 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         )
         self.tabs = packet_settings_tabs(
             (
-            ("Carrier", self.carrier_combo),
-            ("Frequency Offset", self.frequency_offset_spin),
-            ("Generated RF Frequency", self.actual_frequency_label),
             ("PHY", self.phy_combo),
             ("Modulation", QtWidgets.QLabel("GFSK")),
             ("Payload Length [byte]", self.length_spin),
@@ -735,9 +736,6 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         )
         self.tabs = packet_settings_tabs(
             (
-                ("Carrier", self.carrier_combo),
-                ("Frequency Offset", self.frequency_offset_spin),
-                ("Generated RF Frequency", self.actual_frequency_label),
                 ("HDT Rate / Modulation", self.rate_combo),
                 ("Payload Length [byte]", self.length_spin),
                 ("Packet Length", self.packet_duration_label),
@@ -1038,9 +1036,6 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         )
         self.tabs = packet_settings_tabs(
             (
-            ("Carrier", self.carrier_combo),
-            ("Carrier Offset", self.cfo_spin),
-            ("Generated RF Frequency", self.actual_frequency_label),
             ("Packet Type / Modulation", self.packet_type_combo),
             ("Payload Length [byte]", self.payload_length_spin),
             ("Packet Length", self.packet_duration_label),
@@ -1383,7 +1378,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         parent: QtWidgets.QWidget,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("ADALM-Pluto Output Settings")
+        self.setWindowTitle("ADALM-Pluto Instrument Settings")
         self._settings = settings
         self._packet_count = int(packet_count)
         form = QtWidgets.QFormLayout()
@@ -1474,31 +1469,14 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.stop_guard_spin.setSuffix(" ms")
         self.stop_guard_spin.setValue(settings.stop_guard_s * 1e3)
         self.stop_guard_spin.setKeyboardTracking(False)
-        form.addRow("Playback Mode", self.playback_mode_combo)
         form.addRow("Connection URI", selector_row)
-        form.addRow(
-            "Center Frequency",
-            QtWidgets.QLabel(f"{settings.center_frequency_hz / 1e6:.6f} MHz (Project)"),
-        )
-        form.addRow(
-            "Sample Rate",
-            QtWidgets.QLabel(f"{settings.sample_rate_hz / 1e6:.3f} MS/s (Project)"),
-        )
-        form.addRow("TX RF Bandwidth", self.bandwidth_spin)
-        form.addRow("RF Output Level", self.output_power_spin)
         form.addRow("Digital Backoff", self.digital_backoff_combo)
-        form.addRow("Applied Tx Gain", self.applied_gain_label)
-        form.addRow("IQ Active RMS", self.iq_rms_label)
-        form.addRow("IQ Peak", self.iq_peak_label)
-        form.addRow("Crest Factor", self.crest_factor_label)
-        form.addRow("Estimated Peak RF Level", self.peak_rf_level_label)
         form.addRow("Muted LO Settling Time", self.lead_in_guard_spin)
         self.dma_preroll_label = QtWidgets.QLabel("DMA Pre-roll")
         form.addRow(self.dma_preroll_label, self.dma_preroll_spin)
         self.stop_guard_label = QtWidgets.QLabel("Completion Margin")
         form.addRow(self.stop_guard_label, self.stop_guard_spin)
         self.packet_count_label = QtWidgets.QLabel(str(packet_count))
-        form.addRow("Packets per transmission", self.packet_count_label)
         self.warning = QtWidgets.QLabel()
         self.warning.setWordWrap(True)
         self.warning.setStyleSheet("color: #e0b050;")
@@ -1516,7 +1494,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         layout.addLayout(form)
         layout.addWidget(self.warning)
         layout.addWidget(buttons)
-        self.resize(660, 500)
+        self.resize(660, 360)
 
     def _selected_playback_mode(self) -> PlutoPlaybackMode:
         return PlutoPlaybackMode(str(self.playback_mode_combo.currentData()))
@@ -1536,15 +1514,9 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             else str(self._packet_count)
         )
         common = (
-            "RF Output Level uses a provisional 2440 MHz calibration measured "
-            "with this Pluto and a constant-envelope FSK packet, then compensates "
-            "Tx Gain for the generated waveform's declared active-interval RMS. "
-            "Scheduled idle time is excluded. Frequency "
-            "response, device variation, and waveform-dependent analog PAPR / "
-            "compression are not yet "
-            "corrected. Verify the conducted level when accuracy matters. "
-            "Digital Backoff 0 dB drives the DMA/DAC path at full scale; use "
-            "-3 or -6 dB when additional linearity margin is required. "
+            "Digital Backoff is applied to waveform samples before the Pluto DAC. "
+            "The RF frequency, sample rate, TX RF bandwidth, output power and "
+            "playback mode are controlled from the main VSG panel. "
         )
         if continuous:
             detail = (
@@ -1858,16 +1830,14 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_stop_guard_s = float(
             preferences.value("pluto_tx/stop_guard_s", 0.100)
         )
-        try:
-            self._pluto_playback_mode = PlutoPlaybackMode(
-                str(
-                    preferences.value(
-                        "pluto_tx/playback_mode", PlutoPlaybackMode.FINITE.value
-                    )
-                )
-            )
-        except ValueError:
-            self._pluto_playback_mode = PlutoPlaybackMode.FINITE
+        self._pluto_playback_mode = PlutoPlaybackMode.CONTINUOUS
+        self._rf_enabled = False
+        self._modulation_enabled = True
+        self._continuous_enabled = True
+        self._power_step_db = float(preferences.value("pluto_tx/power_step_db", 10.0))
+        self._frequency_selections = {
+            self.project.standard: default_frequency_selection(self.project)
+        }
         self._update_pluto_window_title()
         self.resize(1500, 900)
         self._build_actions()
@@ -1926,7 +1896,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self.pluto_prepare_action.triggered.connect(self._start_pluto_preparation)
         self.pluto_transmit_action = QtGui.QAction("Transmit with ADALM-Pluto", self)
-        self.pluto_transmit_action.setShortcut(QtGui.QKeySequence("Ctrl+T"))
         self.pluto_transmit_action.triggered.connect(self._start_pluto_transmission)
         self.pluto_cw_action = QtGui.QAction(
             "Start CW with ADALM-Pluto (Current Frequency / Level)", self
@@ -2000,19 +1969,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         field_menu.addActions(self.field_display_group.actions())
         output_menu = menu_bar.addMenu("Output")
         output_menu.addAction(self.pluto_settings_action)
-        output_menu.addSeparator()
-        output_menu.addAction(self.pluto_prepare_action)
-        output_menu.addAction(self.pluto_transmit_action)
-        output_menu.addAction(self.pluto_cw_action)
-        output_menu.addAction(self.pluto_stop_action)
-        output_toolbar = self.addToolBar("Output")
-        output_toolbar.setObjectName("PlutoVSGOutputToolbar")
-        output_toolbar.addAction(self.pluto_settings_action)
-        output_toolbar.addSeparator()
-        output_toolbar.addAction(self.pluto_prepare_action)
-        output_toolbar.addAction(self.pluto_transmit_action)
-        output_toolbar.addAction(self.pluto_cw_action)
-        output_toolbar.addAction(self.pluto_stop_action)
         tools_menu = menu_bar.addMenu("Tools")
         tools_menu.addAction(self.validate_action)
         tools_menu.addAction("Device Capabilities").setEnabled(False)
@@ -2070,11 +2026,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             "Edit Bluetooth BR / EDR Settings..."
         )
         self.edit_settings_button.clicked.connect(self._edit_project_settings)
-        generate_button = QtWidgets.QPushButton("Generate Waveform (F5)")
-        generate_button.clicked.connect(self.generate_waveform)
+        self.generate_button = QtWidgets.QPushButton("Generate Waveform (F5)")
+        self.generate_button.clicked.connect(self.generate_waveform)
         inspector_layout.addWidget(self.inspector)
         inspector_layout.addWidget(self.edit_settings_button)
-        inspector_layout.addWidget(generate_button)
+        inspector_layout.addWidget(self.generate_button)
         upper.addWidget(_Panel("Block Library", self.block_library))
         upper.addWidget(_Panel("Packet Composer", composer_tabs))
         upper.addWidget(_Panel("Inspector", inspector_widget))
@@ -2105,7 +2061,105 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([450, 450])
-        self.setCentralWidget(splitter)
+        outer = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        outer.addWidget(splitter)
+        outer.addWidget(self._build_vsg_control_panel())
+        outer.setStretchFactor(0, 1)
+        outer.setStretchFactor(1, 0)
+        outer.setSizes([1250, 245])
+        self.setCentralWidget(outer)
+
+    @staticmethod
+    def _make_control_button(text: str, *, value: bool = False) -> QtWidgets.QPushButton:
+        button = QtWidgets.QPushButton(text)
+        font = QtGui.QFont(button.font())
+        if font.pointSizeF() > 0.0:
+            font.setPointSizeF(font.pointSizeF() * 1.45)
+        font.setBold(True)
+        button.setFont(font)
+        button.setMinimumHeight(72 if value else 58)
+        button.setStyleSheet(
+            "QPushButton { background-color: #303030; color: white; "
+            "border: 1px solid #666; padding: 8px; }"
+            "QPushButton:hover { background-color: #3c3c3c; }"
+            "QPushButton:disabled { color: #888; background-color: #292929; }"
+        )
+        return button
+
+    def _build_vsg_control_panel(self) -> QtWidgets.QWidget:
+        content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(content)
+        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(8)
+        self.rf_button = self._make_control_button("RF\nOFF", value=True)
+        self.mod_button = self._make_control_button("Mod\nON", value=True)
+        self.continuous_button = self._make_control_button("Continuous\nON", value=True)
+        self.power_button = self._make_control_button("Power", value=True)
+        self.power_up_button = QtWidgets.QToolButton()
+        self.power_up_button.setArrowType(QtCore.Qt.ArrowType.UpArrow)
+        self.power_down_button = QtWidgets.QToolButton()
+        self.power_down_button.setArrowType(QtCore.Qt.ArrowType.DownArrow)
+        for button in (self.power_up_button, self.power_down_button):
+            button.setStyleSheet(
+                "QToolButton { background-color: #303030; color: white; "
+                "border: 1px solid #666; }"
+                "QToolButton:hover { background-color: #3c3c3c; }"
+                "QToolButton:disabled { background-color: #292929; }"
+            )
+        self.power_up_button.setMinimumSize(38, 34)
+        self.power_down_button.setMinimumSize(38, 34)
+        power_row = QtWidgets.QWidget()
+        power_layout = QtWidgets.QHBoxLayout(power_row)
+        power_layout.setContentsMargins(0, 0, 0, 0)
+        power_layout.setSpacing(6)
+        power_layout.addWidget(self.power_button, 1)
+        arrows = QtWidgets.QVBoxLayout()
+        arrows.setContentsMargins(0, 0, 0, 0)
+        arrows.setSpacing(4)
+        arrows.addWidget(self.power_up_button)
+        arrows.addWidget(self.power_down_button)
+        power_layout.addLayout(arrows)
+        self.estimated_peak_label = QtWidgets.QLabel()
+        self.estimated_peak_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        peak_font = QtGui.QFont(self.estimated_peak_label.font())
+        peak_font.setBold(True)
+        self.estimated_peak_label.setFont(peak_font)
+        self.power_step_button = self._make_control_button("Power Step", value=True)
+        self.frequency_button = self._make_control_button("Frequency", value=True)
+        self.frequency_settings_button = self._make_control_button("Freq Settings")
+        self.instrument_settings_button = self._make_control_button("Inst Settings")
+        for widget in (
+            self.rf_button,
+            self.mod_button,
+            self.continuous_button,
+            power_row,
+            self.estimated_peak_label,
+            self.power_step_button,
+            self.frequency_button,
+            self.frequency_settings_button,
+            self.instrument_settings_button,
+        ):
+            layout.addWidget(widget)
+        layout.addStretch(1)
+        self.rf_button.clicked.connect(self._toggle_rf)
+        self.mod_button.clicked.connect(self._toggle_modulation)
+        self.continuous_button.clicked.connect(self._toggle_continuous)
+        self.power_button.clicked.connect(self._edit_output_power)
+        self.power_up_button.clicked.connect(lambda: self._step_output_power(+1.0))
+        self.power_down_button.clicked.connect(lambda: self._step_output_power(-1.0))
+        self.power_step_button.clicked.connect(self._edit_power_step)
+        self.frequency_button.clicked.connect(self._edit_frequency)
+        self.frequency_settings_button.clicked.connect(self._edit_frequency_settings)
+        self.instrument_settings_button.clicked.connect(self._edit_pluto_settings)
+        self._update_vsg_control_labels()
+        panel = _Panel("VSG Control", content)
+        panel_font = QtGui.QFont(panel.font())
+        if panel_font.pointSizeF() > 0.0:
+            panel_font.setPointSizeF(panel_font.pointSizeF() * (1.45 / 1.3))
+        panel.setFont(panel_font)
+        panel.setMinimumWidth(225)
+        panel.setMaximumWidth(285)
+        return panel
 
     @staticmethod
     def _make_plot(left: str, bottom: str) -> pg.PlotWidget:
@@ -2150,6 +2204,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def _new_bluetooth_project(self) -> None:
         previous_signature = self._pluto_configuration_signature()
         self.project = bluetooth_br_edr_project()
+        self._frequency_selections[self.project.standard] = (
+            default_frequency_selection(self.project)
+        )
         self.project_path = None
         self.undo_stack.clear()
         self._refresh_project_view()
@@ -2161,6 +2218,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         # LE 1M/2M share one settings dialog; start at the broadly compatible
         # 1M default and select PHY inside that dialog.
         self.project = bluetooth_le_project(BluetoothLEPhy.LE_1M)
+        self._frequency_selections[self.project.standard] = (
+            default_frequency_selection(self.project)
+        )
         self.project_path = None
         self.undo_stack.clear()
         self._refresh_project_view()
@@ -2170,6 +2230,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def _new_bluetooth_hdt_project(self) -> None:
         previous_signature = self._pluto_configuration_signature()
         self.project = bluetooth_hdt_project()
+        self._frequency_selections[self.project.standard] = (
+            default_frequency_selection(self.project)
+        )
         self.project_path = None
         self.undo_stack.clear()
         self._refresh_project_view()
@@ -2179,6 +2242,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def _new_wifi_project(self) -> None:
         previous_signature = self._pluto_configuration_signature()
         self.project = wifi_beacon_project()
+        self._frequency_selections[self.project.standard] = (
+            default_frequency_selection(self.project)
+        )
         self.project_path = None
         self.undo_stack.clear()
         self._refresh_project_view()
@@ -2188,6 +2254,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def _new_dect_project(self) -> None:
         previous_signature = self._pluto_configuration_signature()
         self.project = dect_project()
+        self._frequency_selections[self.project.standard] = (
+            default_frequency_selection(self.project)
+        )
         self.project_path = None
         self.undo_stack.clear()
         self._refresh_project_view()
@@ -2499,6 +2568,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.edit_settings_button.setText(f"Edit {settings_label}")
         self._project_inspector_parameters = parameters
         self._populate_inspector(parameters)
+        if hasattr(self, "frequency_button"):
+            self._update_vsg_control_labels()
         status = "Ready" if not validate_project(self.project) else "Project has validation errors"
         self.statusBar().showMessage(status)
 
@@ -2563,6 +2634,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return
         self._update_previews(self.result)
         level_metrics = generation_result_iq_levels(self.result)
+        minimum_power, maximum_power = self._power_limits_dbm()
+        clamped_power = min(maximum_power, max(minimum_power, self._pluto_output_power_dbm))
+        if not np.isclose(clamped_power, self._pluto_output_power_dbm):
+            self._pluto_output_power_dbm = clamped_power
+            self._save_power_preferences()
         level_names = {
             "IQ Active RMS",
             "IQ Peak",
@@ -2600,6 +2676,173 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             f"Generated {self.result.iq.size:,} samples | {duration_ms:.3f} ms | "
             f"{self.result.sample_rate_hz / 1e6:.3f} MS/s"
         )
+        if hasattr(self, "power_button"):
+            self._update_vsg_control_labels()
+
+    def _power_limits_dbm(self) -> tuple[float, float]:
+        active_rms_dbfs = 0.0
+        if self.result is not None:
+            active_rms_dbfs = generation_result_iq_levels(self.result).active_rms_dbfs
+        return pluto_output_power_range_dbm(
+            self._pluto_digital_backoff_db,
+            effective_rf_frequency_hz(self.project),
+            active_rms_dbfs,
+        )
+
+    def _update_vsg_control_labels(self) -> None:
+        if not hasattr(self, "rf_button"):
+            return
+        self.rf_button.setText(f"RF\n{'ON' if self._rf_enabled else 'OFF'}")
+        self.mod_button.setText(f"Mod\n{'ON' if self._modulation_enabled else 'OFF'}")
+        self.continuous_button.setText(
+            f"Continuous\n{'ON' if self._continuous_enabled else 'OFF'}"
+        )
+        self.power_button.setText(f"Power\n{self._pluto_output_power_dbm:.2f} dBm")
+        self.power_step_button.setText(f"Power Step\n{self._power_step_db:g} dB")
+        self.frequency_button.setText(
+            f"Frequency\n{effective_rf_frequency_hz(self.project) / 1e6:.6f} MHz"
+        )
+        crest_db = 0.0
+        if self.result is not None:
+            crest_db = generation_result_iq_levels(self.result).crest_factor_db
+        self.estimated_peak_label.setText(
+            "Estimated Peak Power\n"
+            f"{self._pluto_output_power_dbm + crest_db:.2f} dBm"
+        )
+
+    def _save_power_preferences(self) -> None:
+        preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
+        preferences.setValue("pluto_tx/output_power_dbm", self._pluto_output_power_dbm)
+        preferences.setValue("pluto_tx/power_step_db", self._power_step_db)
+
+    def _apply_output_power(self, value_dbm: float) -> None:
+        self._pluto_output_power_dbm = float(value_dbm)
+        self._save_power_preferences()
+        self._update_vsg_control_labels()
+        if self._tx_worker is not None:
+            active_rms_dbfs = generation_result_iq_levels(
+                self._tx_worker.result
+            ).active_rms_dbfs
+            gain_db = pluto_hardware_gain_for_output_power_dbm(
+                self._pluto_output_power_dbm,
+                self._pluto_digital_backoff_db,
+                effective_rf_frequency_hz(self.project),
+                active_rms_dbfs,
+            )
+            self._tx_worker.backend.request_hardware_gain_db(gain_db)
+            self.statusBar().showMessage(
+                f"Pluto output power update requested: {value_dbm:.2f} dBm"
+            )
+
+    def _edit_output_power(self) -> None:
+        minimum, maximum = self._power_limits_dbm()
+        value, accepted = get_deferred_double(
+            self,
+            "RF Output Power",
+            f"Power ({minimum:.2f} to {maximum:.2f} dBm)",
+            self._pluto_output_power_dbm,
+            minimum,
+            maximum,
+            2,
+        )
+        if accepted:
+            self._apply_output_power(value)
+
+    def _step_output_power(self, direction: float) -> None:
+        target = self._pluto_output_power_dbm + float(direction) * self._power_step_db
+        minimum, maximum = self._power_limits_dbm()
+        if target < minimum or target > maximum:
+            self.statusBar().showMessage(
+                f"Power step ignored; valid range is {minimum:.2f} to {maximum:.2f} dBm"
+            )
+            return
+        self._apply_output_power(target)
+
+    def _edit_power_step(self) -> None:
+        value, accepted = get_deferred_double(
+            self, "Power Step", "Power step (dB)", self._power_step_db, 0.01, 100.0, 2
+        )
+        if accepted:
+            self._power_step_db = value
+            self._save_power_preferences()
+            self._update_vsg_control_labels()
+
+    def _edit_frequency(self) -> None:
+        value, accepted = get_deferred_double(
+            self,
+            "RF Frequency",
+            "Frequency (MHz)",
+            effective_rf_frequency_hz(self.project) / 1e6,
+            70.0,
+            6000.0,
+            6,
+        )
+        if accepted:
+            self._commit_project_change(
+                with_manual_rf_frequency(self.project, value * 1e6),
+                "Set RF frequency",
+            )
+
+    def _edit_frequency_settings(self) -> None:
+        selection = self._frequency_selections.get(self.project.standard)
+        if selection is None:
+            selection = default_frequency_selection(self.project)
+        dialog = FrequencySettingsDialog(
+            self.project, self, selection=selection
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._frequency_selections[self.project.standard] = dialog.selection
+            self._commit_project_change(dialog.project, "Select RF carrier")
+
+    def _toggle_modulation(self) -> None:
+        if self._tx_thread is not None:
+            return
+        self._modulation_enabled = not self._modulation_enabled
+        self._update_vsg_control_labels()
+
+    def _toggle_continuous(self) -> None:
+        if self._tx_thread is not None:
+            return
+        self._continuous_enabled = not self._continuous_enabled
+        self._pluto_playback_mode = (
+            PlutoPlaybackMode.CONTINUOUS
+            if self._continuous_enabled
+            else PlutoPlaybackMode.FINITE
+        )
+        self._update_vsg_control_labels()
+
+    def _toggle_rf(self) -> None:
+        if self._tx_thread is not None:
+            self._stop_pluto_transmission()
+            return
+        if self._prepare_thread is not None:
+            return
+        if self._pluto_prepared_signature != self._pluto_configuration_signature():
+            answer = QtWidgets.QMessageBox.question(
+                self,
+                "Pluto Calibration Required",
+                "The current frequency or baseband configuration has not been "
+                "calibrated. Run the muted AD936x TX calibration now?\n\n"
+                "RF output will remain OFF after calibration. Press RF ON again "
+                "to start transmission.",
+                QtWidgets.QMessageBox.StandardButton.Ok
+                | QtWidgets.QMessageBox.StandardButton.Cancel,
+                QtWidgets.QMessageBox.StandardButton.Ok,
+            )
+            if answer == QtWidgets.QMessageBox.StandardButton.Ok:
+                self._start_pluto_preparation()
+            self._rf_enabled = False
+            self._update_vsg_control_labels()
+            return
+        self._pluto_playback_mode = (
+            PlutoPlaybackMode.CONTINUOUS
+            if (not self._modulation_enabled or self._continuous_enabled)
+            else PlutoPlaybackMode.FINITE
+        )
+        if self._modulation_enabled:
+            self._start_pluto_transmission()
+        else:
+            self._start_pluto_cw()
 
     def _update_previews(self, result: GenerationResult) -> None:
         complete_iq = np.asarray(result.iq)
@@ -2796,6 +3039,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         except ValueError as error:
             QtWidgets.QMessageBox.critical(self, "Open Project", str(error))
             return
+        self._frequency_selections[self.project.standard] = (
+            default_frequency_selection(self.project)
+        )
         self.project_path = Path(path)
         self.undo_stack.clear()
         self._refresh_project_view()
@@ -2869,16 +3115,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Exported {Path(path).name}")
 
     def _current_pluto_settings(self) -> PlutoTransmitSettings:
-        minimum_bandwidth_hz = (
-            20_000_000.0
-            if self.project.standard == StandardProfile.WIFI
-            else 3_000_000.0
-            if self.project.standard == StandardProfile.DECT
-            else 200_000.0
-        )
         bandwidth_hz = min(
-            56_000_000.0,
-            max(minimum_bandwidth_hz, self._pluto_bandwidth_hz),
+            56_000_000.0, max(200_000.0, self.project.sample_rate_hz)
         )
         if self.result is None:
             active_rms_dbfs = 0.0
@@ -2926,15 +3164,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     ) -> None:
         if previous_signature == self._pluto_configuration_signature():
             return
-        was_prepared = self._pluto_prepared_signature is not None
         self._pluto_prepared_signature = None
         self.statusBar().showMessage(
             "ADALM-Pluto configuration changed; preparation required"
         )
-        # Once this session has prepared a device, subsequent RF/baseband
-        # edits automatically run the explicit calibration step.
-        if was_prepared and self._prepare_thread is None and self._tx_thread is None:
-            QtCore.QTimer.singleShot(0, self._start_pluto_preparation)
 
     def _edit_pluto_settings(self) -> None:
         previous_signature = self._pluto_configuration_signature()
@@ -2946,18 +3179,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         settings = dialog.settings
         self._pluto_uri = settings.connection_uri or ""
         self._update_pluto_window_title()
-        self._pluto_output_power_dbm = float(settings.output_power_dbm)
         self._pluto_digital_backoff_db = settings.digital_backoff_db
-        self._pluto_bandwidth_hz = settings.rf_bandwidth_hz
         self._pluto_lead_in_guard_s = settings.lead_in_guard_s
         self._pluto_dma_preroll_s = settings.dma_preroll_s
         self._pluto_stop_guard_s = settings.stop_guard_s
-        self._pluto_playback_mode = PlutoPlaybackMode(settings.playback_mode)
+        minimum_power, maximum_power = self._power_limits_dbm()
+        self._pluto_output_power_dbm = min(
+            maximum_power, max(minimum_power, self._pluto_output_power_dbm)
+        )
         preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
         preferences.setValue("pluto_tx/uri", self._pluto_uri)
-        preferences.setValue(
-            "pluto_tx/output_power_dbm", self._pluto_output_power_dbm
-        )
         # Preserve the derived legacy value for older application versions.
         preferences.setValue(
             "pluto_tx/hardware_gain_db", settings.resolved_hardware_gain_db
@@ -2965,7 +3196,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         preferences.setValue(
             "pluto_tx/digital_backoff_db", self._pluto_digital_backoff_db
         )
-        preferences.setValue("pluto_tx/rf_bandwidth_hz", self._pluto_bandwidth_hz)
         preferences.setValue(
             "pluto_tx/lead_in_guard_s", self._pluto_lead_in_guard_s
         )
@@ -2973,26 +3203,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             "pluto_tx/dma_preroll_s", self._pluto_dma_preroll_s
         )
         preferences.setValue("pluto_tx/stop_guard_s", self._pluto_stop_guard_s)
-        preferences.setValue(
-            "pluto_tx/playback_mode", self._pluto_playback_mode.value
-        )
         configuration_changed = (
             previous_signature != self._pluto_configuration_signature()
         )
         if configuration_changed:
             self._pluto_prepared_signature = None
-        if self._pluto_prepared_signature != self._pluto_configuration_signature():
-            self.statusBar().showMessage(
-                "ADALM-Pluto output settings saved; preparing configuration..."
-            )
-            # Accepting RF/baseband device settings is the explicit
-            # configuration action. Calibration may radiate an internal tone,
-            # so it is never deferred to the later Transmit command.
-            self._start_pluto_preparation()
-        else:
-            self.statusBar().showMessage(
-                "ADALM-Pluto output settings saved; configuration remains READY"
-            )
+        self._update_vsg_control_labels()
+        self.statusBar().showMessage(
+            "ADALM-Pluto instrument settings saved"
+            + ("; calibration required" if configuration_changed else "")
+        )
 
     def _start_pluto_preparation(self) -> None:
         if self._prepare_thread is not None or self._tx_thread is not None:
@@ -3084,6 +3304,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         thread.finished.connect(self._pluto_thread_finished)
         self._tx_worker = worker
         self._tx_thread = thread
+        self._rf_enabled = True
         self._set_pluto_busy(preparing=False, transmitting=True)
         if self._pluto_playback_mode is PlutoPlaybackMode.CONTINUOUS:
             period_samples = self.result.iq.size // self.project.repeat_count
@@ -3139,6 +3360,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         thread.finished.connect(self._pluto_thread_finished)
         self._tx_worker = worker
         self._tx_thread = thread
+        self._rf_enabled = True
         self._set_pluto_busy(preparing=False, transmitting=True)
         self.statusBar().showMessage(
             "Starting Pluto CW: "
@@ -3152,10 +3374,12 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return
         self._tx_worker.cancel()
         self.pluto_stop_action.setEnabled(False)
+        self.rf_button.setEnabled(False)
         self.statusBar().showMessage("Stopping Pluto transmission...")
 
     @QtCore.Slot(bool, str)
     def _pluto_transmission_finished(self, success: bool, message: str) -> None:
+        self._rf_enabled = False
         if success:
             self.statusBar().showMessage(message)
         else:
@@ -3176,6 +3400,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         active = preparing or transmitting
         for action in (
             self.new_action,
+            self.new_le_action,
+            self.new_hdt_action,
+            self.new_wifi_action,
+            self.new_dect_action,
             self.open_action,
             self.settings_action,
             self.generate_action,
@@ -3186,6 +3414,20 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         ):
             action.setEnabled(not active)
         self.pluto_stop_action.setEnabled(transmitting)
+        if hasattr(self, "rf_button"):
+            self.edit_settings_button.setEnabled(not active)
+            self.generate_button.setEnabled(not active)
+            self.rf_button.setEnabled(not preparing)
+            self.mod_button.setEnabled(not active)
+            self.continuous_button.setEnabled(not active)
+            self.frequency_button.setEnabled(not active)
+            self.frequency_settings_button.setEnabled(not active)
+            self.instrument_settings_button.setEnabled(not active)
+            self.power_button.setEnabled(not preparing)
+            self.power_up_button.setEnabled(not preparing)
+            self.power_down_button.setEnabled(not preparing)
+            self.power_step_button.setEnabled(not preparing)
+            self._update_vsg_control_labels()
 
     def _show_validation(self) -> None:
         issues = validate_project(self.project)

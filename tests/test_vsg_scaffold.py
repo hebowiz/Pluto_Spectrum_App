@@ -68,6 +68,12 @@ from pluto_vsg.ui.main_window import (
     _cw_generation_result,
     _instantaneous_frequency_khz,
 )
+from pluto_vsg.ui.frequency_settings import (
+    FrequencySelection,
+    FrequencySettingsDialog,
+    effective_rf_frequency_hz,
+    with_manual_rf_frequency,
+)
 
 
 def _tab_names(dialog) -> list[str]:
@@ -280,6 +286,51 @@ def test_cw_generation_result_is_constant_normalized_zero_if() -> None:
     np.testing.assert_array_equal(result.iq, np.ones(1024, dtype=np.complex64))
     assert result.metadata["waveform_kind"] == "CW"
     assert result.metadata["baseband_frequency_hz"] == 0.0
+
+
+def test_vsg_control_panel_defaults_and_auto_bandwidth() -> None:
+    pg.mkQApp("Pluto VSG control panel defaults")
+    window = PlutoVSGWindow()
+    try:
+        assert window.rf_button.text() == "RF\nOFF"
+        assert window.mod_button.text() == "Mod\nON"
+        assert window.continuous_button.text() == "Continuous\nON"
+        settings = window._current_pluto_settings()
+        assert settings.rf_bandwidth_hz == settings.sample_rate_hz
+        assert window.frequency_button.text().endswith("MHz")
+    finally:
+        window.close()
+
+
+def test_frequency_settings_uses_protocol_carrier_and_offset() -> None:
+    pg.mkQApp("Pluto VSG frequency settings")
+    project = bluetooth_br_edr_project()
+    dialog = FrequencySettingsDialog(project)
+    try:
+        dialog.carrier_combo.setCurrentIndex(
+            dialog.carrier_combo.findData(2_402_000_000.0)
+        )
+        dialog.offset_spin.setValue(125.0)
+        updated = dialog.project
+        assert updated.center_frequency_hz == 2_402_000_000.0
+        assert effective_rf_frequency_hz(updated) == 2_402_125_000.0
+    finally:
+        dialog.close()
+
+
+def test_frequency_settings_reopens_saved_selection_not_manual_frequency() -> None:
+    pg.mkQApp("Pluto VSG independent frequency selection")
+    project = with_manual_rf_frequency(bluetooth_br_edr_project(), 2_475_123_456.0)
+    previous = FrequencySelection(
+        "bluetooth_classic", "0", 2_402_000_000.0, 125_000.0
+    )
+    dialog = FrequencySettingsDialog(project, selection=previous)
+    try:
+        assert dialog.carrier_combo.currentData() == 2_402_000_000.0
+        assert dialog.offset_spin.value() == pytest.approx(125.0)
+        assert effective_rf_frequency_hz(dialog.project) == 2_402_125_000.0
+    finally:
+        dialog.close()
 
 
 def test_pluto_output_dialog_uses_dbm_and_preserves_target_across_backoff(

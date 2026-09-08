@@ -161,6 +161,19 @@ class _FakePluto:
         self.events.append("buffer_destroyed")
 
 
+def test_runtime_gain_update_is_applied_by_backend_owner_path() -> None:
+    backend = PlutoOutputBackend(_settings())
+    fake = _FakePluto()
+    backend._sdr = fake
+    backend._applied_hardware_gain_db = backend.settings.resolved_hardware_gain_db
+
+    backend.request_hardware_gain_db(-12.5)
+    backend._apply_pending_hardware_gain()
+
+    assert fake.tx_hardwaregain_chan0 == pytest.approx(-12.5)
+    assert "runtime_gain_applied" in [name for name, _time in backend.event_log]
+
+
 class _FakeTddChannel:
     def __init__(self) -> None:
         self.enable = False
