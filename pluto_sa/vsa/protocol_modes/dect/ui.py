@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import csv
 import json
 from pathlib import Path
+import time
 
 import numpy as np
 import pyqtgraph as pg
@@ -87,6 +88,12 @@ class _DectModulationObservation:
     negative_max_hz: float
 
 
+@dataclass(frozen=True)
+class _DectPowerTimeObservation:
+    status: str
+    captured_at_s: float
+
+
 class _DectAnalysisThread(QtCore.QThread):
     analysis_ready = QtCore.Signal(object)
     analysis_failed = QtCore.Signal(str)
@@ -144,6 +151,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._modulation_history: dict[
             tuple[float, str, str, str], list[_DectModulationObservation]
         ] = {}
+        self._power_time_history: dict[
+            tuple[float, str, str, str], list[_DectPowerTimeObservation]
+        ] = {}
         self._accumulated_packet_tokens: set[tuple[int, int, int]] = set()
         self._capture_thread: PlutoSingleCaptureThread | None = None
         self._analysis_thread: _DectAnalysisThread | None = None
@@ -188,6 +198,11 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.export_modulation_action.triggered.connect(
             self._export_modulation_debug_csv
         )
+        self.export_power_action = file_menu.addAction(
+            "Export DECT Power Debug CSV..."
+        )
+        self.export_power_action.setEnabled(False)
+        self.export_power_action.triggered.connect(self._export_power_debug_csv)
         file_menu.addSeparator()
         file_menu.addAction("Close").triggered.connect(
             self.application_close_requested.emit
@@ -974,6 +989,48 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._preferences.sync()
         self.statusBar().showMessage(f"Exported DECT modulation debug: {path}")
 
+    def _export_power_debug_csv(self) -> None:
+        result = self._result
+        recording = self._recording
+        if result is None or recording is None:
+            return
+        path_text, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export DECT Power Debug",
+            str(Path(self._last_directory()) / "dect_power_measurement.csv"),
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path_text:
+            return
+        path = Path(path_text)
+        if path.suffix.lower() != ".csv":
+            path = path.with_suffix(".csv")
+        raw_db = np.asarray(result.raw_measurement_power_db, dtype=np.float64)
+        power_time_db = np.asarray(result.power_time_power_db, dtype=np.float64)
+        ntp_db = np.asarray(result.ntp_power_db, dtype=np.float64)
+        try:
+            with path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow((
+                    "Time [s]",
+                    "Raw Power [dBm/dBFS]",
+                    "Power-Time 3 MHz Power [dBm/dBFS]",
+                    "NTP/Idle 1 MHz Power [dBm/dBFS]",
+                ))
+                for index in range(recording.sample_count):
+                    writer.writerow((
+                        f"{index / recording.sample_rate_hz:.12g}",
+                        f"{raw_db[index]:.12g}",
+                        f"{power_time_db[index]:.12g}",
+                        f"{ntp_db[index]:.12g}",
+                    ))
+        except OSError as error:
+            QtWidgets.QMessageBox.critical(self, "Export DECT Power", str(error))
+            return
+        self._preferences.setValue("directories/iq", str(path.resolve().parent))
+        self._preferences.sync()
+        self.statusBar().showMessage(f"Exported DECT power debug: {path}")
+
     def _capture_settings(self) -> PlutoCaptureSettings:
         return PlutoCaptureSettings(
             center_frequency_hz=self._nominal_frequency_hz(),
@@ -1214,11 +1271,20 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             return
         self._results = payload
         recording_token = self._recording_revision
+        captured_at_s = time.monotonic()
         for result in payload:
             token = (recording_token, result.start_sample, result.stop_sample)
             if token in self._accumulated_packet_tokens:
                 continue
             self._accumulated_packet_tokens.add(token)
+            self._power_time_history.setdefault(
+                self._power_time_key(result), []
+            ).append(
+                _DectPowerTimeObservation(
+                    status=result.power_time.overall_status,
+                    captured_at_s=captured_at_s,
+                )
+            )
             if result.carrier_test_eligible:
                 key = self._carrier_key(result)
                 self._carrier_history.setdefault(key, []).append(
@@ -1258,6 +1324,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         if self._active_analysis_continuous:
             self._continuous_retry_delay_ms = 0
         self.export_modulation_action.setEnabled(True)
+        self.export_power_action.setEnabled(True)
         self._render(self._result)
         self.statusBar().showMessage(
             f"DECT analysis complete - {len(payload)} packet(s), "
@@ -1328,14 +1395,14 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             limit_iq_power_display_dbm(power_dbm),
             pen=pg.mkPen("y", width=1),
         )
-        start_ms = result.p0_sample / recording.sample_rate_hz * 1e3
+        start_ms = result.power_time_start_sample / recording.sample_rate_hz * 1e3
         stop_ms = result.packet_end_sample / recording.sample_rate_hz * 1e3
         add_result_range_overlay(
             self.power_plot,
             result_start_ms=start_ms,
             result_stop_ms=stop_ms,
             pattern_start_ms=start_ms,
-            label="p0",
+            label="p-16" if result.preamble_mode == "Prolonged" else "p0",
         )
         self.power_plot.addItem(
             pg.InfiniteLine(
@@ -1491,43 +1558,130 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         result: DectPacketResult,
         recording: IQRecording,
     ) -> None:
-        """Overlay the representative DECT active/edge power limits."""
+        """Overlay the actual EN 300 176-1 allowed-region boundaries."""
 
-        burst_start_ms = float(
-            result.metadata.get("actual_preamble_start_sample", result.p0_sample)
-        ) / recording.sample_rate_hz * 1e3
+        burst_start_ms = result.power_time_start_sample / recording.sample_rate_hz * 1e3
         end_ms = result.packet_end_sample / recording.sample_rate_hz * 1e3
-        edge_ms = 10e-3
-        quiet = max(-120.0, result.output_power - 35.0)
-        upper = result.output_power + 1.0
-        lower = result.output_power - 1.0
-        upper_x = np.array(
-            (
-                burst_start_ms - edge_ms,
-                burst_start_ms,
-                end_ms,
-                end_ms + edge_ms,
+        edge_ms = result.power_time.template.attack_release_limit_s * 1e3
+        maintenance_ms = result.power_time.template.maintenance_time_s * 1e3
+        guard_ms = result.power_time.template.idle_guard_time_s * 1e3
+        ntp = result.power_time.reference_power_db
+        if not result.power_time.amplitude_calibrated:
+            ntp += recording.dbfs_to_dbm_offset_db
+        segments = (
+            ("NTP -1 dB", burst_start_ms, end_ms, ntp - 1.0, (115, 170, 100)),
+            ("NTP +1 dB", burst_start_ms + edge_ms, end_ms + edge_ms, ntp + 1.0, (170, 105, 55)),
+            ("Attack max NTP +4 dB", burst_start_ms - edge_ms, burst_start_ms + edge_ms, ntp + 4.0, (190, 125, 60)),
+            ("Post-packet NTP -6 dB", end_ms, end_ms + maintenance_ms, ntp - 6.0, (120, 145, 190)),
+        )
+        for name, start, stop, level, color in segments:
+            self.power_plot.plot(
+                np.array((start, stop)), np.array((level, level)),
+                pen=pg.mkPen(*color, 210, width=1), name=name,
             )
-        )
-        lower_x = upper_x.copy()
-        self.power_plot.plot(
-            upper_x,
-            np.array((quiet, upper, upper, quiet)),
-            pen=pg.mkPen(170, 105, 55, 210, width=1),
-            name="Power-Time upper limit",
-        )
-        self.power_plot.plot(
-            lower_x,
-            np.array((quiet, lower, lower, quiet)),
-            pen=pg.mkPen(115, 90, 70, 190, width=1),
-            name="Power-Time lower limit",
-        )
+        for label, position in (
+            ("-10 us", burst_start_ms - edge_ms),
+            ("p-16" if result.preamble_mode == "Prolonged" else "p0", burst_start_ms),
+            ("+10 us", burst_start_ms + edge_ms),
+            ("Packet End", end_ms),
+            ("+0.5 us", end_ms + maintenance_ms),
+            ("End +10 us", end_ms + edge_ms),
+            ("End +27 us", end_ms + guard_ms),
+        ):
+            self.power_plot.addItem(pg.InfiniteLine(
+                pos=position, angle=90,
+                pen=pg.mkPen(100, 110, 120, 105, style=QtCore.Qt.PenStyle.DashLine),
+                label=label, labelOpts={"position": 0.05, "color": (130, 140, 150)},
+            ))
+        if result.power_time.amplitude_calibrated:
+            for name, level, x0, x1 in (
+                ("25 uW", -16.0206, burst_start_ms - edge_ms, burst_start_ms),
+                ("25 uW release", -16.0206, end_ms, end_ms + edge_ms),
+                ("315 mW", 24.981, burst_start_ms - edge_ms, burst_start_ms + edge_ms),
+            ):
+                self.power_plot.plot(
+                    np.array((x0, x1)), np.array((level, level)),
+                    pen=pg.mkPen(180, 80, 80, 170, width=1), name=name,
+                )
+            next_start = result.power_time.next_power_time_start_sample
+            if next_start is not None and (
+                next_start - result.packet_end_sample
+                >= 2.0 * result.power_time.template.idle_guard_time_s * recording.sample_rate_hz
+            ):
+                idle_stop_ms = next_start / recording.sample_rate_hz * 1e3 - guard_ms
+                self.power_plot.plot(
+                    np.array((end_ms + guard_ms, idle_stop_ms)),
+                    np.array((-46.9897, -46.9897)),
+                    pen=pg.mkPen(130, 100, 180, 190, width=1), name="20 nW idle limit",
+                )
+        failures = np.unique(np.concatenate([
+            criterion.failure_samples
+            for criterion in result.power_time.criteria
+            if criterion.failure_samples.size
+        ])) if any(c.failure_samples.size for c in result.power_time.criteria) else np.empty(0)
+        if failures.size:
+            indices = np.clip(np.rint(failures).astype(int), 0, result.power_db.size - 1)
+            self.power_plot.plot(
+                failures / recording.sample_rate_hz * 1e3,
+                result.power_time_power_db[indices]
+                + (
+                    recording.dbfs_to_dbm_offset_db
+                    if not result.power_time.amplitude_calibrated
+                    else 0.0
+                ),
+                pen=None, symbol="x", symbolPen=pg.mkPen("r", width=2),
+                symbolSize=7, name="Power-Time failures",
+            )
 
     def _render_summary(self, result: DectPacketResult) -> None:
         self.summary_table.clearSpans()
         self.summary_table.setRowCount(0)
         last_section = None
         rows = list(result.summary_rows)
+        power_history = self._power_time_history.get(
+            self._power_time_key(result), []
+        )
+        required_power_packets = 60
+        intervals_ok = all(
+            later.captured_at_s - earlier.captured_at_s >= 1.0
+            for earlier, later in zip(power_history, power_history[1:])
+        )
+        if any(item.status == "FAIL" for item in power_history):
+            aggregate_power_status = "FAIL"
+        elif (
+            len(power_history) >= required_power_packets
+            and all(item.status == "PASS" for item in power_history[:required_power_packets])
+            and intervals_ok
+        ):
+            aggregate_power_status = "PASS"
+        elif len(power_history) >= required_power_packets and not intervals_ok:
+            aggregate_power_status = "INCOMPLETE"
+        else:
+            aggregate_power_status = "MEASURING"
+        rows = [
+            replace(
+                row,
+                value=f"ETSI aggregate {aggregate_power_status}",
+                result=aggregate_power_status,
+            )
+            if row.test_item == "Power-Time Template"
+            else row
+            for row in rows
+        ]
+        rows.append(DectSummaryRow(
+            "Reference Information",
+            "Single Packet Power-Time",
+            result.power_time.overall_status,
+            "All captured clause 9 criteria",
+            result.power_time.overall_status,
+        ))
+        rows.append(DectSummaryRow(
+            "Reference Information",
+            "Power-Time Packets",
+            f"{len(power_history)} / {required_power_packets}",
+            ">= 1 s interval; formal c=5, c=0, c=9 sequence",
+            aggregate_power_status,
+        ))
         if result.carrier_test_eligible:
             history = self._carrier_history.get(self._carrier_key(result), [])
             required = carrier_repetition_count(result.packet_type)
@@ -1654,9 +1808,19 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             result.modulation_case,
         )
 
+    @staticmethod
+    def _power_time_key(result: DectPacketResult) -> tuple[float, str, str, str]:
+        return (
+            result.nominal_frequency_hz,
+            result.direction,
+            result.packet_type,
+            result.preamble_mode,
+        )
+
     def _reset_measurement_statistics(self) -> None:
         self._carrier_history.clear()
         self._modulation_history.clear()
+        self._power_time_history.clear()
         self._accumulated_packet_tokens.clear()
         if self._result is not None:
             self._render_summary(self._result)

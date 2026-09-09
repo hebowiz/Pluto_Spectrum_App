@@ -1164,45 +1164,62 @@ extreme:
 
 # 23. Power-Time Template
 
-DECTはTDMA burstなので、Power-Time解析は重要なPHY試験です。
+DECTはTDMA burstなので、Power-Time解析は重要なPHY試験です。Pluto VSAでは
+ETSI EN 300 175-2 V2.9.1 clause 5.2とETSI EN 300 176-1 V2.4.1
+clause 9 / Figure 26を判定根拠とします（Figure 25は定義の説明図、Figure 26は
+verdict用template）。
 
-代表値:
+1回のcommon DECT IQから、3 MHz Power-Time measurement receiverと1 MHz
+Transmitted Power / Idle measurement receiverを並列に生成します。1 MHz系を3 MHz系の
+出力からcascadeしてはいけません。両filterはcomplex IQへ適用し、その後に`|IQ|^2`
+を計算します。
 
-```text
-attack time  < 10 µs
-release time < 10 µs
-```
+Power-Time判定の時間原点はnormal packetではp0、prolonged preambleではp-16です。
+この開始点からphysical packet endまでの線形平均を`Power-Time Reference Power`と
+呼び、Clause 9の相対limitだけに使用します。UI上でこの値をNTPとは表記しません。
 
-packet期間中のpower flatness、burst直前・直後のpower、idle期間のemissionが規定されています。
+判定領域は次のとおりです。
 
-代表的には:
+| 項目 | 判定 |
+|---|---|
+| Attack | 25 µW upward crossingからpacket startまで `< 10 µs` |
+| Release | packet endから25 µW downward crossingまで `< 10 µs` |
+| Minimum Packet Power | packet startからpacket endまで `> reference - 1 dB` |
+| Maximum Packet Power | start + 10 µsからend + 10 µsまで `< reference + 1 dB` |
+| Attack Region Maximum | start - 10 µsからstart + 10 µsまで `< min(reference + 4 dB, 315 mW)` |
+| Post-Packet Maintenance | endからend + 0.5 µsまで `> reference - 6 dB` |
+| Idle Power | end + 27 µsから次packet start - 27 µsまで `< 20 nW` |
 
-- p0からpacket endまで nominal transmit powerに対し -1 dB以上
-- packet主要区間は nominal +1 dBを超えない
-- p0近傍のovershootにもupper limit
-- packet end後のpower decay
-- idle slot中の残留power
+次packetまで54 µs未満ならIdle Power条件は適用しません。必要区間がcapture外なら
+PASSにはせずINCOMPLETEとします。判定は平滑化していないsample-by-sample powerを
+使用し、表示用の平滑化やburst検出包絡とは分離します。非Idle測定は3 MHz以上、
+Idle Powerは1 MHz measurement bandwidthを使用します。
 
-などを評価します。
+25 µW、315 mW、20 nWは絶対電力条件です。このためamplitude calibrationがない
+recordingでは相対reference条件だけを参考評価できても、総合PASSにはせずINCOMPLETEと
+します。sample間crossingは線形補間し、sample intervalが0.1 µsを超えるcaptureは
+timing accuracy limitationを表示します。
 
-自作VSAでは以下の表示が有効です。
-
-```text
-Power vs Time
-p0 marker
-packet-end marker
-upper/lower mask
-attack time
-release time
-overshoot
-idle leakage
-```
+UIのmaskはreference rampではなく許容領域の境界です。Reference相対level、絶対level、
+start ±10 µs、end、end +0.5/+10/+27 µsを表示し、実際に違反したsampleだけを赤で
+示します。単一packet判定と60 burstのETSI aggregate判定を分け、aggregate PASSは
+1秒以上の間隔で取得した60 packetがすべてPASSした場合だけ表示します。正式試験の
+RF channel sequenceはc=5、c=0、c=9です。
 
 ---
 
 # 24. Transmit power
 
 Classic DECT PHYではnominal transmit powerについて最大値が規定されます。
+
+Clause 10の正式な測定結果はNTPです。1 MHz measurement receiverの出力をp0から
+physical packet endまで線形平均します。Prolonged PreambleでもClause 9用のp-16を
+流用せず、Clause 10本文どおりp0を開始点とします。Summary最上段にはこの1 MHz値だけを
+`NTP`として表示し、旧来の中央80 %平均`Transmit Power`は使用しません。
+
+3 MHz Power-Time Referenceと1 MHz NTPはfilter帯域が異なるため、値が異なること自体は
+正常です。channel-center CWではunity-gain normalization誤差内で一致することを確認し、
+変調信号について両値を強制的に一致させてはいけません。
 
 代表的なupper limit:
 

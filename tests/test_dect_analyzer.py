@@ -56,9 +56,14 @@ def test_generated_p32_sync_and_rf_measurements(direction: str) -> None:
     assert result.positive_deviation_hz == pytest.approx(288_000.0, abs=2_000.0)
     assert result.negative_deviation_hz == pytest.approx(-288_000.0, abs=2_000.0)
     assert result.symbol_rate_error_ppm == pytest.approx(8.0, abs=1.0)
-    assert result.output_power == pytest.approx(-7.5, abs=0.1)
-    assert result.output_power_unit == "dBm"
-    assert result.power_time_pass is True
+    assert result.power_time.reference_power_db == pytest.approx(-7.5, abs=0.1)
+    assert result.ntp.power_db == pytest.approx(-7.86, abs=0.1)
+    assert result.ntp.power_unit == "dBm"
+    assert result.ntp.available
+    assert result.power_time_pass is None
+    assert result.power_time.overall_status == "INCOMPLETE"
+    assert result.power_time.criterion_map["Attack Time"].status == "PASS"
+    assert result.power_time.criterion_map["Release Time"].status == "PASS"
     assert result.sync_score > 0.98
     assert result.p0_sample == pytest.approx(
         recording.metadata["expected_p0_sample"], abs=0.6
@@ -242,13 +247,15 @@ def test_case_a_peak_search_excludes_transition_adjacent_bits() -> None:
     )
 
 
-def test_rf_modulation_rejects_less_than_three_mhz_usable_bandwidth() -> None:
+def test_rf_conformance_is_unavailable_below_three_mhz_usable_bandwidth() -> None:
     recording = replace(
         generate_dect_packet(),
         usable_bandwidth_hz=2_999_999.0,
     )
-    with pytest.raises(ValueError, match="3 MHz usable bandwidth"):
-        analyze_dect_recording(recording)
+    result = analyze_dect_recording(recording)[0]
+    assert result.power_time.overall_status == "INCOMPLETE"
+    assert result.modulation_test_eligible is False
+    assert result.metadata["rf_measurement_bandwidth_eligible"] is False
 
 
 @pytest.mark.parametrize(
@@ -295,12 +302,19 @@ def test_rf_summary_uses_requested_measurement_order() -> None:
         for row in result.summary_rows
         if row.section == "RF PHY Measurements"
     ]
-    assert items[:4] == [
-        "Transmit Power",
+    assert items[:3] == [
+        "NTP",
         "Power-Time Template",
         "GFSK Modulation Deviation",
-        "Modulation Speed",
     ]
+    assert "Transmit Power" not in items
+    reference = {
+        row.test_item: row.value
+        for row in result.summary_rows
+        if row.section == "Reference Information"
+    }
+    assert "Power-Time Reference Power" in reference
+    assert reference["Power-Time Measurement BW"] == "3.000 MHz"
 
 
 def test_committed_dect_case_a_fixture_is_analyzable() -> None:
@@ -313,7 +327,8 @@ def test_committed_dect_case_a_fixture_is_analyzable() -> None:
     assert result.modulation_case == "Case A (00001111)"
     assert result.carrier_error_hz == pytest.approx(12_500.0, abs=500.0)
     assert result.symbol_rate_error_ppm == pytest.approx(8.0, abs=1.0)
-    assert result.output_power == pytest.approx(-7.5, abs=0.1)
+    assert result.power_time.reference_power_db == pytest.approx(-7.5, abs=0.1)
+    assert result.ntp.power_db == pytest.approx(-7.86, abs=0.1)
 
 
 def test_committed_dect_prbs9_fixture_is_analyzable_as_reference() -> None:
@@ -353,9 +368,9 @@ def test_nominal_live_pluto_power_is_displayed_in_dbm() -> None:
         metadata={**dict(calibrated.metadata), "nominal_pluto_amplitude": True},
     )
     result = analyze_dect_recording(live)[0]
-    assert result.output_power == pytest.approx(-11.0, abs=0.1)
-    assert result.output_power_unit == "dBm"
-    assert result.power_calibrated is False
+    assert result.ntp.power_db == pytest.approx(-11.36, abs=0.1)
+    assert result.ntp.power_unit == "dBFS"
+    assert result.ntp.available is False
 
 
 def test_variable_p00j_exposes_physical_fields_instead_of_opaque_body() -> None:
@@ -402,11 +417,13 @@ def test_noisy_live_like_capture_keeps_timing_and_power_time_measurements() -> N
     )
     result = analyze_dect_recording(recording)[0]
     assert result.symbol_rate_error_ppm == pytest.approx(-199.0, abs=4.0)
-    assert result.output_power == pytest.approx(-24.0, abs=0.1)
-    assert result.output_power_unit == "dBm"
-    assert result.attack_time_s is not None
-    assert result.release_time_s is not None
-    assert result.power_time_pass is True
+    assert result.ntp.power_db == pytest.approx(-24.39, abs=0.1)
+    assert result.ntp.power_unit == "dBFS"
+    assert result.attack_time_s is None
+    assert result.release_time_s is None
+    assert result.power_time_pass is None
+    assert result.power_time.overall_status == "INCOMPLETE"
+    assert "absolute amplitude calibration is required" in result.power_time.incomplete_reasons
 
 
 @pytest.mark.parametrize("direction", ("RFP", "PP"))
@@ -419,6 +436,10 @@ def test_prolonged_preamble_is_anchored_by_sync_word(direction: str) -> None:
     result = analyze_dect_recording(recording)[0]
     assert result.direction == direction
     assert result.preamble_mode == "Prolonged"
+    assert result.power_time_start_sample == pytest.approx(
+        result.p0_sample - 16 * result.metadata["samples_per_symbol"], abs=0.01
+    )
+    assert result.ntp.start_sample == pytest.approx(result.p0_sample)
     assert result.p0_sample == pytest.approx(
         recording.metadata["expected_p0_sample"], abs=0.6
     )

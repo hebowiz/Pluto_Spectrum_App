@@ -14,7 +14,10 @@ from pluto_sa.vsa.protocol_modes.dect import (
     analyze_dect_recording,
     generate_dect_packet,
 )
-from pluto_sa.vsa.protocol_modes.dect.ui import _DectModulationObservation
+from pluto_sa.vsa.protocol_modes.dect.ui import (
+    _DectModulationObservation,
+    _DectPowerTimeObservation,
+)
 from pluto_sa.vsa.model import IQRecording
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.ui.display_processing import fit_binary_fsk_display_drift
@@ -221,8 +224,8 @@ def test_dect_workspace_renders_measurement_and_packet_views(tmp_path) -> None:
         power_names = {
             item.name() for item in window.power_plot.listDataItems()
         }
-        assert "Power-Time upper limit" in power_names
-        assert "Power-Time lower limit" in power_names
+        assert "NTP +1 dB" in power_names
+        assert "NTP -1 dB" in power_names
         assert window.power_plot.getViewBox().state["limits"]["yLimits"][0] == -120.0
         power_y = window.power_plot.listDataItems()[0].getData()[1]
         assert np.nanmin(power_y) == -120.0
@@ -579,7 +582,42 @@ def test_modulation_history_separates_polarities_and_can_be_cleared(tmp_path) ->
         window.clear_measurement_history_action.trigger()
         assert not window._modulation_history
         assert not window._carrier_history
+        assert not window._power_time_history
         assert not window._accumulated_packet_tokens
+    finally:
+        window._config_dialog.close()
+        window.close()
+        window.deleteLater()
+
+
+def test_power_time_aggregate_requires_60_passes_at_one_second_intervals(tmp_path) -> None:
+    window = _window(tmp_path)
+    result = analyze_dect_recording(generate_dect_packet())[0]
+    try:
+        key = window._power_time_key(result)
+        window._power_time_history[key] = [
+            _DectPowerTimeObservation("PASS", float(index))
+            for index in range(60)
+        ]
+        window._render_summary(result)
+        items = {
+            window.summary_table.item(row, 0).text(): window.summary_table.item(row, 3).text()
+            for row in range(window.summary_table.rowCount())
+            if window.summary_table.item(row, 0) is not None
+            and window.summary_table.item(row, 3) is not None
+        }
+        assert items["Power-Time Template"] == "PASS"
+        assert items["Power-Time Packets"] == "PASS"
+
+        window._power_time_history[key][-1] = _DectPowerTimeObservation("FAIL", 59.0)
+        window._render_summary(result)
+        items = {
+            window.summary_table.item(row, 0).text(): window.summary_table.item(row, 3).text()
+            for row in range(window.summary_table.rowCount())
+            if window.summary_table.item(row, 0) is not None
+            and window.summary_table.item(row, 3) is not None
+        }
+        assert items["Power-Time Template"] == "FAIL"
     finally:
         window._config_dialog.close()
         window.close()

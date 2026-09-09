@@ -28,10 +28,12 @@ DEDICATED_STATUS_COLORS = {
     "PASS": "#43f5a5",
     "FAIL": "#ff5b5b",
     "MEASURING": "#ffd166",
+    "INCOMPLETE": "#ffd166",
     "VALID": "#43f5a5",
     "INVALID": "#ff5b5b",
     "WARNING": "#ffd166",
     "N/A": "#a0a0a0",
+    "NOT APPLICABLE": "#a0a0a0",
     "—": "#a0a0a0",
 }
 

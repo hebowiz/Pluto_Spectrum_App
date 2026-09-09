@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -19,10 +19,6 @@ from pluto_protocol.model import (
 )
 from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
 from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement.power import (
-    measure_burst_power,
-)
-
 from .generator import (
     DECT_SYMBOL_RATE_HZ,
     PACKET_SYMBOL_COUNTS,
@@ -40,6 +36,13 @@ from .modulation import (
     instantaneous_frequency,
     measurement_bandwidth_hz,
     peak_deviations,
+)
+from .power_time import (
+    DectNTPResult,
+    DectPowerTimeResult,
+    build_dect_power_measurement_paths,
+    measure_dect_ntp,
+    measure_dect_power_time,
 )
 
 
@@ -84,9 +87,7 @@ class DectPacketResult:
     negative_deviation_hz: float
     symbol_rate_hz: float
     symbol_rate_error_ppm: float
-    output_power: float
-    output_power_unit: str
-    power_calibrated: bool
+    ntp: DectNTPResult
     attack_time_s: float | None
     release_time_s: float | None
     active_flatness_db: float
@@ -95,7 +96,9 @@ class DectPacketResult:
     start_sample: int
     stop_sample: int
     p0_sample: float
+    power_time_start_sample: float
     packet_end_sample: float
+    power_time: DectPowerTimeResult
     packet_analysis: PacketAnalysisResult
     bits: np.ndarray
     symbol_centers: np.ndarray
@@ -120,6 +123,9 @@ class DectPacketResult:
     bit_measurement_mask: np.ndarray
     deviation_bit_results: tuple[DECTDeviationBitResult, ...]
     power_db: np.ndarray
+    raw_measurement_power_db: np.ndarray
+    power_time_power_db: np.ndarray
+    ntp_power_db: np.ndarray
     summary_rows: tuple[DectSummaryRow, ...] = field(init=False)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -143,6 +149,9 @@ class DectPacketResult:
             "instantaneous_frequency_sample",
             "bit_measurement_mask",
             "power_db",
+            "raw_measurement_power_db",
+            "power_time_power_db",
+            "ntp_power_db",
         ):
             value = np.asarray(getattr(self, name))
             if value.flags.writeable or not value.flags.owndata:
@@ -800,29 +809,33 @@ def _summary_rows(result: DectPacketResult) -> tuple[DectSummaryRow, ...]:
         return f"{margin / 1e3:+.1f} kHz"
     timing_limit = 10.0 if result.direction == "RFP" else 25.0
     timing_result = "PASS" if abs(result.symbol_rate_error_ppm) <= timing_limit else "FAIL"
-    if result.power_time_pass is None:
-        power_time_value, power_time_result = "N/A - burst edges not captured", "N/A"
-    else:
-        power_time_value = (
-            f"Attack {result.attack_time_s * 1e6:.2f} us; "
-            f"Release {result.release_time_s * 1e6:.2f} us; "
-            f"Flatness {result.active_flatness_db:.2f} dB"
+    power_time_value = (
+        f"Single packet {result.power_time.overall_status}"
+        + (
+            f" - {result.power_time.incomplete_reasons[0]}"
+            if result.power_time.incomplete_reasons
+            and result.power_time.overall_status == "INCOMPLETE"
+            else ""
         )
-        power_time_result = "PASS" if result.power_time_pass else "FAIL"
-    power_limit = "Regional/product power class dependent"
+    )
+    power_time_result = result.power_time.overall_status
     rows = [
         DectSummaryRow(
             "RF PHY Measurements",
-            "Transmit Power",
-            f"{result.output_power:+.3f} {result.output_power_unit}",
-            power_limit,
+            "NTP",
+            (
+                f"{result.ntp.power_db:+.3f} {result.ntp.power_unit}"
+                if result.ntp.available
+                else f"N/A ({result.ntp.power_db:+.3f} {result.ntp.power_unit} reference)"
+            ),
+            "Measurement BW: 1 MHz",
             "N/A",
         ),
         DectSummaryRow(
             "RF PHY Measurements",
             "Power-Time Template",
             power_time_value,
-            "Attack/Release < 10 us; active within -1/+1 dB",
+            "EN 300 176-1 clause 9 / single packet",
             power_time_result,
         ),
         DectSummaryRow(
@@ -861,6 +874,17 @@ def _summary_rows(result: DectPacketResult) -> tuple[DectSummaryRow, ...]:
         DectSummaryRow("Reference Information", "Sync Word correlation", f"{100.0 * result.sync_word_correlation:.2f} %"),
         DectSummaryRow("Reference Information", "S-field correlation", f"{100.0 * result.sync_score:.2f} %"),
     ]
+    power_time_rows = [
+        DectSummaryRow(
+            "RF PHY Measurements",
+            criterion.name,
+            criterion.value,
+            criterion.limit,
+            criterion.status,
+        )
+        for criterion in result.power_time.criteria
+    ]
+    rows[3:3] = power_time_rows
     observed_rows: list[DectSummaryRow] = []
     if not result.carrier_test_eligible:
         observed_rows.append(DectSummaryRow("Reference Information", "Observed carrier frequency error", _display_signed(result.carrier_error_hz, "kHz", 1e3)))
@@ -881,6 +905,16 @@ def _summary_rows(result: DectPacketResult) -> tuple[DectSummaryRow, ...]:
     rows[packet_type_index + 1 : packet_type_index + 1] = observed_rows
     rows.extend(
         (
+            DectSummaryRow(
+                "Reference Information",
+                "Power-Time Reference Power",
+                f"{result.power_time.reference_power_db:+.3f} {result.power_time.power_unit}",
+            ),
+            DectSummaryRow(
+                "Reference Information",
+                "Power-Time Measurement BW",
+                f"{result.power_time.measurement_bandwidth_hz / 1e6:.3f} MHz",
+            ),
             DectSummaryRow("Reference Information", "Nominal carrier", f"{result.nominal_frequency_hz / 1e6:.3f} MHz"),
             DectSummaryRow("Reference Information", "p0 sample", f"{result.p0_sample:.3f}"),
             DectSummaryRow(
@@ -912,12 +946,23 @@ def analyze_dect_recording(
     analysis_bandwidth = measurement_bandwidth_hz(
         sample_rate, recording.usable_bandwidth_hz
     )
-    if analysis_bandwidth < 3_000_000.0:
-        raise ValueError(
-            "DECT RF modulation analysis requires at least 3 MHz usable bandwidth"
-        )
+    rf_measurement_bandwidth_eligible = analysis_bandwidth >= 3_000_000.0
     frequency, positions = _instantaneous_frequency(recording.iq, sample_rate)
     raw_power = np.abs(np.asarray(recording.iq, dtype=np.complex128)) ** 2
+    power_paths = build_dect_power_measurement_paths(recording)
+    power_trace_offset = 30.0 if recording.amplitude_calibrated else 0.0
+    raw_measurement_power_db = (
+        10.0 * np.log10(np.maximum(power_paths.raw_power, np.finfo(float).tiny))
+        + power_trace_offset
+    )
+    power_time_power_db = (
+        10.0 * np.log10(np.maximum(power_paths.power_time_power, np.finfo(float).tiny))
+        + power_trace_offset
+    )
+    ntp_power_db = (
+        10.0 * np.log10(np.maximum(power_paths.one_mhz_power, np.finfo(float).tiny))
+        + power_trace_offset
+    )
     power_db = (
         10.0
         * np.log10(
@@ -1091,46 +1136,36 @@ def analyze_dect_recording(
         packet_end = p0 + symbol_count * sps
         start_sample = max(0, int(np.floor(p0)))
         stop_sample = min(recording.sample_count, int(np.ceil(packet_end)))
-        power_result = measure_burst_power(
-            recording.iq,
-            full_scale=recording.full_scale,
-            dbfs_to_dbm_offset_db=recording.dbfs_to_dbm_offset_db,
-            start_sample=start_sample,
-            stop_sample=stop_sample,
-            central_fraction=0.8,
-        )
         nominal_pluto_power = bool(
             recording.metadata.get("nominal_pluto_amplitude", False)
             or recording.metadata.get("nominal_pluto_amplitude_inferred", False)
         )
-        output_unit = (
-            "dBm" if recording.amplitude_calibrated or nominal_pluto_power else "dBFS"
+        power_time = measure_dect_power_time(
+            recording,
+            p0_sample=p0,
+            power_time_start_sample=actual_start,
+            packet_end_sample=packet_end,
+            measurement_bandwidth_hz=analysis_bandwidth,
+            measurement_paths=power_paths,
         )
-        output_power = (
-            power_result.average_dbm
-            if output_unit == "dBm"
-            else power_result.average_dbm - recording.dbfs_to_dbm_offset_db
+        ntp = measure_dect_ntp(
+            power_paths,
+            p0_sample=p0,
+            packet_end_sample=packet_end,
         )
-        reference_power = float(
-            np.mean(raw_power[power_result.start_sample : power_result.stop_sample])
-        )
-        attack_time = _edge_time(
-            raw_power, reference_power, actual_start, sample_rate, attack=True
-        )
-        release_time = _edge_time(
-            raw_power, reference_power, packet_end, sample_rate, attack=False
-        )
+        attack_time = power_time.attack_time_s
+        release_time = power_time.release_time_s
         active = _smoothed_power(raw_power, sps)[
             min(stop_sample, start_sample + max(1, int(4 * sps))) :
             max(start_sample + 1, stop_sample - max(1, int(4 * sps)))
         ]
         active_db = 10.0 * np.log10(np.maximum(active, np.finfo(float).tiny))
         flatness = float(np.percentile(active_db, 99.0) - np.percentile(active_db, 1.0))
-        power_time_pass = None
-        if attack_time is not None and release_time is not None:
-            power_time_pass = bool(
-                attack_time < 10e-6 and release_time < 10e-6 and flatness <= 2.0
-            )
+        power_time_pass = (
+            True if power_time.overall_status == "PASS"
+            else False if power_time.overall_status == "FAIL"
+            else None
+        )
         packet_analysis = DectClassicDecoder().decode(
             PacketDecodeInput(
                 bits,
@@ -1163,14 +1198,12 @@ def analyze_dect_recording(
                 carrier_error_hz=measured_carrier,
                 carrier_test_eligible=modulation_case.startswith("Case A"),
                 modulation_case=modulation_case,
-                modulation_test_eligible=eligible,
+                modulation_test_eligible=eligible and rf_measurement_bandwidth_eligible,
                 positive_deviation_hz=positive_deviation,
                 negative_deviation_hz=negative_deviation,
                 symbol_rate_hz=sample_rate / sps,
                 symbol_rate_error_ppm=(sample_rate / sps / DECT_SYMBOL_RATE_HZ - 1.0) * 1e6,
-                output_power=output_power,
-                output_power_unit=output_unit,
-                power_calibrated=recording.amplitude_calibrated,
+                ntp=ntp,
                 attack_time_s=attack_time,
                 release_time_s=release_time,
                 active_flatness_db=flatness,
@@ -1179,7 +1212,9 @@ def analyze_dect_recording(
                 start_sample=start_sample,
                 stop_sample=stop_sample,
                 p0_sample=p0,
+                power_time_start_sample=actual_start,
                 packet_end_sample=packet_end,
+                power_time=power_time,
                 packet_analysis=packet_analysis,
                 bits=bits,
                 symbol_centers=centers,
@@ -1204,11 +1239,37 @@ def analyze_dect_recording(
                 bit_measurement_mask=measurement_mask,
                 deviation_bit_results=per_bit_deviations,
                 power_db=power_db,
+                raw_measurement_power_db=raw_measurement_power_db,
+                power_time_power_db=power_time_power_db,
+                ntp_power_db=ntp_power_db,
                 metadata={
                     "burst_start_sample": burst_start,
                     "burst_stop_sample": burst_stop,
                     "power_length_hint_sample": power_length_hint,
                     "actual_preamble_start_sample": actual_start,
+                    "power_time_start_sample": actual_start,
+                    "power_time_measurement_bandwidth_hz": power_paths.power_time_measurement_bandwidth_hz,
+                    "idle_power_measurement_bandwidth_hz": 1_000_000.0,
+                    "power_time_reference_power_dbm": (
+                        power_time.reference_power_db if recording.amplitude_calibrated else None
+                    ),
+                    "power_time_reference_power_w": (
+                        power_time.reference_power_linear if recording.amplitude_calibrated else None
+                    ),
+                    "ntp_power_dbm": ntp.power_db if ntp.available else None,
+                    "ntp_power_w": ntp.power_linear if ntp.available else None,
+                    "ntp_measurement_bandwidth_hz": power_paths.ntp_measurement_bandwidth_hz,
+                    "power_time_filter_type": power_paths.power_time_filter_type,
+                    "ntp_filter_type": power_paths.ntp_filter_type,
+                    "power_time_filter_group_delay_samples": power_paths.power_time_filter_group_delay_samples,
+                    "ntp_filter_group_delay_samples": power_paths.ntp_filter_group_delay_samples,
+                    "measurement_filter_delay_compensated": power_paths.filter_delay_compensated,
+                    "power_measurement_input_usable_bandwidth_hz": power_paths.input_usable_bandwidth_hz,
+                    "power_measurement_input": (
+                        "Analysis Channel output"
+                        if recording.metadata.get("analysis_channel_applied", False)
+                        else "Capture/common DECT IQ"
+                    ),
                     "physical_packet_symbol_count": symbol_count,
                     "prolonged_preamble_correlation": prolonged_score,
                     "nominal_pluto_power": nominal_pluto_power,
@@ -1244,9 +1305,42 @@ def analyze_dect_recording(
                     "pattern_exact_etsi": pattern_identification.exact_etsi_pattern,
                     "pattern_figure": pattern_identification.figure,
                     "pattern_dsv_max": pattern_identification.dsv_max,
+                    "rf_measurement_bandwidth_eligible": rf_measurement_bandwidth_eligible,
                 },
             )
         )
     if not results:
         raise RuntimeError("No synchronized DECT packet was found")
-    return tuple(results)
+    # Idle power is defined only between adjacent physical packets.  Resolve it
+    # after all synchronized packet starts are known, without using the coarse
+    # envelope edge as a substitute for p0/p-16.
+    resolved: list[DectPacketResult] = []
+    for index, result in enumerate(results):
+        next_start = (
+            results[index + 1].power_time_start_sample
+            if index + 1 < len(results)
+            else None
+        )
+        power_time = measure_dect_power_time(
+            recording,
+            p0_sample=result.p0_sample,
+            power_time_start_sample=result.power_time_start_sample,
+            packet_end_sample=result.packet_end_sample,
+            next_power_time_start_sample=next_start,
+            measurement_bandwidth_hz=analysis_bandwidth,
+            measurement_paths=power_paths,
+        )
+        resolved.append(
+            replace(
+                result,
+                power_time=power_time,
+                attack_time_s=power_time.attack_time_s,
+                release_time_s=power_time.release_time_s,
+                power_time_pass=(
+                    True if power_time.overall_status == "PASS"
+                    else False if power_time.overall_status == "FAIL"
+                    else None
+                ),
+            )
+        )
+    return tuple(resolved)
