@@ -29,6 +29,19 @@ EDR_SYNC_BITS_3MBPS = np.asarray(
     dtype=np.uint8,
 )
 
+EDR_RF_TEST_PAYLOAD_LENGTH_BYTES = {
+    "2-DH1": 31,
+    "2-EV3": 58,
+    "2-DH3": 356,
+    "2-EV5": 358,
+    "2-DH5": 656,
+    "3-DH1": 11,
+    "3-EV3": 88,
+    "3-DH3": 536,
+    "3-EV5": 538,
+    "3-DH5": 986,
+}
+
 
 @dataclass(frozen=True)
 class BluetoothEDRWaveform:
@@ -65,15 +78,24 @@ def _bytes_to_air_bits(values: bytes) -> np.ndarray:
 
 
 def _header_air_bits(
-    *, packet_type: int, clock_6_1: int, uap: int, lt_addr: int = 1
+    *,
+    packet_type: int,
+    clock_6_1: int,
+    uap: int,
+    lt_addr: int = 1,
+    whitening_enabled: bool = True,
 ) -> np.ndarray:
     packed = int(lt_addr) | (int(packet_type) << 3) | (1 << 7)
     data = _bits_lsb(packed, 10)
     hec = header_error_check(data, int(uap))
     hec_bits = np.asarray([(hec >> shift) & 1 for shift in range(7, -1, -1)], dtype=np.uint8)
     header = np.concatenate((data, hec_bits))
-    whitened = header ^ whitening_sequence(int(clock_6_1), header.size)
-    return fec13_encode(whitened)
+    transmitted = (
+        header ^ whitening_sequence(int(clock_6_1), header.size)
+        if whitening_enabled
+        else header
+    )
+    return fec13_encode(transmitted)
 
 
 def _payload_header_bits(payload_length_bytes: int) -> np.ndarray:
@@ -116,6 +138,64 @@ def edr_sync_symbols(bits_per_symbol: int) -> np.ndarray:
     else:
         raise ValueError("bits_per_symbol must be 2 or 3")
     return _phase_indices(bits, width)
+
+
+def edr_rf_test_reference_phase_indices(
+    packet_name: str,
+    *,
+    payload_length_bytes: int | None = None,
+    uap: int,
+    logical_channel: int = 2,
+    flow: int = 1,
+) -> np.ndarray:
+    """Build the ideal, unwhitened RF.TS EDR differential sequence.
+
+    The sequence is generated solely from the configured packet definition:
+    EDR Sync, enhanced ACL payload header, all-ones-seeded PRBS9 user payload,
+    payload CRC, and the two zero Trailer symbols.
+    """
+
+    name = str(packet_name).upper()
+    if name.startswith("2-"):
+        width = 2
+        sync_bits = EDR_SYNC_BITS_2MBPS
+    elif name.startswith("3-"):
+        width = 3
+        sync_bits = EDR_SYNC_BITS_3MBPS
+    else:
+        raise ValueError("EDR RF test packet must be a 2-* or 3-* packet")
+    expected_length = EDR_RF_TEST_PAYLOAD_LENGTH_BYTES.get(name)
+    if expected_length is None:
+        raise ValueError(f"unsupported EDR RF Test packet {name}")
+    length = (
+        expected_length
+        if payload_length_bytes is None
+        else int(payload_length_bytes)
+    )
+    if length != expected_length:
+        raise ValueError(
+            f"{name} RF.TS payload length must be {expected_length} byte(s)"
+        )
+    packed_header = (
+        (int(logical_channel) & 0x3)
+        | ((int(flow) & 0x1) << 2)
+        | (length << 3)
+    )
+    payload_header = _bits_lsb(packed_header, 16)
+    prbs9 = prbs9_period()
+    payload_body = prbs9[np.arange(length * 8, dtype=np.int64) % prbs9.size]
+    payload_crc = _bytes_to_air_bits(
+        payload_crc_bytes(
+            np.concatenate((payload_header, payload_body)), int(uap)
+        )
+    )
+    trailer = np.zeros(2 * width, dtype=np.uint8)
+    return _phase_indices(
+        np.concatenate(
+            (sync_bits, payload_header, payload_body, payload_crc, trailer)
+        ),
+        width,
+    )
 
 
 def _rrc_taps(samples_per_symbol: int, beta: float = 0.4, span_symbols: int = 10) -> np.ndarray:
@@ -177,23 +257,26 @@ def generate_edr_dh1(
     uap: int = 0x6B,
     clock_6_1: int = 0x2B,
     carrier_frequency_offset_hz: float = 20_000.0,
+    edr_residual_frequency_offset_hz: float = 0.0,
     duration_s: float = 0.003,
     packet_start_s: float = 0.002,
     snr_db: float = 35.0,
     seed: int = 1,
+    payload_length_bytes: int | None = None,
+    whitening_enabled: bool = True,
 ) -> BluetoothEDRWaveform:
     """Generate a maximum-length 2-DH1 or 3-DH1 packet at 1 MSym/s."""
     normalized = str(packet_name).upper()
     if normalized == "2-DH1":
         modulation = ModulationKind.PI4_DQPSK
         packet_type = 0x4
-        payload_length = 54
+        payload_length = 54 if payload_length_bytes is None else int(payload_length_bytes)
         bits_per_symbol = 2
         sync_bits = EDR_SYNC_BITS_2MBPS
     elif normalized == "3-DH1":
         modulation = ModulationKind.DPSK8
         packet_type = 0x8
-        payload_length = 83
+        payload_length = 83 if payload_length_bytes is None else int(payload_length_bytes)
         bits_per_symbol = 3
         sync_bits = EDR_SYNC_BITS_3MBPS
     else:
@@ -209,6 +292,7 @@ def generate_edr_dh1(
         packet_type=packet_type,
         clock_6_1=int(clock_6_1),
         uap=int(uap),
+        whitening_enabled=bool(whitening_enabled),
     )
     gfsk = modulate_packet_bits(
         np.concatenate((access, header_air)),
@@ -223,7 +307,7 @@ def generate_edr_dh1(
     )
     payload = np.concatenate((payload_header, body, crc))
     whitening = whitening_sequence(int(clock_6_1), 18 + payload.size)
-    payload_air = payload ^ whitening[18:]
+    payload_air = payload ^ whitening[18:] if whitening_enabled else payload
     trailer = np.zeros(2 * bits_per_symbol, dtype=np.uint8)
     psk_bits = np.concatenate((sync_bits, payload_air, trailer))
     phase_indices = _phase_indices(psk_bits, bits_per_symbol)
@@ -232,6 +316,14 @@ def generate_edr_dh1(
         order=2**bits_per_symbol,
         samples_per_symbol=samples_per_symbol,
     )
+    if float(edr_residual_frequency_offset_hz) != 0.0:
+        psk_time_s = np.arange(psk.size, dtype=np.float64) / float(sample_rate_hz)
+        psk *= np.exp(
+            2j
+            * np.pi
+            * float(edr_residual_frequency_offset_hz)
+            * psk_time_s
+        )
     psk *= np.exp(1j * (np.angle(gfsk[-1]) - np.angle(psk[0])))
 
     guard = np.full(5 * samples_per_symbol, gfsk[-1], dtype=np.complex128)
@@ -269,6 +361,9 @@ def generate_edr_dh1(
             "uap": int(uap),
             "clock_6_1": int(clock_6_1),
             "carrier_frequency_offset_hz": float(carrier_frequency_offset_hz),
+            "edr_residual_frequency_offset_hz": float(
+                edr_residual_frequency_offset_hz
+            ),
             "tx_filter": "Root Raised Cosine",
             "rolloff": 0.4,
             "seed": int(seed),

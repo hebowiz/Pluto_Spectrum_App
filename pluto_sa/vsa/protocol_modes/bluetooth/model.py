@@ -65,7 +65,10 @@ from pluto_sa.vsa.profiles.bluetooth_br import (
     prbs9_period,
     whitening_sequence,
 )
-from pluto_sa.vsa.profiles.bluetooth_edr import edr_sync_symbols
+from pluto_sa.vsa.profiles.bluetooth_edr import (
+    edr_rf_test_reference_phase_indices,
+    edr_sync_symbols,
+)
 from pluto_sa.vsa.protocol import analyze_demodulated_packet_bits
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement.hdt import (
@@ -86,12 +89,14 @@ from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
     RFTestVerdict,
     build_fm_measurement_trace,
     estimate_p0_from_zero_crossings,
+    edr_measurement_filter_taps,
     frequency_deviation_yield_floor,
     measure_edr_devm,
     measure_edr_guard_time,
     measure_burst_power,
     measure_carrier_drift,
     measure_initial_carrier_frequency,
+    measure_edr_initial_carrier_frequency,
     measure_modulation_characteristics,
     measure_observed_fsk_deviation,
     measure_pre_packet_emissions,
@@ -2225,6 +2230,7 @@ def analyze_bluetooth_classic_recording(
     result_length: int = 4096,
     match_index: int = 1,
     iq_power_trigger: IQPowerTriggerSettings | None = None,
+    expected_edr_rf_test_packet: str | None = None,
     _recording_sample_offset: int = 0,
     _generate_display_products: bool = True,
 ) -> BluetoothDedicatedResult:
@@ -2699,6 +2705,16 @@ def analyze_bluetooth_classic_recording(
             sample_rate_hz=recording.sample_rate_hz,
             minimum_sample_rate_hz=4_000_000.0,
         )
+        if (
+            BluetoothAnalysisProfile(profile) is BluetoothAnalysisProfile.RF_PHY_TEST
+            and expected_edr_rf_test_packet is None
+        ):
+            eligibility = RFTestEligibility.from_reasons(
+                (
+                    *eligibility.reasons,
+                    "complete known EDR RF Test reference unavailable",
+                )
+            )
         try:
             br_packet_start = int(
                 br_analysis_session.pattern_result.result_start_sample
@@ -2723,12 +2739,11 @@ def analyze_bluetooth_classic_recording(
             )
             fm_trace = replace(fm_trace, p0_sample=p0_timing.p0_sample)
             fsk_measurement_trace = fm_trace
-            initial = measure_initial_carrier_frequency(
+            initial = measure_edr_initial_carrier_frequency(
                 fm_trace,
                 packet.raw_bits[72:126],
                 nominal_frequency_hz=recording.center_frequency_hz,
                 start_symbol=72,
-                symbol_count=54,
             )
             fsk_power = measure_burst_power(
                 recording.iq,
@@ -2791,45 +2806,67 @@ def analyze_bluetooth_classic_recording(
                 reference_symbol_start_sample=edr_reference_start_sample,
                 sample_rate_hz=recording.sample_rate_hz,
             )
-            # Build one fixed physical reference from the known Sync and the
-            # decoded packet bitstream re-encoded into its over-the-air form.
-            # The DEVM optimizer never substitutes nearest constellation
-            # decisions for this sequence.
-            decoded_payload_field = _packet_field_by_id(
-                packet.root_fields, "payload"
-            )
-            if decoded_payload_field is None:
-                raise ValueError("EDR DEVM requires a decoded payload reference")
-            payload_reference_bits = np.asarray(
-                decoded_payload_field.raw_bits, dtype=np.uint8
-            )
-            if whitening_enabled:
-                payload_reference_bits = payload_reference_bits ^ (
-                    whitening_sequence(
-                        int(clock_6_1), 18 + payload_reference_bits.size
-                    )[18:]
+            # General/diagnostic mode may use the decoded packet.  Formal RF
+            # Test mode instead requires an explicitly configured packet and
+            # constructs every differential symbol independently of receiver
+            # decisions.
+            reference_source = "decoded_reencoded_packet"
+            if (
+                BluetoothAnalysisProfile(profile)
+                is BluetoothAnalysisProfile.RF_PHY_TEST
+                and expected_edr_rf_test_packet is not None
+            ):
+                expected_packet_name = str(expected_edr_rf_test_packet).upper()
+                if packet.packet_type.upper() != expected_packet_name:
+                    raise ValueError(
+                        f"expected {expected_packet_name}, received {packet.packet_type}"
+                    )
+                expected_phase_indices = edr_rf_test_reference_phase_indices(
+                    expected_packet_name,
+                    uap=int(uap) & 0xFF,
                 )
-            bits_per_edr_symbol = int(
-                round(np.log2(analysis_session.signal.modulation.order))
-            )
-            padding_count = (-payload_reference_bits.size) % bits_per_edr_symbol
-            if padding_count:
-                payload_reference_bits = np.concatenate(
+                edr_devm_reference_symbols = phase_indices_to_logical_symbols(
+                    analysis_session.signal.modulation,
+                    BLUETOOTH_EDR_MAPPING,
+                    expected_phase_indices,
+                )
+                reference_source = "known_rf_test_packet"
+            else:
+                decoded_payload_field = _packet_field_by_id(
+                    packet.root_fields, "payload"
+                )
+                if decoded_payload_field is None:
+                    raise ValueError("EDR DEVM requires a decoded payload reference")
+                payload_reference_bits = np.asarray(
+                    decoded_payload_field.raw_bits, dtype=np.uint8
+                )
+                if whitening_enabled:
+                    payload_reference_bits = payload_reference_bits ^ (
+                        whitening_sequence(
+                            int(clock_6_1), 18 + payload_reference_bits.size
+                        )[18:]
+                    )
+                bits_per_edr_symbol = int(
+                    round(np.log2(analysis_session.signal.modulation.order))
+                )
+                padding_count = (-payload_reference_bits.size) % bits_per_edr_symbol
+                if padding_count:
+                    payload_reference_bits = np.concatenate(
+                        (
+                            payload_reference_bits,
+                            np.zeros(padding_count, dtype=np.uint8),
+                        )
+                    )
+                edr_devm_reference_symbols = np.concatenate(
                     (
-                        payload_reference_bits,
-                        np.zeros(padding_count, dtype=np.uint8),
+                        expected_edr_decoded_sync_symbols,
+                        _air_bits_to_symbols(
+                            payload_reference_bits,
+                            analysis_session.signal.modulation.order,
+                        ),
+                        np.zeros(2, dtype=np.int16),
                     )
                 )
-            edr_devm_reference_symbols = np.concatenate(
-                (
-                    expected_edr_decoded_sync_symbols,
-                    _air_bits_to_symbols(
-                        payload_reference_bits,
-                        analysis_session.signal.modulation.order,
-                    ),
-                    np.zeros(2, dtype=np.int16),
-                )
-            )
             if edr_devm_reference_symbols.size != pattern.decoded_symbols.size:
                 raise ValueError(
                     "re-encoded EDR reference does not match the physical "
@@ -2846,6 +2883,13 @@ def analyze_bluetooth_classic_recording(
                 symbol_mapping=analysis_session.signal.symbol_mapping,
                 initial_frequency_error_hz=initial.error_hz,
             )
+            if any(block.optimizer_boundary_reached for block in devm.blocks):
+                eligibility = RFTestEligibility.from_reasons(
+                    (
+                        *eligibility.reasons,
+                        "EDR DEVM optimizer reached its physical search boundary",
+                    )
+                )
             evaluated_center_samples = (
                 np.concatenate(
                     [
@@ -3074,6 +3118,17 @@ def analyze_bluetooth_classic_recording(
                         "block_peak_devm": np.asarray(
                             [block.peak_devm for block in devm.blocks]
                         ),
+                        "block_optimizer_cost": np.asarray(
+                            [block.optimizer_cost for block in devm.blocks]
+                        ),
+                        "block_optimizer_boundary_reached": np.asarray(
+                            [block.optimizer_boundary_reached for block in devm.blocks],
+                            dtype=np.bool_,
+                        ),
+                        "measurement_filter_taps": edr_measurement_filter_taps(
+                            recording.sample_rate_hz,
+                            analysis_session.signal.symbol_rate_hz,
+                        ),
                         "symbol_devm": np.concatenate(
                             [block.symbol_devm for block in devm.blocks]
                         )
@@ -3147,6 +3202,12 @@ def analyze_bluetooth_classic_recording(
                         "omega_i_selected_header_bit_indices": (
                             initial.selected_bit_indices
                         ),
+                        "omega_i_selected_header_bit_values": (
+                            initial.selected_bit_values
+                        ),
+                        "omega_i_selected_header_bit_center_frequency_hz": (
+                            initial.selected_bit_center_frequency_hz
+                        ),
                         "p0_zero_crossing_samples": (
                             p0_timing.zero_crossing_samples
                         ),
@@ -3161,14 +3222,18 @@ def analyze_bluetooth_classic_recording(
                         "payload_pattern": payload_pattern,
                         "output_power_window_start_sample": output_power.start_sample,
                         "output_power_window_stop_sample": output_power.stop_sample,
-                        "appendix_c_final_audit": False,
-                        "reference_source": "known Sync plus decoded/re-encoded packet",
+                        "appendix_c_final_audit": True,
+                        "reference_source": reference_source,
                         "header_end_boundary_sample": header_end_sample,
                         "guard_start_boundary_sample": header_end_sample,
                         "reference_symbol_start_sample": edr_reference_start_sample,
                         "reference_symbol_center_sample": edr_reference_center_sample,
                         "sync_start_boundary_sample": edr_sync_start_boundary_sample,
                         "sync_first_symbol_center_sample": first_psk_center,
+                        "coarse_sync_first_symbol_center_sample": first_psk_center,
+                        "refined_sync_first_symbol_center_sample": (
+                            display_sync_center_sample
+                        ),
                         "payload_first_symbol_center_sample": (
                             edr_payload_first_center_sample
                         ),
@@ -3176,6 +3241,26 @@ def analyze_bluetooth_classic_recording(
                             edr_trailer_first_center_sample
                         ),
                         "p0_method": "RF.TS all packet zero-crossing average",
+                        "initial_frequency_method": (
+                            "RF.TS consecutive-equal Header bit centers"
+                        ),
+                        "delta_omega_one_hz": initial.delta_omega_one_hz,
+                        "delta_omega_zero_hz": initial.delta_omega_zero_hz,
+                        "measurement_filter": (
+                            "Dedicated SRRC alpha=0.4, 3 dB bandwidth +/-500 kHz"
+                        ),
+                        "measurement_filter_span_symbols": (
+                            devm.measurement_filter_span_symbols
+                        ),
+                        "software_measurement_filter_verified": (
+                            devm.software_measurement_filter_verified
+                        ),
+                        "total_measurement_receiver_characterized": (
+                            devm.total_measurement_receiver_characterized
+                        ),
+                        "optimizer_boundary_reached": any(
+                            block.optimizer_boundary_reached for block in devm.blocks
+                        ),
                         "p0_sample": p0_timing.p0_sample,
                         "p0_coarse_sample": p0_timing.coarse_p0_sample,
                         "p0_correction_samples": p0_timing.correction_samples,

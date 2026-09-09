@@ -497,6 +497,17 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.protocol_combo.addItem("Bluetooth LE", "bluetooth.le")
         self.protocol_combo.addItem("Bluetooth HDT", "bluetooth.hdt")
         self.phy_combo = QtWidgets.QComboBox()
+        self.edr_rf_test_packet_combo = QtWidgets.QComboBox()
+        self.edr_rf_test_packet_combo.addItem("Not configured", None)
+        for packet_name in (
+            "2-DH1", "2-EV3", "2-DH3", "2-EV5", "2-DH5",
+            "3-DH1", "3-EV3", "3-DH3", "3-EV5", "3-DH5",
+        ):
+            self.edr_rf_test_packet_combo.addItem(packet_name, packet_name)
+        self.edr_rf_test_packet_combo.setToolTip(
+            "Formal EDR DEVM uses this known RF Test packet to build the ideal "
+            "reference independently of received symbol decisions."
+        )
         self.lap_edit = QtWidgets.QLineEdit("C6967E")
         self.lap_edit.setMaximumWidth(72)
         self.uap_edit = QtWidgets.QLineEdit("6B")
@@ -712,6 +723,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             ("PHY", self.phy_combo), ("LAP", self.lap_edit), ("UAP", self.uap_edit),
             ("CLK6-1", self.clock_spin), ("Access Address", self.access_address_edit),
             ("LE Channel", self.channel_spin), ("CRC Init", self.crc_init_edit),
+            ("Expected EDR RF Test Packet", self.edr_rf_test_packet_combo),
             ("Whitening", self.whitening_check),
         ):
             bt_form.addRow(label, widget)
@@ -1123,6 +1135,12 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._update_derived_config()
 
     def _sync_le_profile_controls(self) -> None:
+        classic_rf_test = (
+            self.protocol_combo.currentData() == "bluetooth.br_edr"
+            and self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.RF_PHY_TEST
+        )
+        self.edr_rf_test_packet_combo.setEnabled(classic_rf_test)
         if self.protocol_combo.currentData() != "bluetooth.le":
             for widget in (
                 self.access_address_edit,
@@ -1281,6 +1299,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             "profile": str(self.profile_combo.currentData()),
             "protocol": str(self.protocol_combo.currentData()),
             "phy": self.phy_combo.currentText(),
+            "expected_edr_rf_test_packet": self.edr_rf_test_packet_combo.currentData(),
             "lap": self.lap_edit.text().strip(),
             "uap": self.uap_edit.text().strip(),
             "clock_6_1": self.clock_spin.value(),
@@ -1344,6 +1363,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         phy_index = self.phy_combo.findText(phy)
         if phy_index >= 0:
             self.phy_combo.setCurrentIndex(phy_index)
+        self._set_combo_data(
+            self.edr_rf_test_packet_combo,
+            values.get("expected_edr_rf_test_packet", None),
+        )
 
         text_controls = (
             (self.lap_edit, "lap"),
@@ -1740,6 +1763,12 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             "uap": uap,
             "clock_6_1": self.clock_spin.value(),
             "whitening_enabled": self.whitening_check.isChecked(),
+            "expected_edr_rf_test_packet": (
+                self.edr_rf_test_packet_combo.currentData()
+                if self.profile_combo.currentData()
+                == BluetoothAnalysisProfile.RF_PHY_TEST
+                else None
+            ),
             "result_length": max(256, int(self.capture_length_spin.value() * 1000.0)),
             "iq_power_trigger": self._iq_power_trigger_settings(),
         }

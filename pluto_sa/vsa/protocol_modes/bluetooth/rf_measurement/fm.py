@@ -15,6 +15,36 @@ def _readonly(values: object, dtype: np.dtype | type) -> np.ndarray:
     return result
 
 
+def _interpolate_bandlimited_real(
+    values: np.ndarray,
+    positions: np.ndarray,
+    *,
+    half_width: int = 16,
+) -> np.ndarray:
+    """Sample a real trace at fractional positions with a Kaiser-sinc FIR."""
+
+    waveform = np.asarray(values, dtype=np.float64)
+    requested = np.asarray(positions, dtype=np.float64)
+    offsets = np.arange(-half_width + 1, half_width + 1, dtype=np.int64)
+    base = np.floor(requested).astype(np.int64)
+    indices = base[:, None] + offsets[None, :]
+    valid = (indices >= 0) & (indices < waveform.size)
+    clipped = np.clip(indices, 0, waveform.size - 1)
+    distance = requested[:, None] - indices.astype(np.float64)
+    coordinate = distance / float(half_width)
+    window = np.where(
+        np.abs(coordinate) <= 1.0,
+        np.i0(8.6 * np.sqrt(np.maximum(0.0, 1.0 - coordinate**2)))
+        / np.i0(8.6),
+        0.0,
+    )
+    weights = np.sinc(distance) * window * valid
+    weights /= np.maximum(
+        np.sum(weights, axis=1, keepdims=True), np.finfo(np.float64).tiny
+    )
+    return np.sum(waveform[clipped] * weights, axis=1)
+
+
 @dataclass(frozen=True)
 class BluetoothFMMeasurementTrace:
     time_s: np.ndarray
@@ -121,6 +151,37 @@ class InitialCarrierFrequencyResult:
             self,
             "selected_bit_indices",
             _readonly(self.selected_bit_indices, np.int64),
+        )
+
+
+@dataclass(frozen=True)
+class EDRInitialCarrierFrequencyResult:
+    """RF.TS EDR initial-frequency measurement at selected Header centers."""
+
+    nominal_frequency_hz: float
+    f0_hz: float
+    error_hz: float
+    selected_bit_indices: np.ndarray
+    selected_bit_values: np.ndarray
+    selected_bit_center_frequency_hz: np.ndarray
+    delta_omega_one_hz: float
+    delta_omega_zero_hz: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "selected_bit_indices",
+            _readonly(self.selected_bit_indices, np.int64),
+        )
+        object.__setattr__(
+            self,
+            "selected_bit_values",
+            _readonly(self.selected_bit_values, np.uint8),
+        )
+        object.__setattr__(
+            self,
+            "selected_bit_center_frequency_hz",
+            _readonly(self.selected_bit_center_frequency_hz, np.float64),
         )
 
 
@@ -504,6 +565,60 @@ def measure_initial_carrier_frequency(
         selected_bit_indices=(
             int(start_symbol) + np.arange(values.size, dtype=np.int64)
         ),
+    )
+
+
+def measure_edr_initial_carrier_frequency(
+    trace: BluetoothFMMeasurementTrace,
+    header_bits: np.ndarray,
+    *,
+    nominal_frequency_hz: float,
+    start_symbol: int,
+) -> EDRInitialCarrierFrequencyResult:
+    """Measure EDR omega_i by the RF.TS Header bit-center procedure.
+
+    Only Header bits equal to both immediate neighbors are used.  Their
+    fractional center positions are interpolated on the uncompensated FM
+    measurement trace, then the transmitted-one and transmitted-zero groups
+    are independently arithmetically averaged.
+    """
+
+    bits = np.asarray(header_bits, dtype=np.uint8)
+    if bits.ndim != 1 or bits.size < 3 or np.any(bits > 1):
+        raise ValueError("EDR initial frequency requires a binary Header")
+    local_indices = np.arange(1, bits.size - 1, dtype=np.int64)
+    same_neighbors = (
+        (bits[local_indices - 1] == bits[local_indices])
+        & (bits[local_indices] == bits[local_indices + 1])
+    )
+    local_indices = local_indices[same_neighbors]
+    selected_values = bits[local_indices]
+    if not np.any(selected_values == 1) or not np.any(selected_values == 0):
+        raise ValueError(
+            "EDR Header lacks selected consecutive 1 and 0 bits for omega_i"
+        )
+    global_indices = int(start_symbol) + local_indices
+    center_samples = trace.p0_sample + (
+        global_indices.astype(np.float64) + 0.5
+    ) * trace.samples_per_symbol
+    sample_axis = np.arange(trace.frequency_hz.size, dtype=np.float64)
+    if center_samples[0] < sample_axis[0] or center_samples[-1] > sample_axis[-1]:
+        raise ValueError("EDR Header bit-center window is outside the capture")
+    center_frequency_hz = _interpolate_bandlimited_real(
+        trace.frequency_hz, center_samples
+    )
+    delta_one = float(np.mean(center_frequency_hz[selected_values == 1]))
+    delta_zero = float(np.mean(center_frequency_hz[selected_values == 0]))
+    error_hz = 0.5 * (delta_one + delta_zero)
+    return EDRInitialCarrierFrequencyResult(
+        nominal_frequency_hz=float(nominal_frequency_hz),
+        f0_hz=float(nominal_frequency_hz) + error_hz,
+        error_hz=error_hz,
+        selected_bit_indices=global_indices,
+        selected_bit_values=selected_values,
+        selected_bit_center_frequency_hz=center_frequency_hz,
+        delta_omega_one_hz=delta_one,
+        delta_omega_zero_hz=delta_zero,
     )
 
 

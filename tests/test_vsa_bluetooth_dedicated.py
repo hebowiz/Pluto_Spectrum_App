@@ -791,8 +791,10 @@ def test_edr_sig_devm_uses_reference_plus_50_physical_symbols_and_shared_centers
         rtol=1e-10,
         atol=1e-12,
     )
-    assert measurement.metadata["reference_source"] == (
-        "known Sync plus decoded/re-encoded packet"
+    assert measurement.metadata["reference_source"] == "decoded_reencoded_packet"
+    assert measurement.eligibility.eligible is False
+    assert "complete known EDR RF Test reference unavailable" in (
+        measurement.eligibility.reasons
     )
 
 
@@ -1631,7 +1633,7 @@ def test_edr_sig_measurement_uses_five_us_guard_and_excludes_trailer() -> None:
     settings = replace(
         base.bluetooth_br,
         packet_kind=BluetoothPacketKind.DH3_2,
-        payload_length_bytes=300,
+        payload_length_bytes=356,
         whitening_enabled=False,
     )
     generated = BluetoothBRWaveformEngine().generate(
@@ -1649,6 +1651,7 @@ def test_edr_sig_measurement_uses_five_us_guard_and_excludes_trailer() -> None:
         uap=settings.uap,
         clock_6_1=settings.clock_6_1,
         whitening_enabled=False,
+        expected_edr_rf_test_packet="2-DH3",
         result_length=4096,
     )
 
@@ -2499,6 +2502,38 @@ def test_bluetooth_config_accept_does_not_start_analysis(
         window._meas_config_dialog.accept()
         QtWidgets.QApplication.processEvents()
         assert refresh_calls == []
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_classic_rf_profile_passes_explicit_known_edr_packet_context(tmp_path) -> None:
+    pg.mkQApp("Bluetooth EDR RF Test reference config")
+    preferences = QtCore.QSettings(
+        str(tmp_path / "bluetooth-edr-reference.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    window = BluetoothAnalyzerWindow(preferences=preferences)
+    try:
+        assert window.edr_rf_test_packet_combo.currentData() is None
+        options = window._classic_options()
+        assert options["expected_edr_rf_test_packet"] is None
+        window.edr_rf_test_packet_combo.setCurrentIndex(
+            window.edr_rf_test_packet_combo.findData("3-DH3")
+        )
+        options = window._classic_options()
+        assert options["expected_edr_rf_test_packet"] == "3-DH3"
+        saved = window._meas_config_values()
+        assert saved["expected_edr_rf_test_packet"] == "3-DH3"
+        window.edr_rf_test_packet_combo.setCurrentIndex(0)
+        window._apply_meas_config_values(saved)
+        assert window.edr_rf_test_packet_combo.currentData() == "3-DH3"
+
+        window.profile_combo.setCurrentIndex(
+            window.profile_combo.findData(BluetoothAnalysisProfile.GENERAL_PACKET)
+        )
+        assert window.edr_rf_test_packet_combo.isEnabled() is False
+        assert window._classic_options()["expected_edr_rf_test_packet"] is None
     finally:
         window.close()
         window.deleteLater()

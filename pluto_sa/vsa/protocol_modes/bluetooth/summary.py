@@ -544,6 +544,13 @@ def build_edr_summary(
             return "FAIL"
         if measuring:
             return "MEASURING"
+        if key == "p99":
+            yield_fraction = _number(aggregate_metrics.get("devm_99_yield"))
+            return (
+                "PASS"
+                if yield_fraction is not None and yield_fraction >= 0.99
+                else "FAIL"
+            )
         return "PASS" if value is not None and value <= limits[key] else "FAIL"
 
     relative = _number(metrics.get("relative_power_db"))
@@ -678,11 +685,46 @@ def build_edr_summary(
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Detected PHY", phy, metric_id="detected_phy"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "RF Test Eligibility", _eligibility_value(measurement), metric_id="rf_test_eligibility"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Packet Type", str(result.packet.packet_type or "N/A"), metric_id="packet_type"),
+        BluetoothSummaryRow(REFERENCE_INFORMATION, "Initial Frequency Method", str(measurement.metadata.get("initial_frequency_method", "N/A") if measurement else "N/A"), metric_id="initial_frequency_method"),
+        BluetoothSummaryRow(REFERENCE_INFORMATION, "DEVM Reference Source", str(measurement.metadata.get("reference_source", "N/A") if measurement else "N/A"), metric_id="devm_reference_source"),
+        BluetoothSummaryRow(REFERENCE_INFORMATION, "Measurement Filter", str(measurement.metadata.get("measurement_filter", "N/A") if measurement else "N/A"), metric_id="measurement_filter"),
+        BluetoothSummaryRow(
+            REFERENCE_INFORMATION,
+            "Software Measurement Filter",
+            (
+                "Verified"
+                if measurement
+                and measurement.metadata.get("software_measurement_filter_verified")
+                else "Not verified"
+            ),
+            metric_id="software_measurement_filter_status",
+        ),
+        BluetoothSummaryRow(
+            REFERENCE_INFORMATION,
+            "Total Measurement Receiver",
+            (
+                "Characterized"
+                if measurement
+                and measurement.metadata.get("total_measurement_receiver_characterized")
+                else "Not characterized"
+            ),
+            metric_id="total_measurement_receiver_status",
+        ),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Payload Pattern", str(measurement.metadata.get("payload_pattern", "N/A") if measurement else "N/A"), metric_id="payload_pattern"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Access Code Correlation", old.get("correlation").display if old.get("correlation") else "N/A", metric_id="access_code_correlation"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "PGFSK", _display(metrics.get("pgfsk_dbm"), "dBm"), metric_id="pgfsk"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "PDPSK", _display(metrics.get("pdpsk_dbm"), "dBm"), metric_id="pdpsk"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "DEVM Blocks Evaluated", f"{block_count} / {EDR_REQUIRED_DEVM_BLOCKS}", metric_id="devm_blocks_evaluated"),
+        BluetoothSummaryRow(
+            REFERENCE_INFORMATION,
+            "DEVM Symbols Within 99% Limit",
+            (
+                "N/A"
+                if _number(aggregate_metrics.get("devm_99_yield")) is None
+                else f"{100.0 * float(aggregate_metrics['devm_99_yield']):.3f} %"
+            ),
+            metric_id="devm_99_yield",
+        ),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Guard Time Packets Evaluated", f"{guard_count} / {EDR_REQUIRED_GUARD_PACKETS}", metric_id="guard_time_packets_evaluated"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Guard Time Valid Packets", f"{guard_valid} / {EDR_REQUIRED_GUARD_PACKETS}", metric_id="guard_time_valid_packets"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Differential Phase Packets Evaluated", f"{phase_count} / {EDR_REQUIRED_DIFFERENTIAL_PHASE_PACKETS}", metric_id="differential_phase_packets_evaluated"),

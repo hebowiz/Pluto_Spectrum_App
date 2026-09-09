@@ -8,13 +8,21 @@ optimized, keeping decoder-oriented global fitting out of SIG measurements.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.signal import fftconvolve, freqz
 
 from pluto_sa.vsa.mapping import psk_constellation
 from pluto_sa.vsa.model import ModulationKind
-from pluto_sa.vsa.pattern import prepare_psk_iq
+from pluto_sa.vsa.pattern import root_raised_cosine_taps
+
+
+EDR_MEASUREMENT_FILTER_ROLLOFF = 0.4
+EDR_MEASUREMENT_FILTER_SPAN_SYMBOLS = 20
+EDR_RESIDUAL_FREQUENCY_SEARCH_HZ = 200_000.0
+_EDR_INTERPOLATOR_HALF_WIDTH = 16
 
 
 def _readonly(values: object, dtype: np.dtype | type = np.float64) -> np.ndarray:
@@ -24,10 +32,128 @@ def _readonly(values: object, dtype: np.dtype | type = np.float64) -> np.ndarray
 
 
 def _interpolate_complex(values: np.ndarray, positions: np.ndarray) -> np.ndarray:
-    axis = np.arange(values.size, dtype=np.float64)
-    return np.interp(positions, axis, values.real) + 1j * np.interp(
-        positions, axis, values.imag
+    """Band-limited fractional sampling with a deterministic Kaiser-sinc FIR."""
+
+    waveform = np.asarray(values, dtype=np.complex128)
+    requested = np.asarray(positions, dtype=np.float64)
+    if waveform.ndim != 1 or requested.ndim != 1:
+        raise ValueError("EDR interpolation requires one-dimensional inputs")
+    if requested.size == 0:
+        return np.empty(0, dtype=np.complex128)
+    if np.min(requested) < 0.0 or np.max(requested) > waveform.size - 1:
+        raise ValueError("EDR fractional sample position is outside the capture")
+    offsets = np.arange(
+        -_EDR_INTERPOLATOR_HALF_WIDTH + 1,
+        _EDR_INTERPOLATOR_HALF_WIDTH + 1,
+        dtype=np.int64,
     )
+    base = np.floor(requested).astype(np.int64)
+    indices = base[:, None] + offsets[None, :]
+    valid = (indices >= 0) & (indices < waveform.size)
+    clipped = np.clip(indices, 0, waveform.size - 1)
+    distance = requested[:, None] - indices.astype(np.float64)
+    window_coordinate = distance / float(_EDR_INTERPOLATOR_HALF_WIDTH)
+    window = np.where(
+        np.abs(window_coordinate) <= 1.0,
+        np.i0(8.6 * np.sqrt(np.maximum(0.0, 1.0 - window_coordinate**2)))
+        / np.i0(8.6),
+        0.0,
+    )
+    weights = np.sinc(distance) * window * valid
+    weights /= np.maximum(
+        np.sum(weights, axis=1, keepdims=True), np.finfo(np.float64).tiny
+    )
+    return np.sum(waveform[clipped] * weights, axis=1)
+
+
+@lru_cache(maxsize=16)
+def edr_measurement_filter_taps(
+    sample_rate_hz: float,
+    symbol_rate_hz: float = 1_000_000.0,
+    *,
+    span_symbols: int = EDR_MEASUREMENT_FILTER_SPAN_SYMBOLS,
+) -> np.ndarray:
+    """Return the dedicated RF.TS alpha=0.4 square-root raised-cosine FIR."""
+
+    sample_rate = float(sample_rate_hz)
+    symbol_rate = float(symbol_rate_hz)
+    samples_per_symbol = sample_rate / symbol_rate
+    sps = int(round(samples_per_symbol))
+    if sps < 4 or not np.isclose(samples_per_symbol, sps, atol=1e-9):
+        raise ValueError(
+            "EDR measurement filter requires an integer ratio of at least 4 samples/symbol"
+        )
+    span = int(span_symbols)
+    if span < 1:
+        raise ValueError("EDR measurement filter span must be positive")
+    taps = root_raised_cosine_taps(
+        sps,
+        EDR_MEASUREMENT_FILTER_ROLLOFF,
+        span_symbols=span,
+    )
+    taps = np.asarray(taps, dtype=np.float64)
+    taps.setflags(write=False)
+    return taps
+
+
+def edr_measurement_filter_response_db(
+    sample_rate_hz: float,
+    frequencies_hz: np.ndarray,
+    *,
+    symbol_rate_hz: float = 1_000_000.0,
+) -> np.ndarray:
+    """Evaluate the normalized software SRRC response for audit/tests."""
+
+    frequencies = np.asarray(frequencies_hz, dtype=np.float64)
+    taps = edr_measurement_filter_taps(sample_rate_hz, symbol_rate_hz)
+    _angular, response = freqz(
+        taps,
+        worN=2.0 * np.pi * frequencies / float(sample_rate_hz),
+    )
+    magnitude = np.abs(response) / max(abs(np.sum(taps)), np.finfo(float).tiny)
+    return 20.0 * np.log10(np.maximum(magnitude, 1e-15))
+
+
+def apply_edr_measurement_filter(
+    iq: np.ndarray,
+    *,
+    sample_rate_hz: float,
+    symbol_rate_hz: float = 1_000_000.0,
+) -> np.ndarray:
+    values = np.asarray(iq, dtype=np.complex128)
+    if values.ndim != 1:
+        raise ValueError("EDR measurement IQ must be one-dimensional")
+    taps = edr_measurement_filter_taps(sample_rate_hz, symbol_rate_hz)
+    return np.asarray(fftconvolve(values, taps, mode="same"), dtype=np.complex128)
+
+
+def appendix_c_devm_quantities(
+    received_symbols: np.ndarray,
+    reference_symbols: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Return Appendix-C Qk, Ek, per-symbol DEVM, and block RMS DEVM.
+
+    ``received_symbols`` is Zk after the permitted frequency/timing
+    corrections and ``reference_symbols`` is the absolute ideal sequence Sk.
+    This primitive deliberately performs no gain, amplitude, or phase fit.
+    """
+
+    zk = np.asarray(received_symbols, dtype=np.complex128)
+    sk = np.asarray(reference_symbols, dtype=np.complex128)
+    if zk.ndim != 1 or sk.ndim != 1 or zk.size != sk.size:
+        raise ValueError("Appendix-C Zk and Sk must be equal-length 1-D arrays")
+    if zk.size < 2:
+        raise ValueError("Appendix-C DEVM requires at least two physical symbols")
+    qk = zk * np.conj(sk)
+    ek = np.diff(qk)
+    denominator = max(
+        float(np.sum(np.abs(qk[1:]) ** 2)),
+        np.finfo(np.float64).tiny,
+    )
+    rms_amplitude = np.sqrt(denominator / float(ek.size))
+    symbol_devm = np.abs(ek) / rms_amplitude
+    rms_devm = float(np.sqrt(np.sum(np.abs(ek) ** 2) / denominator))
+    return qk, ek, symbol_devm, rms_devm
 
 
 @dataclass(frozen=True)
@@ -44,6 +170,8 @@ class EDRDEVMBlockResult:
     corrected_received_symbols: np.ndarray
     reference_symbols: np.ndarray
     error_vectors: np.ndarray
+    optimizer_boundary_reached: bool = False
+    optimizer_cost: float = 0.0
 
     def __post_init__(self) -> None:
         for name, dtype in (
@@ -66,6 +194,9 @@ class EDRDEVMTestResult:
     total_symbol_count: int
     reference_symbol_center_sample: float | None = None
     sync_first_symbol_center_sample: float | None = None
+    measurement_filter_span_symbols: int = EDR_MEASUREMENT_FILTER_SPAN_SYMBOLS
+    software_measurement_filter_verified: bool = True
+    total_measurement_receiver_characterized: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "blocks", tuple(self.blocks))
@@ -139,17 +270,11 @@ def measure_edr_devm(
         * sample_axis
         / float(sample_rate_hz)
     )
-    filtered, filtered_rate = prepare_psk_iq(
+    filtered = apply_edr_measurement_filter(
         omega_i_corrected,
         sample_rate_hz=float(sample_rate_hz),
         symbol_rate_hz=float(symbol_rate_hz),
-        tx_filter="Root Raised Cosine",
-        filter_parameter=0.4,
-        samples_per_symbol=int(round(float(sample_rate_hz) / float(symbol_rate_hz))),
-        apply_measurement_filter=True,
     )
-    if not np.isclose(filtered_rate, sample_rate_hz):
-        raise ValueError("EDR measurement filter changed the sample rate")
     alphabet = psk_constellation(ModulationKind(modulation), symbol_mapping)
     differential = alphabet[labels]
     # S[0] is the EDR Reference Symbol S0.  S[k + 1] is the physical
@@ -182,10 +307,11 @@ def measure_edr_devm(
                 * (centers - centers[0])
                 / float(sample_rate_hz)
             )
-            q_symbols = observed * np.conj(reference)
-            errors = np.diff(q_symbols)
+            _qk, errors, _symbol_devm, _rms_devm = (
+                appendix_c_devm_quantities(observed, reference)
+            )
             denominator = max(
-                float(np.sum(np.abs(q_symbols[1:]) ** 2)),
+                float(np.sum(np.abs(observed[1:]) ** 2)),
                 np.finfo(np.float64).tiny,
             )
             normalized_errors = errors / np.sqrt(denominator)
@@ -202,24 +328,46 @@ def measure_edr_devm(
             np.median(np.angle(initial_q[1:] * np.conj(initial_q[:-1])))
         )
         initial_omega0_hz = float(
-            np.clip(
-                initial_phase_step * float(symbol_rate_hz) / (2.0 * np.pi),
-                -100_000.0,
-                100_000.0,
-            )
+            initial_phase_step * float(symbol_rate_hz) / (2.0 * np.pi)
         )
 
+        timing_grid = np.linspace(-0.5 * sps, 0.5 * sps, 17)
+        frequency_grid = np.unique(
+            np.clip(
+                initial_omega0_hz
+                + np.linspace(-100_000.0, 100_000.0, 9),
+                -EDR_RESIDUAL_FREQUENCY_SEARCH_HZ,
+                EDR_RESIDUAL_FREQUENCY_SEARCH_HZ,
+            )
+        )
+        coarse_parameters = min(
+            (
+                np.asarray((timing, frequency), dtype=np.float64)
+                for timing in timing_grid
+                for frequency in frequency_grid
+            ),
+            key=lambda parameters: float(np.sum(residual(parameters) ** 2)),
+        )
         fitted = least_squares(
             residual,
-            np.asarray([0.0, initial_omega0_hz], dtype=np.float64),
+            coarse_parameters,
             bounds=(
-                np.asarray([-0.5 * sps, -100_000.0]),
-                np.asarray([0.5 * sps, 100_000.0]),
+                np.asarray(
+                    [-0.5 * sps, -EDR_RESIDUAL_FREQUENCY_SEARCH_HZ]
+                ),
+                np.asarray(
+                    [0.5 * sps, EDR_RESIDUAL_FREQUENCY_SEARCH_HZ]
+                ),
             ),
             x_scale=np.asarray([max(0.25, 0.25 * sps), 10_000.0]),
             max_nfev=120,
         )
         timing_samples, residual_frequency_hz = map(float, fitted.x)
+        boundary_reached = bool(
+            abs(abs(timing_samples) - 0.5 * sps) <= max(1e-6, 1e-4 * sps)
+            or abs(abs(residual_frequency_hz) - EDR_RESIDUAL_FREQUENCY_SEARCH_HZ)
+            <= 10.0
+        )
         centers = nominal_centers + timing_samples
         corrected = _interpolate_complex(filtered, centers)
         corrected *= np.exp(
@@ -229,23 +377,8 @@ def measure_edr_devm(
             * (centers - centers[0])
             / float(sample_rate_hz)
         )
-        q_symbols = corrected * np.conj(reference)
-        errors = np.diff(q_symbols)
-        rms_amplitude = np.sqrt(
-            max(
-                float(np.mean(np.abs(q_symbols[1:]) ** 2)),
-                np.finfo(np.float64).tiny,
-            )
-        )
-        symbol_devm = np.abs(errors) / rms_amplitude
-        rms = float(
-            np.sqrt(
-                np.sum(np.abs(errors) ** 2)
-                / max(
-                    float(np.sum(np.abs(q_symbols[1:]) ** 2)),
-                    np.finfo(np.float64).tiny,
-                )
-            )
+        _qk, errors, symbol_devm, rms = appendix_c_devm_quantities(
+            corrected, reference
         )
         peak = float(np.max(symbol_devm))
         blocks.append(
@@ -262,6 +395,8 @@ def measure_edr_devm(
                 corrected_received_symbols=corrected,
                 reference_symbols=reference,
                 error_vectors=errors,
+                optimizer_boundary_reached=boundary_reached,
+                optimizer_cost=float(np.sum(residual(fitted.x) ** 2)),
             )
         )
         all_devm.append(symbol_devm)

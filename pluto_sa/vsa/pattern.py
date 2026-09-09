@@ -513,10 +513,13 @@ def _resample_for_symbols(
     return np.asarray(result, dtype=np.complex128), actual_rate_hz
 
 
-def _root_raised_cosine_taps(
-    samples_per_symbol: int, beta: float, span_symbols: int = 10
+def root_raised_cosine_taps(
+    samples_per_symbol: int,
+    beta: float,
+    *,
+    span_symbols: int = 10,
 ) -> np.ndarray:
-    """Return unit-energy SRRC taps for offline matched filtering."""
+    """Return unit-energy SRRC taps without imposing a protocol profile."""
     sps = int(samples_per_symbol)
     if sps < 2 or not 0.0 < float(beta) <= 1.0:
         raise ValueError("SRRC requires samples_per_symbol >= 2 and 0 < beta <= 1")
@@ -538,6 +541,18 @@ def _root_raised_cosine_taps(
             denominator = np.pi * value * (1.0 - (4.0 * beta * value) ** 2)
             taps[index] = numerator / denominator
     return taps / np.sqrt(np.sum(taps**2))
+
+
+def _root_raised_cosine_taps(
+    samples_per_symbol: int, beta: float, span_symbols: int = 10
+) -> np.ndarray:
+    """Backward-compatible Generic VSA primitive with its 10-symbol default."""
+
+    return root_raised_cosine_taps(
+        samples_per_symbol,
+        beta,
+        span_symbols=span_symbols,
+    )
 
 
 def prepare_psk_iq(

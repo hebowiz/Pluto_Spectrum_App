@@ -151,6 +151,12 @@ class BluetoothRFTestAccumulator:
         percentile_99 = (
             float(np.percentile(symbol_devm, 99.0)) if symbol_devm.size else None
         )
+        devm_99_yield = (
+            float(np.count_nonzero(symbol_devm <= percentile_limit))
+            / float(symbol_devm.size)
+            if symbol_devm.size
+            else None
+        )
         verdict = RFTestVerdict.NOT_APPLICABLE
         hard_devm_failure = (
             rms_worst is not None
@@ -165,13 +171,14 @@ class BluetoothRFTestAccumulator:
             not base_reasons
             and block_count >= int(required_blocks)
             and rms_worst is not None
-            and percentile_99 is not None
-            and peak_worst is not None
+                and percentile_99 is not None
+                and devm_99_yield is not None
+                and peak_worst is not None
         ):
             verdict = (
                 RFTestVerdict.PASS
                 if rms_worst <= rms_limit
-                and percentile_99 <= percentile_limit
+                and devm_99_yield >= 0.99
                 and peak_worst <= peak_limit
                 else RFTestVerdict.FAIL
             )
@@ -184,6 +191,7 @@ class BluetoothRFTestAccumulator:
                 "block_count": block_count,
                 "rms_devm_worst": rms_worst,
                 "devm_99_percentile": percentile_99,
+                "devm_99_yield": devm_99_yield,
                 "peak_devm_worst": peak_worst,
                 "initial_frequency_error_worst_hz": (
                     None if not omega_i.size else float(omega_i[np.argmax(np.abs(omega_i))])
