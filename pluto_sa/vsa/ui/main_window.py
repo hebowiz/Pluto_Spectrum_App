@@ -68,6 +68,7 @@ from pluto_sa.vsa.pluto_source import (
 from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
 from pluto_sa.vsa.ui.measurement_chrome import (
     IQ_POWER_DISPLAY_FLOOR_DBM,
+    PersistentPlotRanges,
     CenteredLabelAxisItem as _CenteredLabelAxisItem,
     FixedInteractionViewBox as _FixedInteractionViewBox,
     add_result_range_overlay,
@@ -2831,9 +2832,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             )
             if actions:
                 actions["reset"].setToolTip(
-                    "Restore this plot's analysis-complete scale"
+                    "Restore this plot's default scale"
                 )
                 self._plot_context_actions[name] = actions
+        self._persistent_plot_ranges = PersistentPlotRanges(self._plot_widgets())
 
     @staticmethod
     def _trace_bounds(
@@ -2863,19 +2865,13 @@ class VSAWindow(QtWidgets.QMainWindow):
         plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
 
     def _reset_plot_scale(self, name: str, plot: pg.PlotWidget) -> None:
-        ranges = self._analysis_plot_ranges.get(name)
-        if ranges is None:
-            return
-        x_range, y_range = ranges
-        plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
+        self._persistent_plot_ranges.reset(name)
 
     def _capture_analysis_plot_ranges(self) -> None:
-        captured: dict[str, tuple[list[float], list[float]]] = {}
         for name, plot in self._plot_widgets():
             plot.getViewBox().updateAutoRange()
-            x_range, y_range = plot.viewRange()
-            captured[name] = (list(x_range), list(y_range))
-        self._analysis_plot_ranges = captured
+        self._persistent_plot_ranges.capture_current_defaults()
+        self._analysis_plot_ranges = self._persistent_plot_ranges.current_defaults()
 
     def _reset_graph_scales(self) -> None:
         for name, plot in self._plot_widgets():
@@ -4161,6 +4157,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         signal = self.session.signal
         if result is None or signal is None:
             return
+        self._persistent_plot_ranges.prepare_for_update()
         self._update_symbol_plot_dock_title(signal.modulation)
         self._symbol_marker_items = {}
         if reset_ranges:
@@ -4944,7 +4941,28 @@ class VSAWindow(QtWidgets.QMainWindow):
             set_iq_power_default_y_range(
                 self.zero_span_plot, capture_power_dbm
             )
-            self._capture_analysis_plot_ranges()
+        if pattern_result is not None:
+            time_origin_ms = pattern_result.pattern_start_time_s * 1e3
+        elif symbol_times_s.size:
+            time_origin_ms = float(symbol_times_s[0]) * 1e3
+        elif result.time_s.size:
+            time_origin_ms = float(result.time_s[0]) * 1e3
+        else:
+            time_origin_ms = 0.0
+        is_iq_modulation = signal.modulation.family.uses_iq_constellation
+        relative_origins = {"iq_power": time_origin_ms}
+        if not is_iq_modulation:
+            relative_origins["modulation"] = time_origin_ms
+        self._persistent_plot_ranges.finish_update(
+            contexts={
+                "modulation": "iq_plane" if is_iq_modulation else "fsk_time",
+            },
+            relative_x_origins=relative_origins,
+            capture_defaults=reset_ranges,
+        )
+        self._analysis_plot_ranges = (
+            self._persistent_plot_ranges.current_defaults()
+        )
 
     @staticmethod
     def _plot_symbol_points(

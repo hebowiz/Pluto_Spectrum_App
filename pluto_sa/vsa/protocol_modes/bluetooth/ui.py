@@ -39,6 +39,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     DedicatedSummaryTable,
     IQ_PLANE_LIMIT,
     FREQUENCY_CONSTELLATION_X_LIMIT,
+    PersistentPlotRanges,
     SymbolDensitySpread,
     add_fsk_symbol_plot_menu,
     add_result_range_overlay,
@@ -976,9 +977,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             )
             if actions:
                 actions["reset"].setToolTip(
-                    "Restore this plot's analysis-complete scale"
+                    "Restore this plot's default scale"
                 )
                 self._plot_context_actions[name] = actions
+        self._persistent_plot_ranges = PersistentPlotRanges(self._plot_widgets())
 
     def _view_all_plot(self, plot: pg.PlotWidget) -> None:
         bounds = trace_bounds(plot)
@@ -1007,19 +1009,13 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         view_all_traces(plot)
 
     def _reset_plot_scale(self, name: str, plot: pg.PlotWidget) -> None:
-        ranges = self._analysis_plot_ranges.get(name)
-        if ranges is None:
-            return
-        x_range, y_range = ranges
-        plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
+        self._persistent_plot_ranges.reset(name)
         if name == "fsk_symbol" and self._fsk_symbol_plot_mode == "Constellation Frequency":
             self._set_frequency_constellation_x_lock(True)
 
     def _capture_analysis_plot_ranges(self) -> None:
-        self._analysis_plot_ranges = {
-            name: (list(plot.viewRange()[0]), list(plot.viewRange()[1]))
-            for name, plot in self._plot_widgets()
-        }
+        self._persistent_plot_ranges.capture_current_defaults()
+        self._analysis_plot_ranges = self._persistent_plot_ranges.current_defaults()
 
     def _dock(self, title: str, widget: QtWidgets.QWidget) -> QtWidgets.QDockWidget:
         return make_measurement_dock(title, widget, self, object_prefix="vsa-bluetooth", closable=False)
@@ -1959,6 +1955,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         recording = self._recording
         if recording is None:
             return
+        self._persistent_plot_ranges.prepare_for_update()
         display_recordings = AnalysisDisplayRecordings(
             capture=self._capture_recording or recording,
             analysis=recording,
@@ -2790,7 +2787,34 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         )
         self._render_summary(result)
         self._render_packet(result)
-        self._capture_analysis_plot_ranges()
+        packet_start_sample = float(result.metadata.get("packet_start_sample", 0.0))
+        power_origin_sample = packet_start_sample - recording_sample_offset
+        if is_hdt and hdt_plot_data is not None:
+            power_origin_sample = float(hdt_plot_data.packet_sample_range[0])
+            packet_start_sample = power_origin_sample
+        relative_origins = {
+            "iq_power": power_origin_sample / recording.sample_rate_hz * 1e3,
+        }
+        if not is_hdt:
+            fsk_origin_ms = packet_start_sample / recording.sample_rate_hz * 1e3
+            relative_origins.update(
+                {
+                    "fsk_modulation": fsk_origin_ms,
+                    "psk_phase_difference": fsk_origin_ms,
+                    "psk_devm": fsk_origin_ms,
+                }
+            )
+        self._persistent_plot_ranges.finish_update(
+            contexts={
+                "fsk_modulation": "hdt_iq" if is_hdt else "fsk_time",
+                "fsk_symbol": self._fsk_symbol_plot_mode,
+                "psk_symbol": self._psk_symbol_plot_mode,
+            },
+            relative_x_origins=relative_origins,
+        )
+        self._analysis_plot_ranges = (
+            self._persistent_plot_ranges.current_defaults()
+        )
 
     def _configure_fsk_modulation_plot(self, *, iq_plane: bool) -> None:
         """Restore the axis contract when the first tab changes PHY role."""

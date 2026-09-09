@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from enum import StrEnum
 
 import numpy as np
@@ -812,6 +812,140 @@ def plot_trace_symbol_points(
         symbolBrush=pg.mkBrush(70, 255, 145, 230),
         symbolPen=pg.mkPen(10, 35, 20, 230, width=1),
     )
+
+
+class PersistentPlotRanges:
+    """Keep user-selected plot ranges across result redraws.
+
+    Ranges are kept independently for each display context (for example an FSK
+    time trace and an IQ plane sharing one widget).  A time-axis origin can be
+    supplied so a zoom is restored at the same packet-relative position when
+    the next packet occurs elsewhere in the capture.
+    """
+
+    def __init__(self, plots: Sequence[tuple[str, pg.PlotWidget]]) -> None:
+        self._plots = dict(plots)
+        self._contexts = {name: "default" for name in self._plots}
+        self._origins: dict[str, float | None] = {
+            name: None for name in self._plots
+        }
+        self._displayed: dict[str, tuple[list[float], list[float]]] = {}
+        self._defaults: dict[
+            tuple[str, str], tuple[list[float], list[float]]
+        ] = {}
+        self._manual: dict[
+            tuple[str, str], tuple[list[float], list[float], bool]
+        ] = {}
+
+    @staticmethod
+    def _range(plot: pg.PlotWidget) -> tuple[list[float], list[float]]:
+        x_range, y_range = plot.viewRange()
+        return list(x_range), list(y_range)
+
+    @staticmethod
+    def _same_range(
+        left: tuple[list[float], list[float]],
+        right: tuple[list[float], list[float]],
+    ) -> bool:
+        return bool(
+            np.allclose(left[0], right[0], rtol=1e-7, atol=1e-9)
+            and np.allclose(left[1], right[1], rtol=1e-7, atol=1e-9)
+        )
+
+    def prepare_for_update(self) -> None:
+        """Snapshot a user range change before plots are redrawn."""
+
+        for name, plot in self._plots.items():
+            expected = self._displayed.get(name)
+            if expected is None:
+                continue
+            current = self._range(plot)
+            if self._same_range(current, expected):
+                continue
+            context = self._contexts[name]
+            origin = self._origins[name]
+            x_range = list(current[0])
+            relative = origin is not None
+            if relative:
+                x_range = [value - origin for value in x_range]
+            self._manual[(name, context)] = (
+                x_range,
+                list(current[1]),
+                relative,
+            )
+
+    def finish_update(
+        self,
+        *,
+        contexts: Mapping[str, str] | None = None,
+        relative_x_origins: Mapping[str, float] | None = None,
+        capture_defaults: bool = True,
+    ) -> None:
+        """Record new defaults, then restore any user-selected ranges."""
+
+        contexts = contexts or {}
+        relative_x_origins = relative_x_origins or {}
+        for name, plot in self._plots.items():
+            context = str(contexts.get(name, "default"))
+            origin = relative_x_origins.get(name)
+            default_range = self._range(plot)
+            if capture_defaults or (name, context) not in self._defaults:
+                self._defaults[(name, context)] = default_range
+            self._contexts[name] = context
+            self._origins[name] = origin
+            manual = self._manual.get((name, context))
+            if manual is not None:
+                x_range, y_range, relative = manual
+                if relative and origin is None:
+                    manual = None
+                else:
+                    restored_x = (
+                        [value + origin for value in x_range]
+                        if relative and origin is not None
+                        else x_range
+                    )
+                    plot.setRange(
+                        xRange=restored_x,
+                        yRange=y_range,
+                        padding=0.0,
+                    )
+            self._displayed[name] = self._range(plot)
+
+    def reset(self, name: str) -> bool:
+        """Clear the current context's manual range and restore its default."""
+
+        plot = self._plots.get(name)
+        if plot is None:
+            return False
+        context = self._contexts[name]
+        self._manual.pop((name, context), None)
+        ranges = self._defaults.get((name, context))
+        if ranges is None:
+            return False
+        plot.setRange(xRange=ranges[0], yRange=ranges[1], padding=0.0)
+        self._displayed[name] = self._range(plot)
+        return True
+
+    def capture_current_defaults(self) -> None:
+        """Replace defaults without changing contexts or relative origins."""
+
+        for name, plot in self._plots.items():
+            current = self._range(plot)
+            self._defaults[(name, self._contexts[name])] = current
+            self._displayed[name] = current
+
+    def current_defaults(self) -> dict[str, tuple[list[float], list[float]]]:
+        """Return defaults for the currently displayed plot contexts."""
+
+        result: dict[str, tuple[list[float], list[float]]] = {}
+        for name, context in self._contexts.items():
+            ranges = self._defaults.get((name, context))
+            if ranges is not None:
+                result[name] = (list(ranges[0]), list(ranges[1]))
+        return result
+
+    def has_manual_range(self, name: str) -> bool:
+        return (name, self._contexts.get(name, "default")) in self._manual
 
 
 def plot_unit_circle(plot: pg.PlotWidget) -> None:

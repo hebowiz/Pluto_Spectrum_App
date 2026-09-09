@@ -43,6 +43,7 @@ from pluto_sa.vsa.pluto_source import (
 )
 from pluto_sa.vsa.sources import FileIQSource
 from pluto_sa.vsa.ui.measurement_chrome import (
+    PersistentPlotRanges,
     configure_iq_power_plot,
     install_measurement_plot_menu,
     limit_iq_power_display_dbm,
@@ -1831,6 +1832,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         update_power_plot: bool = True,
         update_selection: bool = True,
     ) -> None:
+        if update_power_plot:
+            self._power_plot_ranges.prepare_for_update()
         if not append:
             self._clear_packet_history()
         if update_power_plot:
@@ -1928,7 +1931,17 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self.power_plot.enableAutoRange(axis="y", enable=True)
             self.power_plot.getViewBox().updateAutoRange()
             set_iq_power_default_y_range(self.power_plot, display_power)
-            self._remember_plot_range("power", self.power_plot)
+            power_origin_ms = (
+                new_entries[-1].elapsed_s * 1e3
+                if new_entries
+                else elapsed_base_s * 1e3
+            )
+            self._power_plot_ranges.finish_update(
+                relative_x_origins={"power": power_origin_ms}
+            )
+            self._plot_initial_ranges.update(
+                self._power_plot_ranges.current_defaults()
+            )
         if update_selection and selected_entry is not None:
             self._show_message_plot(selected_entry)
             self._show_summary(selected_entry)
@@ -2469,6 +2482,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         )
 
     def _show_message_plot(self, entry: _ADSBPacketEntry) -> None:
+        self._ppm_plot_ranges.prepare_for_update()
         message = entry.message
         result = entry.result
         self.ppm_plot.clear()
@@ -2523,7 +2537,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.ppm_plot.setXRange(-1.0, float(message.bit_length), padding=0.0)
         limit = max(3.0, 1.1 * float(np.max(np.abs(chip_ratio_db))))
         self.ppm_plot.setYRange(-limit, limit, padding=0.0)
-        self._remember_plot_range("ppm", self.ppm_plot)
+        self._ppm_plot_ranges.finish_update()
+        self._plot_initial_ranges.update(
+            self._ppm_plot_ranges.current_defaults()
+        )
 
     @staticmethod
     def _fractional_window_mean(
@@ -2653,17 +2670,18 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                     plot_name, target
                 ),
             )
+        self._power_plot_ranges = PersistentPlotRanges((("power", self.power_plot),))
+        self._ppm_plot_ranges = PersistentPlotRanges((("ppm", self.ppm_plot),))
     def _remember_plot_range(self, name: str, plot: pg.PlotWidget) -> None:
         plot.getViewBox().updateAutoRange()
         x_range, y_range = plot.viewRange()
         self._plot_initial_ranges[name] = (list(x_range), list(y_range))
 
     def _reset_plot(self, name: str, plot: pg.PlotWidget) -> None:
-        ranges = self._plot_initial_ranges.get(name)
-        if ranges is None:
-            return
-        x_range, y_range = ranges
-        plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
+        manager = (
+            self._power_plot_ranges if name == "power" else self._ppm_plot_ranges
+        )
+        manager.reset(name)
 
     def prepare_for_shutdown(self) -> None:
         """Stop UI callbacks before Qt starts deleting child dock widgets."""

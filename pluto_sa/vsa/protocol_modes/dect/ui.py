@@ -31,6 +31,7 @@ from pluto_sa.vsa.ui.capture_thread import PlutoSingleCaptureThread
 from pluto_sa.vsa.ui.measurement_chrome import (
     DedicatedPacketAnalysisTree,
     DedicatedSummaryTable,
+    PersistentPlotRanges,
     SymbolDensitySpread,
     add_fsk_symbol_plot_menu,
     add_result_range_overlay,
@@ -654,6 +655,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                     plot_name, selected
                 ),
             )
+        self._persistent_plot_ranges = PersistentPlotRanges(self._plot_widgets())
         set_frequency_constellation_x_lock(self.symbol_plot, True)
 
     def _plots(self) -> tuple[pg.PlotWidget, ...]:
@@ -1375,6 +1377,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         recording = self._recording
         if recording is None:
             return
+        self._persistent_plot_ranges.prepare_for_update()
         display_recordings = AnalysisDisplayRecordings(
             capture=self._capture_recording or recording,
             analysis=recording,
@@ -1512,7 +1515,16 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.power_plot.setXRange(
             power_start_ms, power_stop_ms, padding=0.0
         )
-        self._capture_analysis_plot_ranges()
+        relative_origin_ms = actual_start_ms
+        self._persistent_plot_ranges.finish_update(
+            relative_x_origins={
+                "iq_power": relative_origin_ms,
+                "gfsk_modulation": relative_origin_ms,
+            }
+        )
+        self._analysis_plot_ranges = (
+            self._persistent_plot_ranges.current_defaults()
+        )
 
     def _render_symbol_plot(
         self, result: DectPacketResult, display_data: FSKDisplayData
@@ -1910,11 +1922,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             self._reset_plot_scale(name, plot)
 
     def _reset_plot_scale(self, name: str, plot: pg.PlotWidget) -> None:
-        ranges = self._analysis_plot_ranges.get(name)
-        if ranges is None:
-            return
-        x_range, y_range = ranges
-        plot.setRange(xRange=x_range, yRange=y_range, padding=0.0)
+        self._persistent_plot_ranges.reset(name)
 
     def _view_all_plot(self, name: str, plot: pg.PlotWidget) -> None:
         if name != "fsk_symbol":
@@ -1927,10 +1935,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         set_iq_plane_range(plot)
 
     def _capture_analysis_plot_ranges(self) -> None:
-        self._analysis_plot_ranges = {
-            name: (list(plot.viewRange()[0]), list(plot.viewRange()[1]))
-            for name, plot in self._plot_widgets()
-        }
+        self._persistent_plot_ranges.capture_current_defaults()
+        self._analysis_plot_ranges = self._persistent_plot_ranges.current_defaults()
 
     def shutdown_busy_reason(self) -> str | None:
         if self._capture_thread is not None and self._capture_thread.isRunning():
