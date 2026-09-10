@@ -92,6 +92,14 @@ New projects default to a one-symbol cosine ramp at each edge. Ramp Up starts
 one symbol before Packet Start (`-1.000`), while Ramp Down starts one symbol
 after Packet End (`+1.000`). A loaded project keeps its saved ramp values.
 
+For Classic DECT, Ramp Up carries the direction-specific alternating preamble
+pattern continued backwards from `s0`, as permitted by ETSI EN 300 175-2
+V2.9.1 clause 4.9. This history is also supplied to the Gaussian pulse shaper,
+so the first preamble symbol has the correct transition. The same clause does
+not define a bit pattern during Ramp Down; the generator therefore preserves
+phase continuity by continuing the final symbol frequency. Packet End remains
+the end of the D-field, or the optional Z-field when present.
+
 New Bluetooth BR/EDR projects use 2440 MHz as the center frequency. Changing
 Packet Type in Settings selects that type's maximum payload: DH1/DH3/DH5 use
 27/183/339 bytes, 2-DH1/2-DH3/2-DH5 use 54/367/679 bytes, and

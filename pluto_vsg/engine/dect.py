@@ -43,6 +43,63 @@ def _bits(text: str) -> np.ndarray:
     return np.asarray([int(bit) for bit in normalized], dtype=np.uint8)
 
 
+def _natural_preamble_extension(
+    preamble_bits: np.ndarray, symbol_count: int
+) -> np.ndarray:
+    """Return the DECT preamble pattern immediately preceding its first bit.
+
+    ETSI EN 300 175-2 clause 4.9 permits the ramp-up modulation to be the
+    natural extension of the preamble. Indexing backwards from s0 preserves
+    the RFP/PP phase of the alternating pattern instead of merely repeating
+    the first symbol.
+    """
+
+    preamble = np.asarray(preamble_bits, dtype=np.uint8)
+    count = max(0, int(symbol_count))
+    if preamble.ndim != 1 or preamble.size == 0:
+        raise ValueError("DECT preamble must be a non-empty bit sequence")
+    indices = np.arange(-count, 0, dtype=np.int64)
+    return preamble[indices % preamble.size]
+
+
+def _modulate_packet_with_preamble_extension(
+    packet_bits: np.ndarray,
+    preamble_bits: np.ndarray,
+    positions: np.ndarray,
+    *,
+    samples_per_symbol: int,
+    sample_rate_hz: float,
+    deviation_hz: float,
+    gaussian_bt: float,
+) -> np.ndarray:
+    """Generate DECT GFSK at packet-relative sample positions.
+
+    A complete preamble period is added ahead of the earliest requested
+    sample. Besides covering the ramp interval, that period gives the
+    Gaussian pulse shaper the correct alternating history at packet start.
+    The post-packet bit pattern is intentionally not invented: clause 4.9
+    leaves it undefined, so the existing last-frequency continuation is kept.
+    """
+
+    coordinates = np.asarray(positions, dtype=np.int64)
+    if coordinates.ndim != 1 or coordinates.size == 0:
+        return np.empty(0, dtype=np.complex128)
+    sps = int(samples_per_symbol)
+    required_prefix_symbols = int(np.ceil(max(0, -int(coordinates[0])) / sps))
+    prefix_symbols = required_prefix_symbols + int(np.asarray(preamble_bits).size)
+    prefix = _natural_preamble_extension(preamble_bits, prefix_symbols)
+    extended_bits = np.concatenate((prefix, np.asarray(packet_bits, dtype=np.uint8)))
+    extended_iq = _modulate_gfsk(
+        extended_bits,
+        samples_per_symbol=sps,
+        sample_rate_hz=sample_rate_hz,
+        deviation_hz=deviation_hz,
+        gaussian_bt=gaussian_bt,
+    )
+    packet_start = prefix_symbols * sps
+    return _extend_edge_phase(extended_iq, packet_start + coordinates)
+
+
 def _required_test_air_bits(source: DectBFieldSource, packet_type: DectPacketType, count: int) -> np.ndarray | None:
     if source is DectBFieldSource.CASE_A:
         return case_a_bits(count)
@@ -178,23 +235,7 @@ class DectWaveformEngine:
 
         packet_bits, field_bits = dect_packet_bits(project)
         sps = int(project.samples_per_symbol)
-        data_iq = _modulate_gfsk(
-            packet_bits,
-            samples_per_symbol=sps,
-            sample_rate_hz=project.sample_rate_hz,
-            deviation_hz=settings.frequency_deviation_hz,
-            gaussian_bt=settings.gaussian_bt,
-        )
-        if settings.carrier_frequency_offset_hz:
-            sample_index = np.arange(data_iq.size, dtype=np.float64)
-            data_iq *= np.exp(
-                2j
-                * np.pi
-                * float(settings.carrier_frequency_offset_hz)
-                * sample_index
-                / project.sample_rate_hz
-            )
-        data_sample_count = int(data_iq.size)
+        data_sample_count = int(packet_bits.size * sps)
         envelope = project.power_envelope
         if envelope.enabled:
             rise_count = round(envelope.rise_symbols * sps)
@@ -210,7 +251,23 @@ class DectWaveformEngine:
             active_start = 0
             active_stop = data_sample_count
         positions = np.arange(active_start, active_stop, dtype=np.int64)
-        active_iq = _extend_edge_phase(data_iq, positions)
+        active_iq = _modulate_packet_with_preamble_extension(
+            packet_bits,
+            field_bits["preamble_bits"],
+            positions,
+            samples_per_symbol=sps,
+            sample_rate_hz=project.sample_rate_hz,
+            deviation_hz=settings.frequency_deviation_hz,
+            gaussian_bt=settings.gaussian_bt,
+        )
+        if settings.carrier_frequency_offset_hz:
+            active_iq *= np.exp(
+                2j
+                * np.pi
+                * float(settings.carrier_frequency_offset_hz)
+                * positions.astype(np.float64)
+                / project.sample_rate_hz
+            )
         if envelope.enabled:
             active_iq *= _placed_power_envelope(
                 positions,
@@ -300,6 +357,8 @@ class DectWaveformEngine:
                 "symbol_rate_hz": DECT_SYMBOL_RATE_HZ,
                 "frequency_deviation_hz": settings.frequency_deviation_hz,
                 "gaussian_bt": settings.gaussian_bt,
+                "ramp_up_modulation": "Natural preamble extension",
+                "ramp_down_modulation": "Last-symbol frequency continuation (ETSI undefined)",
                 **iq_level_metadata(level_metrics),
             },
         )

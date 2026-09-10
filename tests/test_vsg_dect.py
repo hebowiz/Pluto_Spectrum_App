@@ -14,6 +14,7 @@ from pluto_sa.vsa.protocol_modes.dect.carriers import (
 )
 from pluto_sa.vsa.protocol_modes.dect import analyze_dect_recording
 from pluto_vsg.engine import DectWaveformEngine
+from pluto_vsg.engine.dect import _natural_preamble_extension
 from pluto_vsg.model import (
     DectDirection,
     DectBFieldSource,
@@ -133,6 +134,66 @@ def test_frequency_offset_is_a_baseband_impairment_from_selected_carrier() -> No
     np.testing.assert_allclose(measured, 37_500.0, atol=1.0)
     assert offset.metadata["center_frequency_hz"] == base.center_frequency_hz
     assert offset.metadata["actual_rf_frequency_hz"] == base.center_frequency_hz + 37_500.0
+
+
+def test_ramp_up_uses_direction_specific_natural_preamble_extension() -> None:
+    engine = DectWaveformEngine()
+    for direction, expected in (
+        (DectDirection.RFP, "10101010"),
+        (DectDirection.PP, "01010101"),
+    ):
+        base = dect_project()
+        settings = replace(base.dect, direction=direction)
+        project = replace(
+            _updated_project(base, settings),
+            power_envelope=replace(
+                base.power_envelope,
+                rise_symbols=8.0,
+                rise_delay_symbols=-8.0,
+            ),
+        )
+        result = engine.generate(project)
+        active_start, _ = result.metadata["active_ranges_samples"][0]
+        packet_start, _ = result.metadata["packet_ranges_samples"][0]
+        ramp = np.asarray(result.iq[active_start:packet_start], dtype=np.complex128)
+        frequency = (
+            np.angle(ramp[1:] * np.conj(ramp[:-1]))
+            * result.sample_rate_hz
+            / (2.0 * np.pi)
+        )
+        sps = project.samples_per_symbol
+        symbol_centers = np.arange(sps // 2, ramp.size - 1, sps)
+        observed = (frequency[symbol_centers] > 0.0).astype(np.uint8)
+        assert _text(observed) == expected
+        assert result.metadata["ramp_up_modulation"] == "Natural preamble extension"
+
+
+def test_natural_preamble_extension_is_aligned_immediately_before_s0() -> None:
+    rfp = np.asarray([int(bit) for bit in "1010101010101010"], dtype=np.uint8)
+    pp = 1 - rfp
+    assert _text(_natural_preamble_extension(rfp, 5)) == "01010"
+    assert _text(_natural_preamble_extension(pp, 5)) == "10101"
+
+
+def test_packet_end_includes_optional_z_and_default_release_is_after_it() -> None:
+    base = dect_project()
+    settings = replace(base.dect, packet_type=DectPacketType.P32Z)
+    result = DectWaveformEngine().generate(_updated_project(base, settings))
+    packet_start, packet_stop = result.metadata["packet_ranges_samples"][0]
+    active_start, active_stop = result.metadata["active_ranges_samples"][0]
+    sps = base.samples_per_symbol
+    assert packet_stop - packet_start == 424 * sps
+    assert active_stop - packet_stop == 2 * sps
+    assert active_start < packet_start
+    maintenance_samples = int(np.ceil(0.5e-6 * result.sample_rate_hz))
+    np.testing.assert_allclose(
+        np.abs(result.iq[packet_stop : packet_stop + maintenance_samples]),
+        1.0,
+        atol=1e-6,
+    )
+    assert result.metadata["ramp_down_modulation"].startswith(
+        "Last-symbol frequency continuation"
+    )
 
 
 def test_prolonged_preamble_and_z_repeat_are_explicit() -> None:
