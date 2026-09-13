@@ -69,6 +69,10 @@ New-Item -ItemType Directory -Force -Path $specRoot | Out-Null
 
 $runtimeHook = Join-Path $repoRoot "packaging\hooks\runtime_hook_libiio.py"
 $notices = Join-Path $repoRoot "packaging\THIRD_PARTY_NOTICES.txt"
+$driverManualPath = Join-Path $repoRoot "output\pdf\Pluto_Driver_Installation_Guide_JA.pdf"
+if (-not (Test-Path -LiteralPath $driverManualPath)) {
+    throw "Pluto driver installation guide not found: $driverManualPath"
+}
 $applications = @(
     @{
         Name = "Pluto_RTSA"
@@ -126,6 +130,11 @@ foreach ($application in $applications) {
     Copy-Item -LiteralPath $manualPath -Destination $bundledManual -Force
     if (-not (Test-Path -LiteralPath $bundledManual)) {
         throw "Bundled user manual was not created for $($application.Name): $bundledManual"
+    }
+    $bundledDriverManual = Join-Path $manualDirectory (Split-Path -Leaf $driverManualPath)
+    Copy-Item -LiteralPath $driverManualPath -Destination $bundledDriverManual -Force
+    if (-not (Test-Path -LiteralPath $bundledDriverManual)) {
+        throw "Bundled driver guide was not created for $($application.Name): $bundledDriverManual"
     }
     $smokeReport = Join-Path $buildRoot "$($application.Name)-smoke.json"
     Remove-Item -LiteralPath $smokeReport -Force -ErrorAction SilentlyContinue

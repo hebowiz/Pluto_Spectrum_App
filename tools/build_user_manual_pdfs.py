@@ -1,4 +1,4 @@
-"""Build polished PDF editions of the Pluto RTSA/VSA/VSG Markdown manuals."""
+"""Build polished PDF editions of the Pluto application and setup manuals."""
 
 from __future__ import annotations
 
@@ -45,7 +45,19 @@ MANUALS = (
     ("Pluto_RTSA_User_Manual_JA.md", "Pluto_RTSA_User_Manual_JA.pdf", "Spectrum Analyzer"),
     ("Pluto_VSA_User_Manual_JA.md", "Pluto_VSA_User_Manual_JA.pdf", "Vector Signal Analyzer"),
     ("Pluto_VSG_User_Manual_JA.md", "Pluto_VSG_User_Manual_JA.pdf", "Vector Signal Generator"),
+    (
+        "Pluto_Driver_Installation_Guide_JA.md",
+        "Pluto_Driver_Installation_Guide_JA.pdf",
+        "Windows USB Driver Setup",
+    ),
 )
+
+PDF_METADATA_TITLES = {
+    "Pluto_RTSA_User_Manual_JA.md": "Pluto RTSA User Manual",
+    "Pluto_VSA_User_Manual_JA.md": "Pluto VSA User Manual",
+    "Pluto_VSG_User_Manual_JA.md": "Pluto VSG User Manual",
+    "Pluto_Driver_Installation_Guide_JA.md": "ADALM-Pluto Windows Driver Installation Guide",
+}
 
 
 def _register_fonts() -> None:
@@ -61,7 +73,7 @@ def _register_fonts() -> None:
 
 
 class ManualDocTemplate(BaseDocTemplate):
-    def __init__(self, filename: str, *, title: str) -> None:
+    def __init__(self, filename: str, *, title: str, metadata_title: str | None = None) -> None:
         super().__init__(
             filename,
             pagesize=PAGE_SIZE,
@@ -69,7 +81,7 @@ class ManualDocTemplate(BaseDocTemplate):
             rightMargin=MARGIN_X,
             topMargin=MARGIN_TOP,
             bottomMargin=MARGIN_BOTTOM,
-            title=title,
+            title=metadata_title or title,
             author="Pluto Spectrum App Project",
         )
         self.manual_title = title
@@ -373,7 +385,11 @@ def build_all() -> list[Path]:
         source = SOURCE_DIR / source_name
         output = OUTPUT_DIR / output_name
         title, story = _markdown_story(source, subtitle, styles)
-        document = ManualDocTemplate(str(output), title=title)
+        document = ManualDocTemplate(
+            str(output),
+            title=title,
+            metadata_title=PDF_METADATA_TITLES.get(source_name),
+        )
         document.multiBuild(story)
         outputs.append(output)
     return outputs

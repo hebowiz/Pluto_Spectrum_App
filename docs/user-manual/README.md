@@ -7,6 +7,7 @@
 | Pluto RTSA | スペクトラム／時間領域観測 | [Pluto RTSAユーザーマニュアル](Pluto_RTSA_User_Manual_JA.md) |
 | Pluto VSA | 汎用および規格別の変調・パケット解析 | [Pluto VSAユーザーマニュアル](Pluto_VSA_User_Manual_JA.md) |
 | Pluto VSG | パケット波形生成およびPluto送信 | [Pluto VSGユーザーマニュアル](Pluto_VSG_User_Manual_JA.md) |
+| 共通セットアップ | ADALM-Pluto Windowsドライバの導入と認識確認 | [Plutoドライバ インストールガイド](Pluto_Driver_Installation_Guide_JA.md) |
 
 ## 共通の注意
 
