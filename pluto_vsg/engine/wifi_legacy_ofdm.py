@@ -6,7 +6,11 @@ import math
 
 import numpy as np
 
-from pluto_vsg.engine.base import FieldBoundary, GenerationResult
+from pluto_vsg.engine.base import (
+    ConstellationTrace,
+    FieldBoundary,
+    GenerationResult,
+)
 from pluto_vsg.model import WiFiScramblerSeedMode, WaveformProject, validate_project
 from pluto_vsg.rf_level import iq_level_metadata, measure_iq_levels
 from pluto_vsg.wifi.common import LEGACY_RATES, LegacyRate
@@ -181,15 +185,21 @@ class WiFiLegacyOFDMWaveformEngine:
         l_stf, l_ltf = _training_fields(oversample)
         sig_rate = LEGACY_RATES[6]
         l_sig_bits = _l_sig_bits(rate, len(psdu))
-        l_sig = _ifft_symbol(map_constellation(_encode_symbol(l_sig_bits, sig_rate), 1), 0, oversample)
+        l_sig_constellation = map_constellation(
+            _encode_symbol(l_sig_bits, sig_rate), 1
+        )
+        l_sig = _ifft_symbol(l_sig_constellation, 0, oversample)
         coded = puncture(bcc_encode(scrambled), rate.coding_rate)
         symbols = []
         interleaved_symbols = []
+        data_constellations = []
         for index in range(n_sym):
             chunk = coded[index * rate.n_cbps : (index + 1) * rate.n_cbps]
             interleaved_bits = interleave(chunk, rate.n_cbps, rate.n_bpsc)
             interleaved_symbols.append(interleaved_bits)
-            symbols.append(_ifft_symbol(map_constellation(interleaved_bits, rate.n_bpsc), index + 1, oversample))
+            mapped = map_constellation(interleaved_bits, rate.n_bpsc)
+            data_constellations.append(mapped)
+            symbols.append(_ifft_symbol(mapped, index + 1, oversample))
         data_iq = np.concatenate(symbols)
         ppdu = np.concatenate((l_stf, l_ltf, l_sig, data_iq))
         peak = float(np.max(np.abs(ppdu)))
@@ -219,6 +229,14 @@ class WiFiLegacyOFDMWaveformEngine:
             iq=iq,
             sample_rate_hz=expected_sample_rate,
             field_boundaries=tuple(boundaries),
+            constellation_traces=(
+                ConstellationTrace("L-SIG (BPSK)", "BPSK", l_sig_constellation),
+                ConstellationTrace(
+                    f"DATA ({rate.modulation})",
+                    rate.modulation,
+                    np.concatenate(data_constellations),
+                ),
+            ),
             metadata={
                 "project_name": project.name, "standard": project.standard.value,
                 "center_frequency_hz": project.center_frequency_hz, "packet_name": "Wi-Fi Non-HT OFDM",

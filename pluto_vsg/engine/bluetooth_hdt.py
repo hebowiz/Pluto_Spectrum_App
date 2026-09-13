@@ -15,7 +15,11 @@ from pluto_protocol.bluetooth.hdt import (
 )
 from pluto_protocol.model import GeneratedPacketBits
 from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
-from pluto_vsg.engine.base import FieldBoundary, GenerationResult
+from pluto_vsg.engine.base import (
+    ConstellationTrace,
+    FieldBoundary,
+    GenerationResult,
+)
 from pluto_vsg.engine.bluetooth_br import (
     _append_field_boundaries, _extend_edge_phase, _placed_power_envelope, _srrc_taps,
 )
@@ -125,6 +129,19 @@ class BluetoothHDTWaveformEngine:
         level_metrics = measure_iq_levels(iq, active_ranges)
         return GenerationResult(
             iq=iq, sample_rate_hz=project.sample_rate_hz, field_boundaries=tuple(boundaries),
+            constellation_traces=(
+                ConstellationTrace("Training", "PSK training", training),
+                ConstellationTrace(
+                    "Control Header (pi/4-QPSK)",
+                    "pi/4-QPSK",
+                    np.concatenate((control, control_termination)),
+                ),
+                ConstellationTrace(
+                    f"Payload ({definition.modulation})",
+                    definition.modulation,
+                    np.concatenate((payload_symbols, payload_termination)),
+                ),
+            ),
             packet_bits=GeneratedPacketBits(format0_bits, "bluetooth.hdt", settings.rate.value, context={"rate_indicator": definition.rate_indicator, "packet_format": 0}),
             metadata={
                 "project_name": project.name, "standard": project.standard.value,

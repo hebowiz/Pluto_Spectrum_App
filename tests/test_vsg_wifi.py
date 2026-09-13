@@ -39,6 +39,10 @@ def test_wifi_all_legacy_rates_generate_expected_ppdu_shape() -> None:
         assert result.metadata["active_sample_count"] == result.metadata["packet_sample_count"]
         assert result.metadata["active_rms_dbfs"] < result.metadata["iq_peak_dbfs"]
         assert result.metadata["crest_factor_db"] > 0.0
+        assert [trace.label for trace in result.constellation_traces] == [
+            "L-SIG (BPSK)",
+            f"DATA ({result.metadata['modulation']})",
+        ]
 
 
 def test_wifi_interleaver_and_constellations() -> None:

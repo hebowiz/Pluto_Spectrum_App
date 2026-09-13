@@ -87,6 +87,12 @@ Symbols. Preview plots use:
 - packet-end labels use the same upper label lane as major-field labels
 - label anchoring: fixed to the right of each boundary; labels do not switch
   sides when a boundary crosses the center of the visible plot
+- initial time-axis range: the first Active Window plus at most 10 percent
+  total margin; the complete first period remains plotted so post-packet Idle
+  can be reached by zooming or panning
+- constellation: mapped physical symbols before pulse shaping, separated by
+  modulation section; GFSK, Guard and OFDM time-domain samples are not mixed
+  into the IQ plane
 
 New projects default to a one-symbol cosine ramp at each edge. Ramp Up starts
 one symbol before Packet Start (`-1.000`), while Ramp Down starts one symbol

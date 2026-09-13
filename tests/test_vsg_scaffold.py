@@ -67,6 +67,7 @@ from pluto_vsg.ui.main_window import (
     _PlutoOutputDialog,
     _cw_generation_result,
     _instantaneous_frequency_khz,
+    _preview_active_x_range_us,
 )
 from pluto_vsg.ui.frequency_settings import (
     FrequencySelection,
@@ -427,6 +428,81 @@ def test_vsg_preview_draws_only_first_packet_when_schedule_repeats() -> None:
         labels = [line.label.format for line in lines]
         assert labels.count("Packet End") == 1
         assert not any(label.endswith(" [1]") for label in labels)
+    finally:
+        window.close()
+
+
+def test_vsg_preview_initial_time_range_tracks_active_window_not_post_idle() -> None:
+    pg.mkQApp("Pluto VSG active-window preview range test")
+    base = bluetooth_br_edr_project()
+    project = replace(base, period_symbols=2000.0)
+    result = BluetoothBRWaveformEngine().generate(project)
+    window = PlutoVSGWindow(project)
+    try:
+        window._update_previews(result)
+        expected = _preview_active_x_range_us(
+            result, result.metadata["period_sample_count"]
+        )
+        for plot in (
+            window.iq_waveform_plot,
+            window.power_plot,
+            window.frequency_plot,
+        ):
+            np.testing.assert_allclose(plot.viewRange()[0], expected)
+
+        plotted_time, _ = window.power_plot.listDataItems()[0].getData()
+        assert plotted_time[-1] > expected[1]
+        active_start, active_stop = result.metadata["active_ranges_samples"][0]
+        active_width_us = (active_stop - active_start) / result.sample_rate_hz * 1e6
+        assert expected[1] - expected[0] <= active_width_us * 1.10 + 1e-9
+    finally:
+        window.close()
+
+
+def test_edr_constellation_preview_uses_mapped_psk_symbols_only() -> None:
+    pg.mkQApp("Pluto VSG EDR constellation preview test")
+    base = bluetooth_br_edr_project()
+    settings = replace(base.bluetooth_br, packet_kind=BluetoothPacketKind.DH1_2)
+    project = replace(
+        base,
+        bluetooth_br=settings,
+        fields=bluetooth_br_fields(settings),
+    )
+    result = BluetoothBRWaveformEngine().generate(project)
+    assert len(result.constellation_traces) == 1
+    trace = result.constellation_traces[0]
+    assert trace.modulation == "pi/4-DQPSK"
+    np.testing.assert_allclose(np.abs(trace.symbols), 1.0, atol=1e-12)
+    phase_bins = np.mod(
+        np.rint(np.angle(trace.symbols) / (np.pi / 4.0)).astype(int), 8
+    )
+    assert np.unique(phase_bins).size == 8
+
+    window = PlutoVSGWindow(project)
+    try:
+        window._update_previews(result)
+        plotted = window.constellation_plot.listDataItems()
+        assert len(plotted) == 1
+        x, y = plotted[0].getData()
+        np.testing.assert_allclose(x + 1j * y, trace.symbols)
+        title = window.constellation_plot.getPlotItem().titleLabel.text
+        assert "before pulse shaping" in title
+    finally:
+        window.close()
+
+
+def test_fsk_only_preview_does_not_plot_raw_iq_as_a_constellation() -> None:
+    pg.mkQApp("Pluto VSG FSK constellation exclusion test")
+    project = bluetooth_br_edr_project()
+    result = BluetoothBRWaveformEngine().generate(project)
+    assert result.constellation_traces == ()
+    window = PlutoVSGWindow(project)
+    try:
+        window._update_previews(result)
+        assert window.constellation_plot.listDataItems() == []
+        assert "No I/Q symbol constellation" in (
+            window.constellation_plot.getPlotItem().titleLabel.text
+        )
     finally:
         window.close()
 

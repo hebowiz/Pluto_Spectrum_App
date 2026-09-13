@@ -37,6 +37,11 @@ def test_hdt_profiles_generate_each_supported_rate() -> None:
         assert result.metadata["phy"] == rate.value
         assert result.metadata["modulation"] == definition.modulation
         assert result.metadata["payload_code_rate"] == definition.payload_code_rate
+        assert [trace.label for trace in result.constellation_traces] == [
+            "Training",
+            "Control Header (pi/4-QPSK)",
+            f"Payload ({definition.modulation})",
+        ]
 
 
 def test_hdt6_uses_spec_scaled_16qam_payload_mapping() -> None:

@@ -25,10 +25,20 @@ class FieldBoundary:
 
 
 @dataclass(frozen=True)
+class ConstellationTrace:
+    """One modulation-specific set of mapped symbols for VSG preview."""
+
+    label: str
+    modulation: str
+    symbols: npt.NDArray[np.complexfloating]
+
+
+@dataclass(frozen=True)
 class GenerationResult:
     iq: npt.NDArray[np.complex64]
     sample_rate_hz: float
     field_boundaries: tuple[FieldBoundary, ...] = ()
+    constellation_traces: tuple[ConstellationTrace, ...] = ()
     metadata: dict[str, object] = field(default_factory=dict)
     packet_bits: GeneratedPacketBits | None = None
 

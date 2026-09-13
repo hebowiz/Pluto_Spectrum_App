@@ -19,7 +19,11 @@ from pluto_sa.vsa.profiles.bluetooth_edr import (
     EDR_SYNC_BITS_2MBPS,
     EDR_SYNC_BITS_3MBPS,
 )
-from pluto_vsg.engine.base import FieldBoundary, GenerationResult
+from pluto_vsg.engine.base import (
+    ConstellationTrace,
+    FieldBoundary,
+    GenerationResult,
+)
 from pluto_vsg.model import (
     BluetoothPacketKind,
     FieldDefinition,
@@ -192,15 +196,7 @@ def _modulate_edr(
     samples_per_symbol: int,
     rolloff: float,
 ) -> np.ndarray:
-    phase_offset = np.pi / 4.0 if int(order) == 4 else 0.0
-    changes = np.exp(
-        1j
-        * (
-            phase_offset
-            + 2.0 * np.pi / int(order) * np.asarray(phase_indices, dtype=float)
-        )
-    )
-    symbols = np.concatenate((np.ones(1, dtype=np.complex128), np.cumprod(changes)))
+    symbols = _edr_physical_symbols(phase_indices, order=order)
     span_symbols = 10
     padded = np.pad(symbols, (span_symbols, span_symbols), mode="edge")
     impulses = np.zeros(padded.size * int(samples_per_symbol), dtype=np.complex128)
@@ -213,6 +209,24 @@ def _modulate_edr(
     start = span_symbols * int(samples_per_symbol)
     result = shaped[start : start + symbols.size * int(samples_per_symbol)]
     return result / np.sqrt(np.mean(np.abs(result) ** 2))
+
+
+def _edr_physical_symbols(
+    phase_indices: np.ndarray, *, order: int
+) -> np.ndarray:
+    """Return the absolute physical symbols produced by differential mapping."""
+
+    phase_offset = np.pi / 4.0 if int(order) == 4 else 0.0
+    changes = np.exp(
+        1j
+        * (
+            phase_offset
+            + 2.0 * np.pi / int(order) * np.asarray(phase_indices, dtype=float)
+        )
+    )
+    return np.concatenate(
+        (np.ones(1, dtype=np.complex128), np.cumprod(changes))
+    )
 
 
 def _modulate_gfsk(
@@ -583,6 +597,25 @@ class BluetoothBRWaveformEngine:
             iq=iq,
             sample_rate_hz=project.sample_rate_hz,
             field_boundaries=tuple(boundaries),
+            constellation_traces=(
+                (
+                    ConstellationTrace(
+                        label=(
+                            "EDR PSK (pi/4-DQPSK)"
+                            if bits_per_symbol == 2
+                            else "EDR PSK (8-DPSK)"
+                        ),
+                        modulation=(
+                            "pi/4-DQPSK" if bits_per_symbol == 2 else "8-DPSK"
+                        ),
+                        symbols=_edr_physical_symbols(
+                            edr_phase_indices, order=2**bits_per_symbol
+                        ),
+                    ),
+                )
+                if is_edr
+                else ()
+            ),
             packet_bits=GeneratedPacketBits(
                 bits=packet_bits,
                 protocol_id="bluetooth.br_edr",

@@ -128,6 +128,34 @@ def _instantaneous_frequency_khz(
     return frequency
 
 
+def _preview_active_x_range_us(
+    result: GenerationResult,
+    preview_sample_count: int,
+    *,
+    total_margin_fraction: float = 0.10,
+) -> tuple[float, float]:
+    """Return a first-repeat view covering Active Window plus <=10% margin."""
+
+    count = max(1, int(preview_sample_count))
+    ranges = tuple(result.metadata.get("active_ranges_samples", ()))
+    if ranges:
+        start_sample, stop_sample = map(int, ranges[0])
+    else:
+        packet_ranges = tuple(result.metadata.get("packet_ranges_samples", ()))
+        if packet_ranges:
+            start_sample, stop_sample = map(int, packet_ranges[0])
+        else:
+            start_sample, stop_sample = 0, count
+    start_sample = min(count, max(0, start_sample))
+    stop_sample = min(count, max(start_sample + 1, stop_sample))
+    active_span = max(1, stop_sample - start_sample)
+    side_margin = 0.5 * max(0.0, float(total_margin_fraction)) * active_span
+    view_start = max(0.0, start_sample - side_margin)
+    view_stop = min(float(count), stop_sample + side_margin)
+    scale = 1e6 / float(result.sample_rate_hz)
+    return view_start * scale, view_stop * scale
+
+
 def _cw_generation_result(
     sample_rate_hz: float, sample_count: int = 4096
 ) -> GenerationResult:
@@ -2048,6 +2076,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self.constellation_plot = self._make_plot("Q", "I")
         self.constellation_plot.setAspectLocked(True)
+        self.constellation_legend = self.constellation_plot.addLegend()
         for widget, title in (
             (self.iq_waveform_plot, "IQ Waveform"),
             (self.power_plot, "IQ Power"),
@@ -2903,36 +2932,54 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.clear()
         self.spectrum_plot.plot(frequency_mhz, spectrum_dbfs, pen=TRACE_COLOR)
 
-        edr_start = result.metadata.get("edr_start_sample")
-        edr_indices = np.asarray(
-            result.metadata.get("edr_phase_indices", ()), dtype=np.int16
-        )
-        if edr_start is not None and edr_indices.size:
-            sample_positions = (
-                int(edr_start)
-                + self.project.samples_per_symbol // 2
-                + np.arange(edr_indices.size + 1) * self.project.samples_per_symbol
-            )
-            sample_positions = sample_positions[sample_positions < iq.size]
-            symbol_samples = iq[sample_positions]
-            typical_amplitude = float(np.median(np.abs(symbol_samples)))
-            if typical_amplitude > 0.0:
-                symbol_samples = symbol_samples / typical_amplitude
-        else:
-            symbol_samples = iq[:: self.project.samples_per_symbol]
         self.constellation_plot.clear()
-        self.constellation_plot.plot(
-            symbol_samples.real,
-            symbol_samples.imag,
-            pen=None,
-            symbol="o",
-            symbolSize=7,
-            symbolBrush=TRACE_COLOR,
+        self.constellation_legend.clear()
+        constellation_colors = (
+            TRACE_COLOR,
+            ACCENT_COLOR,
+            FIELD_BOUNDARY_COLOR,
+            FIELD_MINOR_BOUNDARY_COLOR,
+        )
+        for index, trace in enumerate(result.constellation_traces):
+            symbols = np.asarray(trace.symbols, dtype=np.complex128).reshape(-1)
+            if symbols.size > 4096:
+                display_indices = np.linspace(
+                    0, symbols.size - 1, 4096, dtype=np.int64
+                )
+                symbols = symbols[display_indices]
+            color = constellation_colors[index % len(constellation_colors)]
+            self.constellation_plot.plot(
+                symbols.real,
+                symbols.imag,
+                pen=None,
+                symbol="o",
+                symbolSize=7,
+                symbolBrush=color,
+                symbolPen=None,
+                name=trace.label,
+            )
+        has_constellation = bool(result.constellation_traces)
+        self.constellation_legend.setVisible(has_constellation)
+        self.constellation_plot.setTitle(
+            "Mapped symbols before pulse shaping; non-I/Q sections omitted"
+            if has_constellation
+            else "No I/Q symbol constellation for this waveform"
         )
         self.constellation_plot.setRange(
             xRange=[-1.25, 1.25], yRange=[-1.25, 1.25], padding=0.0
         )
         self._remember_plot_scales()
+        active_x_range = _preview_active_x_range_us(result, preview_sample_count)
+        for name, plot in (
+            ("iq_waveform", self.iq_waveform_plot),
+            ("power", self.power_plot),
+            ("frequency", self.frequency_plot),
+        ):
+            plot.setXRange(*active_x_range, padding=0.0)
+            self._plot_initial_ranges[name] = (
+                list(active_x_range),
+                list(plot.viewRange()[1]),
+            )
 
     @staticmethod
     def _add_field_guides(
