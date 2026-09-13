@@ -34,24 +34,12 @@ from pluto_sa.ui.main_window import (
     MIN_MARKER_STEP_HZ,
     MIN_TRACE_AVERAGE_COUNT,
     MAX_TRACE_AVERAGE_COUNT,
-    PLOT_SPACING,
-    PLOT_WIDTH,
-    STATUS_PANEL_HEIGHT,
     TRACE_TYPE_LIVE,
     TRACE_TYPE_OPTIONS,
     WINDOW_HEIGHT,
     WINDOW_WIDTH,
     RealtimeSpectrumWindow,
 )
-
-
-SYSTEM_FRAME_EXTRA_HEIGHT = 80
-SESSION_WINDOW_HEIGHT = WINDOW_HEIGHT + SYSTEM_FRAME_EXTRA_HEIGHT
-SESSION_SIDE_PANEL_HEIGHT = SESSION_WINDOW_HEIGHT - 24
-SESSION_PLOT_HEIGHT = (
-    SESSION_SIDE_PANEL_HEIGHT - STATUS_PANEL_HEIGHT - (PLOT_SPACING * 2)
-) // 2
-SESSION_DUAL_PLOT_HEIGHT = SESSION_PLOT_HEIGHT * 2 + PLOT_SPACING
 
 
 class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
@@ -71,27 +59,11 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         self._restore_saved_session_on_startup()
 
     def _resize_for_system_frame(self) -> None:
-        self.setFixedSize(WINDOW_WIDTH, SESSION_WINDOW_HEIGHT)
-        if hasattr(self, "left_panel"):
-            self.left_panel.setFixedHeight(SESSION_SIDE_PANEL_HEIGHT)
-        if hasattr(self, "control_panel"):
-            self.control_panel.setFixedHeight(SESSION_SIDE_PANEL_HEIGHT)
+        self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
 
     def _apply_display_mode(self) -> None:
-        """Keep the fixed-size plot geometry aligned with the taller window."""
-
+        """Keep the base window's responsive plot visibility behavior."""
         super()._apply_display_mode()
-        if not hasattr(self, "waterfall_plot") or not hasattr(self, "spectrum_plot"):
-            return
-        if self.graph_view_mode == "waterfall_only":
-            self.waterfall_plot.setFixedSize(PLOT_WIDTH, SESSION_DUAL_PLOT_HEIGHT)
-            self.spectrum_plot.setFixedSize(PLOT_WIDTH, SESSION_PLOT_HEIGHT)
-        elif self.graph_view_mode == "spectrum_only":
-            self.spectrum_plot.setFixedSize(PLOT_WIDTH, SESSION_DUAL_PLOT_HEIGHT)
-            self.waterfall_plot.setFixedSize(PLOT_WIDTH, SESSION_PLOT_HEIGHT)
-        else:
-            self.waterfall_plot.setFixedSize(PLOT_WIDTH, SESSION_PLOT_HEIGHT)
-            self.spectrum_plot.setFixedSize(PLOT_WIDTH, SESSION_PLOT_HEIGHT)
 
     def _install_system_frame(self) -> None:
         """Add SYSTEM -> System -> Preset / Device navigation."""

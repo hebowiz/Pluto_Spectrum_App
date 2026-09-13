@@ -145,8 +145,8 @@ UNBOUNDED_INT_MIN = -2_147_483_648
 UNBOUNDED_INT_MAX = 2_147_483_647
 PLOT_SPACING = 12
 CONTROL_PANEL_WIDTH = 240
-WINDOW_WIDTH = 1664
-WINDOW_HEIGHT = 980
+WINDOW_WIDTH = 1600
+WINDOW_HEIGHT = 960
 OUTER_MARGIN_TOTAL = 24
 OUTER_SPACING_TOTAL = 12
 SIDE_PANEL_HEIGHT = WINDOW_HEIGHT - 24
@@ -530,7 +530,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._sweep_like_suppress_progress_until_first_complete = False
 
         self._update_device_window_title()
-        self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.setMinimumSize(960, 640)
 
         self.frame_count_total = 0
         self.frame_count_interval = 0
@@ -2016,8 +2017,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         outer_layout.setSpacing(12)
 
         left_panel = QtWidgets.QWidget()
-        left_panel.setFixedWidth(PLOT_WIDTH)
-        left_panel.setFixedHeight(SIDE_PANEL_HEIGHT)
+        left_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         self.left_panel = left_panel
         layout = QtWidgets.QVBoxLayout(left_panel)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2041,7 +2044,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 avg_capture_ratio=0.0,
             )
         )
-        self.status_label.setFixedWidth(PLOT_WIDTH)
         self.status_label.setFixedHeight(STATUS_PANEL_HEIGHT)
         self.status_label.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
@@ -2072,7 +2074,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.waterfall_plot.getViewBox().invertY(False)
         self.waterfall_plot.getAxis("left").setPen("w")
         self.waterfall_plot.getAxis("bottom").setPen("w")
-        self.waterfall_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
+        self.waterfall_plot.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
 
         self.waterfall_img = pg.ImageItem()
         self.waterfall_plot.addItem(self.waterfall_img)
@@ -2127,7 +2132,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "Amplitude [dBm]",
             **{"font-size": f"{AXIS_LABEL_FONT_SIZE_PT}pt"},
         )
-        self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
+        self.spectrum_plot.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
 
         freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
         self.spectrum_plot.setXRange(
@@ -2224,7 +2232,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                     self._navigate_back()
                 event.accept()
                 return True
-        if event.type() == QtCore.QEvent.Type.Wheel and isinstance(event, QtGui.QWheelEvent):
+        if (
+            event.type() == QtCore.QEvent.Type.Wheel
+            and isinstance(event, QtGui.QWheelEvent)
+            and not self._is_control_panel_target(watched)
+        ):
             if self._handle_active_marker_wheel(event):
                 return True
         return super().eventFilter(watched, event)
@@ -2340,7 +2352,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         panel = QtWidgets.QFrame()
         self.control_panel = panel
         panel.setFixedWidth(CONTROL_PANEL_WIDTH)
-        panel.setFixedHeight(WINDOW_HEIGHT - 24)
+        panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         panel.setStyleSheet(
             "QFrame { background-color: #1c1c1c; }"
             "QGroupBox { color: white; border: 1px solid #555; margin-top: 12px; }"
@@ -2361,7 +2376,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         panel_layout.addWidget(self.control_title_label)
 
         self.control_stack = QtWidgets.QStackedWidget()
-        panel_layout.addWidget(self.control_stack, stretch=1)
+        self.control_stack.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Minimum,
+        )
+        self.control_scroll = QtWidgets.QScrollArea()
+        self.control_scroll.setWidgetResizable(True)
+        self.control_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.control_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.control_scroll.setWidget(self.control_stack)
+        panel_layout.addWidget(self.control_scroll, stretch=1)
 
         footer_layout = QtWidgets.QHBoxLayout()
         footer_layout.addStretch(1)
@@ -6366,24 +6392,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _apply_display_mode(self) -> None:
         if self.graph_view_mode == GRAPH_VIEW_WATERFALL_ONLY:
-            self.waterfall_plot.setFixedSize(PLOT_WIDTH, DUAL_PLOT_TOTAL_HEIGHT)
             self.waterfall_plot.show()
             self.spectrum_plot.hide()
         elif self.graph_view_mode == GRAPH_VIEW_SPECTRUM_ONLY:
-            self.spectrum_plot.setFixedSize(PLOT_WIDTH, DUAL_PLOT_TOTAL_HEIGHT)
             self.spectrum_plot.show()
             self.waterfall_plot.hide()
         else:
-            self.waterfall_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
-            self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
             self.waterfall_plot.show()
             self.spectrum_plot.show()
-            return
-
-        if self.graph_view_mode != GRAPH_VIEW_WATERFALL_ONLY:
-            self.waterfall_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
-        if self.graph_view_mode != GRAPH_VIEW_SPECTRUM_ONLY:
-            self.spectrum_plot.setFixedSize(PLOT_WIDTH, PLOT_HEIGHT)
 
     def _apply_center_frequency_update(self) -> None:
         freq_axis_display_ghz = self.processor.get_display_freq_axis_ghz()
@@ -6500,6 +6516,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._update_calibration_page_controls()
         self._update_calibration_mode_controls()
         self.status_label.setText(self._make_header_status_text())
+        self._refresh_runtime_warning()
 
     @staticmethod
     def _set_labeled_button_value(
@@ -6714,11 +6731,30 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             f"   FFT/Frame: {frame_count}"
         )
         status += f"   Time Coverage: {plan.analysis_coverage_ratio * 100.0:.1f}%"
-        if plan.analysis_coverage_ratio < 1.0:
-            status += "   WARNING: time-domain observation gaps"
-        if self._realtime_rx_discontinuities > 0:
-            status += f"   RX Discontinuity: {self._realtime_rx_discontinuities}"
         return status
+
+    def _make_runtime_warning_text(self) -> str:
+        if self.config.analyzer_mode != AnalyzerMode.REALTIME_SA:
+            return ""
+        warnings: list[str] = []
+        accumulator = self._realtime_fft_accumulator
+        if (
+            accumulator is not None
+            and accumulator.plan.analysis_coverage_ratio < 1.0
+        ):
+            warnings.append("time-domain observation gaps")
+        if self._realtime_rx_discontinuities > 0:
+            warnings.append(
+                f"RX discontinuities: {self._realtime_rx_discontinuities}"
+            )
+        return "" if not warnings else f"WARNING: {'; '.join(warnings)}"
+
+    def _refresh_runtime_warning(self) -> None:
+        warning = self._make_runtime_warning_text()
+        if warning:
+            self.statusBar().showMessage(warning)
+        else:
+            self.statusBar().clearMessage()
 
     def _make_correction_status_text(self) -> str:
         return "Correction: ON" if self.calibration_controller.correction_enabled else "Correction: OFF"
@@ -8110,6 +8146,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
             header_text = self._make_header_status_text()
             self.status_label.setText(header_text)
+            self._refresh_runtime_warning()
 
             self.frame_count_interval = 0
             self.last_report_time = now

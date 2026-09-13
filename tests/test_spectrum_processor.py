@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -287,6 +289,42 @@ def test_advanced_realtime_fft_does_not_shrink_manual_fft_size() -> None:
 
     assert RealtimeSpectrumWindow._expand_realtime_fft_for_rbw(owner) is False
     assert config.fft_size == 16_384
+
+
+def test_realtime_gap_warning_is_separate_from_header_status() -> None:
+    plan = SimpleNamespace(
+        quality="Full",
+        window_length_samples=64,
+        actual_overlap_ratio=0.5,
+        target_overlap_ratio=0.5,
+        actual_fft_rate_hz=1000.0,
+        analysis_coverage_ratio=0.75,
+    )
+    owner = SimpleNamespace(
+        config=SpectrumConfig(analyzer_mode=AnalyzerMode.REALTIME_SA),
+        _realtime_fft_accumulator=SimpleNamespace(plan=plan),
+        _realtime_last_detector_frame=SimpleNamespace(fft_frames=4),
+        _realtime_rx_discontinuities=2,
+    )
+
+    header = RealtimeSpectrumWindow._make_realtime_fft_status_text(owner)
+    warning = RealtimeSpectrumWindow._make_runtime_warning_text(owner)
+
+    assert "WARNING" not in header
+    assert "RX Discontinuity" not in header
+    assert warning == (
+        "WARNING: time-domain observation gaps; RX discontinuities: 2"
+    )
+
+
+def test_runtime_warning_is_hidden_outside_realtime_sa() -> None:
+    owner = SimpleNamespace(
+        config=SpectrumConfig(analyzer_mode=AnalyzerMode.SWEEP_SA),
+        _realtime_fft_accumulator=None,
+        _realtime_rx_discontinuities=3,
+    )
+
+    assert RealtimeSpectrumWindow._make_runtime_warning_text(owner) == ""
 
 
 def test_waterfall_reaches_red_at_80_percent_of_measurement_range() -> None:
