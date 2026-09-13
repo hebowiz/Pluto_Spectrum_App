@@ -397,6 +397,10 @@ def test_pluto_output_dialog_selects_continuous_playback_without_changing_projec
         assert dialog.packet_count_label.text().startswith("Ignored")
         assert not dialog.dma_preroll_spin.isEnabled()
         assert not dialog.stop_guard_spin.isEnabled()
+        assert dialog.dma_preroll_label.text() == "Finite TX Lead-in (Zero IQ)"
+        assert dialog.stop_guard_label.text() == "Finite TX Minimum Hold"
+        assert "DMA startup" in dialog.dma_preroll_spin.toolTip()
+        assert "after DMA submission" in dialog.stop_guard_spin.toolTip()
         dialog._accept_settings()
         assert dialog.settings.playback_mode is PlutoPlaybackMode.CONTINUOUS
         assert dialog.settings.burst_count == 10

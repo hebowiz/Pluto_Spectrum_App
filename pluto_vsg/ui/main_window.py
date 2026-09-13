@@ -1499,10 +1499,24 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
         self.stop_guard_spin.setKeyboardTracking(False)
         form.addRow("Connection URI", selector_row)
         form.addRow("Digital Backoff", self.digital_backoff_combo)
-        form.addRow("Muted LO Settling Time", self.lead_in_guard_spin)
-        self.dma_preroll_label = QtWidgets.QLabel("DMA Pre-roll")
+        self.lead_in_guard_spin.setToolTip(
+            "Wait after enabling the TX LO while TX gain remains muted, "
+            "before applying the requested output level."
+        )
+        form.addRow("LO Stabilization Wait (Muted)", self.lead_in_guard_spin)
+        self.dma_preroll_label = QtWidgets.QLabel(
+            "Finite TX Lead-in (Zero IQ)"
+        )
+        self.dma_preroll_spin.setToolTip(
+            "Finite TX only: prepend zero-IQ samples before the generated "
+            "packet schedule to protect its first packet from DMA startup."
+        )
         form.addRow(self.dma_preroll_label, self.dma_preroll_spin)
-        self.stop_guard_label = QtWidgets.QLabel("Completion Margin")
+        self.stop_guard_label = QtWidgets.QLabel("Finite TX Minimum Hold")
+        self.stop_guard_spin.setToolTip(
+            "Finite TX only: minimum time to keep the transmission active "
+            "after DMA submission before muted cleanup."
+        )
         form.addRow(self.stop_guard_label, self.stop_guard_spin)
         self.packet_count_label = QtWidgets.QLabel(str(packet_count))
         self.warning = QtWidgets.QLabel()
@@ -1550,17 +1564,18 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
             detail = (
                 "Continuous repeats exactly the first generated packet period "
                 "with Pluto cyclic DMA until Stop is requested. Project Repeat "
-                "Count, DMA Pre-roll and Completion Margin do not alter the "
-                "continuous cycle. Stop may interrupt a packet. Residual LO "
-                "leakage is not a calibrated RF-off state."
+                "Count, Finite TX Lead-in and Finite TX Minimum Hold do not "
+                "alter the continuous cycle. Stop may interrupt a packet. "
+                "Residual LO leakage is not a calibrated RF-off state."
             )
         else:
             detail = (
                 "Finite submits the complete requested packet schedule once in "
-                "a non-cyclic DMA buffer. DMA Pre-roll protects the first packet "
-                "from the DMA/DAC source-start transient, and Completion Margin "
-                "defers cleanup after submission. Residual LO leakage is not a "
-                "calibrated RF-off state."
+                "a non-cyclic DMA buffer. Finite TX Lead-in prepends zero IQ to "
+                "protect the first packet from the DMA/DAC source-start "
+                "transient. Finite TX Minimum Hold sets the minimum post-submit "
+                "wait before cleanup. Residual LO leakage is not a calibrated "
+                "RF-off state."
             )
         self.warning.setText(common + detail)
 
