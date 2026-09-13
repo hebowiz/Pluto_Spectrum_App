@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_sa.vsa.ui.application_window import PlutoAnalysisWindow
 
@@ -50,6 +50,37 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
     window = PlutoAnalysisWindow(pluto_source=source, preferences=preferences)
     try:
         assert window._stack.currentWidget() is window.generic_workspace
+        assert not window.generic_workspace.menuBar().isVisible()
+        assert window.control_panel.width() == 240
+        assert not window.generic_workspace.open_config_action.isEnabled()
+        assert all(
+            not bool(
+                dock.features()
+                & QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+            )
+            for dock in window.generic_workspace.findChildren(QtWidgets.QDockWidget)
+        )
+        assert {
+            "Analyzer Mode",
+            "Input / Frontend",
+            "Signal Description",
+            "Signal Capture",
+            "Trigger",
+            "Pattern Search",
+            "Result Range",
+            "Demodulation",
+            "Result Summary",
+            "Display",
+            "Continuous",
+            "Single",
+            "Refresh Analysis",
+            "Reset",
+            "System",
+        }.issubset(window.control_panel.buttons)
+        QtCore.QTimer.singleShot(0, window.generic_workspace._meas_config_dialog.reject)
+        window.control_panel.buttons["Signal Description"].click()
+        assert window.generic_workspace._config_page_title.text() == "Signal Description"
+        assert not window.generic_workspace._config_back_button.isVisible()
         assert "Generic" in window.windowTitle()
         assert window.generic_workspace._pluto_source is source
         assert window.adsb1090_workspace._pluto_source is source
@@ -68,16 +99,19 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
         window.set_analysis_mode("bluetooth")
         assert window._stack.currentWidget() is window.bluetooth_workspace
         assert "Bluetooth Dedicated" in window.windowTitle()
+        assert "Bluetooth Analysis" in window.control_panel.buttons
         window.bluetooth_workspace.center_spin.setValue(2420.0)
 
         window.set_analysis_mode("dect")
         assert window._stack.currentWidget() is window.dect_workspace
         assert "DECT Dedicated" in window.windowTitle()
+        assert "DECT Analysis" in window.control_panel.buttons
         window.dect_workspace.capture_length_spin.setValue(3.0)
 
         window.set_analysis_mode("adsb1090")
         assert window._stack.currentWidget() is window.adsb1090_workspace
         assert "ADS-B 1090ES" in window.windowTitle()
+        assert "ADS-B Analysis" in window.control_panel.buttons
         window.adsb1090_workspace.capture_length_spin.setValue(300.0)
 
         window.set_analysis_mode("generic")
@@ -112,3 +146,66 @@ def test_close_requests_capture_stop_then_closes_shared_source(tmp_path) -> None
     app.processEvents()
 
     assert source.close_count == 1
+
+
+def test_mode_aware_recall_switches_workspace_without_capture(tmp_path) -> None:
+    pg.mkQApp("Pluto analysis mode-aware config test")
+    preferences = QtCore.QSettings(
+        str(tmp_path / "analysis-recall.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    source = _SharedPlutoSource()
+    window = PlutoAnalysisWindow(pluto_source=source, preferences=preferences)
+    path = tmp_path / "bluetooth.vsaconfig.json"
+    try:
+        window.set_analysis_mode("bluetooth")
+        window.bluetooth_workspace.protocol_combo.setCurrentIndex(
+            window.bluetooth_workspace.protocol_combo.findData("bluetooth.le")
+        )
+        window.bluetooth_workspace.phy_combo.setCurrentText("LE 2M")
+        window.bluetooth_workspace.center_spin.setValue(2442.0)
+        window.save_meas_config_path(path)
+
+        window.set_analysis_mode("generic")
+        assert window.recall_meas_config_path(path)
+        assert window._active_mode() == "bluetooth"
+        assert window.bluetooth_workspace.protocol_combo.currentData() == "bluetooth.le"
+        assert window.bluetooth_workspace.phy_combo.currentText() == "LE 2M"
+        assert window.bluetooth_workspace.center_spin.value() == 2442.0
+        assert window.control_panel.stack.currentWidget() is window.control_panel.main_page
+        assert source.capture_count == 0
+    finally:
+        window.close()
+        window.deleteLater()
+
+
+def test_each_mode_has_one_default_preset_without_capture(tmp_path, monkeypatch) -> None:
+    pg.mkQApp("Pluto analysis default preset test")
+    preferences = QtCore.QSettings(
+        str(tmp_path / "analysis-preset.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    source = _SharedPlutoSource()
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+    )
+    window = PlutoAnalysisWindow(pluto_source=source, preferences=preferences)
+    try:
+        for mode in ("generic", "bluetooth", "dect", "adsb1090"):
+            window.set_analysis_mode(mode)
+            assert "Default" in window.control_panel.buttons
+            preset_buttons = [
+                key for key in window.control_panel.buttons if key == "Default"
+            ]
+            assert preset_buttons == ["Default"]
+
+        window.set_analysis_mode("bluetooth")
+        window.bluetooth_workspace.center_spin.setValue(2420.0)
+        window._apply_default_preset()
+        assert window.bluetooth_workspace.center_spin.value() == 2440.0
+        assert source.capture_count == 0
+    finally:
+        window.close()
+        window.deleteLater()

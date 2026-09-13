@@ -655,6 +655,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
             "Result Range",
             "Demodulation",
             "Result Summary",
+            "Display",
             "Sweep / Run",
         }
         assert all(
@@ -2105,7 +2106,10 @@ def test_startup_restores_meas_config_without_restoring_iq(tmp_path) -> None:
             _x_range, y_range = plot.viewRange()
             assert y_range == pytest.approx([-1.25, 1.25])
             assert plot.getViewBox().state["aspectLocked"] == pytest.approx(1.0)
-        assert second.input_source_combo.currentText() == "IQ File"
+            # The common right-side VSA UI fixes live input to Pluto. IQ files
+            # are opened explicitly from System > File and are not persisted
+            # as an input-source mode.
+            assert second.input_source_combo.currentText() == "Pluto"
         assert second.capture_center_spin.value() == pytest.approx(2450.5)
         assert second.internal_gain_spin.value() == 17
         assert second.external_attenuation_spin.value() == pytest.approx(24.0)

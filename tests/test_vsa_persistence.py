@@ -3,11 +3,33 @@ import json
 import pytest
 
 from pluto_sa.vsa.persistence import (
+    load_mode_meas_config,
     load_meas_config,
     load_pattern,
+    save_mode_meas_config,
     save_meas_config,
     save_pattern,
 )
+
+
+def test_mode_aware_config_round_trip_and_legacy_generic_compatibility(tmp_path) -> None:
+    mode_path = tmp_path / "bluetooth.vsaconfig.json"
+    save_mode_meas_config(
+        mode_path,
+        analysis_mode="bluetooth",
+        settings={"protocol": "bluetooth.le", "phy": "LE 2M"},
+    )
+    assert load_mode_meas_config(mode_path) == (
+        "bluetooth",
+        {"protocol": "bluetooth.le", "phy": "LE 2M"},
+    )
+
+    legacy_path = tmp_path / "legacy.vsaconfig.json"
+    save_meas_config(legacy_path, {"signal_description": {"modulation": "GFSK"}})
+    assert load_mode_meas_config(legacy_path) == (
+        "generic",
+        {"signal_description": {"modulation": "GFSK"}},
+    )
 
 
 def test_pattern_file_round_trip_is_versioned_and_human_readable(tmp_path) -> None:

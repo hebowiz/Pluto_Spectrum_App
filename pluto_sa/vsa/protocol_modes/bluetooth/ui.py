@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
@@ -375,6 +376,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._build_meas_config_dialog()
         self._build_results()
         self._configure_plot_context_menus()
+        self._default_meas_config = deepcopy(self._meas_config_values())
         restored = self._restore_startup_meas_config()
         self.statusBar().showMessage(
             "Ready - Bluetooth configuration restored"
@@ -402,9 +404,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.run_continuous_action.triggered.connect(
             self._toggle_continuous_capture
         )
-        refresh_action = run_menu.addAction("Refresh Analysis")
-        refresh_action.setShortcut(QtGui.QKeySequence("F5"))
-        refresh_action.triggered.connect(self.refresh)
+        self.refresh_analysis_action = run_menu.addAction("Refresh Analysis")
+        self.refresh_analysis_action.setShortcut(QtGui.QKeySequence("F5"))
+        self.refresh_analysis_action.setEnabled(False)
+        self.refresh_analysis_action.triggered.connect(self.refresh)
         run_menu.addSeparator()
         previous_action = run_menu.addAction("Previous Packet")
         previous_action.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Left))
@@ -750,7 +753,6 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             ("Resolved LO", self.resolved_lo_label),
             ("Internal Gain (dB)", self.internal_gain_spin),
             ("External ATT (dB)", self.external_att_spin),
-            ("Input Device", self.device_label),
         ):
             input_form.addRow(label, widget)
 
@@ -853,6 +855,26 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             control.blockSignals(False)
         self._update_derived_config()
         self._meas_config_dialog.open_top()
+
+    def open_config_page(self, name: str) -> None:
+        if name == "Display Config":
+            for control, value in (
+                (self.config_show_symbols, self._show_symbol_points),
+                (self.config_density, self._symbol_density),
+            ):
+                blocker = QtCore.QSignalBlocker(control)
+                control.setChecked(value)
+                del blocker
+            for control, value in (
+                (self.config_fsk_mode, self._fsk_symbol_plot_mode),
+                (self.config_psk_mode, self._psk_symbol_plot_mode),
+                (self.config_density_spread, self._symbol_density_spread.value),
+            ):
+                blocker = QtCore.QSignalBlocker(control)
+                control.setCurrentText(value)
+                del blocker
+        self._update_derived_config()
+        self._meas_config_dialog.open_page(name)
 
     @QtCore.Slot()
     def _update_derived_config(self) -> None:
@@ -1174,6 +1196,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._capture_recording = session.recording
         self._recording = session.recording
         self.export_iq_action.setEnabled(self._recording is not None)
+        self.refresh_analysis_action.setEnabled(self._recording is not None)
         if session.recording is not None and self.protocol_combo.currentData() == "bluetooth.le":
             channel = infer_le_channel(session.recording.center_frequency_hz)
             previous = self.channel_spin.blockSignals(True)
@@ -1265,6 +1288,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._capture_recording = capture_recording or recording
         self._recording = recording
         self.export_iq_action.setEnabled(True)
+        self.refresh_analysis_action.setEnabled(True)
         self._session = None
         self.center_spin.setValue(recording.center_frequency_hz / 1e6)
         if self.protocol_combo.currentData() == "bluetooth.le":

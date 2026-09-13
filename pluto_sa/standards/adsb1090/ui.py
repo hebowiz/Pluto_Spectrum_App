@@ -658,6 +658,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._stream_display_timer.timeout.connect(self._flush_stream_views)
         self._build_menu()
         self._build_ui()
+        self._default_meas_config = self._meas_config_values()
         self._restore_user_settings()
         self._connect_user_setting_persistence()
         if recording is not None:
@@ -665,13 +666,14 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
-        open_action = file_menu.addAction("Open IQ...")
-        open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self._open_iq)
+        self.open_iq_action = file_menu.addAction("Open IQ...")
+        self.open_iq_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.open_iq_action.triggered.connect(self._open_iq)
         self.export_iq_action = file_menu.addAction("Export IQ Recording...")
         self.export_iq_action.setEnabled(self.recording is not None)
         self.export_iq_action.triggered.connect(self._export_iq_recording)
         self.export_packet_list_action = file_menu.addAction("Export Packet List...")
+        self.export_packet_list_action.setEnabled(bool(self._packet_history))
         self.export_packet_list_action.triggered.connect(self._export_packet_list)
         metadata_menu = file_menu.addMenu("Aircraft Database")
         self.import_aircraft_database_action = metadata_menu.addAction(
@@ -696,9 +698,16 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.run_continuous_action = run_menu.addAction("Run Continuous (Pluto)")
         self.run_continuous_action.setShortcut("F7")
         self.run_continuous_action.triggered.connect(self._run_pluto_continuous)
-        refresh = run_menu.addAction("Refresh Analysis")
-        refresh.setShortcut("F5")
-        refresh.triggered.connect(self._refresh)
+        self.refresh_analysis_action = run_menu.addAction("Refresh Analysis")
+        self.refresh_analysis_action.setShortcut("F5")
+        self.refresh_analysis_action.setEnabled(self.recording is not None)
+        self.refresh_analysis_action.triggered.connect(self._refresh)
+        self.clear_measurement_history_action = run_menu.addAction(
+            "Clear Measurement History"
+        )
+        self.clear_measurement_history_action.triggered.connect(
+            self._clear_packet_history
+        )
         mode_menu = self.menuBar().addMenu("Analysis Mode")
         generic_action = mode_menu.addAction("Generic FSK / PSK VSA")
         generic_action.triggered.connect(
@@ -733,6 +742,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
     def _build_ui(self) -> None:
         self.setCentralWidget(QtWidgets.QWidget())
         toolbar = QtWidgets.QToolBar("1090ES Capture", self)
+        self.capture_toolbar = toolbar
         toolbar.setMovable(False)
         toolbar.addWidget(QtWidgets.QLabel("Center: 1090 MHz   Fs:"))
         self.sample_rate_combo = QtWidgets.QComboBox()
@@ -751,6 +761,16 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.internal_gain_spin.setValue(50.0)
         self.internal_gain_spin.setSuffix(" dB")
         toolbar.addWidget(self.internal_gain_spin)
+        self.external_attenuation_spin = DeferredDoubleSpinBox()
+        self.external_attenuation_spin.setRange(-200.0, 200.0)
+        self.external_attenuation_spin.setDecimals(2)
+        self.external_attenuation_spin.setValue(0.0)
+        self.external_attenuation_spin.setSuffix(" dB")
+        self.external_gain_spin = DeferredDoubleSpinBox()
+        self.external_gain_spin.setRange(-200.0, 200.0)
+        self.external_gain_spin.setDecimals(2)
+        self.external_gain_spin.setValue(0.0)
+        self.external_gain_spin.setSuffix(" dB")
         toolbar.addWidget(QtWidgets.QLabel("   Preamble SNR Threshold:"))
         self.preamble_snr_spin = DeferredDoubleSpinBox()
         self.preamble_snr_spin.setRange(-20.0, 40.0)
@@ -1008,6 +1028,12 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.internal_gain_spin.setValue(
             float(self._preferences.value("capture/internal_gain_db", 50.0, type=float))
         )
+        self.external_attenuation_spin.setValue(
+            float(self._preferences.value("capture/external_attenuation_db", 0.0, type=float))
+        )
+        self.external_gain_spin.setValue(
+            float(self._preferences.value("capture/external_gain_db", 0.0, type=float))
+        )
         self.preamble_snr_spin.setValue(
             float(self._preferences.value("detection/preamble_snr_db", 5.0, type=float))
         )
@@ -1029,6 +1055,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.sample_rate_combo.currentIndexChanged.connect(self._save_user_settings)
         self.capture_length_spin.valueChanged.connect(self._save_user_settings)
         self.internal_gain_spin.valueChanged.connect(self._save_user_settings)
+        self.external_attenuation_spin.valueChanged.connect(self._save_user_settings)
+        self.external_gain_spin.valueChanged.connect(self._save_user_settings)
         self.preamble_snr_spin.valueChanged.connect(self._save_user_settings)
 
     @QtCore.Slot()
@@ -1041,6 +1069,13 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         )
         self._preferences.setValue(
             "capture/internal_gain_db", float(self.internal_gain_spin.value())
+        )
+        self._preferences.setValue(
+            "capture/external_attenuation_db",
+            float(self.external_attenuation_spin.value()),
+        )
+        self._preferences.setValue(
+            "capture/external_gain_db", float(self.external_gain_spin.value())
         )
         self._preferences.setValue(
             "detection/preamble_snr_db", float(self.preamble_snr_spin.value())
@@ -1378,6 +1413,121 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         if self.recording is not None:
             self.analyze_recording(self.recording)
 
+    def _meas_config_values(self) -> dict[str, object]:
+        return {
+            "sample_rate_msps": int(self.sample_rate_combo.currentData()),
+            "capture_length_ms": float(self.capture_length_spin.value()),
+            "internal_gain_db": float(self.internal_gain_spin.value()),
+            "external_attenuation_db": float(
+                self.external_attenuation_spin.value()
+            ),
+            "external_gain_db": float(self.external_gain_spin.value()),
+            "preamble_snr_db": float(self.preamble_snr_spin.value()),
+            "receiver_latitude_deg": self._receiver_latitude_deg,
+            "receiver_longitude_deg": self._receiver_longitude_deg,
+        }
+
+    def _apply_meas_config_values(self, values: dict[str, object]) -> None:
+        sample_rate_index = self.sample_rate_combo.findData(
+            int(values.get("sample_rate_msps", 8))
+        )
+        if sample_rate_index < 0:
+            raise ValueError("ADS-B sample rate must be 8 or 16 MS/s")
+        self.sample_rate_combo.setCurrentIndex(sample_rate_index)
+        self.capture_length_spin.setValue(
+            float(values.get("capture_length_ms", 250.0))
+        )
+        self.internal_gain_spin.setValue(float(values.get("internal_gain_db", 50.0)))
+        self.external_attenuation_spin.setValue(
+            float(values.get("external_attenuation_db", 0.0))
+        )
+        self.external_gain_spin.setValue(float(values.get("external_gain_db", 0.0)))
+        self.preamble_snr_spin.setValue(float(values.get("preamble_snr_db", 5.0)))
+        latitude = values.get("receiver_latitude_deg")
+        longitude = values.get("receiver_longitude_deg")
+        if latitude is None or longitude is None:
+            self._receiver_latitude_deg = None
+            self._receiver_longitude_deg = None
+            self._update_receiver_location_button()
+        else:
+            self._set_receiver_location(float(latitude), float(longitude), persist=False)
+        self._save_user_settings()
+
+    def open_analysis_settings(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("ADS-B Analysis")
+        dialog.setModal(True)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        form = QtWidgets.QFormLayout()
+        sample_rate = QtWidgets.QComboBox()
+        sample_rate.addItem("8 MS/s", 8)
+        sample_rate.addItem("16 MS/s", 16)
+        sample_rate.setCurrentIndex(sample_rate.findData(self.sample_rate_combo.currentData()))
+
+        def numeric_copy(source: DeferredDoubleSpinBox) -> DeferredDoubleSpinBox:
+            target = DeferredDoubleSpinBox()
+            target.setRange(source.minimum(), source.maximum())
+            target.setDecimals(source.decimals())
+            target.setSingleStep(source.singleStep())
+            target.setSuffix(source.suffix())
+            target.setValue(source.value())
+            return target
+
+        capture_length = numeric_copy(self.capture_length_spin)
+        internal_gain = numeric_copy(self.internal_gain_spin)
+        external_attenuation = numeric_copy(self.external_attenuation_spin)
+        external_gain = numeric_copy(self.external_gain_spin)
+        preamble_snr = numeric_copy(self.preamble_snr_spin)
+        form.addRow("Sample Rate", sample_rate)
+        form.addRow("Capture Time", capture_length)
+        form.addRow("External ATT", external_attenuation)
+        form.addRow("Internal Gain", internal_gain)
+        form.addRow("External Gain", external_gain)
+        form.addRow("Preamble SNR Threshold", preamble_snr)
+        layout.addLayout(form)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        self.sample_rate_combo.setCurrentIndex(
+            self.sample_rate_combo.findData(sample_rate.currentData())
+        )
+        self.capture_length_spin.setValue(capture_length.value())
+        self.internal_gain_spin.setValue(internal_gain.value())
+        self.external_attenuation_spin.setValue(external_attenuation.value())
+        self.external_gain_spin.setValue(external_gain.value())
+        self.preamble_snr_spin.setValue(preamble_snr.value())
+
+    def open_display_settings(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("ADS-B Display")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(
+            QtWidgets.QLabel(
+                "All six result panes remain visible. Plot ranges are controlled "
+                "from each plot's right-click menu."
+            )
+        )
+        reset = QtWidgets.QPushButton("Reset Plot Scales")
+        reset.clicked.connect(
+            lambda: [
+                self._reset_plot(name, plot)
+                for name, plot in (("iq_power", self.power_plot), ("ppm", self.ppm_plot))
+            ]
+        )
+        layout.addWidget(reset)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close
+        )
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.exec()
+
     def _pluto_settings(self) -> PlutoCaptureSettings:
         sample_rate_msps = int(self.sample_rate_combo.currentData())
         return PlutoCaptureSettings(
@@ -1389,8 +1539,8 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             sdr_uri=self._pluto_target or None,
             power_correction=InputPowerCorrection(
                 internal_gain_db=self.internal_gain_spin.value(),
-                external_attenuation_db=0.0,
-                external_gain_db=0.0,
+                external_attenuation_db=self.external_attenuation_spin.value(),
+                external_gain_db=self.external_gain_spin.value(),
             ),
         )
 
@@ -1636,6 +1786,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         )
         self.recording = view_recording
         self.export_iq_action.setEnabled(True)
+        self.refresh_analysis_action.setEnabled(True)
         self.result = result
         scan_wall = self._scan_started_wall_time or datetime.now().astimezone()
         elapsed_base_s = start_sample / view_recording.sample_rate_hz
@@ -1681,6 +1832,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 is_latest = index == len(pending) - 1
                 self.recording = payload.recording
                 self.export_iq_action.setEnabled(True)
+                self.refresh_analysis_action.setEnabled(True)
                 self.result = payload.result
                 self._display_result(
                     payload.result,
@@ -1783,6 +1935,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             return
         self.recording = recording
         self.export_iq_action.setEnabled(True)
+        self.refresh_analysis_action.setEnabled(True)
         self.result = result
         started_at = capture_started_at or datetime.now().astimezone()
         self._display_result(
@@ -1804,6 +1957,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
     def _clear_packet_history(self) -> None:
         self._packet_history.clear()
+        self.export_packet_list_action.setEnabled(False)
         blocker = QtCore.QSignalBlocker(self.packet_table)
         self.packet_table.clearSelection()
         self.packet_table.setRowCount(0)
@@ -1877,6 +2031,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             or previous_selected_row == first_new_row - 1
         )
         self._packet_history.extend(new_entries)
+        self.export_packet_list_action.setEnabled(bool(self._packet_history))
         selection_blocker = QtCore.QSignalBlocker(self.packet_table)
         if not append:
             self.packet_table.clearSelection()

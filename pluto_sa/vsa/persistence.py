@@ -10,6 +10,8 @@ from typing import Any, Mapping
 PATTERN_SCHEMA = "pluto-vsa-pattern"
 CONFIG_SCHEMA = "pluto-vsa-meas-config"
 FORMAT_VERSION = 1
+MODE_CONFIG_FORMAT_VERSION = 2
+ANALYSIS_MODES = frozenset({"generic", "bluetooth", "dect", "adsb1090"})
 PATTERN_FORMATS = ("Binary", "Decimal", "Hexadecimal")
 
 
@@ -98,3 +100,50 @@ def load_meas_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(settings, dict):
         raise ValueError("measurement configuration settings must be a JSON object")
     return settings
+
+
+def save_mode_meas_config(
+    path: str | Path,
+    *,
+    analysis_mode: str,
+    settings: Mapping[str, Any],
+) -> None:
+    """Save a mode-aware configuration used by the shared VSA shell."""
+
+    mode = str(analysis_mode)
+    if mode not in ANALYSIS_MODES:
+        raise ValueError(f"unsupported VSA analysis mode: {mode!r}")
+    _write_document(
+        path,
+        {
+            "schema": CONFIG_SCHEMA,
+            "version": MODE_CONFIG_FORMAT_VERSION,
+            "analysis_mode": mode,
+            "settings": dict(settings),
+        },
+    )
+
+
+def load_mode_meas_config(path: str | Path) -> tuple[str, dict[str, Any]]:
+    """Load v2 mode-aware files and legacy v1 Generic VSA files."""
+
+    source = Path(path)
+    try:
+        document = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"could not read {source.name}: {error}") from error
+    if not isinstance(document, dict) or document.get("schema") != CONFIG_SCHEMA:
+        raise ValueError(f"not a {CONFIG_SCHEMA} file")
+    version = document.get("version")
+    if version == FORMAT_VERSION:
+        mode = "generic"
+    elif version == MODE_CONFIG_FORMAT_VERSION:
+        mode = str(document.get("analysis_mode", ""))
+        if mode not in ANALYSIS_MODES:
+            raise ValueError(f"unsupported VSA analysis mode: {mode!r}")
+    else:
+        raise ValueError(f"unsupported {CONFIG_SCHEMA} version: {version!r}")
+    settings = document.get("settings")
+    if not isinstance(settings, dict):
+        raise ValueError("measurement configuration settings must be a JSON object")
+    return mode, settings

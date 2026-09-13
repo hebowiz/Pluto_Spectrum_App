@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import csv
 import json
@@ -177,6 +178,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._build_controls()
         self._build_config_dialog()
         self._build_results()
+        self._default_meas_config = deepcopy(self._config_values())
         restored = self._restore_config()
         self.statusBar().showMessage(
             "Ready - DECT configuration restored"
@@ -186,9 +188,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
-        open_action = file_menu.addAction("Open IQ...")
-        open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self._open_iq)
+        self.open_iq_action = file_menu.addAction("Open IQ...")
+        self.open_iq_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.open_iq_action.triggered.connect(self._open_iq)
         self.export_iq_action = file_menu.addAction("Export IQ Recording...")
         self.export_iq_action.setEnabled(False)
         self.export_iq_action.triggered.connect(self._export_iq_recording)
@@ -218,9 +220,10 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.run_continuous_action.triggered.connect(
             self._toggle_continuous_capture
         )
-        refresh = run_menu.addAction("Refresh Analysis")
-        refresh.setShortcut(QtGui.QKeySequence("F5"))
-        refresh.triggered.connect(self.refresh)
+        self.refresh_analysis_action = run_menu.addAction("Refresh Analysis")
+        self.refresh_analysis_action.setShortcut(QtGui.QKeySequence("F5"))
+        self.refresh_analysis_action.setEnabled(False)
+        self.refresh_analysis_action.triggered.connect(self.refresh)
         run_menu.addSeparator()
         run_menu.addAction("Previous Packet").triggered.connect(
             lambda: self._select_result(-1)
@@ -516,10 +519,21 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             ("Resolved LO", self.resolved_lo_label),
             ("Internal Gain", self.internal_gain_spin),
             ("External ATT", self.external_att_spin),
-            ("I/Q Power Trigger", self.trigger_level_spin),
-            ("Input Device", self.device_label),
         ):
             input_form.addRow(label, widget)
+
+        signal_page = QtWidgets.QWidget()
+        signal_form = QtWidgets.QFormLayout(signal_page)
+        signal_form.addRow("Modulation", QtWidgets.QLabel("GFSK, BT = 0.5"))
+        signal_form.addRow("Symbol Rate", QtWidgets.QLabel("1.152 MSym/s"))
+        signal_form.addRow(
+            "Modulation reference",
+            QtWidgets.QLabel("DECT measurement trace / selected display reference"),
+        )
+
+        trigger_page = QtWidgets.QWidget()
+        trigger_form = QtWidgets.QFormLayout(trigger_page)
+        trigger_form.addRow("I/Q Power Trigger", self.trigger_level_spin)
 
         run_page = QtWidgets.QWidget()
         run_layout = QtWidgets.QVBoxLayout(run_page)
@@ -552,12 +566,24 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.config_fsk_mode.currentTextChanged.connect(
             self._set_fsk_symbol_plot_mode
         )
+        self.config_modulation_reference = QtWidgets.QComboBox()
+        self.config_modulation_reference.addItems(
+            tuple(reference.value for reference in DectModulationReference)
+        )
+        self.config_modulation_reference.setCurrentText(
+            self._modulation_reference.value
+        )
+        self.config_modulation_reference.currentTextChanged.connect(
+            self._set_modulation_reference
+        )
         display_layout.addWidget(self.config_show_symbols)
         display_layout.addWidget(self.config_density)
         display_layout.addWidget(QtWidgets.QLabel("Density Spread (all modulations)"))
         display_layout.addWidget(self.config_density_spread)
         display_layout.addWidget(QtWidgets.QLabel("FSK Symbol Plot"))
         display_layout.addWidget(self.config_fsk_mode)
+        display_layout.addWidget(QtWidgets.QLabel("GFSK Modulation Reference"))
+        display_layout.addWidget(self.config_modulation_reference)
         display_layout.addStretch(1)
 
         self._config_dialog = HierarchicalMeasConfigDialog(
@@ -565,6 +591,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             (
                 ("DECT Analysis", dect_page),
                 ("Input / Frontend", input_page),
+                ("Signal Description", signal_page),
+                ("Trigger", trigger_page),
                 ("Display Config", display_page),
                 ("Sweep / Run", run_page),
             ),
@@ -724,6 +752,57 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             "modulation_reference": self._modulation_reference.value,
         }
 
+    def _apply_config_values(self, settings: dict[str, object]) -> None:
+        plan_index = self.plan_combo.findData(settings["plan"])
+        if plan_index < 0:
+            raise ValueError(f"unknown DECT carrier plan: {settings['plan']!r}")
+        self.plan_combo.setCurrentIndex(plan_index)
+        self._plan_changed()
+        carrier_index = self.carrier_combo.findData(settings["carrier_hz"])
+        if carrier_index < 0:
+            raise ValueError("carrier is not part of the selected DECT plan")
+        self.carrier_combo.setCurrentIndex(carrier_index)
+        self.capture_length_spin.setValue(float(settings["capture_ms"]))
+        sps_index = self.oversampling_combo.findData(settings["samples_per_symbol"])
+        if sps_index < 0:
+            raise ValueError("unsupported DECT samples/symbol setting")
+        self.oversampling_combo.setCurrentIndex(sps_index)
+        self.rf_bandwidth_spin.setValue(float(settings["rf_bandwidth_mhz"]))
+        self.analysis_bandwidth_spin.setValue(
+            float(settings.get("analysis_bandwidth_mhz", 3.0))
+        )
+        self.lo_offset_spin.setValue(float(settings.get("lo_offset_mhz", 2.0)))
+        self.channel_filter_check.setChecked(
+            bool(settings.get("analysis_channel_enabled", False))
+        )
+        self.analysis_power_display_check.setChecked(
+            bool(settings.get("apply_analysis_bandwidth_to_power", True))
+        )
+        self.analysis_spectrum_display_check.setChecked(
+            bool(settings.get("apply_analysis_bandwidth_to_spectrum", False))
+        )
+        self.lo_offset_check.setChecked(bool(settings.get("lo_offset_enabled", False)))
+        self.internal_gain_spin.setValue(float(settings["internal_gain_db"]))
+        self.external_att_spin.setValue(float(settings["external_att_db"]))
+        self.trigger_level_spin.setValue(float(settings["trigger_level_dbm"]))
+        self._set_show_symbol_points(bool(settings.get("show_symbol_points", True)))
+        self._set_symbol_density(bool(settings.get("symbol_density", False)))
+        self._set_symbol_density_spread(
+            str(settings.get("symbol_density_spread", SymbolDensitySpread.MAXIMUM.value))
+        )
+        self._set_fsk_symbol_plot_mode(
+            str(settings.get("fsk_symbol_plot", "Constellation Frequency"))
+        )
+        self._set_modulation_reference(
+            str(
+                settings.get(
+                    "modulation_reference",
+                    DectModulationReference.MEASURED.value,
+                )
+            )
+        )
+        self._sync_analysis_channel_controls()
+
     def _save_config(self) -> None:
         payload = {
             "schema": _CONFIG_SCHEMA,
@@ -743,65 +822,35 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             payload = json.loads(raw)
             if payload.get("schema") != _CONFIG_SCHEMA:
                 return False
-            settings = payload["settings"]
-            plan_index = self.plan_combo.findData(settings["plan"])
-            if plan_index >= 0:
-                self.plan_combo.setCurrentIndex(plan_index)
-            carrier_index = self.carrier_combo.findData(settings["carrier_hz"])
-            if carrier_index >= 0:
-                self.carrier_combo.setCurrentIndex(carrier_index)
-            self.capture_length_spin.setValue(float(settings["capture_ms"]))
-            sps_index = self.oversampling_combo.findData(settings["samples_per_symbol"])
-            if sps_index >= 0:
-                self.oversampling_combo.setCurrentIndex(sps_index)
-            self.rf_bandwidth_spin.setValue(float(settings["rf_bandwidth_mhz"]))
-            self.analysis_bandwidth_spin.setValue(
-                float(settings.get("analysis_bandwidth_mhz", 3.0))
-            )
-            self.lo_offset_spin.setValue(float(settings.get("lo_offset_mhz", 2.0)))
-            self.channel_filter_check.setChecked(
-                bool(settings.get("analysis_channel_enabled", False))
-            )
-            self.analysis_power_display_check.setChecked(
-                bool(settings.get("apply_analysis_bandwidth_to_power", True))
-            )
-            self.analysis_spectrum_display_check.setChecked(
-                bool(settings.get("apply_analysis_bandwidth_to_spectrum", False))
-            )
-            self.lo_offset_check.setChecked(
-                bool(settings.get("lo_offset_enabled", False))
-            )
-            self.internal_gain_spin.setValue(float(settings["internal_gain_db"]))
-            self.external_att_spin.setValue(float(settings["external_att_db"]))
-            self.trigger_level_spin.setValue(float(settings["trigger_level_dbm"]))
-            self._set_show_symbol_points(bool(settings.get("show_symbol_points", True)))
-            self._set_symbol_density(bool(settings.get("symbol_density", False)))
-            self._set_symbol_density_spread(
-                str(
-                    settings.get(
-                        "symbol_density_spread",
-                        SymbolDensitySpread.MAXIMUM.value,
-                    )
-                )
-            )
-            self._set_fsk_symbol_plot_mode(
-                str(settings.get("fsk_symbol_plot", "Constellation Frequency"))
-            )
-            self._set_modulation_reference(
-                str(
-                    settings.get(
-                        "modulation_reference",
-                        DectModulationReference.MEASURED.value,
-                    )
-                )
-            )
-            self._sync_analysis_channel_controls()
+            self._apply_config_values(payload["settings"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             return False
         return True
 
     def _show_config(self) -> None:
         self._config_dialog.open_top()
+
+    def open_config_page(self, name: str) -> None:
+        if name == "Display Config":
+            for control, value in (
+                (self.config_show_symbols, self._show_symbol_points),
+                (self.config_density, self._symbol_density),
+            ):
+                blocker = QtCore.QSignalBlocker(control)
+                control.setChecked(value)
+                del blocker
+            for control, value in (
+                (self.config_fsk_mode, self._fsk_symbol_plot_mode),
+                (self.config_density_spread, self._symbol_density_spread.value),
+                (
+                    self.config_modulation_reference,
+                    self._modulation_reference.value,
+                ),
+            ):
+                blocker = QtCore.QSignalBlocker(control)
+                control.setCurrentText(value)
+                del blocker
+        self._config_dialog.open_page(name)
 
     def set_pluto_target(self, target: str | None) -> None:
         self._pluto_target = str(target or "")
@@ -817,6 +866,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             self._recording = session.recording
             self._recording_revision += 1
         self.export_iq_action.setEnabled(self._recording is not None)
+        self.refresh_analysis_action.setEnabled(self._recording is not None)
         self.export_modulation_action.setEnabled(False)
 
     def load_recording(
@@ -829,6 +879,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._recording = recording
         self._recording_revision += 1
         self.export_iq_action.setEnabled(True)
+        self.refresh_analysis_action.setEnabled(True)
         self.export_modulation_action.setEnabled(False)
         self.refresh()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import perf_counter
@@ -621,6 +622,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._build_summary_bar()
         self._build_results()
         self._build_configuration()
+        self._default_meas_config = deepcopy(self._meas_config_values())
         self._set_selected_pluto_target(
             self._preferences.value(_PLUTO_SELECTED_TARGET_KEY, "", type=str)
         )
@@ -635,10 +637,10 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
-        open_action = QtGui.QAction("Open IQ...", self)
-        open_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self._open_iq)
-        file_menu.addAction(open_action)
+        self.open_iq_action = QtGui.QAction("Open IQ...", self)
+        self.open_iq_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.open_iq_action.triggered.connect(self._open_iq)
+        file_menu.addAction(self.open_iq_action)
         self.export_iq_action = QtGui.QAction("Export IQ Recording...", self)
         self.export_iq_action.triggered.connect(self._export_iq_recording)
         self.export_iq_action.setEnabled(self.session.recording is not None)
@@ -1087,21 +1089,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         source_layout = QtWidgets.QVBoxLayout(source_page)
         self.input_source_combo = QtWidgets.QComboBox()
         self.input_source_combo.addItems(("Generated", "IQ File", "Pluto"))
-        source_layout.addWidget(QtWidgets.QLabel("Input Source"))
-        source_layout.addWidget(self.input_source_combo)
-        gfsk_button = QtWidgets.QPushButton("Generate Gaussian FSK")
-        qpsk_button = QtWidgets.QPushButton("Generate QPSK")
-        edr_button = QtWidgets.QPushButton("Generate pi/4-DQPSK")
-        open_button = QtWidgets.QPushButton("Open IQ File...")
-        gfsk_button.clicked.connect(lambda: self._load_generated(ModulationKind.FSK))
-        qpsk_button.clicked.connect(lambda: self._load_generated(ModulationKind.QPSK))
-        edr_button.clicked.connect(lambda: self._load_generated(ModulationKind.PI4_DQPSK))
-        open_button.clicked.connect(self._open_iq)
-        source_layout.addWidget(gfsk_button)
-        source_layout.addWidget(qpsk_button)
-        source_layout.addWidget(edr_button)
-        source_layout.addWidget(open_button)
-        source_layout.addSpacing(12)
+        self.input_source_combo.setCurrentText("Pluto")
         pluto_form = QtWidgets.QFormLayout()
         self.pluto_uri_edit = QtWidgets.QComboBox()
         self.pluto_uri_edit.setEditable(True)
@@ -1115,6 +1103,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.pluto_refresh_button = QtWidgets.QPushButton("Refresh Devices")
         self.pluto_refresh_button.clicked.connect(self._refresh_pluto_devices)
         pluto_selector = QtWidgets.QWidget()
+        self.pluto_selector = pluto_selector
         pluto_selector_layout = QtWidgets.QHBoxLayout(pluto_selector)
         pluto_selector_layout.setContentsMargins(0, 0, 0, 0)
         pluto_selector_layout.addWidget(self.pluto_uri_edit, 1)
@@ -1155,7 +1144,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.external_gain_spin.setValue(0.0)
         self.external_gain_spin.setSuffix(" dB")
         self.capture_correction_label = QtWidgets.QLabel()
-        pluto_form.addRow("ADALM-Pluto", pluto_selector)
         pluto_form.addRow("Center Frequency", self.capture_center_spin)
         pluto_form.addRow("RF Bandwidth", self.capture_rf_bandwidth_spin)
         pluto_form.addRow("LO Offset", self.lo_offset_check)
@@ -1612,6 +1600,143 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._populate_result_summary_item_tree()
         config_pages.append(("Result Summary", summary_page))
 
+        display_page = QtWidgets.QWidget()
+        display_form = QtWidgets.QFormLayout(display_page)
+        self.config_show_symbol_points = QtWidgets.QCheckBox()
+        self.config_show_symbol_points.setChecked(self.symbol_display_action.isChecked())
+        self.config_show_symbol_points.toggled.connect(
+            lambda checked: (
+                self.symbol_display_action.trigger()
+                if checked != self.symbol_display_action.isChecked()
+                else None
+            )
+        )
+        self.symbol_display_action.toggled.connect(
+            self.config_show_symbol_points.setChecked
+        )
+        self.config_symbol_table_format = QtWidgets.QComboBox()
+        self.config_symbol_table_format.addItems(("Hexadecimal", "Decimal"))
+        self.config_symbol_table_format.setCurrentText(
+            "Decimal" if self.symbol_table_decimal_action.isChecked() else "Hexadecimal"
+        )
+        self.config_symbol_table_format.currentTextChanged.connect(
+            lambda value: (
+                self.symbol_table_decimal_action.trigger()
+                if (value == "Decimal")
+                != self.symbol_table_decimal_action.isChecked()
+                else None
+            )
+        )
+        self.config_iq_power_signal = QtWidgets.QComboBox()
+        self.config_iq_power_signal.addItems(("Raw Capture", "Measured"))
+        self.config_iq_power_signal.setCurrentText(
+            "Measured" if self.measured_iq_power_action.isChecked() else "Raw Capture"
+        )
+        self.config_iq_power_signal.currentTextChanged.connect(
+            lambda value: (
+                self.measured_iq_power_action.trigger()
+                if (value == "Measured")
+                != self.measured_iq_power_action.isChecked()
+                else None
+            )
+        )
+        self.config_modulation_signal = QtWidgets.QComboBox()
+        self.config_modulation_signal.addItems(("Raw IQ", "Measured"))
+        self.config_modulation_signal.setCurrentText(
+            "Raw IQ" if self.raw_modulation_signal_action.isChecked() else "Measured"
+        )
+        self.config_modulation_signal.currentTextChanged.connect(
+            lambda value: (
+                self.raw_modulation_signal_action.trigger()
+                if (value == "Raw IQ")
+                != self.raw_modulation_signal_action.isChecked()
+                else None
+            )
+        )
+        self.config_qam_modulation_signal = QtWidgets.QComboBox()
+        self.config_qam_modulation_signal.addItems(("Raw IQ", "Measured"))
+        self.config_qam_modulation_signal.setCurrentText(
+            "Raw IQ"
+            if self.qam_raw_modulation_signal_action.isChecked()
+            else "Measured"
+        )
+        self.config_qam_modulation_signal.currentTextChanged.connect(
+            lambda value: (
+                self.qam_raw_modulation_signal_action.trigger()
+                if (value == "Raw IQ")
+                != self.qam_raw_modulation_signal_action.isChecked()
+                else None
+            )
+        )
+        self.config_symbol_trace = QtWidgets.QComboBox()
+        self.config_symbol_trace.addItems(("Flat", "Density"))
+        self.config_symbol_trace.setCurrentText(
+            "Density" if self.constellation_density_action.isChecked() else "Flat"
+        )
+        self.config_symbol_trace.currentTextChanged.connect(
+            lambda value: (
+                self.constellation_density_action.trigger()
+                if (value == "Density")
+                != self.constellation_density_action.isChecked()
+                else None
+            )
+        )
+        self.config_density_spread = QtWidgets.QComboBox()
+        self.config_density_spread.addItems(
+            tuple(spread.value for spread in SymbolDensitySpread)
+        )
+        self.config_density_spread.setCurrentText(self._symbol_density_spread().value)
+        self.config_density_spread.currentTextChanged.connect(
+            lambda value: self.constellation_density_spread_actions[
+                SymbolDensitySpread(value)
+            ].trigger()
+        )
+        self.config_psk_symbol_plot = QtWidgets.QComboBox()
+        self.config_psk_symbol_plot.addItems(("Physical IQ", "Differential IQ"))
+        self.config_psk_symbol_plot.setCurrentText(
+            "Differential IQ"
+            if self.differential_iq_symbol_plot_action.isChecked()
+            else "Physical IQ"
+        )
+        self.config_psk_symbol_plot.currentTextChanged.connect(
+            lambda value: (
+                self.differential_iq_symbol_plot_action.trigger()
+                if (value == "Differential IQ")
+                != self.differential_iq_symbol_plot_action.isChecked()
+                else None
+            )
+        )
+        self.config_fsk_symbol_plot = QtWidgets.QComboBox()
+        self.config_fsk_symbol_plot.addItems(
+            ("Phase Difference", "Constellation Frequency")
+        )
+        self.config_fsk_symbol_plot.setCurrentText(
+            "Constellation Frequency"
+            if self.fsk_constellation_frequency_action.isChecked()
+            else "Phase Difference"
+        )
+        self.config_fsk_symbol_plot.currentTextChanged.connect(
+            lambda value: (
+                self.fsk_constellation_frequency_action.trigger()
+                if (value == "Constellation Frequency")
+                != self.fsk_constellation_frequency_action.isChecked()
+                else None
+            )
+        )
+        display_form.addRow("Show Symbol Points", self.config_show_symbol_points)
+        display_form.addRow("Symbol Table Format", self.config_symbol_table_format)
+        display_form.addRow("IQ Power Signal", self.config_iq_power_signal)
+        display_form.addRow("Modulation Signal", self.config_modulation_signal)
+        display_form.addRow("QAM Modulation Signal", self.config_qam_modulation_signal)
+        display_form.addRow("Symbol Plot Trace", self.config_symbol_trace)
+        display_form.addRow("Density Spread", self.config_density_spread)
+        display_form.addRow("PSK Symbol Plot", self.config_psk_symbol_plot)
+        display_form.addRow("FSK Symbol Plot", self.config_fsk_symbol_plot)
+        reset_plot_button = QtWidgets.QPushButton("Reset Plot Scales")
+        reset_plot_button.clicked.connect(self._reset_graph_scales)
+        display_form.addRow(reset_plot_button)
+        config_pages.append(("Display", display_page))
+
         run_page = QtWidgets.QWidget()
         run_layout = QtWidgets.QVBoxLayout(run_page)
         self.run_single_button = QtWidgets.QPushButton("Run Single (Pluto)")
@@ -1842,6 +1967,59 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _open_meas_config(self) -> None:
         self._show_config_page(0)
         self._meas_config_dialog.exec()
+
+    def open_config_page(self, name: str) -> None:
+        if name == "Display":
+            self._sync_display_config_controls()
+        self._meas_config_dialog.open_page(name)
+
+    def _sync_display_config_controls(self) -> None:
+        checkbox_blocker = QtCore.QSignalBlocker(self.config_show_symbol_points)
+        self.config_show_symbol_points.setChecked(self.symbol_display_action.isChecked())
+        del checkbox_blocker
+        values = (
+            (
+                self.config_symbol_table_format,
+                "Decimal"
+                if self.symbol_table_decimal_action.isChecked()
+                else "Hexadecimal",
+            ),
+            (
+                self.config_iq_power_signal,
+                "Measured" if self.measured_iq_power_action.isChecked() else "Raw Capture",
+            ),
+            (
+                self.config_modulation_signal,
+                "Raw IQ" if self.raw_modulation_signal_action.isChecked() else "Measured",
+            ),
+            (
+                self.config_qam_modulation_signal,
+                "Raw IQ"
+                if self.qam_raw_modulation_signal_action.isChecked()
+                else "Measured",
+            ),
+            (
+                self.config_symbol_trace,
+                "Density" if self.constellation_density_action.isChecked() else "Flat",
+            ),
+            (self.config_density_spread, self._symbol_density_spread().value),
+            (
+                self.config_psk_symbol_plot,
+                "Differential IQ"
+                if self.differential_iq_symbol_plot_action.isChecked()
+                else "Physical IQ",
+            ),
+            (
+                self.config_fsk_symbol_plot,
+                "Constellation Frequency"
+                if self.fsk_constellation_frequency_action.isChecked()
+                else "Phase Difference",
+            ),
+        )
+        for control, value in values:
+            blocker = QtCore.QSignalBlocker(control)
+            control.setCurrentText(value)
+            del blocker
 
     def _last_directory(self, file_kind: str) -> str:
         stored = self._preferences.value(f"directories/{file_kind}", "", type=str)
@@ -2177,7 +2355,7 @@ class VSAWindow(QtWidgets.QMainWindow):
     def _meas_config_values(self) -> dict[str, object]:
         return {
             "input_frontend": {
-                "input_source": self.input_source_combo.currentText(),
+                "input_source": "Pluto",
                 "center_frequency_mhz": self.capture_center_spin.value(),
                 "rf_bandwidth_mhz": self.capture_rf_bandwidth_spin.value(),
                 "lo_offset_enabled": self.lo_offset_check.isChecked(),
@@ -2400,10 +2578,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             self._set_combo_text(self.mapping_combo, signal["symbol_mapping"], "symbol mapping")
             self._set_combo_text(self.tx_filter_combo, signal["tx_filter"], "TX filter")
             self.filter_parameter_spin.setValue(float(signal["filter_parameter"]))
-            if "input_source" in source:
-                self._set_combo_text(
-                    self.input_source_combo, source["input_source"], "input source"
-                )
+            self.input_source_combo.setCurrentText("Pluto")
             self.capture_center_spin.setValue(
                 float(source.get("center_frequency_mhz", 2441.0))
             )

@@ -101,5 +101,20 @@ class HierarchicalMeasConfigDialog(QtWidgets.QDialog):
         super().reject()
 
     def open_top(self) -> int:
+        self.top_title.show()
         self.show_page(0)
+        return self.exec()
+
+    def open_page(self, name: str) -> int:
+        """Open one settings page directly, without exposing Config Top chrome."""
+
+        try:
+            index = self.page_names.index(str(name))
+        except ValueError as error:
+            raise KeyError(f"unknown measurement configuration page: {name}") from error
+        if index == 0:
+            raise ValueError("Config Top is not a settings page")
+        self.show_page(index)
+        self.back_button.hide()
+        self.top_title.hide()
         return self.exec()
