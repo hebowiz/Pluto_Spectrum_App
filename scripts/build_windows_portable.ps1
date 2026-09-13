@@ -70,15 +70,33 @@ New-Item -ItemType Directory -Force -Path $specRoot | Out-Null
 $runtimeHook = Join-Path $repoRoot "packaging\hooks\runtime_hook_libiio.py"
 $notices = Join-Path $repoRoot "packaging\THIRD_PARTY_NOTICES.txt"
 $applications = @(
-    @{ Name = "Pluto_RTSA"; Entry = "packaging\entrypoints\pluto_rtsa.py"; Hidden = @() },
-    @{ Name = "Pluto_VSA"; Entry = "packaging\entrypoints\pluto_vsa.py"; Hidden = @(
+    @{
+        Name = "Pluto_RTSA"
+        Entry = "packaging\entrypoints\pluto_rtsa.py"
+        Manual = "output\pdf\Pluto_RTSA_User_Manual_JA.pdf"
+        Hidden = @()
+    },
+    @{
+        Name = "Pluto_VSA"
+        Entry = "packaging\entrypoints\pluto_vsa.py"
+        Manual = "output\pdf\Pluto_VSA_User_Manual_JA.pdf"
+        Hidden = @(
         "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebChannel"
-    ) },
-    @{ Name = "Pluto_VSG"; Entry = "packaging\entrypoints\pluto_vsg_entry.py"; Hidden = @() },
-    @{ Name = "Pluto_CAL"; Entry = "packaging\entrypoints\pluto_cal.py"; Hidden = @() }
+        )
+    },
+    @{
+        Name = "Pluto_VSG"
+        Entry = "packaging\entrypoints\pluto_vsg_entry.py"
+        Manual = "output\pdf\Pluto_VSG_User_Manual_JA.pdf"
+        Hidden = @()
+    }
 )
 
 foreach ($application in $applications) {
+    $manualPath = Join-Path $repoRoot $application.Manual
+    if (-not (Test-Path -LiteralPath $manualPath)) {
+        throw "User manual not found for $($application.Name): $manualPath"
+    }
     $arguments = @(
         "-m", "PyInstaller",
         "--noconfirm", "--clean", "--onedir", "--windowed",
@@ -102,6 +120,13 @@ foreach ($application in $applications) {
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed for $($application.Name)" }
 
     $executable = Join-Path $distRoot "$($application.Name)\$($application.Name).exe"
+    $manualDirectory = Join-Path $distRoot "$($application.Name)\manual"
+    New-Item -ItemType Directory -Force -Path $manualDirectory | Out-Null
+    $bundledManual = Join-Path $manualDirectory (Split-Path -Leaf $manualPath)
+    Copy-Item -LiteralPath $manualPath -Destination $bundledManual -Force
+    if (-not (Test-Path -LiteralPath $bundledManual)) {
+        throw "Bundled user manual was not created for $($application.Name): $bundledManual"
+    }
     $smokeReport = Join-Path $buildRoot "$($application.Name)-smoke.json"
     Remove-Item -LiteralPath $smokeReport -Force -ErrorAction SilentlyContinue
     $env:PLUTO_APP_SMOKE_TEST = "1"
