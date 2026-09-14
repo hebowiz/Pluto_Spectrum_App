@@ -5,6 +5,7 @@ import numpy as np
 from pluto_protocol import (
     PacketDecodeInput, PacketSourceInfo, analyze_packet, packet_table_rows,
 )
+from pluto_protocol.bluetooth.common import decode_acl_header
 from pluto_sa.vsa.protocol import analyze_demodulated_packet_bits
 from pluto_vsg.engine import BluetoothBRWaveformEngine, BluetoothLEWaveformEngine
 from pluto_vsg.model import BluetoothLEPhy, BluetoothPacketKind
@@ -40,6 +41,17 @@ def test_br_generator_exposes_and_decodes_exact_air_bits() -> None:
     assert " " in payload.display_value
     assert crc.display_value.startswith("0x")
     assert "Expected 0x" in crc.meaning
+
+
+def test_two_octet_acl_header_ignores_three_rfu_bits() -> None:
+    header = np.zeros(16, dtype=np.uint8)
+    header[:3] = (1, 0, 1)
+    header[3:13] = np.asarray(
+        [(0x2AB >> index) & 1 for index in range(10)], dtype=np.uint8
+    )
+    header[13:] = 1
+
+    assert decode_acl_header(header) == (1, 1, 0x2AB)
 
 
 def test_edr_generator_uses_the_same_shared_decoder() -> None:

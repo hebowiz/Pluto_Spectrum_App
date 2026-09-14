@@ -86,4 +86,13 @@ def decode_acl_header(bits: np.ndarray) -> tuple[int, int, int]:
     values = np.asarray(bits, dtype=np.uint8)
     if values.size not in (8, 16):
         raise ValueError("ACL payload header must be 8 or 16 bits")
-    return bits_to_int_lsb(values[:2]), int(values[2]), bits_to_int_lsb(values[3:])
+    # The one-octet header carries a five-bit Length.  The two-octet header
+    # used by multi-slot BR and every EDR ACL packet carries a ten-bit Length;
+    # its final three bits are RFU and must not inflate the decoded packet
+    # extent when observing real traffic.
+    length_width = 5 if values.size == 8 else 10
+    return (
+        bits_to_int_lsb(values[:2]),
+        int(values[2]),
+        bits_to_int_lsb(values[3 : 3 + length_width]),
+    )

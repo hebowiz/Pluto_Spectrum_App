@@ -13,6 +13,7 @@ from typing import Mapping
 import numpy as np
 
 from pluto_sa.vsa.dc import apply_robust_dc_removal
+from pluto_sa.vsa.demod.gfsk import _detect_bursts
 from pluto_protocol.bitops import bits_hex_octets_lsb
 from pluto_protocol.model import (
     FieldStatus,
@@ -1154,6 +1155,56 @@ def _exact_br_result_symbols(packet: PacketAnalysisResult) -> int | None:
         return None
     header_bits = 8 if packet.packet_type == "DH1" else 16
     return 126 + header_bits + 8 * length_bytes + 16
+
+
+def _classic_physical_packet_stop_sample(
+    packet: PacketAnalysisResult,
+    *,
+    phy: BluetoothClassicPhy,
+    packet_start_sample: int,
+    pattern: object,
+    analysis_sample_offset: int,
+    sample_rate_hz: float,
+) -> tuple[int, str]:
+    """Return the physical packet boundary derived from TYPE and Length.
+
+    A VSA Result Range is a measurement/plotting selection and is not the
+    semantic packet boundary.  Keep the two coordinates independent even
+    when an exact-length reanalysis currently makes them numerically equal.
+    """
+
+    if phy is BluetoothClassicPhy.BR:
+        symbol_count = _exact_br_result_symbols(packet)
+        if symbol_count is not None:
+            return (
+                int(packet_start_sample)
+                + int(round(symbol_count * float(sample_rate_hz) / 1_000_000.0)),
+                "decoded_type_and_payload_length",
+            )
+    else:
+        width = 2 if phy is BluetoothClassicPhy.EDR_2M else 3
+        symbol_count = _exact_edr_result_symbols(
+            packet, bits_per_symbol=width
+        )
+        symbol_times = np.asarray(
+            getattr(pattern, "symbol_time_s", ()), dtype=np.float64
+        )
+        if symbol_count is not None and symbol_times.size:
+            samples_per_symbol = float(sample_rate_hz) / 1_000_000.0
+            first_center = (
+                int(analysis_sample_offset)
+                + float(symbol_times[0]) * float(sample_rate_hz)
+            )
+            return (
+                int(round(first_center + (symbol_count - 0.5) * samples_per_symbol)),
+                "decoded_type_and_payload_length",
+            )
+
+    result_stop = int(getattr(pattern, "result_stop_sample"))
+    return (
+        int(analysis_sample_offset) + result_stop,
+        "result_range_fallback",
+    )
 
 
 _HDT_SYMBOL_RATE_HZ = 2_000_000.0
@@ -2819,10 +2870,30 @@ def analyze_bluetooth_classic_recording(
     packet_start_sample = recording_sample_offset + int(
         br_analysis_session.pattern_result.result_start_sample
     )
-    packet_stop_sample = (
+    result_stop_sample = (
         analysis_sample_offset_global + int(pattern.result_stop_sample)
         if phy is not BluetoothClassicPhy.BR
         else recording_sample_offset + int(pattern.result_stop_sample)
+    )
+    packet_stop_sample, packet_stop_source = _classic_physical_packet_stop_sample(
+        packet,
+        phy=phy,
+        packet_start_sample=packet_start_sample,
+        pattern=pattern,
+        analysis_sample_offset=(
+            analysis_sample_offset_global
+            if phy is not BluetoothClassicPhy.BR
+            else recording_sample_offset
+        ),
+        sample_rate_hz=recording.sample_rate_hz,
+    )
+    packet = replace(
+        packet,
+        source=replace(
+            packet.source,
+            start_sample=packet_start_sample,
+            stop_sample=packet_stop_sample,
+        ),
     )
     rf_metrics: tuple[BluetoothMetric, ...] = ()
     rf_measurements: tuple[BluetoothRFMeasurementResult, ...] = ()
@@ -3465,6 +3536,9 @@ def analyze_bluetooth_classic_recording(
             "analysis_sample_offset": analysis_sample_offset_global,
             "packet_start_sample": packet_start_sample,
             "packet_stop_sample": packet_stop_sample,
+            "physical_packet_stop_sample": packet_stop_sample,
+            "packet_stop_source": packet_stop_source,
+            "result_stop_sample": result_stop_sample,
             "selected_match_index": int(match_index),
             "eligible_match_count": int(
                 br_analysis_session.pattern_result.metadata.get(
@@ -3580,6 +3654,14 @@ def analyze_bluetooth_le_recording(
     recording_sample_offset = max(0, int(_recording_sample_offset))
     packet_start_sample = recording_sample_offset + local_packet_start_sample
     packet_stop_sample = recording_sample_offset + local_packet_stop_sample
+    packet = replace(
+        packet,
+        source=replace(
+            packet.source,
+            start_sample=packet_start_sample,
+            stop_sample=packet_stop_sample,
+        ),
+    )
     try:
         rate_error = float(vsa_result.metadata.get("symbol_rate_error_ppm"))
     except (TypeError, ValueError):
@@ -3646,6 +3728,11 @@ def analyze_bluetooth_le_recording(
             "analysis_sample_offset": recording_sample_offset,
             "packet_start_sample": packet_start_sample,
             "packet_stop_sample": packet_stop_sample,
+            "physical_packet_stop_sample": packet_stop_sample,
+            "packet_stop_source": "decoded_pdu_length",
+            "result_stop_sample": (
+                recording_sample_offset + int(pattern.result_stop_sample)
+            ),
             "packet_symbol_count": int(bits.size),
             "provisional_result_bit_count": provisional_result_bit_count,
             "packet_length_refined": int(bits.size) < provisional_result_bit_count,
@@ -3756,8 +3843,25 @@ def _classic_identity_candidates(
             for header in headers
             if _edr_candidate_for_type(header.packet_type) in edr_air_bits
         )
-    length_confirmed: list[tuple[int, int, bool, str]] = []
+    length_confirmed: list[
+        tuple[tuple[int, int, bool, str], float]
+    ] = []
     if edr_air_bits:
+        access_start = int(raw.demodulation.access_start_sample)
+        observed_bursts = _detect_bursts(
+            np.asarray(recording.iq),
+            sample_rate_hz=recording.sample_rate_hz,
+            symbol_rate_hz=1_000_000.0,
+            minimum_symbols=32,
+        )
+        observed_stop = next(
+            (
+                int(stop)
+                for start, stop in observed_bursts
+                if int(start) <= access_start < int(stop)
+            ),
+            recording.sample_count,
+        )
         for header in headers:
             phy = _edr_candidate_for_type(header.packet_type)
             if phy is None or phy not in edr_air_bits or header.uap is None:
@@ -3789,24 +3893,59 @@ def _classic_identity_candidates(
                 stop_sample=recording.sample_count,
             )
             length_field = _packet_field_by_id(packet.root_fields, "length")
+            payload_header_field = _packet_field_by_id(
+                packet.root_fields, "payload_header"
+            )
+            payload_header_bits = np.asarray(
+                ()
+                if payload_header_field is None
+                else payload_header_field.raw_bits,
+                dtype=np.uint8,
+            )
+            rfu_bits_clear = (
+                payload_header_bits.size == 16
+                and not np.any(payload_header_bits[13:16])
+            )
             maximum_octets = _EDR_ACL_MAX_PAYLOAD_OCTETS.get(
                 (phy, int(header.packet_type))
             )
             if (
                 length_field is not None
+                and rfu_bits_clear
                 and maximum_octets is not None
                 and 0 <= int(length_field.value) <= maximum_octets
             ):
+                exact_symbols = _exact_edr_result_symbols(
+                    packet,
+                    bits_per_symbol=(
+                        2 if phy is BluetoothClassicPhy.EDR_2M else 3
+                    ),
+                )
+                predicted_stop = (
+                    access_start
+                    if exact_symbols is None
+                    else access_start
+                    + int(
+                        round(
+                            (132 + exact_symbols)
+                            * recording.sample_rate_hz
+                            / 1_000_000.0
+                        )
+                    )
+                )
                 length_confirmed.append(
                     (
-                        int(header.uap),
-                        detected_clock,
-                        bool(header.whitening_enabled),
                         (
-                            "hec_and_payload_length_unwhitened"
-                            if header.clock_6_1 is None
-                            else "hec_and_payload_length"
+                            int(header.uap),
+                            detected_clock,
+                            bool(header.whitening_enabled),
+                            (
+                                "hec_and_payload_length_unwhitened"
+                                if header.clock_6_1 is None
+                                else "hec_and_payload_length"
+                            ),
                         ),
+                        float(abs(predicted_stop - observed_stop)),
                     )
                 )
     fallback = tuple(
@@ -3834,15 +3973,26 @@ def _classic_identity_candidates(
     # disambiguate the 64 HEC-consistent clock/UAP pairs. Once at least one
     # candidate satisfies the TYPE-specific slot capacity, do not run the
     # expensive full EDR optimizer for candidates whose Length is impossible.
-    identity_pool = (
-        tuple(length_confirmed)
-        if length_confirmed
-        else (*confirmed, *fallback)
-    )
+    endpoint_error = {
+        identity: error for identity, error in length_confirmed
+    }
+    if length_confirmed:
+        identity_pool = tuple(identity for identity, _error in length_confirmed)
+    elif confirmed:
+        identity_pool = confirmed
+    elif uap_hint is None and clock_hint is None:
+        # HEC alone leaves 64 equally valid UAP/clock pairs.  Running the full
+        # synchronizer/measurement pipeline for every pair cannot resolve the
+        # identity and made short NULL/POLL responses stall a General sweep.
+        # Keep fallback trials only when the user supplied identity evidence.
+        identity_pool = ()
+    else:
+        identity_pool = fallback
     ranked = sorted(
         identity_pool,
         key=lambda identity: (
             0 if "payload_crc" in identity[3] else 1 if "payload_length" in identity[3] else 2,
+            endpoint_error.get(identity, float("inf")),
             0 if identity[2] is bool(whitening_enabled) else 1,
         ),
     )
@@ -3883,6 +4033,12 @@ def _analyze_bluetooth_classic_recordings_auto(
     if not candidates:
         raise RuntimeError("Bluetooth Classic Access Code was not found by auto detection")
     margin = max(1, int(round(recording.sample_rate_hz * 16.0e-6)))
+    rf_bursts = _detect_bursts(
+        np.asarray(recording.iq),
+        sample_rate_hz=recording.sample_rate_hz,
+        symbol_rate_hz=1_000_000.0,
+        minimum_symbols=32,
+    )
     results: list[BluetoothDedicatedResult] = []
     for index, candidate in enumerate(candidates):
         if cancelled is not None and cancelled():
@@ -3911,7 +4067,7 @@ def _analyze_bluetooth_classic_recordings_auto(
             continue
         selected: BluetoothDedicatedResult | None = None
         selected_identity: tuple[int, int, bool, str] | None = None
-        best_score: tuple[int, int, int] | None = None
+        best_score: tuple[int, int, int, float] | None = None
         # Exact hints and EDR-capable TYPE candidates are naturally near the
         # front.  Try all HEC candidates until CRC confirms one; retain the
         # best non-CRC result so unsupported packets remain inspectable.
@@ -3932,7 +4088,7 @@ def _analyze_bluetooth_classic_recordings_auto(
                     local,
                     match_index=1,
                     _recording_sample_offset=crop_start,
-                    _generate_display_products=selected is None,
+                    _generate_display_products=False,
                     **options,
                 )
             except (RuntimeError, ValueError):
@@ -3942,6 +4098,11 @@ def _analyze_bluetooth_classic_recordings_auto(
                 1 if integrity.crc_valid is True else 0,
                 1 if integrity.complete else 0,
                 -len(item.packet.issues),
+                -float(
+                    item.metadata["analysis_session"].pattern_result.metadata.get(
+                        "bluetooth_devm_rms_percent", float("inf")
+                    )
+                ),
             )
             if best_score is None or score > best_score:
                 selected, selected_identity, best_score = (
@@ -3962,9 +4123,49 @@ def _analyze_bluetooth_classic_recordings_auto(
                 )
                 selected = item
                 break
+            # A correctly decoded unencrypted Length predicts the observed RF
+            # falling edge closely.  A much longer continuing burst means the
+            # payload header is unavailable (notably with E0, which encrypts
+            # the complete payload).  Candidates were ranked by this same
+            # endpoint evidence, so further UAP/clock trials cannot recover a
+            # trustworthy semantic Length and only repeat the expensive fit.
+            item_start = int(item.metadata.get("packet_start_sample", 0))
+            item_stop = int(item.metadata.get("packet_stop_sample", 0))
+            item_burst_stop = next(
+                (
+                    int(stop)
+                    for start, stop in rf_bursts
+                    if int(start) <= item_start < int(stop)
+                ),
+                None,
+            )
+            if (
+                "payload_length" in provenance
+                and item_burst_stop is not None
+                and item_burst_stop
+                > item_stop
+                + int(round(32.0e-6 * recording.sample_rate_hz))
+            ):
+                break
         if selected is None or selected_identity is None:
             continue
         uap, clock, detected_whitening, provenance = selected_identity
+        # Candidate comparison does not need FFT/plot products.  Generate
+        # those once, only for the winning identity, and refresh the immutable
+        # result's VSA payload from the same session.
+        selected_session = selected.metadata.get("analysis_session")
+        selected_br_session = selected.metadata.get("br_analysis_session")
+        for selected_product_session in (selected_br_session, selected_session):
+            if isinstance(selected_product_session, VSASession):
+                selected_product_session.generate_display_products()
+        if isinstance(selected_session, VSASession):
+            selected_vsa = (
+                selected_session.carrier_corrected_pattern_range_result
+                or selected_session.pattern_range_result
+                or selected_session.result
+            )
+            if selected_vsa is not None:
+                selected = replace(selected, vsa_result=selected_vsa)
         reported_clock: int | None = (
             None if provenance.endswith("unwhitened") else clock
         )
@@ -4015,6 +4216,47 @@ def _analyze_bluetooth_classic_recordings_auto(
                 ),
             ),
         )
+        # E0 can encrypt the complete payload, including its Length field.
+        # When CRC cannot confirm that decoded extent and a clear RF falling
+        # edge proves the burst continues, retain the decoded endpoint for
+        # diagnostics but use the observed physical edge for Packet End.
+        if selected.packet.integrity.crc_valid is not True:
+            decoded_stop = int(selected.metadata.get("packet_stop_sample", 0))
+            packet_start = int(selected.metadata.get("packet_start_sample", 0))
+            containing_burst = next(
+                (
+                    (int(start), int(stop))
+                    for start, stop in rf_bursts
+                    if int(start) <= packet_start < int(stop)
+                ),
+                None,
+            )
+            if (
+                containing_burst is not None
+                and containing_burst[1]
+                > decoded_stop
+                + int(round(4.0 * recording.sample_rate_hz / 1_000_000.0))
+            ):
+                metadata = dict(selected.metadata)
+                metadata.update(
+                    {
+                        "decoded_packet_stop_sample": decoded_stop,
+                        "packet_stop_sample": containing_burst[1],
+                        "physical_packet_stop_sample": containing_burst[1],
+                        "packet_stop_source": "rf_burst_end_unconfirmed_length",
+                    }
+                )
+                selected = replace(
+                    selected,
+                    packet=replace(
+                        selected.packet,
+                        source=replace(
+                            selected.packet.source,
+                            stop_sample=containing_burst[1],
+                        ),
+                    ),
+                    metadata=metadata,
+                )
         results.append(selected)
     if not results:
         raise RuntimeError("Bluetooth Classic auto-detected candidates could not be fine synchronized")

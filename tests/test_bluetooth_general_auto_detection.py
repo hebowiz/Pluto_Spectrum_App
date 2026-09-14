@@ -6,6 +6,7 @@ import pytest
 
 from pluto_sa.vsa.model import IQRecording
 from pluto_sa.vsa.sources import FileIQSource
+from pluto_sa.vsa.channel import extract_requested_analysis_channel
 from pluto_sa.vsa.profiles.bluetooth_br import (
     access_code_bits,
     recover_lap_from_access_code_bits,
@@ -257,6 +258,40 @@ def test_general_classic_rejects_wrong_explicit_edr_phy_quick_path() -> None:
             phy_search="EDR 3M",
             result_length=5_000,
         )
+
+
+def test_general_classic_restores_offset_lo_and_matches_real_ldac_capture() -> None:
+    raw_recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "LDAC.npz"
+    )
+    recording = extract_requested_analysis_channel(raw_recording)
+
+    result = analyze_bluetooth_classic_recordings(
+        recording,
+        profile=BluetoothAnalysisProfile.GENERAL_PACKET,
+        lap=None,
+        uap=None,
+        clock_6_1=None,
+        whitening_enabled=True,
+        phy_search=None,
+        result_length=10_000,
+    )[0]
+
+    assert recording.center_frequency_hz == pytest.approx(2_404_000_000.0)
+    assert result.packet.phy_name == "EDR 2M"
+    assert result.packet.packet_type == "2-DH5"
+    assert result.metadata["detected_lap"] == 0xFCF255
+    assert result.metadata["edr_sync_correlation"] > 0.99
+    assert result.metadata["packet_stop_source"] == (
+        "rf_burst_end_unconfirmed_length"
+    )
+    assert result.metadata["physical_packet_stop_sample"] == pytest.approx(
+        23211, abs=4
+    )
+    assert result.metadata["physical_packet_stop_sample"] > (
+        result.metadata["decoded_packet_stop_sample"]
+    )
+    assert result.packet.source.stop_sample == pytest.approx(23211, abs=4)
 
 
 def test_general_le_auto_detects_arbitrary_access_address_and_leaves_crc_unknown() -> None:

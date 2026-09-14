@@ -907,6 +907,55 @@ def test_bluetooth_workspace_opens_iq_file_directly(
         window.deleteLater()
 
 
+def test_bluetooth_workspace_restores_saved_offset_lo_analysis_channel(
+    tmp_path, monkeypatch
+) -> None:
+    pg.mkQApp("Bluetooth dedicated Offset LO IQ file test")
+    iq_path = tmp_path / "offset-lo.npz"
+    capture = IQRecording(
+        iq=np.ones(4096, dtype=np.complex64),
+        sample_rate_hz=8_000_000.0,
+        center_frequency_hz=2_405_500_000.0,
+        usable_bandwidth_hz=8_000_000.0,
+        metadata={
+            "requested_center_frequency_hz": 2_404_000_000.0,
+            "hardware_lo_frequency_hz": 2_405_500_000.0,
+            "lo_offset_hz": 1_500_000.0,
+            "experimental_lo_offset": True,
+            "requested_analysis_bandwidth_hz": 1_500_000.0,
+        },
+    )
+    FileIQSource.save_npz(iq_path, capture)
+    window = BluetoothAnalyzerWindow(
+        preferences=QtCore.QSettings(
+            str(tmp_path / "bluetooth-offset-open.ini"),
+            QtCore.QSettings.Format.IniFormat,
+        )
+    )
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getOpenFileName",
+            lambda *_args, **_kwargs: (str(iq_path), ""),
+        )
+        monkeypatch.setattr(window, "refresh", lambda: None)
+        window._open_iq()
+
+        assert window._capture_recording is not None
+        assert window._recording is not None
+        assert window._capture_recording.center_frequency_hz == pytest.approx(
+            2_405_500_000.0
+        )
+        assert window._recording.center_frequency_hz == pytest.approx(
+            2_404_000_000.0
+        )
+        assert window._recording.metadata["analysis_channel_applied"] is True
+        assert window.center_spin.value() == pytest.approx(2404.0)
+    finally:
+        window.close()
+        window.deleteLater()
+
+
 def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> None:
     pg.mkQApp("Bluetooth dedicated HDT UI test")
     recording, _generated, _project = _hdt_recording(HDTRate.HDT7_5, 48)
@@ -1968,6 +2017,26 @@ def test_classic_type_is_only_a_phy_candidate_and_length_sets_result_range(
         result.metadata["analysis_session"].pattern_result.decoded_symbols.size
         == expected_result_symbols
     )
+    assert result.metadata["physical_packet_stop_sample"] == (
+        result.metadata["packet_stop_sample"]
+    )
+    assert result.metadata["packet_stop_source"] == (
+        "decoded_type_and_payload_length"
+    )
+    if expected_phy == "BR":
+        expected_packet_stop = result.metadata["packet_start_sample"] + int(
+            round(expected_result_symbols * generated.sample_rate_hz / 1_000_000.0)
+        )
+    else:
+        expected_packet_stop = int(
+            round(
+                result.metadata["edr_sync_first_symbol_center_sample"]
+                + (expected_result_symbols - 0.5)
+                * generated.sample_rate_hz
+                / 1_000_000.0
+            )
+        )
+    assert result.metadata["physical_packet_stop_sample"] == expected_packet_stop
     if expected_phy.startswith("EDR"):
         assert [row.metric_id for row in result.summary_rows[:13]] == [
             "pgfsk",
@@ -2340,6 +2409,11 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
             ),
             atol=1e-12,
         )
+        distance_from_iq_axes = np.minimum(
+            np.abs(plotted_physical_iq.real),
+            np.abs(plotted_physical_iq.imag),
+        )
+        assert np.percentile(distance_from_iq_axes, 95) < 0.08
         fsk_trace, fsk_markers = window.fsk_modulation_plot.listDataItems()[:2]
         np.testing.assert_allclose(
             fsk_markers.yData,
@@ -2811,6 +2885,8 @@ def test_real_le_packet_end_uses_decoded_length_not_available_result_tail(
         )
     )
     assert result.metadata["packet_stop_sample"] == expected_stop
+    assert result.metadata["physical_packet_stop_sample"] == expected_stop
+    assert result.metadata["packet_stop_source"] == "decoded_pdu_length"
     assert result.packet.source.stop_sample == expected_stop
 
     window = BluetoothAnalyzerWindow(

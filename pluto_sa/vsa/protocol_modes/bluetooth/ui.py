@@ -1320,7 +1320,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._remember_directory("iq", path)
         try:
             try:
-                recording = FileIQSource.load(path)
+                capture_recording = FileIQSource.load(path)
             except ValueError as error:
                 if "sample_rate_hz is required" not in str(error):
                     raise
@@ -1344,17 +1344,24 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 )
                 if not accepted:
                     return
-                recording = FileIQSource.load(
+                capture_recording = FileIQSource.load(
                     path,
                     sample_rate_hz=sample_rate_hz,
                     center_frequency_hz=self.center_spin.value() * 1e6,
                 )
-            if recording.center_frequency_hz <= 0.0:
-                recording = replace(
-                    recording,
+            if capture_recording.center_frequency_hz <= 0.0:
+                capture_recording = replace(
+                    capture_recording,
                     center_frequency_hz=self.center_spin.value() * 1e6,
                 )
-            self.load_recording(recording)
+            # Recreate the same DDC/channel-filter plane used by live capture.
+            # An Offset-LO NPZ otherwise analyzes the hardware-LO plane and
+            # can leave the packet outside the fine synchronizer's CFO range.
+            recording = extract_requested_analysis_channel(capture_recording)
+            self.load_recording(
+                recording,
+                capture_recording=capture_recording,
+            )
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "IQ Import Error", str(error))
 
@@ -2384,7 +2391,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                     (symbol_time_s + offset / recording.sample_rate_hz) * 1e3
                 )
         if not is_hdt:
-            packet_stop_value = result.metadata.get("packet_stop_sample")
+            packet_stop_value = result.metadata.get(
+                "physical_packet_stop_sample",
+                result.metadata.get("packet_stop_sample"),
+            )
             if packet_stop_value is not None:
                 packet_stop_ms = (
                     float(packet_stop_value) / recording.sample_rate_hz * 1e3
@@ -2884,24 +2894,6 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 psk_symbol_time_s[:coordinate_count] = (
                     devm_centers[:coordinate_count] - analysis_sample_offset
                 ) / recording.sample_rate_hz
-            reference_center = result.metadata.get(
-                "edr_reference_symbol_center_sample"
-            )
-            if reference_center is not None:
-                psk_symbol_time_s = np.concatenate(
-                    (
-                        np.asarray(
-                            [
-                                (
-                                    float(reference_center)
-                                    - analysis_sample_offset
-                                )
-                                / recording.sample_rate_hz
-                            ]
-                        ),
-                        psk_symbol_time_s,
-                    )
-                )
             trajectory, physical_symbol_iq, symbols = normalized_psk_display(
                 processed_iq,
                 processed_time_s,
