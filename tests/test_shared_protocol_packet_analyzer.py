@@ -33,6 +33,13 @@ def test_br_generator_exposes_and_decodes_exact_air_bits() -> None:
     rows = packet_table_rows(result)
     assert any(row.path == "header.arqn" and row.display_value == "0" for row in rows)
     assert any(row.path == "payload.payload_body" for row in rows)
+    access = next(row for row in rows if row.path == "access_code")
+    payload = next(row for row in rows if row.path == "payload.payload_body")
+    crc = next(row for row in rows if row.path == "payload.payload_crc")
+    assert access.display_value == "LAP 0xC6967E"
+    assert " " in payload.display_value
+    assert crc.display_value.startswith("0x")
+    assert "Expected 0x" in crc.meaning
 
 
 def test_edr_generator_uses_the_same_shared_decoder() -> None:
@@ -90,6 +97,16 @@ def test_le_generator_exposes_and_decodes_exact_air_bits() -> None:
     assert result.phy_name == "LE 2M"
     assert result.integrity.crc_valid is True
     assert result.integrity.complete is True
+    rows = packet_table_rows(result)
+    access = next(row for row in rows if row.path == "access_address")
+    payload = next(row for row in rows if row.path == "pdu.payload")
+    crc = next(row for row in rows if row.path == "pdu.crc")
+    assert access.display_value == "0x8E89BED6"
+    assert access.display_value != "D6BE898E"
+    assert " " in payload.display_value
+    assert crc.display_value.startswith("0x")
+    assert len(crc.display_value) == len("0x000000")
+    assert " " in payload.raw_hex
 
 
 def test_truncated_packet_is_preserved_as_partial_result() -> None:

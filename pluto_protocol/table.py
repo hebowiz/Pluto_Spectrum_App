@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pluto_protocol.bitops import bits_hex_lsb
+from pluto_protocol.bitops import bits_hex_octets_lsb
 from pluto_protocol.model import FieldStatus, PacketAnalysisResult, PacketField
 
 
@@ -48,7 +48,7 @@ def packet_table_rows(result: PacketAnalysisResult) -> tuple[PacketTableRow, ...
                 status=field.status,
                 start_bit=field.start_bit,
                 stop_bit=field.stop_bit,
-                raw_hex=bits_hex_lsb(field.raw_bits),
+                raw_hex=bits_hex_octets_lsb(field.raw_bits),
             )
         )
         for child in field.children:

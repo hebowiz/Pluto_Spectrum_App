@@ -13,6 +13,7 @@ from typing import Mapping
 import numpy as np
 
 from pluto_sa.vsa.dc import apply_robust_dc_removal
+from pluto_protocol.bitops import bits_hex_octets_lsb
 from pluto_protocol.model import (
     FieldStatus,
     IssueSeverity,
@@ -62,6 +63,8 @@ from pluto_sa.vsa.pattern import (
 from pluto_sa.vsa.profiles.bluetooth_br import (
     BluetoothBRProfile,
     access_code_bits,
+    find_dh1_candidates,
+    find_unknown_header_candidates,
     prbs9_period,
     whitening_sequence,
 )
@@ -112,6 +115,12 @@ from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement.limits import (
 from pluto_sa.vsa.protocol_modes.bluetooth.summary import (
     BluetoothSummaryRow,
     build_bluetooth_summary,
+)
+from pluto_sa.vsa.protocol_modes.bluetooth.acquisition import (
+    ClassicAcquisitionCandidate,
+    LEAcquisitionCandidate,
+    detect_classic_identities,
+    detect_le_identities,
 )
 
 
@@ -385,9 +394,18 @@ def _le_access_bits(access_address: int) -> np.ndarray:
     return np.unpackbits(np.frombuffer(octets, dtype=np.uint8), bitorder="little")
 
 
-def _le_sync_bits(phy: BluetoothLEPhy, access_address: int) -> np.ndarray:
+def _le_sync_bits(
+    phy: BluetoothLEPhy,
+    access_address: int,
+    *,
+    preamble_first_bit: int | None = None,
+) -> np.ndarray:
     access = _le_access_bits(access_address)
     preamble_count = 16 if phy is BluetoothLEPhy.LE_2M else 8
+    if preamble_first_bit is not None:
+        first = int(preamble_first_bit) & 1
+        preamble = (first + np.arange(preamble_count, dtype=np.uint8)) & 1
+        return np.concatenate((preamble, access))
     if int(access_address) == 0x71764129:
         # The uncoded RF PHY Test Packet uses the prescribed alternating
         # preamble paired with Sync Word 0x71764129.
@@ -955,6 +973,80 @@ def _analyze_edr_payload_at_sync(
     )
 
 
+def _edr_air_bits_at_classic_boundary(
+    recording: IQRecording,
+    *,
+    access_start_sample: int,
+    phys: tuple[BluetoothClassicPhy, ...] = (
+        BluetoothClassicPhy.EDR_2M,
+        BluetoothClassicPhy.EDR_3M,
+    ),
+) -> dict[BluetoothClassicPhy, np.ndarray]:
+    """Demodulate the EDR sync and enhanced header once for each plausible PHY.
+
+    The 2-DH and 3-DH synchronization sequences can both correlate strongly
+    with the same waveform after their respective symbol mappings. The sync
+    therefore confirms EDR presence and timing, while the TYPE-specific
+    enhanced ACL Length narrows the unknown UAP/clock identity before the
+    complete packet CRC is evaluated.
+    """
+
+    samples_per_br_symbol = recording.sample_rate_hz / 1_000_000.0
+    expected_start = int(
+        round(int(access_start_sample) + 131.0 * samples_per_br_symbol)
+    )
+    detected: dict[BluetoothClassicPhy, np.ndarray] = {}
+    for phy in phys:
+        width = 2 if phy is BluetoothClassicPhy.EDR_2M else 3
+        signal = _classic_signal(phy)
+        decoded_sync = phase_indices_to_logical_symbols(
+            signal.modulation,
+            BLUETOOTH_EDR_MAPPING,
+            edr_sync_symbols(width),
+        )
+        sync = reverse_symbol_bits(decoded_sync, 2**width)
+        search_start, search_stop, timing_tolerance = _edr_sync_search_bounds(
+            expected_start_sample=expected_start,
+            sync_symbol_count=int(sync.size),
+            recording_sample_count=recording.sample_count,
+            samples_per_br_symbol=samples_per_br_symbol,
+            samples_per_psk_symbol=(
+                recording.sample_rate_hz / signal.symbol_rate_hz
+            ),
+        )
+        local = replace(
+            recording,
+            iq=recording.iq[search_start:search_stop],
+            start_sample_index=recording.start_sample_index + search_start,
+            trigger_sample_index=None,
+        )
+        try:
+            sync_session = _analyze_edr_payload_at_sync(
+                local,
+                signal,
+                sync,
+                result_length=int(sync.size) + int(np.ceil(16.0 / width)) + 2,
+                expected_sync_sample=expected_start - search_start,
+                minimum_correlation=_EDR_SYNC_ACQUISITION_CORRELATION,
+                generate_display_products=False,
+            )
+        except (RuntimeError, ValueError):
+            continue
+        pattern = sync_session.pattern_result
+        correlation = float(pattern.correlation)
+        detected_start = search_start + int(pattern.pattern_start_sample)
+        if (
+            bool(pattern.metadata.get("pattern_match_valid", True))
+            and correlation >= _EDR_SYNC_FINAL_CORRELATION
+            and abs(detected_start - expected_start) <= timing_tolerance
+        ):
+            detected[phy] = _symbols_to_air_bits(
+                pattern.decoded_symbols,
+                sync_session.signal.modulation.order,
+            )
+    return detected
+
+
 def _symbols_to_air_bits(symbols: np.ndarray, order: int) -> np.ndarray:
     """Serialize logical PSK symbols in Bluetooth over-the-air bit order.
 
@@ -994,6 +1086,16 @@ def _packet_field_by_id(
         if nested is not None:
             return nested
     return None
+
+
+_EDR_ACL_MAX_PAYLOAD_OCTETS = {
+    (BluetoothClassicPhy.EDR_2M, 0x4): 54,
+    (BluetoothClassicPhy.EDR_2M, 0xA): 367,
+    (BluetoothClassicPhy.EDR_2M, 0xE): 679,
+    (BluetoothClassicPhy.EDR_3M, 0x8): 83,
+    (BluetoothClassicPhy.EDR_3M, 0xB): 552,
+    (BluetoothClassicPhy.EDR_3M, 0xF): 1021,
+}
 
 
 def _exact_edr_result_symbols(
@@ -1741,7 +1843,15 @@ def analyze_bluetooth_hdt_recording(
     pdu_stop = payload_offset + pdu_bits.size
     payload_children = (
         PacketField("pdu_header", "PDU Header", payload_offset, payload_offset + 8, pdu_bits[:8], f"0x{_hdt_lsb_value(pdu_bits[:8]):02X}"),
-        PacketField("payload_body", "Payload", payload_offset + 8, pdu_stop, payload_bits, f"{payload_bits.size // 8} byte(s)"),
+        PacketField(
+            "payload_body",
+            "Payload",
+            payload_offset + 8,
+            pdu_stop,
+            payload_bits,
+            bits_hex_octets_lsb(payload_bits),
+            f"{payload_bits.size // 8} byte(s)",
+        ),
         PacketField("crc32", "CRC-32", pdu_stop, pdu_stop + 32, format0_bits[-32:], f"0x{received_crc:08X}", f"Calculated 0x{calculated_crc:08X}", FieldStatus.VALID if crc_valid else FieldStatus.INVALID),
     )
     issues: tuple[PacketIssue, ...] = tuple(
@@ -2198,20 +2308,36 @@ def analyze_bluetooth_hdt_recordings(
         if cancelled is not None and cancelled():
             break
         try:
-            results.append(
-                analyze_bluetooth_hdt_recording(
-                    recording,
-                    profile=profile,
-                    match_index=match_index,
-                    _matches=matches,
-                    _filtered_iq=filtered_iq,
-                    # HDT's plots consume the Appendix-C corrected arrays in
-                    # hdt_plot_data.  The separate Generic VSA pattern search
-                    # is retained only for packet one (the initially selected
-                    # packet) and is not a measurement dependency.
-                    _include_generic_visualization=match_index == 1,
-                )
+            item = analyze_bluetooth_hdt_recording(
+                recording,
+                profile=profile,
+                match_index=match_index,
+                _matches=matches,
+                _filtered_iq=filtered_iq,
+                # HDT's plots consume the Appendix-C corrected arrays in
+                # hdt_plot_data.  The separate Generic VSA pattern search
+                # is retained only for packet one (the initially selected
+                # packet) and is not a measurement dependency.
+                _include_generic_visualization=match_index == 1,
             )
+            if BluetoothAnalysisProfile(profile) is BluetoothAnalysisProfile.GENERAL_PACKET:
+                item = _general_acquisition_result(
+                    item,
+                    metadata={
+                        "acquisition_mode": "auto_detect",
+                        "hdt_training_source": "rf_test_training",
+                        "hdt_general_training_supported": False,
+                        "hdt_general_training_note": (
+                            "Only the standardized HDT RF-test training sequence "
+                            "is currently identifiable without packet context"
+                        ),
+                    },
+                    metrics=(
+                        BluetoothMetric("acquisition_mode", "Acquisition Mode", "Auto Detect"),
+                        BluetoothMetric("hdt_training_source", "HDT Training Source", "RF-test training"),
+                    ),
+                )
+            results.append(item)
         except RuntimeError:
             continue
     if not results:
@@ -2231,6 +2357,7 @@ def analyze_bluetooth_classic_recording(
     match_index: int = 1,
     iq_power_trigger: IQPowerTriggerSettings | None = None,
     expected_edr_rf_test_packet: str | None = None,
+    phy_search: BluetoothClassicPhy | str | None = None,
     _recording_sample_offset: int = 0,
     _generate_display_products: bool = True,
 ) -> BluetoothDedicatedResult:
@@ -2298,7 +2425,21 @@ def analyze_bluetooth_classic_recording(
     phy = BluetoothClassicPhy.BR
     analysis_session: VSASession | None = None
     analysis_sample_offset = 0
+    requested_phy = (
+        None
+        if phy_search is None or str(phy_search).strip().casefold() == "auto"
+        else BluetoothClassicPhy(phy_search)
+    )
     edr_candidate = _edr_candidate_for_type(br_frontend.header.packet_type)
+    if requested_phy is BluetoothClassicPhy.BR:
+        edr_candidate = None
+    elif requested_phy in {
+        BluetoothClassicPhy.EDR_2M,
+        BluetoothClassicPhy.EDR_3M,
+    } and edr_candidate is not requested_phy:
+        raise RuntimeError(
+            f"Header TYPE is not valid for requested {requested_phy.value} PHY"
+        )
     edr_error: str | None = None
     detected_edr_sync_start: int | None = None
     edr_sync_correlation: float | None = None
@@ -2512,6 +2653,13 @@ def analyze_bluetooth_classic_recording(
         except Exception as error:
             edr_error = str(error)
 
+    if analysis_session is None and requested_phy in {
+        BluetoothClassicPhy.EDR_2M,
+        BluetoothClassicPhy.EDR_3M,
+    }:
+        raise RuntimeError(
+            edr_error or f"Requested {requested_phy.value} synchronization was not found"
+        )
     if analysis_session is None:
         # No EDR synchronization word was present at the deterministic PHY
         # switch boundary, so this is a BR packet even when TYPE is shared
@@ -3222,6 +3370,13 @@ def analyze_bluetooth_classic_recording(
                         "payload_pattern": payload_pattern,
                         "output_power_window_start_sample": output_power.start_sample,
                         "output_power_window_stop_sample": output_power.stop_sample,
+                        "pgfsk_window_start_sample": fsk_power.start_sample,
+                        "pgfsk_window_stop_sample": fsk_power.stop_sample,
+                        "pdpsk_window_start_sample": psk_power.start_sample,
+                        "pdpsk_window_stop_sample": psk_power.stop_sample,
+                        "relative_power_measurement_fraction": 0.8,
+                        "pgfsk_region": "Access Code and Header",
+                        "pdpsk_region": "Synchronization sequence and payload",
                         "appendix_c_final_audit": True,
                         "reference_source": reference_source,
                         "header_end_boundary_sample": header_end_sample,
@@ -3330,18 +3485,23 @@ def analyze_bluetooth_le_recording(
     phy: BluetoothLEPhy | str,
     access_address: int = 0x8E89BED6,
     channel_index: int = 37,
-    crc_init: int = 0x555555,
+    crc_init: int | None = 0x555555,
     whitening_enabled: bool = True,
     result_length: int = 4096,
     match_index: int = 1,
     iq_power_trigger: IQPowerTriggerSettings | None = None,
     _recording_sample_offset: int = 0,
     _generate_display_products: bool = True,
+    _preamble_first_bit: int | None = None,
 ) -> BluetoothDedicatedResult:
     """Synchronize and decode one uncoded LE 1M/2M packet from IQ."""
 
     phy = BluetoothLEPhy(phy)
-    sync = _le_sync_bits(phy, int(access_address))
+    sync = _le_sync_bits(
+        phy,
+        int(access_address),
+        preamble_first_bit=_preamble_first_bit,
+    )
     session = _analyze_known_pattern(
         recording,
         _le_signal(phy),
@@ -3359,12 +3519,41 @@ def analyze_bluetooth_le_recording(
         whitening_enabled=bool(whitening_enabled),
         channel_index=int(channel_index),
     )
+    provisional_result_bit_count = int(pattern.decoded_bits.size)
+    # The first pass is deliberately generous so the PDU Length octet is
+    # always available.  Once decoded, repeat the existing pattern-aided fine
+    # synchronization with the exact packet extent.  Keeping the provisional
+    # Result Range made Spectrum and other session-backed plots include an
+    # arbitrary tail even though Packet Decode already reported the right
+    # number of bits.
+    minimum_complete_bits = (16 if phy is BluetoothLEPhy.LE_2M else 8) + 32 + 16 + 24
+    if (
+        BluetoothAnalysisProfile(profile) is BluetoothAnalysisProfile.GENERAL_PACKET
+        and minimum_complete_bits <= bits.size < pattern.decoded_bits.size
+    ):
+        session = _analyze_known_pattern(
+            recording,
+            _le_signal(phy),
+            sync,
+            result_length=int(bits.size),
+            minimum_correlation=0.60,
+            match_index=match_index,
+            iq_power_trigger=iq_power_trigger,
+            generate_display_products=_generate_display_products,
+        )
+        pattern = session.pattern_result
+        bits = _trim_le_packet_bits(
+            pattern.decoded_bits,
+            phy=phy,
+            whitening_enabled=bool(whitening_enabled),
+            channel_index=int(channel_index),
+        )
     context = {
         "phy": phy.value,
         "whitening_enabled": bool(whitening_enabled),
         "whitening_channel_index": int(channel_index),
-        "crc_enabled": True,
-        "crc_init": int(crc_init) & 0xFFFFFF,
+        "crc_enabled": crc_init is not None,
+        "crc_init": 0 if crc_init is None else int(crc_init) & 0xFFFFFF,
     }
     local_packet_start_sample = int(pattern.result_start_sample)
     local_packet_stop_sample = local_packet_start_sample + int(
@@ -3431,7 +3620,8 @@ def analyze_bluetooth_le_recording(
                 if int(access_address) == 0x71764129
                 else "RF test Access Address must be 0x71764129",
                 None
-                if (int(crc_init) & 0xFFFFFF) == 0x555555
+                if crc_init is not None
+                and (int(crc_init) & 0xFFFFFF) == 0x555555
                 else "RF test CRCInit must be 0x555555",
             )
             if reason is not None
@@ -3449,18 +3639,386 @@ def analyze_bluetooth_le_recording(
             "sample_rate_hz": recording.sample_rate_hz,
             "center_frequency_hz": recording.center_frequency_hz,
             "access_address": int(access_address) & 0xFFFFFFFF,
+            "preamble_first_bit": _preamble_first_bit,
+            "crc_init": None if crc_init is None else int(crc_init) & 0xFFFFFF,
             "analysis_session": session,
             "recording_sample_offset": recording_sample_offset,
             "analysis_sample_offset": recording_sample_offset,
             "packet_start_sample": packet_start_sample,
             "packet_stop_sample": packet_stop_sample,
             "packet_symbol_count": int(bits.size),
+            "provisional_result_bit_count": provisional_result_bit_count,
+            "packet_length_refined": int(bits.size) < provisional_result_bit_count,
             "selected_match_index": int(pattern.metadata.get("selected_match_index", match_index)),
             "eligible_match_count": int(pattern.metadata.get("eligible_match_count", 1)),
             "rf_measurements": rf_measurements,
             "fsk_measurement_trace": fsk_measurement_trace,
         },
     )
+
+
+def _general_acquisition_result(
+    result: BluetoothDedicatedResult,
+    *,
+    metadata: Mapping[str, object],
+    metrics: tuple[BluetoothMetric, ...],
+) -> BluetoothDedicatedResult:
+    combined_metadata = dict(result.metadata)
+    combined_metadata.update(metadata)
+    return replace(result, metadata=combined_metadata, metrics=(*result.metrics, *metrics))
+
+
+def _classic_identity_candidates(
+    recording: IQRecording,
+    candidate: ClassicAcquisitionCandidate,
+    *,
+    uap_hint: int | None,
+    clock_hint: int | None,
+    whitening_enabled: bool,
+    phy_search: BluetoothClassicPhy | str | None,
+) -> tuple[tuple[int, int, bool, str], ...]:
+    """Rank UAP/CLK identities without repeating full EDR analysis."""
+
+    raw = BluetoothBRProfile(access_code_bits(candidate.lap)).analyze(
+        recording,
+        clock_6_1=None,
+        uap=None,
+        whitening_enabled=bool(whitening_enabled),
+        minimum_correlation=0.60,
+        match_index=1,
+    )
+    if raw.header_air_bits.size != 54:
+        return ()
+    requested_phy = (
+        None
+        if phy_search is None or str(phy_search).strip().casefold() == "auto"
+        else BluetoothClassicPhy(phy_search)
+    )
+    requested_edr_phys = (
+        (requested_phy,)
+        if requested_phy in {
+            BluetoothClassicPhy.EDR_2M,
+            BluetoothClassicPhy.EDR_3M,
+        }
+        else (
+            ()
+            if requested_phy is BluetoothClassicPhy.BR
+            else (BluetoothClassicPhy.EDR_2M, BluetoothClassicPhy.EDR_3M)
+        )
+    )
+    edr_air_bits = (
+        _edr_air_bits_at_classic_boundary(
+            recording,
+            access_start_sample=int(raw.demodulation.access_start_sample),
+            phys=requested_edr_phys,
+        )
+        if requested_edr_phys
+        else {}
+    )
+    if requested_phy in {
+        BluetoothClassicPhy.EDR_2M,
+        BluetoothClassicPhy.EDR_3M,
+    } and requested_phy not in edr_air_bits:
+        return ()
+    dh1 = tuple(
+        item
+        for item in find_dh1_candidates(raw.header_air_bits, raw.payload_bits)
+        if not edr_air_bits
+        or _edr_candidate_for_type(item.header.packet_type) in edr_air_bits
+    )
+    confirmed = tuple(
+        (
+            int(item.header.uap),
+            int(
+                item.header.clock_6_1
+                if item.header.clock_6_1 is not None
+                else 0 if clock_hint is None else clock_hint
+            ),
+            bool(item.header.whitening_enabled),
+            (
+                "hec_and_payload_crc_unwhitened"
+                if item.header.clock_6_1 is None
+                else "hec_and_payload_crc"
+            ),
+        )
+        for item in dh1
+        if item.header.uap is not None
+    )
+    headers = find_unknown_header_candidates(
+        raw.header_air_bits,
+        uap_hint=uap_hint,
+        clock_hint=clock_hint,
+        include_unwhitened=True,
+    )
+    if edr_air_bits:
+        headers = tuple(
+            header
+            for header in headers
+            if _edr_candidate_for_type(header.packet_type) in edr_air_bits
+        )
+    length_confirmed: list[tuple[int, int, bool, str]] = []
+    if edr_air_bits:
+        for header in headers:
+            phy = _edr_candidate_for_type(header.packet_type)
+            if phy is None or phy not in edr_air_bits or header.uap is None:
+                continue
+            detected_clock = (
+                int(header.clock_6_1)
+                if header.clock_6_1 is not None
+                else 0 if clock_hint is None else int(clock_hint)
+            )
+            packet = analyze_demodulated_packet_bits(
+                np.concatenate(
+                    (
+                        raw.access_code_bits,
+                        raw.header_air_bits,
+                        edr_air_bits[phy],
+                    )
+                ),
+                protocol_id="bluetooth.br_edr",
+                phy_name=phy.value,
+                context={
+                    "uap": int(header.uap),
+                    "clock_6_1": detected_clock,
+                    "whitening_enabled": bool(header.whitening_enabled),
+                    "phy": phy.value,
+                },
+                packet_index=0,
+                center_frequency_hz=recording.center_frequency_hz,
+                start_sample=int(raw.demodulation.access_start_sample),
+                stop_sample=recording.sample_count,
+            )
+            length_field = _packet_field_by_id(packet.root_fields, "length")
+            maximum_octets = _EDR_ACL_MAX_PAYLOAD_OCTETS.get(
+                (phy, int(header.packet_type))
+            )
+            if (
+                length_field is not None
+                and maximum_octets is not None
+                and 0 <= int(length_field.value) <= maximum_octets
+            ):
+                length_confirmed.append(
+                    (
+                        int(header.uap),
+                        detected_clock,
+                        bool(header.whitening_enabled),
+                        (
+                            "hec_and_payload_length_unwhitened"
+                            if header.clock_6_1 is None
+                            else "hec_and_payload_length"
+                        ),
+                    )
+                )
+    fallback = tuple(
+        (
+            int(header.uap),
+            int(
+                header.clock_6_1
+                if header.clock_6_1 is not None
+                else 0 if clock_hint is None else clock_hint
+            ),
+            bool(header.whitening_enabled),
+            "hec_only_unwhitened" if header.clock_6_1 is None else "hec_only",
+        )
+        for header in headers
+        if header.uap is not None
+    )
+    if requested_phy in {
+        BluetoothClassicPhy.EDR_2M,
+        BluetoothClassicPhy.EDR_3M,
+    } and not length_confirmed:
+        return ()
+    ordered: list[tuple[int, int, bool, str]] = []
+    seen: set[tuple[int, int, bool]] = set()
+    # A valid enhanced ACL Length is the first payload information that can
+    # disambiguate the 64 HEC-consistent clock/UAP pairs. Once at least one
+    # candidate satisfies the TYPE-specific slot capacity, do not run the
+    # expensive full EDR optimizer for candidates whose Length is impossible.
+    identity_pool = (
+        tuple(length_confirmed)
+        if length_confirmed
+        else (*confirmed, *fallback)
+    )
+    ranked = sorted(
+        identity_pool,
+        key=lambda identity: (
+            0 if "payload_crc" in identity[3] else 1 if "payload_length" in identity[3] else 2,
+            0 if identity[2] is bool(whitening_enabled) else 1,
+        ),
+    )
+    for identity in ranked:
+        key = identity[:3]
+        if key not in seen:
+            seen.add(key)
+            ordered.append(identity)
+    return tuple(ordered)
+
+
+def _analyze_bluetooth_classic_recordings_auto(
+    recording: IQRecording,
+    *,
+    cancelled: Callable[[], bool] | None,
+    max_candidates: int,
+    **kwargs: object,
+) -> tuple[BluetoothDedicatedResult, ...]:
+    recording = _prepare_classic_frontend_recording(recording)
+    raw_lap_hint = kwargs.get("lap")
+    raw_uap_hint = kwargs.get("uap")
+    raw_clock_hint = kwargs.get("clock_6_1")
+    lap_hint = (
+        None if raw_lap_hint is None else int(raw_lap_hint) & 0xFFFFFF
+    )
+    uap_hint = (
+        None if raw_uap_hint is None else int(raw_uap_hint) & 0xFF
+    )
+    clock_hint = (
+        None if raw_clock_hint is None else int(raw_clock_hint) & 0x3F
+    )
+    whitening_enabled = bool(kwargs.get("whitening_enabled", True))
+    candidates = detect_classic_identities(
+        recording,
+        lap_hint=lap_hint,
+        max_candidates=max_candidates,
+    )
+    if not candidates:
+        raise RuntimeError("Bluetooth Classic Access Code was not found by auto detection")
+    margin = max(1, int(round(recording.sample_rate_hz * 16.0e-6)))
+    results: list[BluetoothDedicatedResult] = []
+    for index, candidate in enumerate(candidates):
+        if cancelled is not None and cancelled():
+            break
+        crop_start = max(0, candidate.start_sample - margin)
+        crop_stop = (
+            min(recording.sample_count, candidates[index + 1].start_sample)
+            if index + 1 < len(candidates)
+            else recording.sample_count
+        )
+        local = replace(
+            recording,
+            iq=recording.iq[crop_start:crop_stop],
+            start_sample_index=recording.start_sample_index + crop_start,
+            trigger_sample_index=None,
+        )
+        identities = _classic_identity_candidates(
+            local,
+            candidate,
+            uap_hint=uap_hint,
+            clock_hint=clock_hint,
+            whitening_enabled=whitening_enabled,
+            phy_search=kwargs.get("phy_search"),
+        )
+        if not identities:
+            continue
+        selected: BluetoothDedicatedResult | None = None
+        selected_identity: tuple[int, int, bool, str] | None = None
+        best_score: tuple[int, int, int] | None = None
+        # Exact hints and EDR-capable TYPE candidates are naturally near the
+        # front.  Try all HEC candidates until CRC confirms one; retain the
+        # best non-CRC result so unsupported packets remain inspectable.
+        for uap, clock, detected_whitening, provenance in identities:
+            if cancelled is not None and cancelled():
+                break
+            options = dict(kwargs)
+            options.update(
+                {
+                    "lap": candidate.lap,
+                    "uap": uap,
+                    "clock_6_1": clock,
+                    "whitening_enabled": detected_whitening,
+                }
+            )
+            try:
+                item = analyze_bluetooth_classic_recording(
+                    local,
+                    match_index=1,
+                    _recording_sample_offset=crop_start,
+                    _generate_display_products=selected is None,
+                    **options,
+                )
+            except (RuntimeError, ValueError):
+                continue
+            integrity = item.packet.integrity
+            score = (
+                1 if integrity.crc_valid is True else 0,
+                1 if integrity.complete else 0,
+                -len(item.packet.issues),
+            )
+            if best_score is None or score > best_score:
+                selected, selected_identity, best_score = (
+                    item,
+                    (uap, clock, detected_whitening, provenance),
+                    score,
+                )
+            if integrity.crc_valid is True:
+                selected_identity = (
+                    uap,
+                    clock,
+                    detected_whitening,
+                    (
+                        "hec_and_payload_crc_unwhitened"
+                        if not detected_whitening
+                        else "hec_and_payload_crc"
+                    ),
+                )
+                selected = item
+                break
+        if selected is None or selected_identity is None:
+            continue
+        uap, clock, detected_whitening, provenance = selected_identity
+        reported_clock: int | None = (
+            None if provenance.endswith("unwhitened") else clock
+        )
+        selected = _general_acquisition_result(
+            selected,
+            metadata={
+                "acquisition_mode": "auto_detect",
+                "detected_lap": candidate.lap,
+                "lap_source": "access_code_bch",
+                "detected_uap": uap,
+                "detected_clock_6_1": reported_clock,
+                "uap_clock_source": provenance,
+                "detected_whitening_enabled": detected_whitening,
+                "whitening_source": provenance,
+                "coarse_start_sample": candidate.start_sample,
+                "coarse_access_bit_errors": candidate.access_bit_errors,
+                "coarse_correlation": candidate.correlation,
+                "fine_correlation": float(selected.metadata["br_analysis_session"].pattern_result.correlation),
+                "fine_timing_confidence": selected.metadata[
+                    "br_analysis_session"
+                ].pattern_result.metadata.get("timing_confidence"),
+                "fine_cfo_hz": selected.metadata[
+                    "br_analysis_session"
+                ].pattern_result.carrier_frequency_offset_hz,
+                "fine_frequency_drift_hz_per_s": selected.metadata[
+                    "br_analysis_session"
+                ].pattern_result.metadata.get("carrier_frequency_drift_hz_per_s"),
+                "identity_crc_confirmed": selected.packet.integrity.crc_valid is True,
+                "identity_hec_confirmed": selected.packet.integrity.hec_valid is True,
+            },
+            metrics=(
+                BluetoothMetric("acquisition_mode", "Acquisition Mode", "Auto Detect"),
+                BluetoothMetric("detected_lap", "Detected LAP", f"0x{candidate.lap:06X}"),
+                BluetoothMetric("detected_uap", "Detected UAP", f"0x{uap:02X} ({provenance})"),
+                BluetoothMetric(
+                    "detected_clock",
+                    "Detected CLK[6:1]",
+                    (
+                        "Unknown (unwhitened packet)"
+                        if reported_clock is None
+                        else f"0x{reported_clock:02X} ({provenance})"
+                    ),
+                ),
+                BluetoothMetric(
+                    "detected_whitening",
+                    "Detected Whitening",
+                    f"{'ON' if detected_whitening else 'OFF'} ({provenance})",
+                ),
+            ),
+        )
+        results.append(selected)
+    if not results:
+        raise RuntimeError("Bluetooth Classic auto-detected candidates could not be fine synchronized")
+    return _attach_rf_capture_aggregates(results)
 
 
 def analyze_bluetooth_classic_recordings(
@@ -3471,6 +4029,14 @@ def analyze_bluetooth_classic_recordings(
     **kwargs: object,
 ) -> tuple[BluetoothDedicatedResult, ...]:
     """Analyze every eligible Classic/EDR packet in chronological order."""
+
+    if BluetoothAnalysisProfile(kwargs["profile"]) is BluetoothAnalysisProfile.GENERAL_PACKET:
+        return _analyze_bluetooth_classic_recordings_auto(
+            recording,
+            cancelled=cancelled,
+            max_candidates=max_candidates,
+            **kwargs,
+        )
 
     # Estimate a zero-IF frontend DC vector from the complete capture before
     # packet-local slicing.  Local packet crops may contain too little idle IQ
@@ -3546,6 +4112,156 @@ def analyze_bluetooth_classic_recordings(
     return _attach_rf_capture_aggregates(results)
 
 
+def _analyze_bluetooth_le_recordings_auto(
+    recording: IQRecording,
+    *,
+    cancelled: Callable[[], bool] | None,
+    max_candidates: int,
+    **kwargs: object,
+) -> tuple[BluetoothDedicatedResult, ...]:
+    phy = BluetoothLEPhy(kwargs["phy"])
+    raw_aa_hint = kwargs.get("access_address")
+    aa_hint = (
+        None if raw_aa_hint is None else int(raw_aa_hint) & 0xFFFFFFFF
+    )
+    configured_channel = int(kwargs.get("channel_index", 37))
+    requested_center_hz = float(
+        recording.metadata.get(
+            "requested_center_frequency_hz", recording.center_frequency_hz
+        )
+    )
+    center_mhz = int(round(requested_center_hz / 1e6))
+    center_source = (
+        "requested_center_frequency"
+        if "requested_center_frequency_hz" in recording.metadata
+        else "rf_center_frequency"
+    )
+    if center_mhz in {2402, 2426, 2480}:
+        channel_index = {2402: 37, 2426: 38, 2480: 39}[center_mhz]
+        channel_source = center_source
+    elif 2404 <= center_mhz <= 2424 and center_mhz % 2 == 0:
+        channel_index = (center_mhz - 2404) // 2
+        channel_source = center_source
+    elif 2428 <= center_mhz <= 2478 and center_mhz % 2 == 0:
+        channel_index = 11 + (center_mhz - 2428) // 2
+        channel_source = center_source
+    else:
+        channel_index = configured_channel
+        channel_source = "configured_hint"
+    candidates = detect_le_identities(
+        recording,
+        phy=phy.value,
+        access_address_hint=aa_hint,
+        max_candidates=max_candidates,
+    )
+    if not candidates:
+        raise RuntimeError("Bluetooth LE Access Address was not found by auto detection")
+    margin = max(1, int(round(recording.sample_rate_hz * 16.0e-6)))
+    results: list[BluetoothDedicatedResult] = []
+    for index, candidate in enumerate(candidates):
+        if cancelled is not None and cancelled():
+            break
+        crop_start = max(0, candidate.start_sample - margin)
+        crop_stop = (
+            min(recording.sample_count, candidates[index + 1].start_sample)
+            if index + 1 < len(candidates)
+            else recording.sample_count
+        )
+        local = replace(
+            recording,
+            iq=recording.iq[crop_start:crop_stop],
+            start_sample_index=recording.start_sample_index + crop_start,
+            trigger_sample_index=None,
+        )
+        # Advertising CRCInit is defined by the Core.  For arbitrary data AAs
+        # it is connection state and cannot be inferred from a single packet;
+        # leave CRC unevaluated instead of reporting a false VALID result.
+        crc_init = (
+            0x555555
+            if candidate.access_address in {0x8E89BED6, 0x71764129}
+            else None
+        )
+        channel_candidates = [(channel_index, channel_source)]
+        if (
+            crc_init is not None
+            and configured_channel != channel_index
+        ):
+            channel_candidates.append((configured_channel, "configured_crc_confirmed"))
+        item: BluetoothDedicatedResult | None = None
+        selected_channel = channel_index
+        selected_channel_source = channel_source
+        for trial_channel, trial_source in channel_candidates:
+            options = dict(kwargs)
+            options.update(
+                {
+                    "access_address": candidate.access_address,
+                    "channel_index": trial_channel,
+                    "crc_init": crc_init,
+                    "_preamble_first_bit": candidate.preamble_first_bit,
+                }
+            )
+            try:
+                trial = analyze_bluetooth_le_recording(
+                    local,
+                    match_index=1,
+                    _recording_sample_offset=crop_start,
+                    _generate_display_products=index == 0,
+                    **options,
+                )
+            except (RuntimeError, ValueError):
+                continue
+            item = trial
+            selected_channel = trial_channel
+            selected_channel_source = trial_source
+            if crc_init is None or trial.packet.integrity.crc_valid is True:
+                break
+        if item is None:
+            continue
+        crc_source = (
+            "advertising_channel_default"
+            if candidate.access_address == 0x8E89BED6
+            else "rf_test_packet_default"
+            if candidate.access_address == 0x71764129
+            else "unknown"
+        )
+        item = _general_acquisition_result(
+            item,
+            metadata={
+                "acquisition_mode": "auto_detect",
+                "detected_access_address": candidate.access_address,
+                "access_address_source": "preamble_and_access_address",
+                "detected_preamble_first_bit": candidate.preamble_first_bit,
+                "detected_channel_index": selected_channel,
+                "channel_index_source": selected_channel_source,
+                "crc_init_source": crc_source,
+                "coarse_start_sample": candidate.start_sample,
+                "coarse_sync_bit_errors": candidate.sync_bit_errors,
+                "coarse_correlation": candidate.correlation,
+                "fine_correlation": float(item.metadata["analysis_session"].pattern_result.correlation),
+                "fine_timing_confidence": item.metadata[
+                    "analysis_session"
+                ].pattern_result.metadata.get("timing_confidence"),
+                "fine_cfo_hz": item.metadata[
+                    "analysis_session"
+                ].pattern_result.carrier_frequency_offset_hz,
+                "fine_frequency_drift_hz_per_s": item.metadata[
+                    "analysis_session"
+                ].pattern_result.metadata.get("carrier_frequency_drift_hz_per_s"),
+                "identity_crc_confirmed": item.packet.integrity.crc_valid is True,
+            },
+            metrics=(
+                BluetoothMetric("acquisition_mode", "Acquisition Mode", "Auto Detect"),
+                BluetoothMetric("detected_access_address", "Detected Access Address", f"0x{candidate.access_address:08X}"),
+                BluetoothMetric("detected_channel", "Detected LE Channel", f"{selected_channel} ({selected_channel_source})"),
+                BluetoothMetric("crc_init_source", "CRCInit Source", crc_source),
+            ),
+        )
+        results.append(item)
+    if not results:
+        raise RuntimeError("Bluetooth LE auto-detected candidates could not be fine synchronized")
+    return _attach_rf_capture_aggregates(results)
+
+
 def analyze_bluetooth_le_recordings(
     recording: IQRecording,
     *,
@@ -3554,6 +4270,14 @@ def analyze_bluetooth_le_recordings(
     **kwargs: object,
 ) -> tuple[BluetoothDedicatedResult, ...]:
     """Analyze every eligible LE packet in chronological order."""
+
+    if BluetoothAnalysisProfile(kwargs["profile"]) is BluetoothAnalysisProfile.GENERAL_PACKET:
+        return _analyze_bluetooth_le_recordings_auto(
+            recording,
+            cancelled=cancelled,
+            max_candidates=max_candidates,
+            **kwargs,
+        )
 
     first = analyze_bluetooth_le_recording(recording, match_index=1, **kwargs)
     first_pattern = first.metadata["analysis_session"].pattern_result

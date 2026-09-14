@@ -6,7 +6,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pluto_protocol.bitops import bits_hex_lsb, bits_to_bytes_lsb, bits_to_int_lsb, bits_to_int_msb
+from pluto_protocol.bitops import (
+    bits_hex_octets_lsb,
+    bits_to_bytes_lsb,
+    bits_to_int_lsb,
+    bits_to_int_msb,
+)
 from pluto_protocol.bluetooth.common import (
     br_whitening_sequence,
     decode_acl_header,
@@ -65,7 +70,13 @@ class BluetoothBREDRDecoder:
         complete = True
 
         access = bits[: min(bits.size, ACCESS_BITS)]
-        fields.append(_field("access_code", "Access Code", 0, access, bits_hex_lsb(access), "Preamble, sync word and trailer"))
+        lap = context.get("lap")
+        access_value = (
+            f"LAP 0x{int(lap) & 0xFFFFFF:06X}"
+            if lap is not None
+            else "72-bit Access Code"
+        )
+        fields.append(_field("access_code", "Access Code", 0, access, access_value, "Preamble, sync word and trailer"))
         if access.size < ACCESS_BITS:
             issues.append(_issue("truncated_access_code", "Packet ends inside the 72-bit access code", access.size))
             return self._result(packet, None, None, fields, issues, None, None, False)
@@ -169,8 +180,20 @@ class BluetoothBREDRDecoder:
                 _field("payload_flow", "FLOW", payload_start + 2, acl_header[2:3], payload_flow),
                 _field("length", "Length", payload_start + 3, acl_header[3:], length_bytes, f"{length_bytes} byte(s)"),
             )),
-            _field("payload_body", "Payload Body", payload_start + header_width, body, bits_hex_lsb(body), f"{body.size // 8} complete byte(s)"),
-            _field("payload_crc", "Payload CRC", payload_start + body_stop, crc_bits, received_crc.hex().upper() if received_crc else None, (f"Expected {expected_crc.hex().upper()}" if expected_crc else "Not checked"), status=(FieldStatus.UNKNOWN if crc_valid is None else FieldStatus.VALID if crc_valid else FieldStatus.INVALID)),
+            _field("payload_body", "Payload Body", payload_start + header_width, body, bits_hex_octets_lsb(body), f"{body.size // 8} complete byte(s)"),
+            _field(
+                "payload_crc",
+                "Payload CRC",
+                payload_start + body_stop,
+                crc_bits,
+                f"0x{bits_to_int_msb(crc_bits):04X}" if crc_bits.size == 16 else None,
+                (
+                    f"Expected 0x{bits_to_int_msb(np.unpackbits(np.frombuffer(expected_crc, dtype=np.uint8), bitorder='little')):04X}"
+                    if expected_crc
+                    else "Not checked"
+                ),
+                status=(FieldStatus.UNKNOWN if crc_valid is None else FieldStatus.VALID if crc_valid else FieldStatus.INVALID),
+            ),
         )
         fields.append(_field("payload", "ACL Payload", payload_start, payload[:min(payload.size, crc_stop)], meaning=f"{length_bytes} byte payload", children=payload_children))
         if crc_valid is False:

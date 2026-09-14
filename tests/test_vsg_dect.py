@@ -94,6 +94,14 @@ def test_all_dect_packet_types_generate_and_decode_with_valid_checks() -> None:
         assert decoded.integrity.complete
         assert summary["r_crc"].value is True
         assert summary["x_crc"].value is (None if packet_type is DectPacketType.P00 else True)
+        if packet_type is not DectPacketType.P00:
+            b_field = next(
+                field
+                for field in decoded.root_fields[0].children
+                if field.field_id == "b_field"
+            )
+            raw = next(child for child in b_field.children if child.field_id == "b_raw")
+            assert " " in raw.value
 
 
 def test_direction_derived_sync_and_manual_crc_fields_are_transmitted() -> None:

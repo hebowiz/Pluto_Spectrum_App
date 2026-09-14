@@ -7,7 +7,7 @@ from enum import StrEnum
 
 import numpy as np
 
-from pluto_protocol.bitops import bits_hex_lsb
+from pluto_protocol.bitops import bits_hex_octets_lsb
 from pluto_protocol.model import (
     DecodeProbeResult,
     FieldStatus,
@@ -418,7 +418,7 @@ class BluetoothHDTDecoder:
                 "Coded Payload",
                 payload_start,
                 payload,
-                bits_hex_lsb(payload),
+                bits_hex_octets_lsb(payload),
                 (
                     f"{payload_length} logical byte(s), {payload.size} transmitted bit(s)"
                     + (

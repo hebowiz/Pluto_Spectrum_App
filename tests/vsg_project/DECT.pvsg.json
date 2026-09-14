@@ -1,0 +1,220 @@
+{
+  "format": "pluto-vsg-project",
+  "version": 1,
+  "project": {
+    "name": "DECT P32Z Packet",
+    "standard": "DECT",
+    "sample_rate_hz": 9216000.0,
+    "samples_per_symbol": 8,
+    "repeat_count": 1,
+    "period_symbols": 11520.0,
+    "center_frequency_hz": 1902528000.0,
+    "fields": [
+      {
+        "name": "Prolonged Preamble",
+        "symbol_count": 16,
+        "logical_bit_count": 16,
+        "data_source": "Fixed",
+        "data": "1010101010101010",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1152000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "S-field",
+        "symbol_count": 32,
+        "logical_bit_count": 32,
+        "data_source": "Computed",
+        "data": "RFP synchronization",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1152000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": [
+          {
+            "name": "Preamble",
+            "symbol_count": 16,
+            "logical_bit_count": 16,
+            "data_source": "Fixed",
+            "data": "1010101010101010",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1152000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "Packet Synchronization Word",
+            "symbol_count": 16,
+            "logical_bit_count": 16,
+            "data_source": "Fixed",
+            "data": "1110100110001010",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1152000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          }
+        ]
+      },
+      {
+        "name": "A-field",
+        "symbol_count": 64,
+        "logical_bit_count": 64,
+        "data_source": "Computed",
+        "data": "H (8) + Tail (40) + R-CRC (16)",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1152000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": [
+          {
+            "name": "Header",
+            "symbol_count": 8,
+            "logical_bit_count": 8,
+            "data_source": "Fixed",
+            "data": "01100000",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1152000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "Tail",
+            "symbol_count": 40,
+            "logical_bit_count": 40,
+            "data_source": "Fixed",
+            "data": "0101010101010101010101010101010101010101",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1152000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "R-CRC",
+            "symbol_count": 16,
+            "logical_bit_count": 16,
+            "data_source": "Computed",
+            "data": "Auto",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1152000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          }
+        ]
+      },
+      {
+        "name": "B-field",
+        "symbol_count": 320,
+        "logical_bit_count": 320,
+        "data_source": "PRBS",
+        "data": "PRBS-9",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1152000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "X-field",
+        "symbol_count": 4,
+        "logical_bit_count": 4,
+        "data_source": "Computed",
+        "data": "Auto X-CRC",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1152000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "Z-field",
+        "symbol_count": 4,
+        "logical_bit_count": 4,
+        "data_source": "Computed",
+        "data": "Repeat X",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1152000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      }
+    ],
+    "power_envelope": {
+      "enabled": true,
+      "on_level_db": 0.0,
+      "idle_level_db": -120.0,
+      "rise_symbols": 1.0,
+      "fall_symbols": 1.0,
+      "rise_delay_symbols": -1.0,
+      "fall_delay_symbols": 1.0,
+      "shape": "Cosine"
+    },
+    "bluetooth_br": null,
+    "bluetooth_le": null,
+    "bluetooth_hdt": null,
+    "wifi": null,
+    "dect": {
+      "direction": "RFP",
+      "packet_type": "P32Z",
+      "prolonged_preamble": true,
+      "preamble_bits": "1010101010101010",
+      "sync_word_bits": "1110100110001010",
+      "a_header_bits": "01100000",
+      "a_tail_bits": "0101010101010101010101010101010101010101",
+      "r_crc_auto": true,
+      "r_crc_bits": "0000000000000000",
+      "b_field_source": "PRBS-9",
+      "b_field_pattern": "00001111",
+      "x_crc_auto": true,
+      "x_field_bits": "0000",
+      "z_repeat_auto": true,
+      "z_field_bits": "0000",
+      "carrier_plan_id": "j_dect",
+      "carrier_channel": "F5",
+      "carrier_frequency_offset_hz": 0.0,
+      "frequency_deviation_hz": 360000.0,
+      "gaussian_bt": 0.5,
+      "pre_idle_symbols": 16,
+      "post_idle_symbols": 0
+    }
+  }
+}

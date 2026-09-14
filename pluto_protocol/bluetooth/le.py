@@ -6,7 +6,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pluto_protocol.bitops import bits_hex_lsb, bits_to_int_lsb
+from pluto_protocol.bitops import (
+    bits_hex_octets_lsb,
+    bits_to_int_lsb,
+    bits_to_int_msb,
+)
 from pluto_protocol.bluetooth.common import le_crc24_bits, le_whitening_sequence
 from pluto_protocol.model import (
     DecodeProbeResult, FieldStatus, IssueSeverity, PacketAnalysisResult,
@@ -38,9 +42,14 @@ class BluetoothLEDecoder:
         fields: list[PacketField] = []
         minimum = preamble_count + 32
         preamble = bits[:min(bits.size, preamble_count)]
-        fields.append(_field("preamble", "Preamble", 0, preamble, bits_hex_lsb(preamble)))
+        fields.append(_field("preamble", "Preamble", 0, preamble, bits_hex_octets_lsb(preamble)))
         access = bits[preamble_count:min(bits.size, minimum)] if bits.size > preamble_count else np.empty(0, dtype=np.uint8)
-        fields.append(_field("access_address", "Access Address", preamble_count, access, bits_hex_lsb(access)))
+        access_value = (
+            f"0x{bits_to_int_lsb(access):08X}"
+            if access.size == 32
+            else bits_hex_octets_lsb(access)
+        )
+        fields.append(_field("access_address", "Access Address", preamble_count, access, access_value))
         if bits.size < minimum:
             issues.append(PacketIssue("truncated_access_address", "Packet ends before the access address is complete", IssueSeverity.WARNING))
             return self._result(packet, phy, fields, issues, None, False)
@@ -83,8 +92,15 @@ class BluetoothLEDecoder:
                 _field("pdu_type", "PDU Type", minimum, header[:4], pdu_type),
                 _field("pdu_length", "Length", minimum + 8, length_bits, length_bytes, f"{length_bytes} byte(s)"),
             )),
-            _field("payload", "Payload", minimum + 16, body, bits_hex_lsb(body), f"{body.size // 8} complete byte(s)"),
-            _field("crc", "CRC", minimum + body_stop, crc, bits_hex_lsb(crc), status=FieldStatus.UNKNOWN if crc_valid is None else FieldStatus.VALID if crc_valid else FieldStatus.INVALID),
+            _field("payload", "Payload", minimum + 16, body, bits_hex_octets_lsb(body), f"{body.size // 8} complete byte(s)"),
+            _field(
+                "crc",
+                "CRC",
+                minimum + body_stop,
+                crc,
+                f"0x{bits_to_int_msb(crc):06X}" if crc.size == 24 else bits_hex_octets_lsb(crc),
+                status=FieldStatus.UNKNOWN if crc_valid is None else FieldStatus.VALID if crc_valid else FieldStatus.INVALID,
+            ),
         )
         fields.append(_field("pdu", "PDU", minimum, logical[:min(logical.size, crc_stop)], meaning=f"Type {pdu_type}; {length_bytes} byte payload", children=pdu_children))
         return self._result(packet, phy, fields, issues, crc_valid, complete)

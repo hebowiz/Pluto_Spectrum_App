@@ -632,7 +632,9 @@ def test_vsg_settings_edit_packet_header_and_recalculate_hec() -> None:
         dialog.arqn_combo.setCurrentIndex(dialog.arqn_combo.findData(1))
         dialog.seqn_combo.setCurrentIndex(dialog.seqn_combo.findData(1))
 
-        assert dialog.hec_value.text().endswith("(auto)")
+        assert dialog.hec_mode_combo.currentData() is True
+        assert dialog.hec_value.text().startswith("0x")
+        assert not dialog.hec_value.isEnabled()
         assert dialog.hec_value.text() != initial_hec
 
         dialog._accept_settings()

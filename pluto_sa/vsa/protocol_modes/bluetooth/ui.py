@@ -243,6 +243,14 @@ class _PacketAnalysisTree(DedicatedPacketAnalysisTree):
         )
 
 
+class _AutoHeightIssuesTable(QtWidgets.QTableWidget):
+    """Recalculate wrapped issue rows whenever the available width changes."""
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        QtCore.QTimer.singleShot(0, self.resizeRowsToContents)
+
+
 class _SummaryTable(DedicatedSummaryTable):
     pass
 
@@ -576,7 +584,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.device_label = QtWidgets.QLabel("Pluto: Auto")
         self.protocol_combo.currentIndexChanged.connect(self._protocol_changed)
         self.profile_combo.currentIndexChanged.connect(self._profile_changed)
-        self.phy_combo.currentIndexChanged.connect(self._update_derived_config)
+        self.phy_combo.currentIndexChanged.connect(self._phy_changed)
         self.refresh_button.clicked.connect(self.refresh)
         self.capture_button.clicked.connect(self._toggle_capture)
         self.continuous_capture_button.clicked.connect(
@@ -730,6 +738,8 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             ("Whitening", self.whitening_check),
         ):
             bt_form.addRow(label, widget)
+        self._bluetooth_config_form = bt_form
+        self._sync_packet_identity_controls()
 
         input_page = QtWidgets.QWidget()
         input_form = QtWidgets.QFormLayout(input_page)
@@ -1106,10 +1116,22 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         apply_dedicated_table_style(self.packet_table)
         self.packet_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.packet_table.cellClicked.connect(self._packet_row_clicked)
-        self.issues_table = QtWidgets.QTableWidget(0, 4)
+        self.issues_table = _AutoHeightIssuesTable(0, 4)
         self.issues_table.setHorizontalHeaderLabels(("Severity", "Code", "Message", "Bit Range"))
         apply_dedicated_table_style(self.issues_table)
-        self.issues_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.issues_table.setWordWrap(True)
+        self.issues_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        self.issues_table.verticalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        issues_header = self.issues_table.horizontalHeader()
+        for column in (0, 1, 3):
+            issues_header.setSectionResizeMode(
+                column, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
+        issues_header.setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
         self.air_bits_text = QtWidgets.QPlainTextEdit(readOnly=True)
         for label, widget in (("Decode", self.decode_tree), ("Payload Hex", self.payload_text), ("Packet List", self.packet_table), ("Issues", self.issues_table), ("Air Bits", self.air_bits_text)):
             self.packet_tabs.addTab(widget, label)
@@ -1131,30 +1153,95 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.phy_combo.blockSignals(True)
         self.phy_combo.clear()
         if is_le:
-            self.phy_combo.addItems(("LE 1M", "LE 2M"))
+            self.phy_combo.addItem("LE 1M", "LE 1M")
+            self.phy_combo.addItem("LE 2M", "LE 2M")
         elif is_hdt:
-            self.phy_combo.addItem("Auto (HDT2 / HDT3 / HDT4 / HDT6 / HDT7.5)")
+            self.phy_combo.addItem(
+                "Auto (HDT2 / HDT3 / HDT4 / HDT6 / HDT7.5)", "auto"
+            )
         else:
-            self.phy_combo.addItem("Auto (BR / EDR 2M / EDR 3M)")
+            self.phy_combo.addItem("Auto (BR / EDR 2M / EDR 3M)", "auto")
+            self.phy_combo.addItem("BR", "BR")
+            self.phy_combo.addItem("EDR 2M", "EDR 2M")
+            self.phy_combo.addItem("EDR 3M", "EDR 3M")
         self.phy_combo.blockSignals(False)
-        self.context_label.setText(
-            "No manual packet parameters (RI and Length are decoded):"
-            if is_hdt
-            else "Access Address / Channel / CRC Init:"
-            if is_le
-            else "LAP / UAP / CLK6-1:"
-        )
+        self._update_identity_context_label()
         for widget in (self.access_address_edit, self.channel_spin, self.crc_init_edit):
             widget.setVisible(is_le)
         for widget in (self.lap_edit, self.uap_edit, self.clock_spin):
             widget.setVisible(not is_le and not is_hdt)
         self._sync_le_profile_controls()
+        self._sync_packet_identity_controls()
         self._update_derived_config()
 
     @QtCore.Slot()
     def _profile_changed(self) -> None:
+        self._update_identity_context_label()
+        self._sync_le_profile_controls()
+        self._sync_packet_identity_controls()
+        self._update_derived_config()
+
+    @QtCore.Slot()
+    def _phy_changed(self) -> None:
         self._sync_le_profile_controls()
         self._update_derived_config()
+
+    def _set_packet_config_field_visible(
+        self, widget: QtWidgets.QWidget, visible: bool
+    ) -> None:
+        widget.setVisible(visible)
+        form = getattr(self, "_bluetooth_config_form", None)
+        if form is not None:
+            label = form.labelForField(widget)
+            if label is not None:
+                label.setVisible(visible)
+
+    def _sync_packet_identity_controls(self) -> None:
+        """Show manual identity fields only where the selected profile uses them."""
+
+        general = (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.GENERAL_PACKET
+        )
+        protocol = self.protocol_combo.currentData()
+        classic_rf_test = not general and protocol == "bluetooth.br_edr"
+        le_rf_test = not general and protocol == "bluetooth.le"
+        for widget in (self.lap_edit, self.uap_edit, self.clock_spin):
+            self._set_packet_config_field_visible(widget, classic_rf_test)
+        for widget in (
+            self.access_address_edit,
+            self.channel_spin,
+            self.crc_init_edit,
+        ):
+            self._set_packet_config_field_visible(widget, le_rf_test)
+        self._set_packet_config_field_visible(
+            self.edr_rf_test_packet_combo, classic_rf_test
+        )
+        self._set_packet_config_field_visible(
+            self.whitening_check, classic_rf_test or le_rf_test
+        )
+
+    def _update_identity_context_label(self) -> None:
+        protocol = self.protocol_combo.currentData()
+        general = (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.GENERAL_PACKET
+        )
+        if protocol == "bluetooth.hdt":
+            text = "HDT identity is acquired from the packet training sequence:"
+        elif protocol == "bluetooth.le":
+            text = (
+                "Access Address is auto-detected; PHY and RF channel constrain the search:"
+                if general
+                else "Access Address / Channel / CRC Init:"
+            )
+        else:
+            text = (
+                "LAP / UAP / CLK6-1 are auto-detected; PHY can constrain the search:"
+                if general
+                else "LAP / UAP / CLK6-1:"
+            )
+        self.context_label.setText(text)
 
     def _sync_le_profile_controls(self) -> None:
         classic_rf_test = (
@@ -1162,7 +1249,9 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             and self.profile_combo.currentData()
             == BluetoothAnalysisProfile.RF_PHY_TEST
         )
-        self.edr_rf_test_packet_combo.setEnabled(classic_rf_test)
+        self.edr_rf_test_packet_combo.setEnabled(
+            classic_rf_test and self.phy_combo.currentData() != "BR"
+        )
         if self.protocol_combo.currentData() != "bluetooth.le":
             for widget in (
                 self.access_address_edit,
@@ -1322,7 +1411,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         return {
             "profile": str(self.profile_combo.currentData()),
             "protocol": str(self.protocol_combo.currentData()),
-            "phy": self.phy_combo.currentText(),
+            "phy": self.phy_combo.currentData(),
             "expected_edr_rf_test_packet": self.edr_rf_test_packet_combo.currentData(),
             "lap": self.lap_edit.text().strip(),
             "uap": self.uap_edit.text().strip(),
@@ -1383,8 +1472,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._set_combo_data(self.profile_combo, values.get("profile", "rf_phy_test"))
         self._set_combo_data(self.protocol_combo, values.get("protocol", "bluetooth.br_edr"))
         self._protocol_changed()
-        phy = str(values.get("phy", self.phy_combo.currentText()))
-        phy_index = self.phy_combo.findText(phy)
+        phy = str(values.get("phy", self.phy_combo.currentData()))
+        phy_index = self.phy_combo.findData(phy)
+        if phy_index < 0:
+            phy_index = self.phy_combo.findText(phy)
         if phy_index >= 0:
             self.phy_combo.setCurrentIndex(phy_index)
         self._set_combo_data(
@@ -1776,28 +1867,81 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self.shutdown_ready.emit()
 
     def _classic_options(self) -> dict[str, object]:
+        if (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.GENERAL_PACKET
+        ):
+            return {
+                "profile": BluetoothAnalysisProfile.GENERAL_PACKET,
+                # General acquisition recovers these values.  Neutral values
+                # are passed only to keep the shared analyzer API stable.
+                "lap": None,
+                "uap": None,
+                "clock_6_1": None,
+                "whitening_enabled": True,
+                "expected_edr_rf_test_packet": None,
+                "phy_search": self.phy_combo.currentData(),
+                "result_length": max(
+                    256, int(self.capture_length_spin.value() * 1000.0)
+                ),
+                "iq_power_trigger": self._iq_power_trigger_settings(),
+            }
         try:
             lap = int(self.lap_edit.text().strip(), 16)
             uap = int(self.uap_edit.text().strip(), 16)
         except ValueError as error:
             raise ValueError("LAP and UAP must be hexadecimal values") from error
+        phy_search = self.phy_combo.currentData()
+        expected_packet = (
+            self.edr_rf_test_packet_combo.currentData()
+            if self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.RF_PHY_TEST
+            and phy_search != "BR"
+            else None
+        )
+        if (
+            expected_packet is not None
+            and phy_search in {"EDR 2M", "EDR 3M"}
+            and not str(expected_packet).startswith(
+                "2-" if phy_search == "EDR 2M" else "3-"
+            )
+        ):
+            raise ValueError(
+                f"{expected_packet} does not match the selected {phy_search} PHY"
+            )
         return {
             "profile": self.profile_combo.currentData(),
             "lap": lap,
             "uap": uap,
             "clock_6_1": self.clock_spin.value(),
             "whitening_enabled": self.whitening_check.isChecked(),
-            "expected_edr_rf_test_packet": (
-                self.edr_rf_test_packet_combo.currentData()
-                if self.profile_combo.currentData()
-                == BluetoothAnalysisProfile.RF_PHY_TEST
-                else None
-            ),
+            "expected_edr_rf_test_packet": expected_packet,
+            "phy_search": phy_search,
             "result_length": max(256, int(self.capture_length_spin.value() * 1000.0)),
             "iq_power_trigger": self._iq_power_trigger_settings(),
         }
 
     def _le_options(self) -> dict[str, object]:
+        if (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.GENERAL_PACKET
+        ):
+            return {
+                "profile": BluetoothAnalysisProfile.GENERAL_PACKET,
+                "phy": self.phy_combo.currentText(),
+                # AA and CRCInit are recovered/selected by auto acquisition.
+                # LE whitening is mandatory; its channel follows RF center.
+                "access_address": None,
+                "channel_index": infer_le_channel(
+                    self.center_spin.value() * 1e6
+                ),
+                "crc_init": 0x555555,
+                "whitening_enabled": True,
+                "result_length": max(
+                    256, int(self.capture_length_spin.value() * 2000.0)
+                ),
+                "iq_power_trigger": self._iq_power_trigger_settings(),
+            }
         try:
             access_address = int(self.access_address_edit.text().strip(), 16)
             crc_init = int(self.crc_init_edit.text().strip(), 16)
@@ -2239,6 +2383,28 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 power_symbol_times_ms.append(
                     (symbol_time_s + offset / recording.sample_rate_hz) * 1e3
                 )
+        if not is_hdt:
+            packet_stop_value = result.metadata.get("packet_stop_sample")
+            if packet_stop_value is not None:
+                packet_stop_ms = (
+                    float(packet_stop_value) / recording.sample_rate_hz * 1e3
+                )
+                self.power_plot.addItem(
+                    pg.InfiniteLine(
+                        pos=packet_stop_ms,
+                        angle=90,
+                        movable=False,
+                        pen=pg.mkPen(95, 100, 108, 150, width=1),
+                        label="Packet End",
+                        labelOpts={
+                            "position": 0.92,
+                            "color": (115, 120, 128),
+                        },
+                    )
+                )
+                # Keep the physical packet boundary visible even when a
+                # conformance Result Range intentionally stops earlier.
+                selected_ranges.append((packet_stop_ms, packet_stop_ms))
         if self._show_symbol_points and power_symbol_times_ms:
             marker_time_ms = np.concatenate(power_symbol_times_ms)
             power_time_ms = (power_time_s + power_time_offset_s) * 1e3
@@ -3010,12 +3176,6 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         bit_offset: int,
     ) -> QtWidgets.QTreeWidgetItem:
         value = str(field.value)
-        if field.field_id in {"payload", "payload_body"}:
-            compact = "".join(value.split())
-            value = "\n".join(
-                compact[start : start + 20]
-                for start in range(0, len(compact), 20)
-            )
         if field.field_id == "payload" and field.children:
             value = "\N{EM DASH}"
         bit_range = self._field_bit_range(field, bit_offset)
@@ -3092,10 +3252,14 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         if listed:
             self.packet_table.selectRow(self._selected_result_index)
         self.issues_table.setRowCount(len(packet.issues))
+        self.issues_table.verticalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
         for row, issue in enumerate(packet.issues):
             bit_range = "--" if issue.start_bit is None else f"{issue.start_bit}:{issue.stop_bit}"
             for column, value in enumerate((issue.severity.value, issue.code, issue.message, bit_range)):
                 self.issues_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
+        self.issues_table.resizeRowsToContents()
         self.air_bits_text.setPlainText(format_air_bits(packet.raw_bits))
 
     @QtCore.Slot(int, int)

@@ -10,6 +10,7 @@ import pytest
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_protocol.bluetooth.hdt import HDTRate, hdt_definition
+from pluto_protocol.model import PacketIssue
 from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSAAnalysisResult
 from pluto_sa.vsa.pattern import IQPowerTriggerSettings, MeasurementFilterMode
 from pluto_sa.vsa.protocol_modes.bluetooth.model import (
@@ -35,6 +36,9 @@ from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
+from pluto_sa.vsa.ui.display_processing import (
+    physical_constellation_display_symbols,
+)
 from pluto_sa.vsa.ui.measurement_chrome import (
     CenteredDedicatedTableDelegate,
     DEDICATED_TABLE_GRID_COLOR,
@@ -317,6 +321,13 @@ def test_dedicated_hdt_auto_detects_rate_length_and_exact_payload_range(
     )
     assert children["pdu_control"].value == 74
     assert children["hec_c"].status.value == "valid"
+    payload = next(
+        field for field in result.packet.root_fields if field.field_id == "payload"
+    )
+    payload_body = next(
+        field for field in payload.children if field.field_id == "payload_body"
+    )
+    assert " " in payload_body.value
     assert result.packet.integrity.hec_valid is True
     assert result.packet.integrity.crc_valid is True
 
@@ -980,7 +991,29 @@ def test_bluetooth_workspace_renders_hdt_header_payload_and_fields(tmp_path) -> 
             window.decode_tree.header().defaultAlignment()
             == QtCore.Qt.AlignmentFlag.AlignCenter
         )
+        assert (
+            window.issues_table.horizontalHeader().sectionResizeMode(2)
+            == QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        issue_packet = replace(
+            result.packet,
+            issues=(
+                PacketIssue(
+                    "truncated_pdu",
+                    "PDU declares 173 payload bytes, but the captured packet "
+                    "is incomplete and cannot be validated.",
+                ),
+            ),
+        )
+        window._render_packet(replace(result, packet=issue_packet))
         QtWidgets.QApplication.processEvents()
+        assert (
+            window.issues_table.verticalHeader().sectionResizeMode(0)
+            == QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        assert window.issues_table.rowHeight(0) > (
+            2 * window.issues_table.fontMetrics().height()
+        )
         assert (
             window.summary_table.textElideMode()
             == QtCore.Qt.TextElideMode.ElideNone
@@ -1156,7 +1189,7 @@ def test_bluetooth_display_helpers_are_deterministic() -> None:
     assert "55" in format_air_bits(np.array([1, 0, 1, 0, 1, 0, 1, 0], dtype=np.uint8))
 
 
-def test_le_rf_profile_uses_test_sync_word_and_general_preserves_user_config(
+def test_le_rf_profile_uses_test_sync_word_and_general_hides_identity_inputs(
     tmp_path,
 ) -> None:
     pg.mkQApp("Bluetooth LE profile config test")
@@ -1187,12 +1220,26 @@ def test_le_rf_profile_uses_test_sync_word_and_general_preserves_user_config(
         assert window.access_address_edit.isEnabled() is True
         assert window.crc_init_edit.isEnabled() is True
         assert window.whitening_check.isEnabled() is True
+        assert window.access_address_edit.isHidden()
+        assert window.channel_spin.isHidden()
+        assert window.crc_init_edit.isHidden()
+        assert window.whitening_check.isHidden()
+        assert all(
+            window._bluetooth_config_form.labelForField(widget).isHidden()
+            for widget in (
+                window.access_address_edit,
+                window.channel_spin,
+                window.crc_init_edit,
+                window.whitening_check,
+            )
+        )
         window.access_address_edit.setText("8E89BED6")
         window.crc_init_edit.setText("123456")
-        window.whitening_check.setChecked(True)
+        window.whitening_check.setChecked(False)
         general_options = window._le_options()
-        assert general_options["access_address"] == 0x8E89BED6
-        assert general_options["crc_init"] == 0x123456
+        assert general_options["access_address"] is None
+        assert general_options["channel_index"] == 17
+        assert general_options["crc_init"] == 0x555555
         assert general_options["whitening_enabled"] is True
     finally:
         window.close()
@@ -1664,6 +1711,13 @@ def test_edr_sig_measurement_uses_five_us_guard_and_excludes_trailer() -> None:
     assert measurement.metadata["trailer_excluded_from_devm"] is True
     assert measurement.metrics["rms_devm_worst"] < 0.05
     assert measurement.metrics["output_power_dbm"] is not None
+    assert measurement.metrics["pgfsk_dbm"] is not None
+    assert measurement.metrics["pdpsk_dbm"] is not None
+    assert measurement.metadata["relative_power_measurement_fraction"] == 0.8
+    assert measurement.metadata["pgfsk_region"] == "Access Code and Header"
+    assert measurement.metadata["pdpsk_region"] == (
+        "Synchronization sequence and payload"
+    )
     assert measurement.metadata["output_power_window_start_sample"] > (
         result.metadata["packet_start_sample"]
     )
@@ -1672,9 +1726,17 @@ def test_edr_sig_measurement_uses_five_us_guard_and_excludes_trailer() -> None:
     )
     assert measurement.metrics["payload_bit_errors"] == 0
     summary = {row.metric_id: row for row in result.summary_rows}
-    assert summary["output_power"].value.endswith(" dBm")
-    assert summary["output_power"].limit == "Power Class dependent"
-    assert summary["output_power"].result == "N/A"
+    assert summary["pgfsk"].value.endswith(" dBm")
+    assert summary["pdpsk"].value.endswith(" dBm")
+    assert "80% of GFSK portion" in summary["pgfsk"].limit
+    assert "80% of DPSK portion" in summary["pdpsk"].limit
+    assert summary["pgfsk"].section == "RF PHY Measurements"
+    assert summary["pdpsk"].section == "RF PHY Measurements"
+    assert not any(
+        row.metric_id in {"pgfsk", "pdpsk"}
+        for row in result.summary_rows
+        if row.section == "Reference Information"
+    )
     assert summary["omega_i"].result == "PASS"
     assert summary["omega_0"].result == "PASS"
     assert summary["omega_i_plus_omega_0"].result == "PASS"
@@ -1907,8 +1969,9 @@ def test_classic_type_is_only_a_phy_candidate_and_length_sets_result_range(
         == expected_result_symbols
     )
     if expected_phy.startswith("EDR"):
-        assert [row.metric_id for row in result.summary_rows[:12]] == [
-            "output_power",
+        assert [row.metric_id for row in result.summary_rows[:13]] == [
+            "pgfsk",
+            "pdpsk",
             "relative_transmit_power",
             "omega_i",
             "omega_0",
@@ -2259,6 +2322,24 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
         )
         window._recording = result.metadata["analysis_session"].recording
         window._classic_analysis_ready((result,))
+        assert window._psk_symbol_plot_mode == "Physical IQ"
+        assert window.psk_symbol_plot.getAxis("bottom").labelText == "I"
+        assert window.psk_symbol_plot.getAxis("left").labelText == "Q"
+        physical_markers = window.psk_modulation_plot.listDataItems()[1]
+        physical_marker_iq = np.asarray(physical_markers.xData) + 1j * np.asarray(
+            physical_markers.yData
+        )
+        plotted_physical = window.psk_symbol_plot.listDataItems()[0]
+        plotted_physical_iq = np.asarray(plotted_physical.xData) + 1j * np.asarray(
+            plotted_physical.yData
+        )
+        np.testing.assert_allclose(
+            plotted_physical_iq,
+            physical_constellation_display_symbols(
+                ModulationKind.PI4_DQPSK, physical_marker_iq
+            ),
+            atol=1e-12,
+        )
         fsk_trace, fsk_markers = window.fsk_modulation_plot.listDataItems()[:2]
         np.testing.assert_allclose(
             fsk_markers.yData,
@@ -2404,7 +2485,8 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
                 break
             pending.extend(item.child(index) for index in range(item.childCount()))
         assert payload_body is not None
-        assert "\n" in payload_body.text(1)
+        assert "\n" not in payload_body.text(1)
+        assert " " in payload_body.text(1)
         assert window.decode_tree.textElideMode() is QtCore.Qt.TextElideMode.ElideNone
         psk_trajectory = window.psk_modulation_plot.listDataItems()[0]
         assert psk_trajectory.xData.size > result.vsa_result.measured_symbols.size
@@ -2518,11 +2600,24 @@ def test_classic_rf_profile_passes_explicit_known_edr_packet_context(tmp_path) -
         assert window.edr_rf_test_packet_combo.currentData() is None
         options = window._classic_options()
         assert options["expected_edr_rf_test_packet"] is None
+        assert options["phy_search"] == "auto"
+        assert [window.phy_combo.itemData(index) for index in range(window.phy_combo.count())] == [
+            "auto",
+            "BR",
+            "EDR 2M",
+            "EDR 3M",
+        ]
+        window.phy_combo.setCurrentIndex(window.phy_combo.findData("EDR 3M"))
         window.edr_rf_test_packet_combo.setCurrentIndex(
             window.edr_rf_test_packet_combo.findData("3-DH3")
         )
         options = window._classic_options()
         assert options["expected_edr_rf_test_packet"] == "3-DH3"
+        assert options["phy_search"] == "EDR 3M"
+        window.phy_combo.setCurrentIndex(window.phy_combo.findData("EDR 2M"))
+        with pytest.raises(ValueError, match="does not match"):
+            window._classic_options()
+        window.phy_combo.setCurrentIndex(window.phy_combo.findData("EDR 3M"))
         saved = window._meas_config_values()
         assert saved["expected_edr_rf_test_packet"] == "3-DH3"
         window.edr_rf_test_packet_combo.setCurrentIndex(0)
@@ -2533,7 +2628,28 @@ def test_classic_rf_profile_passes_explicit_known_edr_packet_context(tmp_path) -
             window.profile_combo.findData(BluetoothAnalysisProfile.GENERAL_PACKET)
         )
         assert window.edr_rf_test_packet_combo.isEnabled() is False
-        assert window._classic_options()["expected_edr_rf_test_packet"] is None
+        assert window.edr_rf_test_packet_combo.isHidden()
+        assert window.lap_edit.isHidden()
+        assert window.uap_edit.isHidden()
+        assert window.clock_spin.isHidden()
+        assert window.whitening_check.isHidden()
+        assert all(
+            window._bluetooth_config_form.labelForField(widget).isHidden()
+            for widget in (
+                window.lap_edit,
+                window.uap_edit,
+                window.clock_spin,
+                window.edr_rf_test_packet_combo,
+                window.whitening_check,
+            )
+        )
+        general_options = window._classic_options()
+        assert general_options["lap"] is None
+        assert general_options["uap"] is None
+        assert general_options["clock_6_1"] is None
+        assert general_options["whitening_enabled"] is True
+        assert general_options["expected_edr_rf_test_packet"] is None
+        assert general_options["phy_search"] == "EDR 3M"
     finally:
         window.close()
         window.deleteLater()
@@ -2715,6 +2831,17 @@ def test_real_le_packet_end_uses_decoded_length_not_available_result_tail(
         assert any(
             np.isclose(float(region.getRegion()[1]), expected_stop_ms)
             for region in result_regions
+        )
+        packet_end_lines = [
+            item
+            for item in window.power_plot.getPlotItem().items
+            if isinstance(item, pg.InfiniteLine)
+            and item.label is not None
+            and item.label.format == "Packet End"
+        ]
+        assert len(packet_end_lines) == 1
+        assert float(packet_end_lines[0].value()) == pytest.approx(
+            expected_stop_ms
         )
         fsk_items = window.fsk_modulation_plot.listDataItems()
         marker = next(item for item in fsk_items if item.opts.get("symbol") is not None)

@@ -6,6 +6,9 @@ generation will be added to the engine without introducing a second UI model.
 
 from __future__ import annotations
 
+import numpy as np
+
+from pluto_sa.vsa.profiles.bluetooth_br import header_error_check
 from pluto_vsg.model import (
     BluetoothBRSettings,
     BluetoothPacketKind,
@@ -50,9 +53,25 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
     """Return the logical/transmitted hierarchy for a BR/EDR DH1 packet."""
 
     packet_kind = BluetoothPacketKind(settings.packet_kind)
+    _, packet_type, bits_per_symbol, _ = bluetooth_packet_properties(packet_kind)
+    packed_header = (
+        int(settings.lt_addr)
+        | (packet_type << 3)
+        | (int(settings.flow) << 7)
+        | (int(settings.arqn) << 8)
+        | (int(settings.seqn) << 9)
+    )
+    header_data = np.asarray(
+        [(packed_header >> index) & 1 for index in range(10)], dtype=np.uint8
+    )
+    transmitted_hec = (
+        header_error_check(header_data, settings.uap)
+        if settings.hec_auto
+        else int(settings.hec_manual)
+    )
+    hec_mode = "auto" if settings.hec_auto else "manual"
     payload_body_bits = int(settings.payload_length_bytes) * 8
     is_edr = bluetooth_packet_is_edr(packet_kind)
-    _, _, bits_per_symbol, _ = bluetooth_packet_properties(packet_kind)
     payload_header_bits = 8 if packet_kind == BluetoothPacketKind.DH1 else 16
     payload_modulation = (
         ModulationDefinition()
@@ -94,7 +113,11 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
             "Payload Header",
             logical_bits=payload_header_bits,
             transmitted_symbols=header_symbols,
-            data="LLID + FLOW + LENGTH",
+            data=(
+                f"LLID={int(settings.payload_llid)}, "
+                f"FLOW={int(settings.payload_flow)}, "
+                f"LENGTH={int(settings.payload_length_bytes)}"
+            ),
             modulation=payload_modulation,
             relative_power_db=payload_relative_power_db,
         )
@@ -150,7 +173,7 @@ def bluetooth_br_fields(settings: BluetoothBRSettings) -> tuple[FieldDefinition,
                     "HEC",
                     logical_bits=8,
                     transmitted_symbols=24,
-                    data="HEC + 1/3 FEC",
+                    data=f"0x{transmitted_hec:02X} ({hec_mode}) + 1/3 FEC",
                 ),
             ),
         ),

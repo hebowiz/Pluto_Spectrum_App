@@ -192,8 +192,12 @@ class BluetoothBRSettings:
     flow: int = 1
     arqn: int = 0
     seqn: int = 0
+    hec_auto: bool = True
+    hec_manual: int = 0x00
     whitening_enabled: bool = False
     payload_length_bytes: int = 27
+    payload_llid: int = 0b10
+    payload_flow: int = 1
     payload_source: PayloadSourceKind = PayloadSourceKind.PRBS9
     payload_pattern: str = "10101010"
     frequency_deviation_hz: float = 160_000.0
@@ -515,6 +519,8 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
             ("clock_6_1", settings.clock_6_1, 0, 0x3F),
             ("lt_addr", settings.lt_addr, 0, 7),
             ("payload_length_bytes", settings.payload_length_bytes, 0, payload_max),
+            ("payload_llid", settings.payload_llid, 0, 3),
+            ("hec_manual", settings.hec_manual, 0, 0xFF),
         )
         for name, value, lower, upper in integer_ranges:
             if not lower <= int(value) <= upper:
@@ -526,6 +532,7 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 )
         for name, value in (
             ("flow", settings.flow),
+            ("payload_flow", settings.payload_flow),
             ("arqn", settings.arqn),
             ("seqn", settings.seqn),
         ):
@@ -533,6 +540,12 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 issues.append(
                     ValidationIssue(f"bluetooth_br.{name}", "Value must be 0 or 1.")
                 )
+        if not isinstance(settings.hec_auto, bool):
+            issues.append(
+                ValidationIssue(
+                    "bluetooth_br.hec_auto", "Value must be a boolean."
+                )
+            )
         if settings.frequency_deviation_hz <= 0.0:
             issues.append(
                 ValidationIssue(

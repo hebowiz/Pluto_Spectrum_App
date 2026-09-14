@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from itertools import combinations
 
 import numpy as np
 
@@ -73,6 +75,89 @@ def access_code_bits(lap: int, *, include_trailer: bool = True) -> np.ndarray:
         return np.concatenate((preamble, sync_word))
     trailer = _bits_from_hex_msb("5" if sync_word[-1] else "a")
     return np.concatenate((preamble, sync_word, trailer))
+
+
+@lru_cache(maxsize=1)
+def _access_code_error_syndromes() -> dict[int, int]:
+    """Map BCH syndromes to error masks containing at most two bits."""
+
+    primitive_bch = 0x37CD0EB67
+    generator = primitive_bch ^ (primitive_bch << 1)
+    masks = (0, *(1 << index for index in range(64)))
+    result = {_polynomial_remainder(mask, generator): mask for mask in masks}
+    for first, second in combinations(range(64), 2):
+        mask = (1 << first) | (1 << second)
+        result.setdefault(_polynomial_remainder(mask, generator), mask)
+    return result
+
+
+def _correct_access_codeword(codeword: int, maximum_bit_errors: int) -> int | None:
+    """Correct up to four errors in the shortened (64, 30) BCH word."""
+
+    primitive_bch = 0x37CD0EB67
+    generator = primitive_bch ^ (primitive_bch << 1)
+    syndrome = _polynomial_remainder(int(codeword), generator)
+    if syndrome == 0:
+        return int(codeword)
+    syndromes = _access_code_error_syndromes()
+    direct = syndromes.get(syndrome)
+    if direct is not None and direct.bit_count() <= maximum_bit_errors:
+        return int(codeword) ^ direct
+    if maximum_bit_errors < 3:
+        return None
+    # Meet in the middle: two <=2-bit masks cover every <=4-bit error.
+    for left_syndrome, left_mask in syndromes.items():
+        right_mask = syndromes.get(syndrome ^ left_syndrome)
+        if right_mask is None:
+            continue
+        error_mask = left_mask ^ right_mask
+        if error_mask.bit_count() <= maximum_bit_errors:
+            corrected = int(codeword) ^ error_mask
+            if _polynomial_remainder(corrected, generator) == 0:
+                return corrected
+    return None
+
+
+def recover_lap_from_access_code_bits(
+    bits: np.ndarray,
+    *,
+    maximum_bit_errors: int = 4,
+) -> tuple[int, int] | None:
+    """Recover LAP from one 72-bit over-the-air Access Code candidate.
+
+    The LAP occupies the systematic information portion of the shortened BCH
+    code after removal of the PN overlay.  Re-encoding the recovered value
+    validates the complete preamble, sync word and trailer without requiring
+    a preconfigured LAP.  The returned error count is suitable only for blind
+    acquisition ranking; the caller must still run the normal known-pattern
+    fine synchronizer with the reconstructed Access Code.
+    """
+
+    values = np.asarray(bits, dtype=np.uint8)
+    if values.shape != (BLUETOOTH_ACCESS_CODE_BITS,) or np.any(values > 1):
+        raise ValueError("bits must contain exactly 72 binary Access Code bits")
+    pn_overlay = _bits_from_hex_msb("3F2A33DD69B121C1")
+    received_codeword_bits = values[4:68] ^ pn_overlay
+    received_codeword = sum(
+        int(bit) << index for index, bit in enumerate(received_codeword_bits)
+    )
+    corrected_codeword = _correct_access_codeword(
+        received_codeword, max(0, int(maximum_bit_errors))
+    )
+    if corrected_codeword is None:
+        return None
+    codeword = np.asarray(
+        [(corrected_codeword >> index) & 1 for index in range(64)],
+        dtype=np.uint8,
+    )
+    covered_information = codeword[34:]
+    information = covered_information ^ pn_overlay[34:]
+    lap = _bits_to_int_lsb(information[:24])
+    expected = access_code_bits(lap)
+    errors = int(np.count_nonzero(values != expected))
+    if errors > max(0, int(maximum_bit_errors)):
+        return None
+    return int(lap), errors
 
 
 def giac_access_code_bits(*, include_trailer: bool = True) -> np.ndarray:
@@ -268,6 +353,73 @@ def find_header_candidates(
         if unwhitened.hec_valid:
             candidates.append(unwhitened)
     return tuple(candidates)
+
+
+def find_unknown_header_candidates(
+    header_air_bits: np.ndarray,
+    *,
+    uap_hint: int | None = None,
+    clock_hint: int | None = None,
+    include_unwhitened: bool = True,
+) -> tuple[BluetoothHeader, ...]:
+    """Recover every HEC-consistent UAP/CLK candidate from a BR header.
+
+    HEC alone does not in general make the pair unique.  Candidates are
+    therefore returned in a stable order with an exact configured hint first;
+    payload CRC and PHY-boundary checks remain responsible for confirmation.
+    """
+
+    values = np.asarray(header_air_bits, dtype=np.uint8)
+    if values.shape != (BLUETOOTH_HEADER_AIR_BITS,) or np.any(values > 1):
+        raise ValueError("header_air_bits must contain exactly 54 binary bits")
+    fec_bits, _ = fec13_decode(values)
+    candidates: list[BluetoothHeader] = []
+    modes: list[tuple[int | None, bool]] = [
+        (clock, True) for clock in range(64)
+    ]
+    if include_unwhitened:
+        modes.append((None, False))
+    for clock, whitening_enabled in modes:
+        header_bits = (
+            fec_bits ^ whitening_sequence(int(clock), fec_bits.size)
+            if whitening_enabled
+            else fec_bits
+        )
+        data = header_bits[:10]
+        received_hec = _bits_to_int_msb(header_bits[10:18])
+        for uap in range(256):
+            if header_error_check(data, uap) != received_hec:
+                continue
+            candidates.append(
+                decode_header_air_bits(
+                    values,
+                    uap=uap,
+                    clock_6_1=clock,
+                    whitening_enabled=whitening_enabled,
+                )
+            )
+    hint_uap = None if uap_hint is None else int(uap_hint) & 0xFF
+    hint_clock = None if clock_hint is None else int(clock_hint) & 0x3F
+    return tuple(
+        sorted(
+            candidates,
+            key=lambda candidate: (
+                0
+                if (
+                    candidate.uap == hint_uap
+                    and (
+                        candidate.clock_6_1 == hint_clock
+                        or not candidate.whitening_enabled
+                    )
+                )
+                else 1,
+                0 if candidate.whitening_enabled else 1,
+                candidate.corrected_fec_triplets,
+                -1 if candidate.clock_6_1 is None else candidate.clock_6_1,
+                -1 if candidate.uap is None else candidate.uap,
+            ),
+        )
+    )
 
 
 def payload_crc_bytes(bits: np.ndarray, uap: int) -> bytes:

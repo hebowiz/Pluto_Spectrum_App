@@ -133,6 +133,17 @@ def _hex(bits: np.ndarray) -> str:
     return f"0x{bits_to_int_msb(values):0{width}X}"
 
 
+def _octets(bits: np.ndarray) -> str:
+    """Format a DECT MSB-first bit stream as readable octets."""
+
+    values = np.asarray(bits, dtype=np.uint8)
+    complete_stop = values.size - values.size % 8
+    return " ".join(
+        f"{bits_to_int_msb(values[index:index + 8]):02X}"
+        for index in range(0, complete_stop, 8)
+    )
+
+
 def _slice(bits: np.ndarray, start: int, stop: int) -> np.ndarray:
     return np.asarray(bits[max(0, start):max(0, min(stop, bits.size))], dtype=np.uint8)
 
@@ -474,7 +485,7 @@ class DectClassicDecoder:
             children.append(_field(bits, "b_field", "B-field", b_start, b_start + b_size, f"{b_raw.size} bits", "Scrambled air bits; payload not decoded", FieldStatus.INFO if b_raw.size == b_size else FieldStatus.WARNING, (
                 _field(bits, "b_length", "Length", b_start, b_start, f"{b_raw.size} bits", "Physical B-field length"),
                 _field(bits, "b_ba_type", "BA Type", b_start, b_start, ba_name, "Interpretation from A-field BA"),
-                _field(bits, "b_raw", "Raw", b_start, b_start + b_size, _hex(b_raw), "Scrambled air bits"),
+                _field(bits, "b_raw", "Raw", b_start, b_start + b_size, _octets(b_raw), "Scrambled bearer octets"),
                 _field(bits, "b_decode", "Decode", b_start, b_start, "Not decoded", "B-field descrambling/higher layers are outside this analyzer", FieldStatus.UNKNOWN),
             )))
             x_start = b_start + b_size

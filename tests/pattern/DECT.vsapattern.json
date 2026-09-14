@@ -1,0 +1,18 @@
+{
+  "schema": "pluto-vsa-pattern",
+  "version": 1,
+  "name": "DECT",
+  "symbol_format": "Decimal",
+  "symbols": [
+    1,
+    0,
+    1,
+    0,
+    1,
+    0,
+    1,
+    0,
+    1,
+    0
+  ]
+}

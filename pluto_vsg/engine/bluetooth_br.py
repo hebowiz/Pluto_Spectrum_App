@@ -8,7 +8,6 @@ from pluto_protocol.model import GeneratedPacketBits
 from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
 from pluto_sa.vsa.profiles.bluetooth_br import (
     access_code_bits,
-    build_packet_bits,
     fec13_encode,
     header_error_check,
     payload_crc_bytes,
@@ -131,15 +130,28 @@ def _header_data_bits(project: WaveformProject) -> np.ndarray:
     return _bits_lsb(packed, 10)
 
 
+def _packet_header_bits(project: WaveformProject) -> tuple[np.ndarray, int]:
+    """Return the 18 logical header bits and the HEC selected for transmission."""
+
+    settings = project.bluetooth_br
+    assert settings is not None
+    header_data = _header_data_bits(project)
+    hec = (
+        header_error_check(header_data, settings.uap)
+        if settings.hec_auto
+        else int(settings.hec_manual)
+    )
+    hec_bits_msb = np.asarray([int(bit) for bit in f"{hec:08b}"], dtype=np.uint8)
+    return np.concatenate((header_data, hec_bits_msb)), hec
+
+
 def _unwhitened_packet_bits(
     project: WaveformProject, payload_bits: np.ndarray
 ) -> np.ndarray:
     settings = project.bluetooth_br
     assert settings is not None
-    header_data = _header_data_bits(project)
-    hec = header_error_check(header_data, settings.uap)
-    hec_bits_msb = np.asarray([int(bit) for bit in f"{hec:08b}"], dtype=np.uint8)
-    header_air = fec13_encode(np.concatenate((header_data, hec_bits_msb)))
+    header, _hec = _packet_header_bits(project)
+    header_air = fec13_encode(header)
     return np.concatenate(
         (access_code_bits(settings.lap), header_air, payload_bits)
     )
@@ -374,7 +386,9 @@ class BluetoothBRWaveformEngine:
         body = _payload_body(project)
         payload_header = (
             _bits_lsb(
-                0b10 | (1 << 2) | (settings.payload_length_bytes << 3),
+                int(settings.payload_llid)
+                | (int(settings.payload_flow) << 2)
+                | (settings.payload_length_bytes << 3),
                 8 if packet_kind == BluetoothPacketKind.DH1 else 16,
             )
         )
@@ -382,31 +396,22 @@ class BluetoothBRWaveformEngine:
             payload_crc_bytes(np.concatenate((payload_header, body)), settings.uap)
         )
         payload = np.concatenate((payload_header, body, payload_crc))
+        header, transmitted_hec = _packet_header_bits(project)
         edr_phase_indices = np.empty(0, dtype=np.int16)
         gfsk_sample_count = 0
         edr_start_relative_sample: int | None = None
         if not is_edr and settings.whitening_enabled:
-            packet_bits = build_packet_bits(
-                clock_6_1=settings.clock_6_1,
-                uap=settings.uap,
-                payload_bits=payload,
-                lt_addr=settings.lt_addr,
-                packet_type=packet_type,
-                flow=settings.flow,
-                arqn=settings.arqn,
-                seqn=settings.seqn,
-                lap=settings.lap,
+            whitening = whitening_sequence(
+                int(settings.clock_6_1), header.size + payload.size
+            )
+            header_air = fec13_encode(header ^ whitening[: header.size])
+            payload_air = payload ^ whitening[header.size :]
+            packet_bits = np.concatenate(
+                (access_code_bits(settings.lap), header_air, payload_air)
             )
         elif not is_edr:
             packet_bits = _unwhitened_packet_bits(project, payload)
         else:
-            header_data = _header_data_bits(project)
-            hec = header_error_check(header_data, settings.uap)
-            hec_bits = np.asarray(
-                [(hec >> shift) & 1 for shift in range(7, -1, -1)],
-                dtype=np.uint8,
-            )
-            header = np.concatenate((header_data, hec_bits))
             if settings.whitening_enabled:
                 whitening = whitening_sequence(
                     int(settings.clock_6_1), header.size + payload.size
@@ -644,6 +649,8 @@ class BluetoothBRWaveformEngine:
                 "payload_header_bits": payload_header,
                 "payload_body_bits": body,
                 "payload_crc_bits": payload_crc,
+                "packet_header_hec": transmitted_hec,
+                "packet_header_hec_mode": "Auto" if settings.hec_auto else "Manual",
                 "edr_phase_indices": edr_phase_indices,
                 "edr_padding_bits": int(
                     (-payload.size) % (

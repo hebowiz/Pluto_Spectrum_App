@@ -934,11 +934,31 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.flow_combo = self._bit_combo(settings.flow)
         self.arqn_combo = self._bit_combo(settings.arqn)
         self.seqn_combo = self._bit_combo(settings.seqn)
-        self.hec_value = QtWidgets.QLabel()
-        self.hec_value.setToolTip("Automatically calculated from Header and UAP")
+        self.hec_mode_combo = QtWidgets.QComboBox()
+        self.hec_mode_combo.addItem("Auto", True)
+        self.hec_mode_combo.addItem("Manual", False)
+        self.hec_mode_combo.setCurrentIndex(
+            self.hec_mode_combo.findData(bool(settings.hec_auto))
+        )
+        self._hec_mode_auto = bool(settings.hec_auto)
+        self.hec_value = QtWidgets.QLineEdit(f"0x{int(settings.hec_manual):02X}")
+        self.hec_value.setMaximumWidth(72)
+        self.hec_value.setValidator(
+            QtGui.QRegularExpressionValidator(
+                QtCore.QRegularExpression(r"0[xX][0-9A-Fa-f]{1,2}"),
+                self.hec_value,
+            )
+        )
+        self.hec_value.setToolTip(
+            "Auto calculates HEC from Packet Header and UAP. Manual transmits "
+            "the entered byte while retaining normal FEC and whitening."
+        )
         self.payload_length_spin = self._integer_spin(
             0, 1021, settings.payload_length_bytes
         )
+        self.payload_llid_spin = self._integer_spin(0, 3, settings.payload_llid)
+        self.payload_flow_combo = self._bit_combo(settings.payload_flow)
+        self.payload_header_length_value = QtWidgets.QLabel()
         self.rf_test_payload_combo = QtWidgets.QComboBox()
         for label, value in (
             ("PRBS-9", "prbs9"),
@@ -1045,9 +1065,15 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             ("FLOW", self.flow_combo),
             ("ARQN", self.arqn_combo),
             ("SEQN", self.seqn_combo),
-            ("HEC", self.hec_value),
+            ("HEC Mode", self.hec_mode_combo),
+            ("HEC Value", self.hec_value),
         ):
             header_form.addRow(label, widget)
+        payload_header_group = QtWidgets.QGroupBox("Payload Header")
+        payload_header_form = QtWidgets.QFormLayout(payload_header_group)
+        payload_header_form.addRow("LLID", self.payload_llid_spin)
+        payload_header_form.addRow("FLOW", self.payload_flow_combo)
+        payload_header_form.addRow("LENGTH", self.payload_header_length_value)
         self._timing_controls = tuple(
             SymbolTimeControl(control, lambda: 1_000_000.0)
             for control in (
@@ -1095,6 +1121,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             ("UAP [hex]", self.uap_edit),
             ("CLK 6-1 [hex]", self.clock_edit),
             ("Header Fields", header_group),
+            ("Payload Header Fields", payload_header_group),
             ("RF Test Payload Preset", rf_test_row),
             ("Payload Source", self.payload_source_combo),
             ("Source Behavior", self.payload_source_help),
@@ -1122,8 +1149,12 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.flow_combo.currentIndexChanged.connect(self._update_header_preview)
         self.arqn_combo.currentIndexChanged.connect(self._update_header_preview)
         self.seqn_combo.currentIndexChanged.connect(self._update_header_preview)
+        self.hec_mode_combo.currentIndexChanged.connect(self._hec_mode_changed)
         self.packet_type_combo.currentIndexChanged.connect(
             self._packet_type_changed
+        )
+        self.payload_length_spin.valueChanged.connect(
+            self._update_payload_header_preview
         )
         self.carrier_combo.currentIndexChanged.connect(self._update_rf_preview)
         self.cfo_spin.valueChanged.connect(self._update_rf_preview)
@@ -1145,6 +1176,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self._packet_type_changed(reset_payload=False)
         self._update_period_constraints()
         self._update_header_preview()
+        self._update_payload_header_preview()
 
     @staticmethod
     def _double_spin(
@@ -1173,6 +1205,10 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         return control
 
     def _update_header_preview(self) -> None:
+        hec_auto = bool(self.hec_mode_combo.currentData())
+        self.hec_value.setEnabled(not hec_auto)
+        if not hec_auto:
+            return
         try:
             uap = int(self.uap_edit.text().strip(), 16)
             if not 0 <= uap <= 0xFF:
@@ -1192,7 +1228,19 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         header_bits = np.asarray(
             [(packed >> index) & 1 for index in range(10)], dtype=np.uint8
         )
-        self.hec_value.setText(f"0x{header_error_check(header_bits, uap):02X} (auto)")
+        self.hec_value.setText(f"0x{header_error_check(header_bits, uap):02X}")
+
+    def _hec_mode_changed(self, _index=None) -> None:
+        hec_auto = bool(self.hec_mode_combo.currentData())
+        # Auto -> Manual deliberately retains the currently displayed correct
+        # HEC as the editable starting point for negative-test packets.
+        self._hec_mode_auto = hec_auto
+        self._update_header_preview()
+
+    def _update_payload_header_preview(self, _value=None) -> None:
+        self.payload_header_length_value.setText(
+            f"{self.payload_length_spin.value()} byte (auto)"
+        )
 
     def _update_post_idle_reference(self) -> None:
         post_idle = max(0.0, self.period_spin.value() - self._minimum_period_symbols)
@@ -1251,9 +1299,14 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             lap = int(self.lap_edit.text().strip(), 16)
             uap = int(self.uap_edit.text().strip(), 16)
             clock = int(self.clock_edit.text().strip(), 16)
+            hec_manual = int(self.hec_value.text().strip(), 16)
+            if not 0 <= hec_manual <= 0xFF:
+                raise ValueError
         except ValueError:
             QtWidgets.QMessageBox.warning(
-                self, "Bluetooth Settings", "LAP, UAP and clock must be hexadecimal."
+                self,
+                "Bluetooth Settings",
+                "LAP, UAP, clock and HEC must be valid hexadecimal values.",
             )
             return
         settings = replace(
@@ -1266,7 +1319,11 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             flow=int(self.flow_combo.currentData()),
             arqn=int(self.arqn_combo.currentData()),
             seqn=int(self.seqn_combo.currentData()),
+            hec_auto=bool(self.hec_mode_combo.currentData()),
+            hec_manual=hec_manual,
             payload_length_bytes=self.payload_length_spin.value(),
+            payload_llid=self.payload_llid_spin.value(),
+            payload_flow=int(self.payload_flow_combo.currentData()),
             payload_source=PayloadSourceKind(
                 self.payload_source_combo.currentData()
             ),

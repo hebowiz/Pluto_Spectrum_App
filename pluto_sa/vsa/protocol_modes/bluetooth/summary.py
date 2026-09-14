@@ -647,11 +647,19 @@ def build_edr_summary(
     rows = (
         BluetoothSummaryRow(
             RF_PHY_MEASUREMENTS,
-            "Output power",
-            _display(metrics.get("output_power_dbm"), "dBm"),
-            OUTPUT_POWER_LIMIT_DEPENDENCY,
+            "GFSK output power (PGFSK)",
+            _display(metrics.get("pgfsk_dbm"), "dBm"),
+            "Average over N{GREATER-THAN OR EQUAL TO} 80% of GFSK portion",
             "N/A",
-            "output_power",
+            "pgfsk",
+        ),
+        BluetoothSummaryRow(
+            RF_PHY_MEASUREMENTS,
+            "DPSK output power (PDPSK)",
+            _display(metrics.get("pdpsk_dbm"), "dBm"),
+            "Average over N{GREATER-THAN OR EQUAL TO} 80% of DPSK portion",
+            "N/A",
+            "pdpsk",
         ),
         BluetoothSummaryRow(RF_PHY_MEASUREMENTS, "Relative transmit power", _display(metrics.get("relative_power_db"), "dB"), "-4 dB < value < +1 dB", relative_result, "relative_transmit_power"),
         BluetoothSummaryRow(RF_PHY_MEASUREMENTS, "Initial frequency error \N{GREEK SMALL LETTER OMEGA}i", _display(initial, "kHz", 1e3), "-75 kHz < \N{GREEK SMALL LETTER OMEGA}i < +75 kHz", range_result(initial, EDR_INITIAL_FREQUENCY_ERROR_RANGE_HZ), "omega_i"),
@@ -712,8 +720,6 @@ def build_edr_summary(
         ),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Payload Pattern", str(measurement.metadata.get("payload_pattern", "N/A") if measurement else "N/A"), metric_id="payload_pattern"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "Access Code Correlation", old.get("correlation").display if old.get("correlation") else "N/A", metric_id="access_code_correlation"),
-        BluetoothSummaryRow(REFERENCE_INFORMATION, "PGFSK", _display(metrics.get("pgfsk_dbm"), "dBm"), metric_id="pgfsk"),
-        BluetoothSummaryRow(REFERENCE_INFORMATION, "PDPSK", _display(metrics.get("pdpsk_dbm"), "dBm"), metric_id="pdpsk"),
         BluetoothSummaryRow(REFERENCE_INFORMATION, "DEVM Blocks Evaluated", f"{block_count} / {EDR_REQUIRED_DEVM_BLOCKS}", metric_id="devm_blocks_evaluated"),
         BluetoothSummaryRow(
             REFERENCE_INFORMATION,
@@ -740,7 +746,33 @@ def build_bluetooth_summary(
 ) -> tuple[BluetoothSummaryRow, ...]:
     phy = result.packet.phy_name
     if phy.startswith("HDT"):
-        return build_hdt_summary(result)
-    if phy.startswith("EDR"):
-        return build_edr_summary(result)
-    return build_fsk_summary(result)
+        rows = build_hdt_summary(result)
+    elif phy.startswith("EDR"):
+        rows = build_edr_summary(result)
+    else:
+        rows = build_fsk_summary(result)
+    if str(result.profile) != "general_packet":
+        return rows
+    metrics = _metric_map(result)
+    acquisition_ids = (
+        "acquisition_mode",
+        "detected_lap",
+        "detected_uap",
+        "detected_clock",
+        "detected_whitening",
+        "detected_access_address",
+        "detected_channel",
+        "crc_init_source",
+        "hdt_training_source",
+    )
+    acquisition_rows = tuple(
+        BluetoothSummaryRow(
+            REFERENCE_INFORMATION,
+            metrics[metric_id].label,
+            metrics[metric_id].display,
+            metric_id=metric_id,
+        )
+        for metric_id in acquisition_ids
+        if metric_id in metrics
+    )
+    return (*rows, *acquisition_rows)

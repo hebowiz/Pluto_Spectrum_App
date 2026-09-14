@@ -36,3 +36,15 @@ def bits_to_bytes_lsb(bits: np.ndarray, *, require_complete: bool = True) -> byt
 
 def bits_hex_lsb(bits: np.ndarray) -> str:
     return bits_to_bytes_lsb(bits, require_complete=False).hex().upper()
+
+
+def format_hex_octets(data: bytes) -> str:
+    """Format an octet sequence without implying a multi-octet integer."""
+
+    return " ".join(f"{value:02X}" for value in data)
+
+
+def bits_hex_octets_lsb(bits: np.ndarray) -> str:
+    """Format complete LSB-first octets in their logical sequence."""
+
+    return format_hex_octets(bits_to_bytes_lsb(bits, require_complete=False))
