@@ -1777,8 +1777,8 @@ def test_edr_sig_measurement_uses_five_us_guard_and_excludes_trailer() -> None:
     summary = {row.metric_id: row for row in result.summary_rows}
     assert summary["pgfsk"].value.endswith(" dBm")
     assert summary["pdpsk"].value.endswith(" dBm")
-    assert "80% of GFSK portion" in summary["pgfsk"].limit
-    assert "80% of DPSK portion" in summary["pdpsk"].limit
+    assert summary["pgfsk"].limit == "\N{EM DASH}"
+    assert summary["pdpsk"].limit == "\N{EM DASH}"
     assert summary["pgfsk"].section == "RF PHY Measurements"
     assert summary["pdpsk"].section == "RF PHY Measurements"
     assert not any(
