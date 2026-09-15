@@ -181,13 +181,18 @@ class VSAControlPanel(QtWidgets.QFrame):
         )
 
         def sync_sweep_group() -> None:
-            single_running = (
-                spec.single.action is not None
-                and "Stop" in spec.single.action.text()
-            )
             continuous_running = (
                 spec.continuous.action is not None
                 and "Stop" in spec.continuous.action.text()
+            )
+            # Dedicated Continuous capture temporarily gives its internal
+            # Single/analysis action a Stop label while analysis is active.
+            # Continuous is the owning operation in that state; treating both
+            # actions as running disables the only button that can stop it.
+            single_running = (
+                not continuous_running
+                and spec.single.action is not None
+                and "Stop" in spec.single.action.text()
             )
             busy = single_running or continuous_running
             refresh_enabled = (
@@ -201,6 +206,10 @@ class VSAControlPanel(QtWidgets.QFrame):
             self.buttons["Continuous"].setEnabled(
                 continuous_enabled and not single_running
             )
+            self.buttons["Continuous"].setChecked(continuous_running)
+            self.buttons["Single"].setChecked(single_running)
+            if continuous_running:
+                self.buttons["Single"].setText("Single")
             self.buttons["Refresh Analysis"].setEnabled(
                 refresh_enabled and not busy
             )
