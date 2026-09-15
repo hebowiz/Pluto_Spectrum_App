@@ -77,6 +77,21 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
             "Reset",
             "System",
         }.issubset(window.control_panel.buttons)
+        assert window.control_panel.buttons["Analyzer Mode"].text() == (
+            "Analyzer Mode\nGeneric VSA"
+        )
+        single_action = window.generic_workspace.run_single_action
+        continuous_action = window.generic_workspace.run_continuous_action
+        single_action.setText("Stop Single")
+        assert window.control_panel.buttons["Single"].isChecked()
+        assert not window.control_panel.buttons["Continuous"].isEnabled()
+        single_action.setText("Run Single")
+        assert not window.control_panel.buttons["Single"].isChecked()
+        assert window.control_panel.buttons["Continuous"].isEnabled()
+        continuous_action.setText("Stop Continuous")
+        assert window.control_panel.buttons["Continuous"].isChecked()
+        continuous_action.setText("Run Continuous")
+        assert not window.control_panel.buttons["Continuous"].isChecked()
         QtCore.QTimer.singleShot(0, window.generic_workspace._meas_config_dialog.reject)
         window.control_panel.buttons["Signal Description"].click()
         assert window.generic_workspace._config_page_title.text() == "Signal Description"
@@ -99,10 +114,16 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
         window.set_analysis_mode("bluetooth")
         assert window._stack.currentWidget() is window.bluetooth_workspace
         assert "Bluetooth Dedicated" in window.windowTitle()
+        assert window.control_panel.buttons["Analyzer Mode"].text() == (
+            "Analyzer Mode\nBluetooth"
+        )
         assert "Bluetooth Analysis" in window.control_panel.buttons
         window.bluetooth_workspace.center_spin.setValue(2420.0)
 
         window.set_analysis_mode("dect")
+        assert window.control_panel.buttons["Analyzer Mode"].text() == (
+            "Analyzer Mode\nDECT"
+        )
         assert window._stack.currentWidget() is window.dect_workspace
         assert "DECT Dedicated" in window.windowTitle()
         assert "DECT Analysis" in window.control_panel.buttons

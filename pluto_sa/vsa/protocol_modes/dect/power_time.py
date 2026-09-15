@@ -228,7 +228,18 @@ def build_dect_power_measurement_paths(
     usable = min(rate, float(recording.usable_bandwidth_hz or rate))
     normalized_iq = np.asarray(recording.iq, dtype=np.complex128) / recording.full_scale
     scale_mw = 10.0 ** (recording.dbfs_to_dbm_offset_db / 10.0)
-    scale = scale_mw / 1000.0 if recording.amplitude_calibrated else 1.0
+    dbm_reference_available = bool(
+        recording.amplitude_calibrated
+        or recording.metadata.get("nominal_pluto_amplitude", False)
+        or recording.metadata.get("nominal_pluto_amplitude_inferred", False)
+        or recording.calibration_offset_db
+        or recording.frequency_dependent_offset_db
+        or recording.input_correction_db
+    )
+    # A Pluto capture carries a nominal dBFS-to-dBm conversion even when it is
+    # not formally amplitude calibrated.  Keep that engineering-unit
+    # conversion independent from eligibility for absolute ETSI verdicts.
+    scale = scale_mw / 1000.0 if dbm_reference_available else 1.0
     power_time_iq, power_time_filter, power_time_delay = _complex_measurement_receiver(
         normalized_iq, rate, float(power_time_bandwidth_hz)
     )
@@ -242,7 +253,7 @@ def build_dect_power_measurement_paths(
         power_time_available=usable >= float(power_time_bandwidth_hz),
         ntp_available=usable >= float(one_mhz_bandwidth_hz),
         amplitude_calibrated=bool(recording.amplitude_calibrated),
-        power_unit="dBm" if recording.amplitude_calibrated else "dBFS",
+        power_unit="dBm" if dbm_reference_available else "dBFS",
         input_usable_bandwidth_hz=usable,
         power_time_measurement_bandwidth_hz=float(power_time_bandwidth_hz),
         ntp_measurement_bandwidth_hz=float(one_mhz_bandwidth_hz),
@@ -265,7 +276,7 @@ def measure_dect_ntp(
     complete = p0_sample >= 0.0 and packet_end_sample <= paths.one_mhz_power.size
     available = bool(paths.ntp_available and complete)
     value = _weighted_mean(paths.one_mhz_power, p0_sample, packet_end_sample)
-    value_db = _db(value) + (30.0 if paths.amplitude_calibrated else 0.0)
+    value_db = _db(value) + (30.0 if paths.power_unit == "dBm" else 0.0)
     reason = ""
     if not paths.ntp_available:
         reason = "input usable bandwidth is below 1 MHz"
@@ -304,9 +315,9 @@ def measure_dect_power_time(
     bandwidth = float(paths.power_time_measurement_bandwidth_hz)
     power = paths.power_time_power
     calibrated = bool(paths.amplitude_calibrated)
-    unit = "dBm" if calibrated else "dBFS"
+    unit = paths.power_unit
     reference_power = _weighted_mean(power, power_time_start_sample, packet_end_sample)
-    reference_power_db = _db(reference_power) + (30.0 if calibrated else 0.0)
+    reference_power_db = _db(reference_power) + (30.0 if unit == "dBm" else 0.0)
     criteria: list[DectPowerTimeCriterion] = []
     reasons: list[str] = []
 

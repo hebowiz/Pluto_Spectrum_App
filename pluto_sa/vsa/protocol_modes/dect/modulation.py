@@ -17,6 +17,7 @@ class DectModulationReference(str, Enum):
     """Frequency references offered by the CTS60 modulation display."""
 
     MEASURED = "Measured"
+    WINDOW_MEAN = "Window Mean"
     NOMINAL = "Nominal"
     HALF_PEAK = "Half Peak"
 
@@ -29,7 +30,10 @@ class DectFrequencyReferences:
 
     def value(self, reference: DectModulationReference | str) -> float:
         selected = DectModulationReference(reference)
-        if selected is DectModulationReference.MEASURED:
+        if selected in {
+            DectModulationReference.MEASURED,
+            DectModulationReference.WINDOW_MEAN,
+        }:
             return self.measured_hz
         if selected is DectModulationReference.HALF_PEAK:
             return self.half_peak_hz

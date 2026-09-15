@@ -172,7 +172,13 @@ class DectPacketResult:
     def modulation_reference_hz(
         self, reference: DectModulationReference | str | None = None
     ) -> float:
-        return self.frequency_references.value(reference or self.modulation_reference)
+        selected = DectModulationReference(reference or self.modulation_reference)
+        if selected is DectModulationReference.MEASURED:
+            # Display Measured relative to the packet's payload-independent
+            # observed carrier.  The former payload-window arithmetic mean is
+            # retained as the explicit Window Mean diagnostic reference.
+            return float(self.carrier_error_hz)
+        return self.frequency_references.value(selected)
 
 
 def _contiguous_ranges(mask: np.ndarray) -> tuple[tuple[int, int], ...]:
@@ -597,12 +603,25 @@ def _sync_timing(
         if fitted.success:
             fitted_center, sps = (float(value) for value in fitted.x)
             p0 = fitted_center - 16.0 * sps
-    centers = p0 + (np.arange(sync_bits.size, dtype=np.float64) + 0.5) * sps
-    observed = _sample_frequency(frequency, positions, centers)
-    carrier = 0.5 * (
-        float(np.nanmean(observed[sync_bits == 1]))
-        + float(np.nanmean(observed[sync_bits == 0]))
+    # Refit the complete known S-field at the recovered timing.  The model
+    # scale absorbs the actual deviation while the intercept is carrier.  A
+    # center-sample midpoint has a small deterministic bias because Gaussian
+    # pulse memory makes nominally equal symbols depend on their neighbours.
+    selected = (
+        (positions >= p0 + 0.25 * sps)
+        & (positions <= p0 + 31.75 * sps)
     )
+    final_positions = positions[selected]
+    final_frequency = frequency[selected]
+    symbol_time = (final_positions - p0) / sps + 1.0
+    model = np.interp(
+        symbol_time * reference_sps,
+        np.arange(reference.size, dtype=np.float64),
+        reference,
+    )
+    design = np.column_stack((np.ones(model.size), model))
+    coefficients, *_ = np.linalg.lstsq(design, final_frequency, rcond=None)
+    carrier = float(coefficients[0])
     return p0, sps, carrier
 
 
@@ -950,7 +969,10 @@ def analyze_dect_recording(
     frequency, positions = _instantaneous_frequency(recording.iq, sample_rate)
     raw_power = np.abs(np.asarray(recording.iq, dtype=np.complex128)) ** 2
     power_paths = build_dect_power_measurement_paths(recording)
-    power_trace_offset = 30.0 if recording.amplitude_calibrated else 0.0
+    # The parallel power receivers always use the recording's common nominal
+    # dBFS-to-dBm conversion.  ``amplitude_calibrated`` remains a separate
+    # statement about whether absolute ETSI limits may receive a verdict.
+    power_trace_offset = 30.0 if power_paths.power_unit == "dBm" else 0.0
     raw_measurement_power_db = (
         10.0 * np.log10(np.maximum(power_paths.raw_power, np.finfo(float).tiny))
         + power_trace_offset
@@ -986,7 +1008,7 @@ def analyze_dect_recording(
         except RuntimeError:
             continue
         p0 = _refine_p0_crossing(frequency, positions, p0, sps, direction)
-        p0, sps, carrier = _sync_timing(
+        p0, sps, s_field_carrier = _sync_timing(
             frequency, positions, p0, sps, direction
         )
         preamble_score, sync_word_score, sync_score = _s_field_correlations(
@@ -1047,6 +1069,10 @@ def analyze_dect_recording(
         )
         carrier = _two_level_midpoint(bit_means)
         bits = (bit_means > carrier).astype(np.uint8)
+        # The S-field carrier returned by synchronization is fitted from the
+        # complete known, balanced waveform.  In particular, do not report
+        # the mean of a generic loopback payload as CFO: that folds modulation
+        # deviation into the result whenever the ones/zeroes count differs.
         loopback_start, loopback_stop = _loopback_range_with_offset(
             packet_type, symbol_count, bit_offset
         )
@@ -1056,7 +1082,7 @@ def analyze_dect_recording(
         # two-level midpoint above solely as the demodulation threshold.
         loopback_frequencies = bit_means[loopback_start:loopback_stop]
         loopback_frequencies = loopback_frequencies[np.isfinite(loopback_frequencies)]
-        measured_carrier = (
+        clause_7_carrier = (
             float(np.mean(loopback_frequencies))
             if loopback_frequencies.size
             else float(carrier)
@@ -1064,6 +1090,16 @@ def analyze_dect_recording(
         modulation_case, eligible, pattern_identification = _classify_pattern(
             loopback, packet_type
         )
+        observed_carrier = (
+            clause_7_carrier
+            if modulation_case.startswith("Case A")
+            else s_field_carrier
+        )
+        # Preserve the standards-defined loopback reference for an eligible
+        # RF modulation test pattern.  Generic traffic has no formal clause-7
+        # carrier result, so use the payload-independent observed carrier for
+        # its diagnostic deviation values as well.
+        modulation_carrier = clause_7_carrier if eligible else observed_carrier
         measurement_mask = _measurement_mask(
             bits, modulation_case, loopback_start, loopback_stop
         )
@@ -1075,7 +1111,7 @@ def analyze_dect_recording(
             window_start_sample=reference_window_start,
             window_stop_sample=reference_window_stop,
         )
-        selected_reference = references.value(DectModulationReference.MEASURED)
+        selected_reference = observed_carrier
         eligible_sample_mask = eligible_peak_sample_mask(
             positions,
             bits=bits,
@@ -1094,7 +1130,7 @@ def analyze_dect_recording(
             samples_per_symbol=sps,
             # EN 300 176-1 parts 1-3 use the carrier measured by the carrier
             # procedure.  The selectable CTS60 display reference is separate.
-            reference_hz=measured_carrier,
+            reference_hz=modulation_carrier,
         )
         per_bit_deviations = deviation_bit_results(
             bit_peaks,
@@ -1103,19 +1139,22 @@ def analyze_dect_recording(
             first_symbol_sample=actual_start,
             samples_per_symbol=sps,
             sample_rate_hz=sample_rate,
-            reference_hz=measured_carrier,
+            reference_hz=modulation_carrier,
             modulation_case=modulation_case,
             first_symbol_number=-bit_offset,
         )
         measured_positive = bit_peaks[measurement_mask & (bits == 1)]
         measured_negative = bit_peaks[measurement_mask & (bits == 0)]
         measured_deviations = np.concatenate(
-            (measured_positive - measured_carrier, measured_carrier - measured_negative)
+            (
+                measured_positive - modulation_carrier,
+                modulation_carrier - measured_negative,
+            )
         )
         measured_deviations = measured_deviations[np.isfinite(measured_deviations)]
         if not measured_deviations.size:
             measured_deviations = np.abs(
-                frequency[eligible_sample_mask] - measured_carrier
+                frequency[eligible_sample_mask] - modulation_carrier
             )
         cts_frequency, cts_positions, cts_symbols, cts_fractions = cts60_trace(
             frequency,
@@ -1194,8 +1233,8 @@ def analyze_dect_recording(
                 sync_word_correlation=sync_word_score,
                 packet_type=packet_type,
                 nominal_frequency_hz=nominal_frequency,
-                measured_frequency_hz=nominal_frequency + measured_carrier,
-                carrier_error_hz=measured_carrier,
+                measured_frequency_hz=nominal_frequency + observed_carrier,
+                carrier_error_hz=observed_carrier,
                 carrier_test_eligible=modulation_case.startswith("Case A"),
                 modulation_case=modulation_case,
                 modulation_test_eligible=eligible and rf_measurement_bandwidth_eligible,
@@ -1285,7 +1324,9 @@ def analyze_dect_recording(
                     "drift_compensation_applied": False,
                     "modulation_reference": DectModulationReference.MEASURED.value,
                     "modulation_reference_hz": selected_reference,
-                    "clause_7_carrier_reference_hz": measured_carrier,
+                    "observed_s_field_carrier_hz": s_field_carrier,
+                    "clause_7_carrier_reference_hz": clause_7_carrier,
+                    "modulation_carrier_reference_hz": modulation_carrier,
                     "loopback_bit_range": (loopback_start, loopback_stop),
                     "loopback_bit_count": int(loopback.size),
                     "minimum_measured_deviation_hz": (

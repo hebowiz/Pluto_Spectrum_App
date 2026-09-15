@@ -276,7 +276,7 @@ def test_dect_workspace_renders_measurement_and_packet_views(tmp_path) -> None:
         assert fm_y == pytest.approx(
             (
                 result.measurement_fm_frequency_hz[fm_mask]
-                - result.frequency_references.measured_hz
+                - result.carrier_error_hz
                 - display_drift * (fm_time_s - display_reference_time)
             )
             / 1e3

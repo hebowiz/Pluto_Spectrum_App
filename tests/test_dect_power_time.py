@@ -79,6 +79,7 @@ def test_each_sample_region_reports_its_own_violation(
 def test_uncalibrated_capture_never_gets_an_absolute_template_pass() -> None:
     result = _measure(replace(_power_time_recording(), amplitude_calibrated=False))
     assert result.overall_status == "INCOMPLETE"
+    assert result.power_unit == "dBFS"
     assert result.criterion_map["Minimum Packet Power"].status == "PASS"
     assert result.criterion_map["Attack Time"].status == "INCOMPLETE"
     assert "absolute amplitude calibration is required" in result.incomplete_reasons

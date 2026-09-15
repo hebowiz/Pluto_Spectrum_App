@@ -1629,7 +1629,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         maintenance_ms = result.power_time.template.maintenance_time_s * 1e3
         guard_ms = result.power_time.template.idle_guard_time_s * 1e3
         ntp = result.power_time.reference_power_db
-        if not result.power_time.amplitude_calibrated:
+        if result.power_time.power_unit != "dBm":
             ntp += recording.dbfs_to_dbm_offset_db
         segments = (
             ("NTP -1 dB", burst_start_ms, end_ms, ntp - 1.0, (115, 170, 100)),
@@ -1689,7 +1689,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                 result.power_time_power_db[indices]
                 + (
                     recording.dbfs_to_dbm_offset_db
-                    if not result.power_time.amplitude_calibrated
+                    if result.power_time.power_unit != "dBm"
                     else 0.0
                 ),
                 pen=None, symbol="x", symbolPen=pg.mkPen("r", width=2),

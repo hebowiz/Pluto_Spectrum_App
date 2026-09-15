@@ -89,7 +89,7 @@ def test_alternating_payload_is_generic_case_b_not_part2_conformance() -> None:
 
 def test_arbitrary_payload_reports_reference_values_without_rf_test_verdict() -> None:
     result = analyze_dect_recording(
-        generate_dect_packet(payload_pattern="prbs9")
+        generate_dect_packet(payload_pattern="prbs9", frequency_error_hz=12_345.0)
     )[0]
     assert result.modulation_case == "Case B / Generic"
     assert not result.carrier_test_eligible
@@ -99,6 +99,13 @@ def test_arbitrary_payload_reports_reference_values_without_rf_test_verdict() ->
     assert rows["GFSK Modulation Deviation"].result == "N/A"
     assert "Observed carrier frequency error" in rows
     assert "Observed GFSK deviation" in rows
+    assert result.carrier_error_hz == pytest.approx(12_345.0, abs=500.0)
+    assert result.metadata["observed_s_field_carrier_hz"] == pytest.approx(
+        12_345.0, abs=500.0
+    )
+    assert result.metadata["clause_7_carrier_reference_hz"] != pytest.approx(
+        12_345.0, abs=5_000.0
+    )
     reference_items = [
         row.test_item
         for row in result.summary_rows
@@ -223,7 +230,10 @@ def test_modulation_references_are_independent_of_carrier_accuracy_estimator() -
     assert result.frequency_references.half_peak_hz == pytest.approx(
         0.5 * (np.max(selected) + np.min(selected))
     )
-    assert result.modulation_reference_hz() == result.frequency_references.measured_hz
+    assert result.modulation_reference_hz() == result.carrier_error_hz
+    assert result.modulation_reference_hz(
+        DectModulationReference.WINDOW_MEAN
+    ) == result.frequency_references.measured_hz
     assert result.modulation_reference_hz(DectModulationReference.NOMINAL) == 0.0
     assert result.carrier_error_hz == pytest.approx(17_000.0, abs=500.0)
 
@@ -369,8 +379,10 @@ def test_nominal_live_pluto_power_is_displayed_in_dbm() -> None:
     )
     result = analyze_dect_recording(live)[0]
     assert result.ntp.power_db == pytest.approx(-11.36, abs=0.1)
-    assert result.ntp.power_unit == "dBFS"
+    assert result.ntp.power_unit == "dBm"
     assert result.ntp.available is False
+    assert result.power_time.reference_power_db == pytest.approx(-11.0, abs=0.1)
+    assert result.power_time.power_unit == "dBm"
 
 
 def test_variable_p00j_exposes_physical_fields_instead_of_opaque_body() -> None:
@@ -418,7 +430,7 @@ def test_noisy_live_like_capture_keeps_timing_and_power_time_measurements() -> N
     result = analyze_dect_recording(recording)[0]
     assert result.symbol_rate_error_ppm == pytest.approx(-199.0, abs=4.0)
     assert result.ntp.power_db == pytest.approx(-24.39, abs=0.1)
-    assert result.ntp.power_unit == "dBFS"
+    assert result.ntp.power_unit == "dBm"
     assert result.attack_time_s is None
     assert result.release_time_s is None
     assert result.power_time_pass is None

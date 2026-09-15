@@ -148,7 +148,10 @@ class VSAControlPanel(QtWidgets.QFrame):
 
         analyzer = self._group("ANALYZER SETUP")
         analyzer_layout = analyzer.layout()
-        mode_button = self._make_button("Analyzer Mode")
+        mode_button = self._make_button(
+            f"Analyzer Mode\n{spec.mode_label}"
+        )
+        mode_button.setMinimumHeight(68)
         mode_button.clicked.connect(
             lambda: self._show_page("Analyzer Mode", self.mode_page)
         )
@@ -191,6 +194,13 @@ class VSAControlPanel(QtWidgets.QFrame):
                 spec.refresh.action is None or spec.refresh.action.isEnabled()
             )
             reset_enabled = spec.reset.action is None or spec.reset.action.isEnabled()
+            continuous_enabled = (
+                spec.continuous.action is None
+                or spec.continuous.action.isEnabled()
+            )
+            self.buttons["Continuous"].setEnabled(
+                continuous_enabled and not single_running
+            )
             self.buttons["Refresh Analysis"].setEnabled(
                 refresh_enabled and not busy
             )
@@ -286,6 +296,12 @@ class VSAControlPanel(QtWidgets.QFrame):
         display_label: str | None = None,
     ) -> QtWidgets.QPushButton:
         button = self._make_button(display_label or command.label)
+        running_button = display_label in {"Continuous", "Single"}
+        if running_button:
+            # Reuse the exact checked-state styling used by Analyzer Mode.
+            # State is driven by the QAction below rather than by click
+            # toggling, so a rejected start cannot leave stale blue feedback.
+            button.setCheckable(True)
         # QPushButton.clicked emits its checked state.  Do not forward that
         # positional bool to commands whose callbacks use default arguments
         # (for example the measurement-config page name), otherwise False
@@ -297,23 +313,30 @@ class VSAControlPanel(QtWidgets.QFrame):
             action = command.action
 
             def sync() -> None:
+                running = "Stop" in action.text()
                 button.setEnabled(action.isEnabled())
+                if running_button:
+                    button.setChecked(running)
                 if display_label == "Continuous":
                     button.setText(
                         "Stopping..."
-                        if "Stop" in action.text() and not action.isEnabled()
-                        else ("Stop" if "Stop" in action.text() else "Continuous")
+                        if running and not action.isEnabled()
+                        else ("Stop" if running else "Continuous")
                     )
                 elif display_label == "Single":
                     button.setText(
                         "Stopping..."
-                        if "Stop" in action.text() and not action.isEnabled()
-                        else ("Stop" if "Stop" in action.text() else "Single")
+                        if running and not action.isEnabled()
+                        else ("Stop" if running else "Single")
                     )
 
             action.changed.connect(sync)
             self._bound_actions.append((action, sync))
             sync()
+            if running_button:
+                button.clicked.connect(
+                    lambda _checked=False, update=sync: update()
+                )
         return button
 
     def _disconnect_actions(self) -> None:
