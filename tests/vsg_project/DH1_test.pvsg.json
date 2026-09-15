@@ -7,7 +7,7 @@
     "sample_rate_hz": 8000000.0,
     "samples_per_symbol": 8,
     "repeat_count": 100,
-    "period_symbols": 625.0,
+    "period_symbols": 1250.0,
     "center_frequency_hz": 2440000000.0,
     "fields": [
       {
@@ -254,8 +254,8 @@
       "lap": 13014654,
       "uap": 107,
       "clock_6_1": 43,
-      "lt_addr": 1,
-      "flow": 1,
+      "lt_addr": 7,
+      "flow": 0,
       "arqn": 0,
       "seqn": 0,
       "whitening_enabled": false,
@@ -275,6 +275,9 @@
       "pre_idle_symbols": 8,
       "post_idle_symbols": 0
     },
-    "bluetooth_le": null
+    "bluetooth_le": null,
+    "bluetooth_hdt": null,
+    "wifi": null,
+    "dect": null
   }
 }
