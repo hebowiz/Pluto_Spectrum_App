@@ -16,8 +16,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 from pluto_common.numeric_input import DeferredDoubleSpinBox
 from pluto_protocol.dect.common import dect_p_range
 from pluto_protocol.model import PacketField
-from pluto_sa.config.input_frontend import InputPowerCorrection
-from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
+from pluto_sa.sdr.trigger import TriggerKind
 from pluto_sa.vsa.analysis import capture_power_traces, recording_spectrum_trace
 from pluto_sa.vsa.model import IQRecording
 from pluto_sa.vsa.channel import (
@@ -100,16 +99,18 @@ class _DectAnalysisThread(QtCore.QThread):
     analysis_ready = QtCore.Signal(object)
     analysis_failed = QtCore.Signal(str)
 
-    def __init__(self, recording: IQRecording, nominal_frequency_hz: float, parent=None):
+    def __init__(self, recording: IQRecording, nominal_frequency_hz: float, parent=None, *, iq_power_trigger=None):
         super().__init__(parent)
         self._recording = recording
         self._nominal_frequency_hz = nominal_frequency_hz
+        self._iq_power_trigger = iq_power_trigger
 
     def run(self) -> None:
         try:
             results = analyze_dect_recording(
                 self._recording,
                 nominal_frequency_hz=self._nominal_frequency_hz,
+                iq_power_trigger=self._iq_power_trigger,
             )
             if not self.isInterruptionRequested():
                 self.analysis_ready.emit(results)
@@ -239,7 +240,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             self._reset_measurement_statistics
         )
 
-        display_menu = self.menuBar().addMenu("Display Config")
+        display_menu = self.menuBar().addMenu("Display")
         self.symbols_action = display_menu.addAction("Show Symbol Points")
         self.symbols_action.setCheckable(True)
         self.symbols_action.setChecked(self._show_symbol_points)
@@ -284,9 +285,6 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             )
             self.modulation_reference_group.addAction(action)
             self.modulation_reference_actions[reference] = action
-        reset = display_menu.addAction("Reset Plot Scales")
-        reset.setShortcut(QtGui.QKeySequence("Home"))
-        reset.triggered.connect(self._reset_plot_scales)
 
         config_menu = self.menuBar().addMenu("Meas Config")
         self.open_config_action = config_menu.addAction("Open Meas Config...")
@@ -491,6 +489,18 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             self._render(self._result)
 
     def _build_config_dialog(self) -> None:
+        from pluto_sa.vsa.ui.setup_controls import ReceiverSetupControls, TriggerControls, standardize_frontend, display_form
+        self._common_setup = ReceiverSetupControls(
+            self, rate=lambda: DECT_SYMBOL_RATE_HZ * int(self.oversampling_combo.currentData()),
+            symbol_rate=lambda: DECT_SYMBOL_RATE_HZ, bandwidth=self.rf_bandwidth_spin,
+            gain=self.internal_gain_spin, attenuation=self.external_att_spin,
+            duration=self.capture_length_spin, oversampling=self.oversampling_combo,
+        )
+        self._trigger_setup = TriggerControls(source=TriggerKind.POWER_LEVEL, level=-25.0,
+                                              symbol_rate=lambda: DECT_SYMBOL_RATE_HZ)
+        # Retain the legacy threshold model for old saved configurations.
+        self._trigger_setup.controls["level"].valueChanged.connect(self.trigger_level_spin.setValue)
+        self.trigger_level_spin.valueChanged.connect(self._trigger_setup.controls["level"].setValue)
         dect_page = QtWidgets.QWidget()
         dect_form = QtWidgets.QFormLayout(dect_page)
         dect_form.addRow("Regional Carrier Plan", self.plan_combo)
@@ -501,9 +511,6 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         input_page = QtWidgets.QWidget()
         input_form = QtWidgets.QFormLayout(input_page)
         for label, widget in (
-            ("Capture Length", self.capture_length_spin),
-            ("Samples / Symbol", self.oversampling_combo),
-            ("RF Bandwidth", self.rf_bandwidth_spin),
             ("Analysis Channel", self.channel_filter_check),
             ("Analysis Bandwidth", self.analysis_bandwidth_spin),
             (
@@ -517,23 +524,14 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             ("LO Offset", self.lo_offset_check),
             ("Offset Frequency", self.lo_offset_spin),
             ("Resolved LO", self.resolved_lo_label),
-            ("Internal Gain", self.internal_gain_spin),
-            ("External ATT", self.external_att_spin),
         ):
             input_form.addRow(label, widget)
+        self._common_setup.bandwidth_rows(input_form)
+        self._common_setup.power_rows(input_form)
+        standardize_frontend(input_form)
 
-        signal_page = QtWidgets.QWidget()
-        signal_form = QtWidgets.QFormLayout(signal_page)
-        signal_form.addRow("Modulation", QtWidgets.QLabel("GFSK, BT = 0.5"))
-        signal_form.addRow("Symbol Rate", QtWidgets.QLabel("1.152 MSym/s"))
-        signal_form.addRow(
-            "Modulation reference",
-            QtWidgets.QLabel("DECT measurement trace / selected display reference"),
-        )
-
-        trigger_page = QtWidgets.QWidget()
-        trigger_form = QtWidgets.QFormLayout(trigger_page)
-        trigger_form.addRow("I/Q Power Trigger", self.trigger_level_spin)
+        self.trigger_level_spin.setParent(self)
+        self.trigger_level_spin.hide()
 
         run_page = QtWidgets.QWidget()
         run_layout = QtWidgets.QVBoxLayout(run_page)
@@ -586,18 +584,19 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         display_layout.addWidget(self.config_modulation_reference)
         display_layout.addStretch(1)
 
+        display_form(display_page, self, reference=self.config_modulation_reference)
         self._config_dialog = HierarchicalMeasConfigDialog(
             self,
             (
-                ("DECT Analysis", dect_page),
+                ("Signal Description", dect_page),
                 ("Input / Frontend", input_page),
-                ("Signal Description", signal_page),
-                ("Trigger", trigger_page),
-                ("Display Config", display_page),
+                ("Signal Capture", self._common_setup.capture_page()),
+                ("Trigger", self._trigger_setup.page),
+                ("Display", display_page),
                 ("Sweep / Run", run_page),
             ),
             window_title="DECT Meas Config",
-            size=(760, 520),
+            size=(820, 620),
             standard_buttons=(
                 QtWidgets.QDialogButtonBox.StandardButton.Ok
                 | QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -727,6 +726,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
 
     def _config_values(self) -> dict[str, object]:
         return {
+            "common_setup": self._common_setup.values(),
+            "trigger_setup": self._trigger_setup.values(),
             "plan": self.plan_combo.currentData(),
             "carrier_hz": self.carrier_combo.currentData(),
             "capture_ms": self.capture_length_spin.value(),
@@ -803,6 +804,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         )
         self._sync_analysis_channel_controls()
 
+        self._common_setup.apply(settings.get("common_setup", {}))
+        self._trigger_setup.apply(settings.get("trigger_setup", {}))
+
     def _save_config(self) -> None:
         payload = {
             "schema": _CONFIG_SCHEMA,
@@ -831,7 +835,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._config_dialog.open_top()
 
     def open_config_page(self, name: str) -> None:
-        if name == "Display Config":
+        self._common_setup.refresh()
+        if name in {"Display", "Display Config"}:
+            name = "Display"
             for control, value in (
                 (self.config_show_symbols, self._show_symbol_points),
                 (self.config_density, self._symbol_density),
@@ -1085,11 +1091,13 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(f"Exported DECT power debug: {path}")
 
     def _capture_settings(self) -> PlutoCaptureSettings:
+        self._common_setup.refresh()
         return PlutoCaptureSettings(
             center_frequency_hz=self._nominal_frequency_hz(),
             symbol_rate_hz=DECT_SYMBOL_RATE_HZ,
             samples_per_symbol=int(self.oversampling_combo.currentData()),
             capture_length_s=self.capture_length_spin.value() * 1e-3,
+            swap_iq=self._common_setup.swap_iq.isChecked(),
             rf_bandwidth_hz=self.rf_bandwidth_spin.value() * 1e6,
             lo_offset_hz=(
                 self.lo_offset_spin.value() * 1e6
@@ -1102,14 +1110,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                 else None
             ),
             sdr_uri=self._pluto_target or None,
-            power_correction=InputPowerCorrection(
-                internal_gain_db=self.internal_gain_spin.value(),
-                external_attenuation_db=self.external_att_spin.value(),
-            ),
-            trigger_source=TriggerKind.POWER_LEVEL,
-            trigger_level_dbm=self.trigger_level_spin.value(),
-            trigger_slope=TriggerSlope.RISING,
-            trigger_hysteresis_db=3.0,
+            power_correction=self._common_setup.power_correction(),
+            **self._trigger_setup.acquisition_settings(),
         )
 
     def _toggle_capture(self) -> None:
@@ -1303,7 +1305,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             return
         self._active_analysis_continuous = self._active_capture_continuous
         thread = _DectAnalysisThread(
-            self._recording, self._nominal_frequency_hz(), self
+            self._recording, self._nominal_frequency_hz(), self,
+            iq_power_trigger=self._trigger_setup.burst_settings(),
         )
         thread.analysis_ready.connect(self._analysis_ready)
         thread.analysis_failed.connect(self._analysis_failed)

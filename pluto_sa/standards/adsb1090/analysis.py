@@ -19,6 +19,7 @@ from pluto_sa.standards.adsb1090.model import (
     ADSB1090Settings,
 )
 from pluto_sa.vsa.model import IQRecording
+from pluto_sa.vsa.pattern import detect_iq_power_trigger_events
 
 
 _EPSILON = np.finfo(np.float64).tiny
@@ -136,6 +137,14 @@ class ADSB1090Analyzer:
         power_dbfs = 10.0 * np.log10(np.maximum(power, _EPSILON))
         time_s = np.arange(iq.size, dtype=np.float64) / sample_rate_hz
         starts, correlations = _candidate_starts(power, sample_rate_hz, resolved)
+        trigger = resolved.iq_power_trigger
+        if trigger.enabled:
+            events = detect_iq_power_trigger_events(recording, symbol_rate_hz=1e6, settings=trigger)
+            offset = trigger.search_start_offset_symbols * sample_rate_hz / 1e6
+            starts = np.asarray([start for start in starts if any(
+                event.trigger_sample + offset <= start < event.active_stop_sample
+                for event in events
+            )], dtype=np.int64)
         messages: list[ADSB1090Message] = []
         for start in starts:
             if len(messages) >= resolved.maximum_messages:
@@ -162,6 +171,11 @@ class ADSB1090Analyzer:
             if downlink_format < 16 and bit_count == _LONG_MESSAGE_BITS:
                 bits = bits[:_SHORT_MESSAGE_BITS]
                 confidence = confidence[:_SHORT_MESSAGE_BITS]
+            if trigger.enabled and trigger.limit_result_to_active_interval:
+                stop = int(start) + (8 + bits.size) * sample_rate_hz / 1e6
+                if not any(event.trigger_sample + offset <= start and stop <= event.active_stop_sample
+                           for event in events):
+                    continue
             parity = classify_mode_s_parity(bits)
             fields = {
                 **decode_mode_s_header_fields(bits),

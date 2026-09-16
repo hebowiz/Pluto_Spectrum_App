@@ -98,18 +98,17 @@ class VSAControlPanel(QtWidgets.QFrame):
         self.main_page = self._build_main_page(spec)
         self.mode_page = self._build_mode_page(spec.mode_id)
         self.system_page = self._build_system_page()
-        self.preset_page = self._build_preset_page()
         self.file_page = self._build_file_page(spec.files)
         for page in (
             self.main_page,
             self.mode_page,
             self.system_page,
-            self.preset_page,
             self.file_page,
         ):
             self.stack.addWidget(page)
             self._install_back_filter(page)
         self._show_page("Main Menu", self.main_page, remember=False)
+        self._sync_sweep_group()
 
     def show_main_menu(self) -> None:
         if self._spec is None:
@@ -214,18 +213,28 @@ class VSAControlPanel(QtWidgets.QFrame):
                 refresh_enabled and not busy
             )
             self.buttons["Reset"].setEnabled(reset_enabled and not busy)
+            for label in ("Preset", "Recall"):
+                button = self.buttons.get(label)
+                if button is not None:
+                    button.setEnabled(not busy)
 
         for action in watched_actions:
             action.changed.connect(sync_sweep_group)
             self._bound_actions.append((action, sync_sweep_group))
+        self._sync_sweep_group = sync_sweep_group
         sync_sweep_group()
         layout.addWidget(sweep)
 
         system = self._group("SYSTEM")
-        system_button = self._make_button("System")
-        system_button.clicked.connect(lambda: self._show_page("System", self.system_page))
-        system.layout().addWidget(system_button)
-        self.buttons["System"] = system_button
+        for label, callback in (
+            ("Device", self.device_requested.emit),
+            ("State", lambda: self._show_page("State", self.system_page)),
+            ("File", lambda: self._show_page("File", self.file_page)),
+        ):
+            button = self._make_button(label)
+            button.clicked.connect(lambda _checked=False, callback=callback: callback())
+            system.layout().addWidget(button)
+            self.buttons[label] = button
         layout.addWidget(system)
         layout.addStretch(1)
 
@@ -259,34 +268,19 @@ class VSAControlPanel(QtWidgets.QFrame):
     def _build_system_page(self) -> QtWidgets.QWidget:
         page = self._simple_page()
         preset = self._make_button("Preset")
-        preset.clicked.connect(lambda: self._show_page("Preset", self.preset_page))
-        device = self._make_button("Device")
-        device.clicked.connect(self.device_requested.emit)
+        preset.clicked.connect(self.preset_requested.emit)
         recall = self._make_button("Recall")
         recall.clicked.connect(self.recall_requested.emit)
         save = self._make_button("Save")
         save.clicked.connect(self.save_requested.emit)
-        file_button = self._make_button("File")
-        file_button.clicked.connect(lambda: self._show_page("File", self.file_page))
         for key, button in (
-            ("Preset", preset),
-            ("Device", device),
             ("Recall", recall),
             ("Save", save),
-            ("File", file_button),
+            ("Preset", preset),
         ):
             page.layout().addWidget(button)
             self.buttons[key] = button
         page.layout().addStretch(1)
-        return page
-
-    def _build_preset_page(self) -> QtWidgets.QWidget:
-        page = self._simple_page()
-        button = self._make_button("Default")
-        button.clicked.connect(self.preset_requested.emit)
-        page.layout().addWidget(button)
-        page.layout().addStretch(1)
-        self.buttons["Default"] = button
         return page
 
     def _build_file_page(self, commands: Sequence[PanelCommand]) -> QtWidgets.QWidget:

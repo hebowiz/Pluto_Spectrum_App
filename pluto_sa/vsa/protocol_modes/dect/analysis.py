@@ -19,6 +19,7 @@ from pluto_protocol.model import (
 )
 from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
 from pluto_sa.vsa.model import IQRecording
+from pluto_sa.vsa.pattern import IQPowerTriggerSettings, detect_iq_power_trigger_events
 from .generator import (
     DECT_SYMBOL_RATE_HZ,
     PACKET_SYMBOL_COUNTS,
@@ -950,6 +951,7 @@ def analyze_dect_recording(
     recording: IQRecording,
     *,
     nominal_frequency_hz: float | None = None,
+    iq_power_trigger: IQPowerTriggerSettings | None = None,
 ) -> tuple[DectPacketResult, ...]:
     """Detect and measure Classic DECT GFSK bursts in one IQ recording."""
 
@@ -998,9 +1000,7 @@ def analyze_dect_recording(
     for shared in (frequency, positions, power_db):
         shared.setflags(write=False)
     results: list[DectPacketResult] = []
-    for burst_start, burst_stop in _burst_ranges(
-        recording.iq, nominal_sps, power=raw_power
-    ):
+    for burst_start, burst_stop in _burst_ranges(recording.iq, nominal_sps, power=raw_power):
         try:
             direction, p0, sps, _coarse_sync_word_score = _sync_packet(
                 frequency, positions, burst_start, nominal_sps
@@ -1384,4 +1384,15 @@ def analyze_dect_recording(
                 ),
             )
         )
+    if iq_power_trigger is not None and iq_power_trigger.enabled:
+        events = detect_iq_power_trigger_events(
+            recording, symbol_rate_hz=DECT_SYMBOL_RATE_HZ, settings=iq_power_trigger
+        )
+        offset = iq_power_trigger.search_start_offset_symbols * nominal_sps
+        resolved = [result for result in resolved if any(
+            event.trigger_sample + offset <= result.p0_sample < event.active_stop_sample
+            and (not iq_power_trigger.limit_result_to_active_interval
+                 or result.packet_end_sample <= event.active_stop_sample)
+            for event in events
+        )]
     return tuple(resolved)

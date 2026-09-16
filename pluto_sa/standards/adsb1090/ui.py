@@ -326,7 +326,7 @@ class _ADSBPlutoCaptureThread(QtCore.QThread):
         fresh = True
         stream_settings = replace(
             self._settings,
-            capture_length_s=_STREAM_BLOCK_DURATION_S,
+            capture_length_s=max(_STREAM_BLOCK_DURATION_S, -self._settings.trigger_offset_s + 0.001),
         )
         while not self.isInterruptionRequested():
             try:
@@ -345,6 +345,8 @@ class _ADSBPlutoCaptureThread(QtCore.QThread):
                 _ADSBCaptureBatch(recording=recording)
             )
             fresh = False
+            from pluto_sa.sdr.trigger import TriggerKind
+            stream_settings = replace(stream_settings, trigger_source=TriggerKind.FREE_RUN, trigger_offset_s=0.0)
 
 
 class _ADSBStreamProcessor:
@@ -658,8 +660,16 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._stream_display_timer.timeout.connect(self._flush_stream_views)
         self._build_menu()
         self._build_ui()
+        self._build_setup_dialog()
         self._default_meas_config = self._meas_config_values()
         self._restore_user_settings()
+        try:
+            saved_setup = json.loads(self._preferences.value("setup/common", "{}", type=str))
+            self.rf_bandwidth_spin.setValue(float(saved_setup.get("rf_bandwidth_mhz", 4.0)))
+            self._common_setup.apply(saved_setup.get("common_setup", {}))
+            self._trigger_setup.apply(saved_setup.get("trigger_setup", {}))
+        except (ValueError, TypeError):
+            pass
         self._connect_user_setting_persistence()
         if recording is not None:
             self.analyze_recording(recording)
@@ -1061,6 +1071,11 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def _save_user_settings(self) -> None:
+        self._preferences.setValue("setup/common", json.dumps({
+            "rf_bandwidth_mhz": self.rf_bandwidth_spin.value(),
+            "common_setup": self._common_setup.values(),
+            "trigger_setup": self._trigger_setup.values(),
+        }))
         self._preferences.setValue(
             "capture/sample_rate_msps", int(self.sample_rate_combo.currentData())
         )
@@ -1415,6 +1430,9 @@ class ADSB1090Window(QtWidgets.QMainWindow):
 
     def _meas_config_values(self) -> dict[str, object]:
         return {
+            "common_setup": self._common_setup.values(),
+            "trigger_setup": self._trigger_setup.values(),
+            "rf_bandwidth_mhz": self.rf_bandwidth_spin.value(),
             "sample_rate_msps": int(self.sample_rate_combo.currentData()),
             "capture_length_ms": float(self.capture_length_spin.value()),
             "internal_gain_db": float(self.internal_gain_spin.value()),
@@ -1451,57 +1469,67 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self._update_receiver_location_button()
         else:
             self._set_receiver_location(float(latitude), float(longitude), persist=False)
+        self.rf_bandwidth_spin.setValue(float(values.get("rf_bandwidth_mhz", 4.0)))
+        self._common_setup.apply(values.get("common_setup", {}))
+        self._trigger_setup.apply(values.get("trigger_setup", {}))
         self._save_user_settings()
 
+    def _build_setup_dialog(self) -> None:
+        from pluto_sa.vsa.ui.setup_controls import ReceiverSetupControls, TriggerControls, standardize_frontend
+        from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
+        # QWidgetAction keeps toolbar widgets hidden when their toolbar is
+        # hidden. Detach before transferring ownership to settings pages.
+        moved_controls = (self.sample_rate_combo, self.internal_gain_spin, self.preamble_snr_spin)
+        for action in tuple(self.capture_toolbar.actions()):
+            if isinstance(action, QtWidgets.QWidgetAction) and action.defaultWidget() in moved_controls:
+                self.capture_toolbar.removeAction(action)
+        self.rf_bandwidth_spin = DeferredDoubleSpinBox()
+        self.rf_bandwidth_spin.setValue(4.0)
+        self._common_setup = ReceiverSetupControls(
+            self, rate=lambda: int(self.sample_rate_combo.currentData()) * 1e6,
+            symbol_rate=lambda: 1e6, bandwidth=self.rf_bandwidth_spin,
+            gain=self.internal_gain_spin, attenuation=self.external_attenuation_spin,
+            external_gain=self.external_gain_spin, duration=self.capture_length_spin,
+            oversampling=self.sample_rate_combo, symbols=False,
+        )
+        self._trigger_setup = TriggerControls(time_units=True)
+        signal = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(signal)
+        form.addRow("Protocol", QtWidgets.QLabel("ADS-B 1090ES"))
+        form.addRow("Preamble SNR Threshold", self.preamble_snr_spin)
+        location = QtWidgets.QPushButton("Receiver Location…")
+        location.clicked.connect(self._edit_receiver_location)
+        form.addRow("Local CPR Reference", location)
+        frontend = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(frontend)
+        form.addRow("Center Frequency", QtWidgets.QLabel("1090.000000 MHz (fixed)"))
+        self._common_setup.bandwidth_rows(form)
+        self._common_setup.power_rows(form)
+        standardize_frontend(form)
+        self._setup_dialog = HierarchicalMeasConfigDialog(
+            self, (("Signal Description", signal), ("Input / Frontend", frontend),
+                   ("Signal Capture", self._common_setup.capture_page()),
+                   ("Trigger", self._trigger_setup.page)),
+            size=(820, 620),
+            standard_buttons=QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+        )
+        self._setup_dialog.accepted.connect(self._save_user_settings)
+        for control in moved_controls:
+            control.show()
+
+    def open_frontend_settings(self) -> None:
+        self._common_setup.refresh()
+        self._setup_dialog.open_page("Input / Frontend")
+
+    def open_capture_settings(self) -> None:
+        self._common_setup.refresh()
+        self._setup_dialog.open_page("Signal Capture")
+
+    def open_trigger_settings(self) -> None:
+        self._setup_dialog.open_page("Trigger")
+
     def open_analysis_settings(self) -> None:
-        dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("ADS-B Analysis")
-        dialog.setModal(True)
-        layout = QtWidgets.QVBoxLayout(dialog)
-        form = QtWidgets.QFormLayout()
-        sample_rate = QtWidgets.QComboBox()
-        sample_rate.addItem("8 MS/s", 8)
-        sample_rate.addItem("16 MS/s", 16)
-        sample_rate.setCurrentIndex(sample_rate.findData(self.sample_rate_combo.currentData()))
-
-        def numeric_copy(source: DeferredDoubleSpinBox) -> DeferredDoubleSpinBox:
-            target = DeferredDoubleSpinBox()
-            target.setRange(source.minimum(), source.maximum())
-            target.setDecimals(source.decimals())
-            target.setSingleStep(source.singleStep())
-            target.setSuffix(source.suffix())
-            target.setValue(source.value())
-            return target
-
-        capture_length = numeric_copy(self.capture_length_spin)
-        internal_gain = numeric_copy(self.internal_gain_spin)
-        external_attenuation = numeric_copy(self.external_attenuation_spin)
-        external_gain = numeric_copy(self.external_gain_spin)
-        preamble_snr = numeric_copy(self.preamble_snr_spin)
-        form.addRow("Sample Rate", sample_rate)
-        form.addRow("Capture Time", capture_length)
-        form.addRow("External ATT", external_attenuation)
-        form.addRow("Internal Gain", internal_gain)
-        form.addRow("External Gain", external_gain)
-        form.addRow("Preamble SNR Threshold", preamble_snr)
-        layout.addLayout(form)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return
-        self.sample_rate_combo.setCurrentIndex(
-            self.sample_rate_combo.findData(sample_rate.currentData())
-        )
-        self.capture_length_spin.setValue(capture_length.value())
-        self.internal_gain_spin.setValue(internal_gain.value())
-        self.external_attenuation_spin.setValue(external_attenuation.value())
-        self.external_gain_spin.setValue(external_gain.value())
-        self.preamble_snr_spin.setValue(preamble_snr.value())
+        self._setup_dialog.open_page("Signal Description")
 
     def open_display_settings(self) -> None:
         dialog = QtWidgets.QDialog(self)
@@ -1513,14 +1541,6 @@ class ADSB1090Window(QtWidgets.QMainWindow):
                 "from each plot's right-click menu."
             )
         )
-        reset = QtWidgets.QPushButton("Reset Plot Scales")
-        reset.clicked.connect(
-            lambda: [
-                self._reset_plot(name, plot)
-                for name, plot in (("iq_power", self.power_plot), ("ppm", self.ppm_plot))
-            ]
-        )
-        layout.addWidget(reset)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Close
         )
@@ -1529,19 +1549,22 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         dialog.exec()
 
     def _pluto_settings(self) -> PlutoCaptureSettings:
+        self._common_setup.refresh()
         sample_rate_msps = int(self.sample_rate_combo.currentData())
         return PlutoCaptureSettings(
             center_frequency_hz=1_090_000_000.0,
             symbol_rate_hz=1_000_000.0,
             samples_per_symbol=sample_rate_msps,
             capture_length_s=self.capture_length_spin.value() / 1e3,
-            rf_bandwidth_hz=4_000_000.0,
+            swap_iq=self._common_setup.swap_iq.isChecked(),
+            rf_bandwidth_hz=self.rf_bandwidth_spin.value() * 1e6,
             sdr_uri=self._pluto_target or None,
             power_correction=InputPowerCorrection(
                 internal_gain_db=self.internal_gain_spin.value(),
                 external_attenuation_db=self.external_attenuation_spin.value(),
                 external_gain_db=self.external_gain_spin.value(),
             ),
+            **self._trigger_setup.acquisition_settings(),
         )
 
     def set_pluto_target(self, target: str | None) -> None:
@@ -1552,6 +1575,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
     def _analysis_settings(self) -> ADSB1090Settings:
         return ADSB1090Settings(
             minimum_preamble_snr_db=self.preamble_snr_spin.value(),
+            iq_power_trigger=self._trigger_setup.burst_settings(),
         )
 
     def _run_pluto_single(self) -> None:

@@ -7,6 +7,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
+from pluto_sa.vsa.pattern import IQPowerTriggerSettings
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class ADSB1090Settings:
     minimum_preamble_correlation: float = 0.72
     require_valid_crc: bool = False
     maximum_messages: int = 4096
+    iq_power_trigger: IQPowerTriggerSettings = field(default_factory=IQPowerTriggerSettings)
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.minimum_preamble_snr_db):

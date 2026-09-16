@@ -59,6 +59,7 @@ from pluto_sa.vsa.pattern import (
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeSettings,
+    detect_iq_power_trigger_events,
     prepare_psk_iq,
 )
 from pluto_sa.vsa.profiles.bluetooth_br import (
@@ -2349,6 +2350,7 @@ def analyze_bluetooth_hdt_recordings(
     *,
     profile: BluetoothAnalysisProfile,
     cancelled: Callable[[], bool] | None = None,
+    iq_power_trigger: IQPowerTriggerSettings | None = None,
 ) -> tuple[BluetoothDedicatedResult, ...]:
     """Return every complete HDT packet found in a capture."""
 
@@ -2391,6 +2393,15 @@ def analyze_bluetooth_hdt_recordings(
             results.append(item)
         except RuntimeError:
             continue
+    if iq_power_trigger is not None and iq_power_trigger.enabled:
+        events = detect_iq_power_trigger_events(recording, symbol_rate_hz=2e6, settings=iq_power_trigger)
+        offset = iq_power_trigger.search_start_offset_symbols * recording.sample_rate_hz / 2e6
+        results = [item for item in results if any(
+            event.trigger_sample + offset <= item.metadata["packet_start_sample"] < event.active_stop_sample
+            and (not iq_power_trigger.limit_result_to_active_interval
+                 or item.metadata["packet_stop_sample"] <= event.active_stop_sample)
+            for event in events
+        )]
     if not results:
         raise RuntimeError("Bluetooth HDT synchronization pattern was not found")
     return _attach_rf_capture_aggregates(results)

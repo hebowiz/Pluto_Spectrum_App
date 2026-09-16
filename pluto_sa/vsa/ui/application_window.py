@@ -12,6 +12,7 @@ from pluto_common import short_pluto_identity
 
 from pluto_sa.standards.adsb1090.ui import ADSB1090Window
 from pluto_sa.vsa.pluto_source import PlutoLiveSource
+from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.protocol_modes.bluetooth import BluetoothAnalyzerWindow
 from pluto_sa.vsa.protocol_modes.dect import DectAnalyzerWindow
 from pluto_sa.vsa.persistence import load_mode_meas_config, save_mode_meas_config
@@ -113,8 +114,8 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             setup = tuple(
                 command(label, lambda page=page: workspace.open_config_page(page))
                 for label, page in (
-                    ("Input / Frontend", "Input / Frontend"),
                     ("Signal Description", "Signal Description"),
+                    ("Input / Frontend", "Input / Frontend"),
                     ("Signal Capture", "Signal Capture"),
                     ("Trigger", "Trigger"),
                     ("Pattern Search", "Pattern Search"),
@@ -125,7 +126,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 )
             )
             files = (
-                command("Open IQ", workspace._open_iq, workspace.open_iq_action),
+                command("Import IQ", workspace._open_iq, workspace.open_iq_action),
                 command("Export IQ", workspace._export_iq_recording, workspace.export_iq_action),
                 command(
                     "Export Symbol Table",
@@ -144,22 +145,22 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                     workspace.run_continuous_action,
                 ),
                 command("Refresh Analysis", workspace._request_analysis, workspace.refresh_analysis_action),
-                command("Reset", workspace._reset_all_packet_statistics, workspace.reset_all_packets_action),
+                command("Reset", lambda: self._reset_workspace("generic", workspace), workspace.reset_all_packets_action),
                 files,
             )
         if mode == "bluetooth":
             setup = tuple(
                 command(label, lambda page=page: workspace.open_config_page(page))
                 for label, page in (
-                    ("Bluetooth Analysis", "Bluetooth Analysis"),
-                    ("Input / Frontend", "Input / Frontend"),
                     ("Signal Description", "Signal Description"),
+                    ("Input / Frontend", "Input / Frontend"),
+                    ("Signal Capture", "Signal Capture"),
                     ("Trigger", "Trigger"),
-                    ("Display", "Display Config"),
+                    ("Display", "Display"),
                 )
             )
             files = (
-                command("Open IQ", workspace._open_iq, workspace.open_iq_action),
+                command("Import IQ", workspace._open_iq, workspace.open_iq_action),
                 command("Export IQ", workspace._export_iq_recording, workspace.export_iq_action),
             )
             return WorkspacePanelSpec(
@@ -169,22 +170,22 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 command("Single", workspace._toggle_capture, workspace.run_action),
                 command("Continuous", workspace._toggle_continuous_capture, workspace.run_continuous_action),
                 command("Refresh Analysis", workspace.refresh, workspace.refresh_analysis_action),
-                command("Reset", workspace._reset_measurement_statistics, workspace.clear_measurement_history_action),
+                command("Reset", lambda: self._reset_workspace("bluetooth", workspace), workspace.clear_measurement_history_action),
                 files,
             )
         if mode == "dect":
             setup = tuple(
                 command(label, lambda page=page: workspace.open_config_page(page))
                 for label, page in (
-                    ("DECT Analysis", "DECT Analysis"),
-                    ("Input / Frontend", "Input / Frontend"),
                     ("Signal Description", "Signal Description"),
+                    ("Input / Frontend", "Input / Frontend"),
+                    ("Signal Capture", "Signal Capture"),
                     ("Trigger", "Trigger"),
-                    ("Display", "Display Config"),
+                    ("Display", "Display"),
                 )
             )
             files = (
-                command("Open IQ", workspace._open_iq, workspace.open_iq_action),
+                command("Import IQ", workspace._open_iq, workspace.open_iq_action),
                 command("Export IQ", workspace._export_iq_recording, workspace.export_iq_action),
             )
             return WorkspacePanelSpec(
@@ -194,16 +195,17 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 command("Single", workspace._toggle_capture, workspace.run_action),
                 command("Continuous", workspace._toggle_continuous_capture, workspace.run_continuous_action),
                 command("Refresh Analysis", workspace.refresh, workspace.refresh_analysis_action),
-                command("Reset", workspace._reset_measurement_statistics, workspace.clear_measurement_history_action),
+                command("Reset", lambda: self._reset_workspace("dect", workspace), workspace.clear_measurement_history_action),
                 files,
             )
         setup = (
-            command("ADS-B Analysis", workspace.open_analysis_settings),
-            command("Receiver Location", workspace._edit_receiver_location),
-            command("Display", workspace.open_display_settings),
+            command("Signal Description", workspace.open_analysis_settings),
+            command("Input / Frontend", workspace.open_frontend_settings),
+            command("Signal Capture", workspace.open_capture_settings),
+            command("Trigger", workspace.open_trigger_settings),
         )
         files = (
-            command("Open IQ", workspace._open_iq, workspace.open_iq_action),
+            command("Import IQ", workspace._open_iq, workspace.open_iq_action),
             command("Export IQ", workspace._export_iq_recording, workspace.export_iq_action),
             command("Export Packet List", workspace._export_packet_list, workspace.export_packet_list_action),
             command(
@@ -212,7 +214,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 workspace.import_aircraft_database_action,
             ),
             command(
-                "Download / Update from OpenSky",
+                "Update Database",
                 workspace._download_aircraft_database,
                 workspace.update_aircraft_database_action,
             ),
@@ -224,9 +226,63 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             command("Single", workspace._run_pluto_single, workspace.run_single_action),
             command("Continuous", workspace._run_pluto_continuous, workspace.run_continuous_action),
             command("Refresh Analysis", workspace._refresh, workspace.refresh_analysis_action),
-            command("Reset", workspace._clear_packet_history, workspace.clear_measurement_history_action),
+            command("Reset", lambda: self._reset_workspace("adsb1090", workspace), workspace.clear_measurement_history_action),
             files,
         )
+
+    def _reset_workspace(self, mode: str, workspace) -> None:
+        """Clear all acquired products while retaining mode settings/device."""
+        if self._busy_reason() is not None:
+            return
+        if mode == "generic":
+            workspace._reset_all_packet_statistics()
+            previous = workspace.session
+            workspace.session = VSASession(
+                name=previous.name, signal=previous.signal, settings=previous.settings,
+                pattern_search=previous.pattern_search, iq_power_trigger=previous.iq_power_trigger,
+                result_range=previous.result_range, demodulation=previous.demodulation,
+            )
+            workspace._result_summary_values.clear()
+            workspace._selected_symbol_marker_index = None
+            workspace._selected_match_index = 1
+            workspace._pending_analysis = None
+            workspace._analysis_generation += 1
+            workspace._continuous_sweep_count = 0
+        elif mode == "adsb1090":
+            workspace._stream_display_timer.stop()
+            workspace._pending_stream_views.clear()
+            workspace._clear_packet_history()
+            workspace._analyzer = type(workspace._analyzer)()
+            workspace.recording = None
+            workspace.result = None
+            workspace._reset_stream_state(float(workspace.sample_rate_combo.currentData()) * 1e6)
+        else:
+            workspace._reset_measurement_statistics()
+            workspace._result = None
+            workspace._results = ()
+            workspace._recording = None
+            workspace._capture_recording = None
+            workspace._session = None
+            workspace._selected_result_index = 0
+            workspace._continuous_capture_count = 0
+        import pyqtgraph as pg
+        for plot in workspace.findChildren(pg.PlotWidget):
+            plot.clear()
+        for name in ("symbol_table", "result_summary", "summary_table", "packet_table", "issues_table"):
+            widget = getattr(workspace, name, None)
+            if widget is not None:
+                widget.setRowCount(0)
+        for name in ("decode_tree", "payload_text", "payload_hex_text", "air_bits_text"):
+            widget = getattr(workspace, name, None)
+            if widget is not None:
+                widget.clear()
+        for name in ("export_iq_action", "export_symbol_table_action", "refresh_analysis_action",
+                     "previous_result_action", "next_result_action", "export_modulation_action",
+                     "export_power_action"):
+            action = getattr(workspace, name, None)
+            if action is not None:
+                action.setEnabled(False)
+        workspace.statusBar().showMessage("All results, history and plots cleared; settings retained")
 
     def _busy_reason(self) -> str | None:
         generic = self.generic_workspace.shutdown_busy_reason()
@@ -312,13 +368,17 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             workspace._apply_meas_config_values(settings)
 
     def _apply_default_preset(self) -> None:
+        if self._busy_reason() is not None:
+            return
         mode = self._active_mode()
         answer = QtWidgets.QMessageBox.question(
             self,
             "Default Preset",
             f"Restore the {self.control_panel._spec.mode_label} Default settings?",
+            QtWidgets.QMessageBox.StandardButton.Ok | QtWidgets.QMessageBox.StandardButton.Cancel,
+            QtWidgets.QMessageBox.StandardButton.Cancel,
         )
-        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+        if answer != QtWidgets.QMessageBox.StandardButton.Ok:
             return
         workspace = self._active_workspace()
         defaults = deepcopy(workspace._default_meas_config)

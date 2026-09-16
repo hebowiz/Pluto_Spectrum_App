@@ -667,14 +667,14 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         assert not hasattr(window, "_config_load_button")
         assert not hasattr(window, "_config_save_button")
         window._config_top_buttons["Signal Description"].click()
-        assert window._config_stack.currentIndex() == 2
+        assert window._config_stack.currentIndex() == 1
         assert window._config_back_button.isVisibleTo(window._meas_config_dialog)
         window._config_back_button.click()
         assert window._config_stack.currentIndex() == 0
         active_modal_widgets = []
 
         def inspect_modality() -> None:
-            active_modal_widgets.append(QtWidgets.QApplication.activeModalWidget())
+            active_modal_widgets.append(QtWidgets.QApplication.activeModalWidget()._is_draft)
             window._meas_config_dialog.reject()
 
         window.show()
@@ -797,7 +797,7 @@ def test_pattern_result_uses_table_and_fitted_plot_ranges(tmp_path) -> None:
         ) <= 2
         QtCore.QTimer.singleShot(0, inspect_modality)
         window._open_meas_config()
-        assert active_modal_widgets == [window._meas_config_dialog]
+        assert active_modal_widgets == [True]
         assert window.measured_modulation_signal_action.isChecked()
         assert not hasattr(window, "raw_carrier_action")
         assert not hasattr(window, "corrected_carrier_action")

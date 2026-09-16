@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from pyqtgraph.Qt import QtCore, QtWidgets
+from pluto_sa.vsa.ui.setup_controls import configure_form
 
 from pluto_common.numeric_input import (
     ensure_valid_numeric_inputs,
@@ -27,6 +28,12 @@ class HierarchicalMeasConfigDialog(QtWidgets.QDialog):
         ),
     ) -> None:
         super().__init__(parent)
+        self._is_draft = False
+        self._editor_dialog = None
+        self._transaction_owner = parent if (
+            hasattr(parent, "_meas_config_values") or hasattr(parent, "_config_values")
+        ) else None
+        self.settings_validator = None
         self.setWindowTitle(window_title)
         self.setModal(True)
         self.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
@@ -60,9 +67,18 @@ class HierarchicalMeasConfigDialog(QtWidgets.QDialog):
         button_grid.setVerticalSpacing(14)
         self.top_buttons: dict[str, QtWidgets.QPushButton] = {}
         self.page_names = ("Config Top Menu",) + tuple(name for name, _page in pages)
-        self.stack.addWidget(config_top)
+        def scroll_page(page):
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            scroll.setWidget(page)
+            return scroll
+
+        self.stack.addWidget(scroll_page(config_top))
         for index, (name, page) in enumerate(pages, start=1):
-            self.stack.addWidget(page)
+            for form in page.findChildren(QtWidgets.QFormLayout):
+                configure_form(form)
+            self.stack.addWidget(scroll_page(page))
             button = QtWidgets.QPushButton(name)
             button_font = button.font()
             button_font.setPointSizeF(max(18.0, button_font.pointSizeF() * 2.0))
@@ -92,13 +108,55 @@ class HierarchicalMeasConfigDialog(QtWidgets.QDialog):
         self.page_title.setText("" if is_top else self.page_names[int(index)])
 
     def accept(self) -> None:
+        if self._editor_dialog is not None:
+            self._editor_dialog.accept()
+            return
+        for check in self.findChildren(QtWidgets.QCheckBox):
+            setup = getattr(check, "receiver_setup", None)
+            if setup is not None and check.isChecked() and not setup.bandwidth.minimum() <= setup.rate() / 1e6 <= setup.bandwidth.maximum():
+                QtWidgets.QMessageBox.warning(self, "Invalid RF Bandwidth", "Sample Rate is outside the receiver RF Bandwidth range. Disable Match Sample Rate or change Sample Rate.")
+                return
         if not ensure_valid_numeric_inputs(self, title="Invalid Measurement Setting"):
             return
+        if self.settings_validator is not None:
+            try:
+                self.settings_validator()
+            except (ValueError, TypeError, KeyError) as error:
+                QtWidgets.QMessageBox.warning(self, "Invalid Measurement Setting", str(error))
+                return
         super().accept()
 
     def reject(self) -> None:
+        if self._editor_dialog is not None:
+            self._editor_dialog.reject()
+            return
         revert_invalid_numeric_inputs(self)
         super().reject()
+
+    def exec(self) -> int:
+        if self._is_draft or self._transaction_owner is None:
+            return super().exec()
+        from pluto_sa.vsa.ui.config_transaction import (
+            apply_settings, collect_settings, create_draft_editor,
+        )
+        draft, editor = create_draft_editor(self._transaction_owner)
+        self._editor_dialog = editor
+        editor.resize(self.size())
+        editor.show_page(self.stack.currentIndex())
+        editor.back_button.setVisible(not self.back_button.isHidden())
+        editor.top_title.setVisible(not self.top_title.isHidden())
+        try:
+            result = editor.exec()
+            if result == QtWidgets.QDialog.DialogCode.Accepted:
+                apply_settings(self._transaction_owner, collect_settings(draft))
+            # Emit the normal accepted/rejected/finished signals only after
+            # commit, so workspace persistence observes committed values.
+            QtWidgets.QDialog.done(self, result)
+            return result
+        finally:
+            self._editor_dialog = None
+            editor.deleteLater()
+            draft.deleteLater()
 
     def open_top(self) -> int:
         self.top_title.show()

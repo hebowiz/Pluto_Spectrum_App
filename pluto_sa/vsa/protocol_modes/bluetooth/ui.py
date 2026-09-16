@@ -22,7 +22,6 @@ from pluto_sa.vsa.channel import (
     extract_requested_analysis_channel,
     validate_analysis_channel_capture,
 )
-from pluto_sa.config.input_frontend import InputPowerCorrection
 from pluto_sa.vsa.pluto_source import PlutoCaptureSettings, PlutoLiveSource
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource
@@ -431,7 +430,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self._reset_measurement_statistics
         )
 
-        display_menu = self.menuBar().addMenu("Display Config")
+        display_menu = self.menuBar().addMenu("Display")
         self.symbols_action = display_menu.addAction("Show Symbol Points")
         self.symbols_action.setCheckable(True)
         self.symbols_action.setChecked(True)
@@ -474,9 +473,6 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.psk_differential_action.triggered.connect(
             lambda: self._set_psk_symbol_plot_mode("Differential IQ")
         )
-        reset_action = display_menu.addAction("Reset Plot Scales")
-        reset_action.setShortcut(QtGui.QKeySequence("Home"))
-        reset_action.triggered.connect(self._reset_plot_scales)
 
         config_menu = self.menuBar().addMenu("Meas Config")
         self.open_config_action = config_menu.addAction("Open Meas Config...")
@@ -629,94 +625,8 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self._render(self._result)
 
     def _build_trigger_page(self) -> QtWidgets.QWidget:
-        page = QtWidgets.QWidget()
-        form = QtWidgets.QFormLayout(page)
-
-        acquisition_heading = QtWidgets.QLabel("Acquisition Trigger")
-        acquisition_heading.setStyleSheet("font-weight: bold;")
-        self.acquisition_trigger_source_combo = QtWidgets.QComboBox()
-        self.acquisition_trigger_source_combo.addItem(
-            "Free Run", TriggerKind.FREE_RUN.value
-        )
-        self.acquisition_trigger_source_combo.addItem(
-            "I/Q Power", TriggerKind.POWER_LEVEL.value
-        )
-        self.acquisition_trigger_level_spin = DeferredDoubleSpinBox()
-        self.acquisition_trigger_level_spin.setRange(-200.0, 100.0)
-        self.acquisition_trigger_level_spin.setDecimals(2)
-        self.acquisition_trigger_level_spin.setValue(-20.0)
-        self.acquisition_trigger_level_spin.setSuffix(" dBm")
-        self.acquisition_trigger_slope_combo = QtWidgets.QComboBox()
-        for slope in TriggerSlope:
-            self.acquisition_trigger_slope_combo.addItem(
-                slope.value.capitalize(), slope.value
-            )
-        self.acquisition_trigger_offset_spin = DeferredDoubleSpinBox()
-        self.acquisition_trigger_offset_spin.setRange(-1_000_000.0, 1_000_000.0)
-        self.acquisition_trigger_offset_spin.setDecimals(3)
-        self.acquisition_trigger_offset_spin.setSuffix(" sym")
-        self.acquisition_trigger_hysteresis_spin = DeferredDoubleSpinBox()
-        self.acquisition_trigger_hysteresis_spin.setRange(0.0, 50.0)
-        self.acquisition_trigger_hysteresis_spin.setDecimals(1)
-        self.acquisition_trigger_hysteresis_spin.setValue(3.0)
-        self.acquisition_trigger_hysteresis_spin.setSuffix(" dB")
-        form.addRow(acquisition_heading)
-        form.addRow("Trigger Source", self.acquisition_trigger_source_combo)
-        form.addRow("Level", self.acquisition_trigger_level_spin)
-        form.addRow("Slope", self.acquisition_trigger_slope_combo)
-        form.addRow("Trigger Offset", self.acquisition_trigger_offset_spin)
-        form.addRow("Hysteresis", self.acquisition_trigger_hysteresis_spin)
-
-        burst_heading = QtWidgets.QLabel("Post-capture Burst Search")
-        burst_heading.setStyleSheet("font-weight: bold;")
-        self.iq_power_trigger_check = QtWidgets.QCheckBox("Burst Search On")
-        self.iq_power_trigger_check.setChecked(True)
-        self.iq_power_trigger_level_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_level_spin.setRange(-200.0, 100.0)
-        self.iq_power_trigger_level_spin.setDecimals(2)
-        self.iq_power_trigger_level_spin.setValue(-20.0)
-        self.iq_power_trigger_level_spin.setSuffix(" dBm")
-        self.iq_power_trigger_hysteresis_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_hysteresis_spin.setRange(0.0, 60.0)
-        self.iq_power_trigger_hysteresis_spin.setDecimals(2)
-        self.iq_power_trigger_hysteresis_spin.setValue(3.0)
-        self.iq_power_trigger_hysteresis_spin.setSuffix(" dB")
-        self.iq_power_trigger_average_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_average_spin.setRange(0.0, 1_000.0)
-        self.iq_power_trigger_average_spin.setDecimals(2)
-        self.iq_power_trigger_average_spin.setValue(1.0)
-        self.iq_power_trigger_average_spin.setSuffix(" sym")
-        self.iq_power_trigger_dropout_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_dropout_spin.setRange(0.0, 1_000_000.0)
-        self.iq_power_trigger_dropout_spin.setDecimals(2)
-        self.iq_power_trigger_dropout_spin.setValue(8.0)
-        self.iq_power_trigger_dropout_spin.setSuffix(" sym")
-        self.iq_power_trigger_holdoff_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_holdoff_spin.setRange(0.0, 1_000_000.0)
-        self.iq_power_trigger_holdoff_spin.setDecimals(2)
-        self.iq_power_trigger_holdoff_spin.setSuffix(" sym")
-        self.iq_power_trigger_offset_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_offset_spin.setRange(-1_000_000.0, 1_000_000.0)
-        self.iq_power_trigger_offset_spin.setDecimals(3)
-        self.iq_power_trigger_offset_spin.setSuffix(" sym")
-        self.iq_power_trigger_limit_result_check = QtWidgets.QCheckBox(
-            "Limit Result Range to Active Interval"
-        )
-        self.iq_power_trigger_limit_result_check.setChecked(True)
-        form.addRow(burst_heading)
-        form.addRow(self.iq_power_trigger_check)
-        form.addRow("Level", self.iq_power_trigger_level_spin)
-        form.addRow("Hysteresis", self.iq_power_trigger_hysteresis_spin)
-        form.addRow("Envelope Average", self.iq_power_trigger_average_spin)
-        form.addRow("Drop-Out Time", self.iq_power_trigger_dropout_spin)
-        form.addRow("Holdoff", self.iq_power_trigger_holdoff_spin)
-        form.addRow("Search Start Offset", self.iq_power_trigger_offset_spin)
-        form.addRow(self.iq_power_trigger_limit_result_check)
-        self.acquisition_trigger_source_combo.currentIndexChanged.connect(
-            self._sync_acquisition_trigger_controls
-        )
-        self._sync_acquisition_trigger_controls()
-        return page
+        from pluto_sa.vsa.ui.setup_controls import build_trigger_page
+        return build_trigger_page(self, burst=True)
 
     def _build_meas_config_dialog(self) -> None:
         if hasattr(self, "_meas_config_dialog"):
@@ -741,13 +651,19 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._bluetooth_config_form = bt_form
         self._sync_packet_identity_controls()
 
+        from pluto_sa.vsa.ui.setup_controls import ReceiverSetupControls, standardize_frontend, display_form
+        self._common_setup = ReceiverSetupControls(
+            self, rate=lambda: self._capture_symbol_rate_hz() * int(self.oversampling_combo.currentData()),
+            symbol_rate=self._capture_symbol_rate_hz, bandwidth=self.rf_bandwidth_spin,
+            gain=self.internal_gain_spin, attenuation=self.external_att_spin,
+            duration=self.capture_length_spin, oversampling=self.oversampling_combo,
+        )
+        self.protocol_combo.currentIndexChanged.connect(self._common_setup.refresh)
+        self.phy_combo.currentIndexChanged.connect(self._common_setup.refresh)
         input_page = QtWidgets.QWidget()
         input_form = QtWidgets.QFormLayout(input_page)
         for label, widget in (
-            ("Center Frequency (MHz)", self.center_spin),
-            ("Capture Length (ms)", self.capture_length_spin),
-            ("Samples / Symbol", self.oversampling_combo),
-            ("RF Bandwidth (MHz)", self.rf_bandwidth_spin),
+            ("Center Frequency", self.center_spin),
             ("Analysis Channel", self.channel_filter_check),
             ("Analysis Bandwidth", self.analysis_bandwidth_spin),
             (
@@ -761,24 +677,12 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             ("LO Offset", self.lo_offset_check),
             ("Offset Frequency", self.lo_offset_spin),
             ("Resolved LO", self.resolved_lo_label),
-            ("Internal Gain (dB)", self.internal_gain_spin),
-            ("External ATT (dB)", self.external_att_spin),
         ):
             input_form.addRow(label, widget)
-
-        signal_page = QtWidgets.QWidget()
-        signal_form = QtWidgets.QFormLayout(signal_page)
-        self.derived_modulation = QtWidgets.QLineEdit(readOnly=True)
-        self.derived_symbol_rate = QtWidgets.QLineEdit(readOnly=True)
-        self.derived_tx_filter = QtWidgets.QLineEdit(readOnly=True)
-        self.derived_result_range = QtWidgets.QLineEdit(readOnly=True)
-        for widget in (self.derived_modulation, self.derived_symbol_rate, self.derived_tx_filter, self.derived_result_range):
-            widget.setEnabled(False)
-        signal_form.addRow("Modulation (from PHY)", self.derived_modulation)
-        signal_form.addRow("Symbol Rate (from PHY)", self.derived_symbol_rate)
-        signal_form.addRow("TX Filter (from PHY)", self.derived_tx_filter)
-        signal_form.addRow("Result Range", self.derived_result_range)
-        signal_form.addRow(QtWidgets.QLabel("PHY-derived parameters are intentionally read-only."))
+        self.center_spin.setSuffix(" MHz")
+        self._common_setup.bandwidth_rows(input_form)
+        self._common_setup.power_rows(input_form)
+        standardize_frontend(input_form)
 
         display_page = QtWidgets.QWidget()
         display_layout = QtWidgets.QVBoxLayout(display_page)
@@ -820,11 +724,12 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         run_layout.addWidget(self.continuous_capture_button)
         run_layout.addWidget(self.refresh_button)
         run_layout.addStretch(1)
-        add_page("Bluetooth Analysis", bt_page, 0, 0)
+        add_page("Signal Description", bt_page, 0, 0)
         add_page("Input / Frontend", input_page, 0, 1)
-        add_page("Signal Description", signal_page, 1, 0)
-        add_page("Display Config", display_page, 1, 1)
+        add_page("Signal Capture", self._common_setup.capture_page(), 1, 0)
         add_page("Trigger", self._build_trigger_page(), 2, 0)
+        display_form(display_page, self, psk=True)
+        add_page("Display", display_page, 1, 1)
         add_page("Sweep / Run", run_page, 2, 1)
 
         dialog = HierarchicalMeasConfigDialog(
@@ -867,7 +772,9 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._meas_config_dialog.open_top()
 
     def open_config_page(self, name: str) -> None:
-        if name == "Display Config":
+        self._common_setup.refresh()
+        if name in {"Display", "Display Config"}:
+            name = "Display"
             for control, value in (
                 (self.config_show_symbols, self._show_symbol_points),
                 (self.config_density, self._symbol_density),
@@ -1416,6 +1323,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         """Return the Bluetooth workspace state without Generic VSA state."""
 
         return {
+            "common_setup": self._common_setup.values(),
             "profile": str(self.profile_combo.currentData()),
             "protocol": str(self.protocol_combo.currentData()),
             "phy": self.phy_combo.currentData(),
@@ -1570,6 +1478,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self._sync_acquisition_trigger_controls()
         self._sync_analysis_channel_controls()
         self._update_derived_config()
+        self._common_setup.apply(values.get("common_setup", {}))
 
     def _save_startup_meas_config(self) -> None:
         payload = {
@@ -1631,6 +1540,11 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             ),
         )
 
+    def _capture_symbol_rate_hz(self) -> float:
+        if self.protocol_combo.currentData() == "bluetooth.hdt":
+            return 2_000_000.0
+        return 2_000_000.0 if self.phy_combo.currentText() == "LE 2M" else 1_000_000.0
+
     def _capture_settings(self) -> PlutoCaptureSettings:
         symbol_rate_hz = (
             2_000_000.0
@@ -1643,11 +1557,13 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             )
             else 1_000_000.0
         )
+        self._common_setup.refresh()
         return PlutoCaptureSettings(
             center_frequency_hz=self.center_spin.value() * 1e6,
             symbol_rate_hz=symbol_rate_hz,
             samples_per_symbol=int(self.oversampling_combo.currentData()),
             capture_length_s=self.capture_length_spin.value() * 1e-3,
+            swap_iq=self._common_setup.swap_iq.isChecked(),
             rf_bandwidth_hz=self.rf_bandwidth_spin.value() * 1e6,
             lo_offset_hz=(
                 self.lo_offset_spin.value() * 1e6
@@ -1660,10 +1576,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 else None
             ),
             sdr_uri=self._pluto_target or None,
-            power_correction=InputPowerCorrection(
-                internal_gain_db=self.internal_gain_spin.value(),
-                external_attenuation_db=self.external_att_spin.value(),
-            ),
+            power_correction=self._common_setup.power_correction(),
             trigger_source=TriggerKind(
                 self.acquisition_trigger_source_combo.currentData()
             ),
@@ -1966,7 +1879,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         }
 
     def _hdt_options(self) -> dict[str, object]:
-        return {"profile": self.profile_combo.currentData()}
+        return {"profile": self.profile_combo.currentData(), "iq_power_trigger": self._iq_power_trigger_settings()}
 
     @QtCore.Slot()
     def refresh(self) -> None:

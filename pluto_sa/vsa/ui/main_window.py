@@ -879,7 +879,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
         self.reset_graph_scales_action.setShortcut("Home")
         self.reset_graph_scales_action.triggered.connect(self._reset_graph_scales)
-        display_menu.addAction(self.reset_graph_scales_action)
 
         self.meas_config_menu = self.menuBar().addMenu("Meas Config")
         self.open_config_action = QtGui.QAction("Open Meas Config...", self)
@@ -1129,8 +1128,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.lo_offset_spin.setValue(1.5)
         self.lo_offset_spin.setSuffix(" MHz")
         self.lo_offset_status_label = QtWidgets.QLabel()
-        self.internal_gain_spin = DeferredSpinBox()
-        self.internal_gain_spin.setRange(0, 40)
+        self.internal_gain_spin = DeferredDoubleSpinBox()
+        self.internal_gain_spin.setRange(0, 70)
+        self.internal_gain_spin.setDecimals(0)
         self.internal_gain_spin.setValue(30)
         self.internal_gain_spin.setSuffix(" dB")
         self.external_attenuation_spin = DeferredDoubleSpinBox()
@@ -1289,119 +1289,8 @@ class VSAWindow(QtWidgets.QMainWindow):
                 control.valueChanged.connect(self._sync_capture_settings)
         config_pages.append(("Signal Capture", capture_page))
 
-        trigger_page = QtWidgets.QWidget()
-        trigger_form = QtWidgets.QFormLayout(trigger_page)
-        acquisition_heading = QtWidgets.QLabel("Acquisition Trigger")
-        acquisition_heading.setStyleSheet("font-weight: bold;")
-        self.acquisition_trigger_source_combo = QtWidgets.QComboBox()
-        self.acquisition_trigger_source_combo.addItem(
-            "Free Run", TriggerKind.FREE_RUN.value
-        )
-        self.acquisition_trigger_source_combo.addItem(
-            "I/Q Power", TriggerKind.POWER_LEVEL.value
-        )
-        self.acquisition_trigger_level_spin = DeferredDoubleSpinBox()
-        self.acquisition_trigger_level_spin.setRange(-200.0, 100.0)
-        self.acquisition_trigger_level_spin.setDecimals(2)
-        self.acquisition_trigger_level_spin.setValue(-20.0)
-        self.acquisition_trigger_level_spin.setSuffix(" dBm")
-        self.acquisition_trigger_slope_combo = QtWidgets.QComboBox()
-        for slope in TriggerSlope:
-            self.acquisition_trigger_slope_combo.addItem(
-                slope.value.capitalize(), slope.value
-            )
-        self.acquisition_trigger_offset_spin = DeferredDoubleSpinBox()
-        self.acquisition_trigger_offset_spin.setRange(-1_000_000.0, 1_000_000.0)
-        self.acquisition_trigger_offset_spin.setDecimals(3)
-        self.acquisition_trigger_offset_spin.setSuffix(" sym")
-        self.acquisition_trigger_offset_spin.setToolTip(
-            "R&S Trigger Offset: positive starts the record after the crossing; "
-            "negative retains pretrigger samples. At exactly zero, Pluto VSA "
-            "automatically retains 16 symbols to protect the first burst ramp "
-            "and preamble."
-        )
-        self.acquisition_trigger_hysteresis_spin = DeferredDoubleSpinBox()
-        self.acquisition_trigger_hysteresis_spin.setRange(0.0, 50.0)
-        self.acquisition_trigger_hysteresis_spin.setDecimals(1)
-        self.acquisition_trigger_hysteresis_spin.setValue(3.0)
-        self.acquisition_trigger_hysteresis_spin.setSuffix(" dB")
-        trigger_form.addRow(acquisition_heading)
-        trigger_form.addRow("Trigger Source", self.acquisition_trigger_source_combo)
-        trigger_form.addRow("Level", self.acquisition_trigger_level_spin)
-        trigger_form.addRow("Slope", self.acquisition_trigger_slope_combo)
-        trigger_form.addRow("Trigger Offset", self.acquisition_trigger_offset_spin)
-        trigger_form.addRow("Hysteresis", self.acquisition_trigger_hysteresis_spin)
-
-        burst_heading = QtWidgets.QLabel("Post-capture Burst Search")
-        burst_heading.setStyleSheet("font-weight: bold;")
-        trigger_form.addRow(burst_heading)
-        self.iq_power_trigger_check = QtWidgets.QCheckBox("Burst Search On")
-        self.iq_power_trigger_check.setToolTip(
-            "Detect every rising power event in the current I/Q capture and "
-            "run pattern search once inside each active interval."
-        )
-        self.iq_power_trigger_level_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_level_spin.setRange(-200.0, 100.0)
-        self.iq_power_trigger_level_spin.setDecimals(2)
-        self.iq_power_trigger_level_spin.setValue(-20.0)
-        self.iq_power_trigger_level_spin.setSuffix(" dBm")
-        self.iq_power_trigger_hysteresis_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_hysteresis_spin.setRange(0.0, 60.0)
-        self.iq_power_trigger_hysteresis_spin.setDecimals(2)
-        self.iq_power_trigger_hysteresis_spin.setValue(3.0)
-        self.iq_power_trigger_hysteresis_spin.setSuffix(" dB")
-        self.iq_power_trigger_average_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_average_spin.setRange(0.0, 1_000.0)
-        self.iq_power_trigger_average_spin.setDecimals(2)
-        self.iq_power_trigger_average_spin.setValue(1.0)
-        self.iq_power_trigger_average_spin.setSuffix(" sym")
-        self.iq_power_trigger_average_spin.setToolTip(
-            "Moving average applied to linear I/Q envelope power before "
-            "threshold comparison."
-        )
-        self.iq_power_trigger_dropout_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_dropout_spin.setRange(0.0, 1_000_000.0)
-        self.iq_power_trigger_dropout_spin.setDecimals(2)
-        self.iq_power_trigger_dropout_spin.setValue(8.0)
-        self.iq_power_trigger_dropout_spin.setSuffix(" sym")
-        self.iq_power_trigger_dropout_spin.setToolTip(
-            "Power must remain below Level - Hysteresis for this duration "
-            "before another trigger can be detected."
-        )
-        self.iq_power_trigger_holdoff_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_holdoff_spin.setRange(0.0, 1_000_000.0)
-        self.iq_power_trigger_holdoff_spin.setDecimals(2)
-        self.iq_power_trigger_holdoff_spin.setValue(0.0)
-        self.iq_power_trigger_holdoff_spin.setSuffix(" sym")
-        self.iq_power_trigger_offset_spin = DeferredDoubleSpinBox()
-        self.iq_power_trigger_offset_spin.setRange(-1_000_000.0, 1_000_000.0)
-        self.iq_power_trigger_offset_spin.setDecimals(3)
-        self.iq_power_trigger_offset_spin.setValue(0.0)
-        self.iq_power_trigger_offset_spin.setSuffix(" sym")
-        self.iq_power_trigger_offset_spin.setToolTip(
-            "Signed offset from each trigger event to the pattern-search start; "
-            "positive values delay the search and negative values include pre-trigger data."
-        )
-        self.iq_power_trigger_limit_result_check = QtWidgets.QCheckBox(
-            "Limit Result Range to Active Interval"
-        )
-        self.iq_power_trigger_limit_result_check.setChecked(True)
-        self.iq_power_trigger_limit_result_check.setToolTip(
-            "Keep only complete symbols ending before the hysteretic burst stop. "
-            "Disable for OOK or signals whose valid data contains long power gaps."
-        )
-        trigger_form.addRow(self.iq_power_trigger_check)
-        trigger_form.addRow("Level", self.iq_power_trigger_level_spin)
-        trigger_form.addRow("Hysteresis", self.iq_power_trigger_hysteresis_spin)
-        trigger_form.addRow("Envelope Average", self.iq_power_trigger_average_spin)
-        trigger_form.addRow("Drop-Out Time", self.iq_power_trigger_dropout_spin)
-        trigger_form.addRow("Holdoff", self.iq_power_trigger_holdoff_spin)
-        trigger_form.addRow("Search Start Offset", self.iq_power_trigger_offset_spin)
-        trigger_form.addRow(self.iq_power_trigger_limit_result_check)
-        self.acquisition_trigger_source_combo.currentIndexChanged.connect(
-            self._sync_acquisition_trigger_controls
-        )
-        self._sync_acquisition_trigger_controls()
+        from pluto_sa.vsa.ui.setup_controls import build_trigger_page
+        trigger_page = build_trigger_page(self)
         self._sync_capture_settings()
         config_pages.append(("Trigger", trigger_page))
 
@@ -1732,9 +1621,6 @@ class VSAWindow(QtWidgets.QMainWindow):
         display_form.addRow("Density Spread", self.config_density_spread)
         display_form.addRow("PSK Symbol Plot", self.config_psk_symbol_plot)
         display_form.addRow("FSK Symbol Plot", self.config_fsk_symbol_plot)
-        reset_plot_button = QtWidgets.QPushButton("Reset Plot Scales")
-        reset_plot_button.clicked.connect(self._reset_graph_scales)
-        display_form.addRow(reset_plot_button)
         config_pages.append(("Display", display_page))
 
         run_page = QtWidgets.QWidget()
@@ -1764,11 +1650,27 @@ class VSAWindow(QtWidgets.QMainWindow):
         run_layout.addStretch(1)
         config_pages.append(("Sweep / Run", run_page))
 
+        from pluto_sa.vsa.ui.setup_controls import ReceiverSetupControls, standardize_frontend
+        self._common_setup = ReceiverSetupControls(
+            self, rate=lambda: self.symbol_rate_spin.value() * int(self.capture_oversampling_combo.currentData()),
+            bandwidth=self.capture_rf_bandwidth_spin, gain=self.internal_gain_spin,
+            attenuation=self.external_attenuation_spin, external_gain=self.external_gain_spin,
+            oversampling=self.capture_oversampling_combo,
+        )
+        pluto_form.insertRow(2, self._common_setup.match_bandwidth)
+        pluto_form.insertRow(3, "Applied RF Bandwidth", self._common_setup.applied_bandwidth)
+        self.symbol_rate_spin.valueChanged.connect(self._common_setup.refresh)
+        standardize_frontend(pluto_form, channel_form)
+        config_pages.sort(key=lambda item: (
+            "Signal Description", "Input / Frontend", "Signal Capture", "Trigger",
+            "Pattern Search", "Result Range", "Demodulation", "Result Summary", "Display", "Sweep / Run"
+        ).index(item[0]))
         self._meas_config_dialog = HierarchicalMeasConfigDialog(
             self,
             config_pages,
             window_title="Meas Config",
-            size=(620, 520),
+            size=(820, 620),
+            standard_buttons=(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel),
         )
         self._config_stack = self._meas_config_dialog.stack
         self._config_back_button = self._meas_config_dialog.back_button
@@ -1776,6 +1678,7 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._config_top_title = self._meas_config_dialog.top_title
         self._config_top_buttons = self._meas_config_dialog.top_buttons
         self._config_page_names = self._meas_config_dialog.page_names
+        self._meas_config_dialog.accepted.connect(self._save_startup_meas_config)
         self._show_config_page(0)
 
     def _populate_result_summary_item_tree(self) -> None:
@@ -1965,10 +1868,10 @@ class VSAWindow(QtWidgets.QMainWindow):
         )
 
     def _open_meas_config(self) -> None:
-        self._show_config_page(0)
-        self._meas_config_dialog.exec()
+        self._meas_config_dialog.open_top()
 
     def open_config_page(self, name: str) -> None:
+        self._common_setup.refresh()
         if name == "Display":
             self._sync_display_config_controls()
         self._meas_config_dialog.open_page(name)
@@ -2354,6 +2257,7 @@ class VSAWindow(QtWidgets.QMainWindow):
 
     def _meas_config_values(self) -> dict[str, object]:
         return {
+            "common_setup": self._common_setup.values(),
             "input_frontend": {
                 "input_source": "Pluto",
                 "center_frequency_mhz": self.capture_center_spin.value(),
@@ -2856,6 +2760,7 @@ class VSAWindow(QtWidgets.QMainWindow):
             raise ValueError(f"invalid measurement configuration: {error}") from error
         self._sync_signal_controls()
         self._sync_analysis_controls()
+        self._common_setup.apply(settings.get("common_setup", {}))
         self._sync_capture_settings()
         self._sync_result_summary_item_tree()
         self._render_result_summary()
@@ -3219,6 +3124,8 @@ class VSAWindow(QtWidgets.QMainWindow):
         self._pluto_discovery_thread = None
 
     def _pluto_capture_settings(self) -> PlutoCaptureSettings:
+        if hasattr(self, "_common_setup"):
+            self._common_setup.refresh()
         return PlutoCaptureSettings(
             center_frequency_hz=self.capture_center_spin.value() * 1e6,
             symbol_rate_hz=self.symbol_rate_spin.value(),

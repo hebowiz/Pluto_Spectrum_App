@@ -603,6 +603,21 @@ def test_dedicated_hdt_returns_every_packet_in_capture() -> None:
         assert evaluated.display == "2 / 1500"
 
 
+def test_hdt_post_capture_trigger_gates_packets_without_changing_evm() -> None:
+    recording, _generated, _project = _hdt_recording(HDTRate.HDT7_5, 32)
+    baseline = analyze_bluetooth_hdt_recordings(recording, profile=BluetoothAnalysisProfile.RF_PHY_TEST)
+    threshold = recording.dbfs_to_dbm_offset_db - 20
+    gated = analyze_bluetooth_hdt_recordings(
+        recording, profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+        iq_power_trigger=IQPowerTriggerSettings(enabled=True, level_dbm=threshold),
+    )
+    assert [item.metadata["packet_start_sample"] for item in gated] == [item.metadata["packet_start_sample"] for item in baseline]
+    assert [item.metrics for item in gated] == [item.metrics for item in baseline]
+    with pytest.raises(RuntimeError, match="synchronization pattern"):
+        analyze_bluetooth_hdt_recordings(recording, profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+                                        iq_power_trigger=IQPowerTriggerSettings(enabled=True, level_dbm=100))
+
+
 def test_dedicated_hdt_decodes_real_hdt7_5_and_identifies_legacy_crc_init() -> None:
     recording = FileIQSource.load(
         Path(__file__).with_name("fixtures") / "RT_HDT7_5.npz"
@@ -2332,7 +2347,7 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
         assert [action.text() for action in window.menuBar().actions()] == [
             "File",
             "Sweep / Run",
-            "Display Config",
+            "Display",
             "Meas Config",
             "Analysis Mode",
         ]
@@ -2346,11 +2361,11 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
         )
         window._build_meas_config_dialog()
         assert isinstance(window._meas_config_dialog, HierarchicalMeasConfigDialog)
-        assert not window.derived_modulation.isEnabled()
-        assert not window.derived_symbol_rate.isEnabled()
+        assert not hasattr(window, "derived_modulation")
+        assert not hasattr(window, "derived_symbol_rate")
         window.show()
         window._meas_config_dialog.show()
-        window._config_top_buttons["Bluetooth Analysis"].click()
+        window._config_top_buttons["Signal Description"].click()
         QtWidgets.QApplication.processEvents()
         assert window.profile_combo.isVisibleTo(window._meas_config_dialog)
         assert window.protocol_combo.isVisibleTo(window._meas_config_dialog)
@@ -2358,8 +2373,11 @@ def test_bluetooth_workspace_uses_generic_run_config_and_edr_tabs(
         window._config_top_buttons["Input / Frontend"].click()
         QtWidgets.QApplication.processEvents()
         assert window.center_spin.isVisibleTo(window._meas_config_dialog)
-        assert window.capture_length_spin.isVisibleTo(window._meas_config_dialog)
+        assert not window.capture_length_spin.isVisibleTo(window._meas_config_dialog)
         assert window.internal_gain_spin.isVisibleTo(window._meas_config_dialog)
+        window._config_top_buttons["Signal Capture"].click()
+        assert window._common_setup.length.isVisibleTo(window._meas_config_dialog)
+        assert window.oversampling_combo.isVisibleTo(window._meas_config_dialog)
         window._config_top_buttons["Trigger"].click()
         QtWidgets.QApplication.processEvents()
         assert window.acquisition_trigger_source_combo.isVisibleTo(

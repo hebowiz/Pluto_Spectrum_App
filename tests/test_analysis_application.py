@@ -75,7 +75,9 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
             "Single",
             "Refresh Analysis",
             "Reset",
-            "System",
+            "Device",
+            "State",
+            "File",
         }.issubset(window.control_panel.buttons)
         assert window.control_panel.buttons["Analyzer Mode"].text() == (
             "Analyzer Mode\nGeneric VSA"
@@ -125,7 +127,7 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
         assert window.control_panel.buttons["Analyzer Mode"].text() == (
             "Analyzer Mode\nBluetooth"
         )
-        assert "Bluetooth Analysis" in window.control_panel.buttons
+        assert "Signal Description" in window.control_panel.buttons
         window.bluetooth_workspace.center_spin.setValue(2420.0)
 
         window.set_analysis_mode("dect")
@@ -134,13 +136,14 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
         )
         assert window._stack.currentWidget() is window.dect_workspace
         assert "DECT Dedicated" in window.windowTitle()
-        assert "DECT Analysis" in window.control_panel.buttons
+        assert "Signal Description" in window.control_panel.buttons
         window.dect_workspace.capture_length_spin.setValue(3.0)
 
         window.set_analysis_mode("adsb1090")
         assert window._stack.currentWidget() is window.adsb1090_workspace
         assert "ADS-B 1090ES" in window.windowTitle()
-        assert "ADS-B Analysis" in window.control_panel.buttons
+        assert "Signal Description" in window.control_panel.buttons
+        assert "Display" not in window.control_panel.buttons
         window.adsb1090_workspace.capture_length_spin.setValue(300.0)
 
         window.set_analysis_mode("generic")
@@ -218,17 +221,18 @@ def test_each_mode_has_one_default_preset_without_capture(tmp_path, monkeypatch)
     monkeypatch.setattr(
         QtWidgets.QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QtWidgets.QMessageBox.StandardButton.Yes,
+        lambda *_args, **_kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
     )
     window = PlutoAnalysisWindow(pluto_source=source, preferences=preferences)
     try:
         for mode in ("generic", "bluetooth", "dect", "adsb1090"):
             window.set_analysis_mode(mode)
-            assert "Default" in window.control_panel.buttons
+            assert "Preset" in window.control_panel.buttons
+            assert "Default" not in window.control_panel.buttons
             preset_buttons = [
-                key for key in window.control_panel.buttons if key == "Default"
+                key for key in window.control_panel.buttons if key == "Preset"
             ]
-            assert preset_buttons == ["Default"]
+            assert preset_buttons == ["Preset"]
 
         window.set_analysis_mode("bluetooth")
         window.bluetooth_workspace.center_spin.setValue(2420.0)
