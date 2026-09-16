@@ -24,7 +24,7 @@ from pluto_vsg.engine.base import (
 from pluto_vsg.engine.bluetooth_br import (
     _append_field_boundaries, _extend_edge_phase, _placed_power_envelope, _srrc_taps,
 )
-from pluto_vsg.model import HDTPayloadSourceKind, WaveformProject, waveform_timing_samples, validate_project
+from pluto_vsg.model import HDTPayloadSourceKind, WaveformProject, waveform_timing_samples, validate_project, hdt_is_rf_test_configuration
 from pluto_vsg.rf_level import iq_level_metadata, measure_iq_levels
 
 
@@ -41,6 +41,8 @@ def hdt_payload_bits(project: WaveformProject) -> np.ndarray:
         source = prbs15_period()
     else:
         pattern = settings.payload_pattern.strip().replace(" ", "")
+        if not pattern or any(bit not in "01" for bit in pattern):
+            raise ValueError("Fixed and pattern payloads require a binary pattern")
         if settings.payload_source == HDTPayloadSourceKind.FIXED:
             pattern = pattern[:1]
         source = np.asarray([int(bit) for bit in pattern], dtype=np.uint8)
@@ -71,14 +73,20 @@ class BluetoothHDTWaveformEngine:
             raise ValueError("HDT sample rate must equal 2 Msym/s times samples per symbol")
 
         payload = hdt_payload_bits(project)
-        format0_bits = hdt_rf_test_format0_bits(payload)
+        format0_bits = hdt_rf_test_format0_bits(
+            payload, md=settings.md, sn=settings.sn, llid=settings.llid,
+            crc_init=settings.crc_init,
+            crc_override=None if settings.crc_auto else settings.crc_manual,
+        )
         coded = puncture(
             convolutional_encode(format0_bits), definition.payload_code_rate
         )
         payload_symbols = map_hdt_symbols(coded, settings.rate)
         training = hdt_rf_test_training_symbols()
         control_data = hdt_rf_test_control_bits(
-            settings.rate, settings.payload_length_bytes
+            settings.rate, settings.payload_length_bytes, pca=settings.pca,
+            nesn=settings.nesn,
+            hec_override=None if settings.hec_auto else settings.hec_manual,
         )
         control_bits = convolutional_encode(control_data)
         control = map_hdt_symbols(control_bits, "HDT2")
@@ -149,11 +157,12 @@ class BluetoothHDTWaveformEngine:
             packet_bits=GeneratedPacketBits(
                 np.concatenate((control_data, format0_bits)), "bluetooth.hdt",
                 settings.rate.value, representation=BitRepresentation.LOGICAL,
-                context={"rate_indicator": definition.rate_indicator, "packet_format": 0},
+                context={"rate_indicator": definition.rate_indicator, "packet_format": 0,
+                         "pca": settings.pca, "crc_init": settings.crc_init},
             ),
             metadata={
                 "project_name": project.name, "standard": project.standard.value,
-                "packet_name": f"{settings.rate.value} " + ("RF Test Packet" if settings.payload_source in {HDTPayloadSourceKind.PRBS9, HDTPayloadSourceKind.PRBS15} and abs(settings.rrc_rolloff - 0.4) < 1e-12 else "Custom Format 0 Packet"), "phy": settings.rate.value,
+                "packet_name": f"{settings.rate.value} " + ("RF Test Packet" if hdt_is_rf_test_configuration(settings) else "Custom Format 0 Packet"), "phy": settings.rate.value,
                 "modulation": definition.modulation, "payload_code_rate": definition.payload_code_rate,
                 "payload_bits": payload, "format0_bits": format0_bits,
                 "control_header_bits": control_data, "coded_payload_bits": coded,

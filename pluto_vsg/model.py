@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from pluto_protocol.bluetooth.hdt import HDTRate
+from pluto_protocol.bluetooth.hdt import HDTRate, HDT_RF_TEST_PCA, HDT_RF_TEST_CRC32_INIT
 from pluto_protocol.dect.rf_modulation import DectRFPattern, DectScramblingMode
 
 
@@ -258,6 +258,27 @@ class BluetoothHDTSettings:
     rrc_rolloff: float = 0.4
     pre_idle_symbols: int = 16
     post_idle_symbols: int = 16
+    pca: int = HDT_RF_TEST_PCA
+    nesn: int = 1
+    md: int = 0
+    sn: int = 0
+    llid: int = 0
+    hec_auto: bool = True
+    hec_manual: int = 0
+    crc_init: int = HDT_RF_TEST_CRC32_INIT
+    crc_auto: bool = True
+    crc_manual: int = 0
+
+
+def hdt_is_rf_test_configuration(settings: BluetoothHDTSettings) -> bool:
+    return (
+        settings.payload_source in {HDTPayloadSourceKind.PRBS9, HDTPayloadSourceKind.PRBS15}
+        and abs(settings.rrc_rolloff - 0.4) < 1e-12
+        and settings.pca == HDT_RF_TEST_PCA and settings.nesn == 1
+        and settings.md == settings.sn == settings.llid == 0
+        and settings.hec_auto and settings.crc_auto
+        and settings.crc_init == HDT_RF_TEST_CRC32_INIT
+    )
 
 
 @dataclass(frozen=True)
@@ -711,6 +732,18 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 )
     hdt_settings = project.bluetooth_hdt
     if hdt_settings is not None:
+        for name, upper in (
+            ("pca", 0xFFFFFFFFFF), ("nesn", 7), ("md", 1), ("sn", 7),
+            ("llid", 3), ("hec_manual", 0xFFFFFF),
+            ("crc_init", 0xFFFFFFFF), ("crc_manual", 0xFFFFFFFF),
+        ):
+            if not 0 <= int(getattr(hdt_settings, name)) <= upper:
+                issues.append(ValidationIssue(
+                    f"bluetooth_hdt.{name}", f"Value must be between 0 and {upper}.",
+                ))
+        for name in ("hec_auto", "crc_auto"):
+            if not isinstance(getattr(hdt_settings, name), bool):
+                issues.append(ValidationIssue(f"bluetooth_hdt.{name}", "Value must be a boolean."))
         if not 1 <= int(hdt_settings.payload_length_bytes) <= 510:
             issues.append(
                 ValidationIssue(

@@ -36,7 +36,7 @@ def bluetooth_hdt_fields(settings: BluetoothHDTSettings) -> tuple[FieldDefinitio
     coded_bits = hdt_coded_payload_bit_count(settings)
     fields = [
         FieldDefinition("Training / Preamble", 74, None, DataSourceKind.COMPUTED, "STS x9 + GI + LTS x2", qpsk),
-        FieldDefinition("Control Header", 62, 57, DataSourceKind.COMPUTED, f"RI={definition.rate_indicator:03b}, HEC-C", qpsk),
+        FieldDefinition("Control Header", 62, 57, DataSourceKind.COMPUTED, f"PCA-A={settings.pca >> 24:04X}, NESN={settings.nesn}, PFI=0, RI={definition.rate_indicator:03b}, RFU=0, PDU={settings.payload_length_bytes + 1}, HEC-C", qpsk),
         FieldDefinition("Control Terminating Symbols", 2, None, DataSourceKind.COMPUTED, "00, 00", qpsk),
     ]
     if coded_bits:

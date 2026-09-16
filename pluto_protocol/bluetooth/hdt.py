@@ -149,8 +149,12 @@ def hdt_rf_test_training_symbols() -> np.ndarray:
 def hdt_rf_test_control_bits(
     rate: HDTRate | str,
     payload_length_bytes: int,
+    *,
+    pca: int = HDT_RF_TEST_PCA,
+    nesn: int = 1,
+    hec_override: int | None = None,
 ) -> np.ndarray:
-    """Build the 57 logical Control Header bits for an RF PHY format-0 packet."""
+    """Build a 57-bit Format-0 Control Header; defaults are the RF Test profile."""
 
     payload_length = int(payload_length_bytes)
     if not 1 <= payload_length <= 510:
@@ -159,28 +163,40 @@ def hdt_rf_test_control_bits(
     pdu_length = payload_length + 1  # one-octet ACL Initial Portion
     header = np.concatenate(
         (
-            _lsb_bits((HDT_RF_TEST_PCA >> 24) & 0xFFFF, 16),
-            _lsb_bits(1, 3),
+            _lsb_bits((pca >> 24) & 0xFFFF, 16),
+            _lsb_bits(nesn, 3),
             _lsb_bits(0, 1),
             _lsb_bits(definition.rate_indicator, 3),
             _lsb_bits(0, 1),
             _lsb_bits(pdu_length, 9),
         )
     )
-    hec = hdt_crc24(header, init=HDT_RF_TEST_PCA & 0xFF_FFFF)
+    if not 0 <= pca <= 0xFFFFFFFFFF or not 0 <= nesn <= 7:
+        raise ValueError("PCA must be 40-bit and NESN must be 3-bit")
+    if hec_override is not None and not 0 <= hec_override <= 0xFFFFFF:
+        raise ValueError("HEC-C must be 24-bit")
+    hec = hdt_crc24(header, init=pca & 0xFF_FFFF) if hec_override is None else hec_override
     return np.concatenate((header, _msb_bits(hec, 24)))
 
 
-def hdt_rf_test_format0_bits(payload_bits: np.ndarray) -> np.ndarray:
-    """Build PDU Header + payload + CRC-32 bits for an RF PHY format-0 packet."""
+def hdt_rf_test_format0_bits(
+    payload_bits: np.ndarray, *, md: int = 0, sn: int = 0, llid: int = 0,
+    crc_init: int = HDT_RF_TEST_CRC32_INIT, crc_override: int | None = None,
+) -> np.ndarray:
+    """Build minimum-header Format-0 PDU / CRC bits; defaults are RF Test values."""
 
     payload = np.asarray(payload_bits, dtype=np.uint8)
     if payload.ndim != 1 or np.any(payload > 1) or payload.size % 8:
         raise ValueError("HDT payload must be a whole number of binary octets")
     if payload.size > 510 * 8:
         raise ValueError("HDT RF test format-0 payload cannot exceed 510 bytes")
-    pdu = np.concatenate((np.zeros(8, dtype=np.uint8), payload))
-    crc = hdt_crc32(pdu)
+    if md not in (0, 1) or not 0 <= sn <= 7 or not 0 <= llid <= 3:
+        raise ValueError("Invalid HDT Initial Portion fields")
+    if not 0 <= crc_init <= 0xFFFFFFFF or (crc_override is not None and not 0 <= crc_override <= 0xFFFFFFFF):
+        raise ValueError("CRC-32 initialization and override must be 32-bit")
+    header = _lsb_bits((md << 2) | (sn << 3) | (llid << 6), 8)
+    pdu = np.concatenate((header, payload))
+    crc = hdt_crc32(pdu, init=crc_init) if crc_override is None else crc_override
     return np.concatenate((pdu, _msb_bits(crc, 32)))
 
 

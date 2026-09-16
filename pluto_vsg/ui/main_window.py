@@ -55,6 +55,7 @@ from pluto_vsg.model import (
     DectPacketType,
     PayloadSourceKind,
     HDTPayloadSourceKind,
+    hdt_is_rf_test_configuration,
     StandardProfile,
     WaveformProject,
     bluetooth_packet_is_edr,
@@ -84,7 +85,8 @@ from pluto_vsg.profiles import (
     dect_fields,
     dect_project,
 )
-from pluto_protocol.bluetooth.hdt import HDTRate, hdt_definition
+from pluto_protocol.bluetooth.hdt import HDTRate, hdt_definition, hdt_rf_test_control_bits, hdt_rf_test_format0_bits
+from pluto_vsg.engine.bluetooth_hdt import hdt_payload_bits
 from pluto_vsg.ui.style import (
     ACCENT_COLOR,
     FIELD_BOUNDARY_COLOR,
@@ -753,8 +755,41 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self.fall_spin = DeferredDoubleSpinBox(); self.fall_spin.setRange(0.0, 1000.0); self.fall_spin.setValue(project.power_envelope.fall_symbols)
         self.fall_delay_spin = DeferredDoubleSpinBox(); self.fall_delay_spin.setRange(-1000.0, 1000.0); self.fall_delay_spin.setValue(project.power_envelope.fall_delay_symbols)
         self.ramp_combo = QtWidgets.QComboBox(); self.ramp_combo.addItems(["Cosine", "Linear"]); self.ramp_combo.setCurrentText(project.power_envelope.shape)
-        self.training_value = QtWidgets.QLabel("Enabled (required / automatic)")
+        self.training_value = QtWidgets.QLabel("STS x9 + GI + LTS x2: 74 symbols / 37 us (u=7, p=8; fixed)")
         self.packet_profile_label = QtWidgets.QLabel()
+        self.pca_edit = QtWidgets.QLineEdit(f"{settings.pca:010X}")
+        self.hec_edit = QtWidgets.QLineEdit(f"{settings.hec_manual:06X}")
+        self.crc_init_edit = QtWidgets.QLineEdit(f"{settings.crc_init:08X}")
+        self.crc_edit = QtWidgets.QLineEdit(f"{settings.crc_manual:08X}")
+        for control, width in (
+            (self.pca_edit, 10), (self.hec_edit, 6),
+            (self.crc_init_edit, 8), (self.crc_edit, 8),
+        ):
+            control.setMaxLength(width)
+            control.setValidator(QtGui.QRegularExpressionValidator(
+                QtCore.QRegularExpression(f"[0-9A-Fa-f]{{0,{width}}}"), control,
+            ))
+            control.setToolTip(f"Enter exactly {width} hexadecimal digits (without 0x)")
+        def choice(values, current):
+            control = QtWidgets.QComboBox()
+            for label, value in values:
+                control.addItem(label, value)
+            control.setCurrentIndex(control.findData(current))
+            return control
+        self.nesn_combo = choice([(str(i), i) for i in range(8)], settings.nesn)
+        self.md_combo = choice([("0 — No more data", 0), ("1 — More data", 1)], settings.md)
+        self.sn_combo = choice([(str(i), i) for i in range(8)], settings.sn)
+        self.llid_combo = choice([(f"0b{i:02b}", i) for i in range(4)], settings.llid)
+        self.hec_auto_check = QtWidgets.QCheckBox("Automatic HEC-C")
+        self.hec_auto_check.setChecked(settings.hec_auto)
+        self.crc_auto_check = QtWidgets.QCheckBox("Automatic CRC-32")
+        self.crc_auto_check.setChecked(settings.crc_auto)
+        self.control_readback = QtWidgets.QLabel()
+        self.integrity_readback = QtWidgets.QLabel()
+        self.address_readback = QtWidgets.QLabel()
+        for label in (self.training_value, self.packet_profile_label, self.control_readback,
+                      self.integrity_readback, self.address_readback):
+            label.setWordWrap(True)
         self._timing_controls = tuple(
             SymbolTimeControl(control, lambda: 2_000_000.0)
             for control in (
@@ -789,8 +824,23 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
                 ("Project Name", self.name_value),
                 ("Training / Preamble", self.training_value),
                 ("Packet Profile", self.packet_profile_label),
+                ("PCA [40-bit hex]", self.pca_edit),
+                ("PCA-A / HEC Init (auto)", self.address_readback),
+                ("NESN", self.nesn_combo),
+                ("Control Header (auto)", self.control_readback),
+                ("HEC-C Mode", self.hec_auto_check),
+                ("Manual HEC-C [hex]", self.hec_edit),
+                ("XHP / RxPP (fixed)", QtWidgets.QLabel("0 / 0 — extended headers not generated")),
+                ("MD", self.md_combo),
+                ("SN", self.sn_combo),
+                ("LLID", self.llid_combo),
                 ("Payload Source", self.source_combo),
                 ("Payload Pattern", self.pattern_edit),
+                ("CRC-32 Init [hex]", self.crc_init_edit),
+                ("CRC-32 Mode", self.crc_auto_check),
+                ("Manual CRC-32 [hex]", self.crc_edit),
+                ("Generated HEC-C / CRC-32", self.integrity_readback),
+                ("Terminating Symbols (fixed)", QtWidgets.QLabel("2 zero-label symbols per stream; pi/4-QPSK parity continues")),
             ),
         )
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
@@ -813,6 +863,12 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self.frequency_offset_spin.valueChanged.connect(self._update_preview)
         self.source_combo.currentIndexChanged.connect(self._source_changed)
         self.rolloff_spin.valueChanged.connect(self._update_preview)
+        for control in (self.pca_edit, self.hec_edit, self.crc_init_edit, self.crc_edit, self.pattern_edit):
+            control.textChanged.connect(self._update_preview)
+        for control in (self.nesn_combo, self.md_combo, self.sn_combo, self.llid_combo):
+            control.currentIndexChanged.connect(self._update_preview)
+        self.hec_auto_check.toggled.connect(self._update_preview)
+        self.crc_auto_check.toggled.connect(self._update_preview)
         self.period_spin.valueChanged.connect(self._update_post_idle_reference)
         self._source_changed()
         self._update_period_constraints()
@@ -824,10 +880,36 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self._update_preview()
 
     def _update_preview(self, _value=None) -> None:
-        rf_test = (
-            self.source_combo.currentData() in {HDTPayloadSourceKind.PRBS9, HDTPayloadSourceKind.PRBS15}
-            and abs(self.rolloff_spin.value() - 0.4) < 1e-12
+        self.hec_edit.setEnabled(not self.hec_auto_check.isChecked())
+        self.crc_edit.setEnabled(not self.crc_auto_check.isChecked())
+        definition = hdt_definition(self.rate_combo.currentData())
+        self.control_readback.setText(
+            f"PFI=0; RI=0b{definition.rate_indicator:03b}; RFU=0; "
+            f"PDU Control={self.length_spin.value() + 1} octets; FEC tail=00000"
         )
+        rf_test = False
+        try:
+            fields = self._field_settings()
+            self.address_readback.setText(
+                f"PCA-A=0x{fields.pca >> 24:04X}; HEC Init=0x{fields.pca & 0xFFFFFF:06X}"
+            )
+            rf_test = hdt_is_rf_test_configuration(fields)
+            control = hdt_rf_test_control_bits(
+                fields.rate, fields.payload_length_bytes, pca=fields.pca, nesn=fields.nesn,
+                hec_override=None if fields.hec_auto else fields.hec_manual,
+            )
+            payload = hdt_payload_bits(replace(self._project, bluetooth_hdt=fields))
+            pdu = hdt_rf_test_format0_bits(
+                payload, md=fields.md, sn=fields.sn, llid=fields.llid, crc_init=fields.crc_init,
+                crc_override=None if fields.crc_auto else fields.crc_manual,
+            )
+            msb = lambda bits: sum(int(bit) << (bits.size - 1 - i) for i, bit in enumerate(bits))
+            self.integrity_readback.setText(
+                f"HEC-C=0x{msb(control[-24:]):06X}; CRC-32=0x{msb(pdu[-32:]):08X}"
+            )
+        except ValueError:
+            self.address_readback.setText("Incomplete or invalid field input")
+            self.integrity_readback.setText("Incomplete or invalid field input")
         self.packet_profile_label.setText(
             "RF Test Format 0 (PRBS9 / PRBS15, SRRC 0.4)"
             if rf_test else "Custom Format 0 (not the RF Test configuration)"
@@ -841,6 +923,28 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self.sample_rate_label.setText(f"{2.0 * self.sps_spin.value():.3f} MS/s")
         for control in self._timing_controls:
             control.refresh()
+
+    def _field_settings(self) -> BluetoothHDTSettings:
+        def hexadecimal(control, width):
+            text = control.text().strip()
+            if not re.fullmatch(f"[0-9A-Fa-f]{{{width}}}", text):
+                raise ValueError(f"Enter exactly {width} hexadecimal digits")
+            return int(text, 16)
+        return replace(
+            self._project.bluetooth_hdt,
+            rate=HDTRate(self.rate_combo.currentData()),
+            payload_length_bytes=self.length_spin.value(),
+            payload_source=HDTPayloadSourceKind(self.source_combo.currentData()),
+            payload_pattern=self.pattern_edit.text(), rrc_rolloff=self.rolloff_spin.value(),
+            pca=hexadecimal(self.pca_edit, 10), nesn=self.nesn_combo.currentData(),
+            md=self.md_combo.currentData(), sn=self.sn_combo.currentData(), llid=self.llid_combo.currentData(),
+            hec_auto=self.hec_auto_check.isChecked(),
+            hec_manual=(hexadecimal(self.hec_edit, 6) if len(self.hec_edit.text()) == 6
+                        or not self.hec_auto_check.isChecked() else self._project.bluetooth_hdt.hec_manual),
+            crc_init=hexadecimal(self.crc_init_edit, 8), crc_auto=self.crc_auto_check.isChecked(),
+            crc_manual=(hexadecimal(self.crc_edit, 8) if len(self.crc_edit.text()) == 8
+                        or not self.crc_auto_check.isChecked() else self._project.bluetooth_hdt.crc_manual),
+        )
 
     def _update_post_idle_reference(self, _value=None) -> None:
         post_idle = max(0.0, self.period_spin.value() - self._minimum_period_symbols)
@@ -884,15 +988,22 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             self, title="Invalid Bluetooth HDT Setting"
         ):
             return
-        settings = replace(self._project.bluetooth_hdt,
+        try:
+            field_settings = self._field_settings()
+        except ValueError as error:
+            QtWidgets.QMessageBox.warning(self, "Bluetooth HDT Settings", str(error))
+            return
+        settings = replace(field_settings,
             rate=HDTRate(self.rate_combo.currentData()), payload_length_bytes=self.length_spin.value(),
             payload_source=HDTPayloadSourceKind(self.source_combo.currentData()), payload_pattern=self.pattern_edit.text(),
             rrc_rolloff=self.rolloff_spin.value(), pre_idle_symbols=self.pre_idle_spin.value(),
             post_idle_symbols=0, training_enabled=True,
         )
-        self._project = replace(
+        candidate = replace(
             self._project,
-            name=f"Bluetooth {settings.rate.value} RF Test Packet",
+            name=f"Bluetooth {settings.rate.value} " + (
+                "RF Test Packet" if hdt_is_rf_test_configuration(settings) else "Custom Format 0 Packet"
+            ),
             center_frequency_hz=(float(self.carrier_combo.currentData()) + self.frequency_offset_spin.value() * 1e3),
             sample_rate_hz=2_000_000.0 * self.sps_spin.value(),
             samples_per_symbol=self.sps_spin.value(),
@@ -909,9 +1020,10 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
                 shape=self.ramp_combo.currentText(),
             ),
         )
-        issues = validate_project(self._project)
+        issues = validate_project(candidate)
         if issues:
             QtWidgets.QMessageBox.warning(self, "Bluetooth HDT Settings", "\n".join(f"{i.path}: {i.message}" for i in issues)); return
+        self._project = candidate
         self.accept()
 
     @property
