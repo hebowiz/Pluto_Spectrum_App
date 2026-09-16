@@ -45,6 +45,13 @@ class FilterKind(StrEnum):
     ROOT_RAISED_COSINE = "Root Raised Cosine"
 
 
+class HDTPayloadSourceKind(StrEnum):
+    FIXED = "Fixed"
+    PATTERN = "Pattern"
+    PRBS9 = "PRBS-9"
+    PRBS15 = "PRBS-15"
+
+
 class PayloadSourceKind(StrEnum):
     FIXED = "Fixed"
     PATTERN = "Pattern"
@@ -245,7 +252,7 @@ class BluetoothHDTSettings:
 
     rate: HDTRate = HDTRate.HDT6
     payload_length_bytes: int = 255
-    payload_source: PayloadSourceKind = PayloadSourceKind.PRBS9
+    payload_source: HDTPayloadSourceKind = HDTPayloadSourceKind.PRBS9
     payload_pattern: str = "10101010"
     training_enabled: bool = True
     rrc_rolloff: float = 0.4
@@ -704,11 +711,11 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
                 )
     hdt_settings = project.bluetooth_hdt
     if hdt_settings is not None:
-        if not 0 <= int(hdt_settings.payload_length_bytes) <= 509:
+        if not 1 <= int(hdt_settings.payload_length_bytes) <= 510:
             issues.append(
                 ValidationIssue(
                     "bluetooth_hdt.payload_length_bytes",
-                    "HDT RF test format-0 payload length must be between 0 and 509 bytes.",
+                    "HDT RF test format-0 payload length must be between 1 and 510 bytes.",
                 )
             )
         if not 0.0 < float(hdt_settings.rrc_rolloff) <= 1.0:

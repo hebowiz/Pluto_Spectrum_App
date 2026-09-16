@@ -82,6 +82,18 @@ def le_crc24_bits(bits: np.ndarray, init: int = 0x555555) -> np.ndarray:
     return np.asarray([(register >> position) & 1 for position in range(23, -1, -1)], dtype=np.uint8)
 
 
+def prbs15_period() -> np.ndarray:
+    """Bluetooth RF test PRBS15: all-ones seed, x^15 + x^14 + 1."""
+    register = np.ones(15, dtype=np.uint8)
+    sequence = np.empty((1 << 15) - 1, dtype=np.uint8)
+    for index in range(sequence.size):
+        sequence[index] = register[-1]
+        feedback = register[-2] ^ register[-1]
+        register[1:] = register[:-1]
+        register[0] = feedback
+    return sequence
+
+
 def decode_acl_header(bits: np.ndarray) -> tuple[int, int, int]:
     values = np.asarray(bits, dtype=np.uint8)
     if values.size not in (8, 16):

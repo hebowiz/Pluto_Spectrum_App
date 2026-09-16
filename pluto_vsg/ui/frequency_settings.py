@@ -59,7 +59,7 @@ def default_frequency_selection(project: WaveformProject) -> FrequencySelection:
         return FrequencySelection("wifi_24", str(project.wifi.channel), nominal_hz)
     carriers = (
         bluetooth_le_carriers()
-        if project.standard == StandardProfile.BLUETOOTH_LE
+        if project.standard in {StandardProfile.BLUETOOTH_LE, StandardProfile.BLUETOOTH_HDT}
         else bluetooth_classic_carriers()
     )
     nominal_hz = min(
@@ -78,7 +78,7 @@ def default_frequency_selection(project: WaveformProject) -> FrequencySelection:
     )
     return FrequencySelection(
         "bluetooth_le"
-        if project.standard == StandardProfile.BLUETOOTH_LE
+        if project.standard in {StandardProfile.BLUETOOTH_LE, StandardProfile.BLUETOOTH_HDT}
         else "bluetooth_classic",
         channel,
         nominal_hz,
@@ -167,14 +167,14 @@ class FrequencySettingsDialog(QtWidgets.QDialog):
             self._kind = "wifi"
             carriers = wifi_24ghz_carriers()
             plan_label = "2.4 GHz Wi-Fi"
-        elif project.standard == StandardProfile.BLUETOOTH_LE:
+        elif project.standard in {StandardProfile.BLUETOOTH_LE, StandardProfile.BLUETOOTH_HDT}:
             self._kind = "le"
             carriers = bluetooth_le_carriers()
-            plan_label = "Bluetooth LE"
+            plan_label = "Bluetooth HDT" if project.standard == StandardProfile.BLUETOOTH_HDT else "Bluetooth LE"
         else:
             self._kind = "bluetooth"
             carriers = bluetooth_classic_carriers()
-            plan_label = "Bluetooth BR / EDR / HDT"
+            plan_label = "Bluetooth BR / EDR"
         self.plan_combo.addItem(plan_label, self._kind)
         self.plan_combo.setEnabled(False)
         selector = carrier_selector(carriers, selected.nominal_frequency_hz)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from pluto_protocol import PacketDecodeInput, PacketSourceInfo, analyze_packet
-from pluto_protocol.model import PacketAnalysisResult
+from pluto_protocol.model import BitRepresentation, PacketAnalysisResult
 
 
 def analyze_demodulated_packet_bits(
@@ -13,6 +13,7 @@ def analyze_demodulated_packet_bits(
     *,
     protocol_id: str,
     phy_name: str,
+    representation: BitRepresentation = BitRepresentation.AIR,
     context: dict[str, object] | None = None,
     packet_index: int | None = None,
     center_frequency_hz: float | None = None,
@@ -21,7 +22,8 @@ def analyze_demodulated_packet_bits(
 ) -> PacketAnalysisResult:
     """Decode one packet after VSA synchronization/demodulation.
 
-    ``bits`` must be canonical over-the-air order.  Symbol mapping and packet
+    ``bits`` must be canonical over-the-air order, or FEC-decoded logical
+    order when ``representation=LOGICAL`` (HDT). Symbol mapping and packet
     boundary detection remain VSA responsibilities; field semantics and
     integrity checks are shared with VSG.
     """
@@ -29,6 +31,7 @@ def analyze_demodulated_packet_bits(
     return analyze_packet(
         PacketDecodeInput(
             bits=np.asarray(bits, dtype=np.uint8),
+            representation=representation,
             protocol_hint=protocol_id,
             phy_hint=phy_name,
             source=PacketSourceInfo(

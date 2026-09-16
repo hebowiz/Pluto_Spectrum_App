@@ -7,6 +7,7 @@ import math
 import numpy as np
 
 from pluto_protocol.model import GeneratedPacketBits
+from pluto_protocol.bluetooth.common import prbs15_period
 from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
 from pluto_vsg.engine.base import FieldBoundary, GenerationResult
 from pluto_vsg.engine.bluetooth_br import (
@@ -43,14 +44,7 @@ def _bits_lsb(value: int, width: int) -> np.ndarray:
 
 
 def _prbs15_period() -> np.ndarray:
-    register = np.ones(15, dtype=np.uint8)
-    sequence = np.empty((1 << 15) - 1, dtype=np.uint8)
-    for index in range(sequence.size):
-        sequence[index] = register[-1]
-        feedback = register[-2] ^ register[-1]
-        register[1:] = register[:-1]
-        register[0] = feedback
-    return sequence
+    return prbs15_period()
 
 
 def le_test_payload_bits(

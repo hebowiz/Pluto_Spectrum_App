@@ -14,8 +14,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common.numeric_input import DeferredDoubleSpinBox
-from pluto_protocol.dect.common import dect_p_range
-from pluto_protocol.model import PacketField
+from pluto_sa.vsa.ui.packet_decode import PacketDecodeTabs, dect_tree_item
 from pluto_sa.sdr.trigger import TriggerKind
 from pluto_sa.vsa.analysis import capture_power_traces, recording_spectrum_trace
 from pluto_sa.vsa.model import IQRecording
@@ -29,7 +28,6 @@ from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.sources import FileIQSource
 from pluto_sa.vsa.ui.capture_thread import PlutoSingleCaptureThread
 from pluto_sa.vsa.ui.measurement_chrome import (
-    DedicatedPacketAnalysisTree,
     DedicatedSummaryTable,
     PersistentPlotRanges,
     SymbolDensitySpread,
@@ -641,12 +639,11 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             self.spectrum_dock, self.symbol_dock, QtCore.Qt.Orientation.Vertical
         )
 
-        self.packet_tabs = QtWidgets.QTabWidget()
-        self.decode_tree = DedicatedPacketAnalysisTree(
-            ("Field", "Value", "Bit Range", "DECT Symbols", "Status"),
-            (125, 115, 68, 92, 55),
-            expand_columns=(0, 1),
-        )
+        self.packet_tabs = PacketDecodeTabs(dect=True)
+        self.decode_tree = self.packet_tabs.decode_tree
+        # Preserve the existing DECT tab set; VSG exposes all shared tabs.
+        self.packet_tabs.removeTab(self.packet_tabs.indexOf(self.packet_tabs.payload_text))
+        self.packet_tabs.removeTab(self.packet_tabs.indexOf(self.packet_tabs.issues_table))
         self.packet_table = QtWidgets.QTableWidget(0, 5)
         self.packet_table.setHorizontalHeaderLabels(
             ("#", "Direction", "Packet", "Pattern", "Symbols")
@@ -664,7 +661,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
             lambda row, _column: self._select_result_index(row)
         )
         self.air_bits_text = QtWidgets.QPlainTextEdit(readOnly=True)
-        self.packet_tabs.addTab(self.decode_tree, "Decode")
+
         self.packet_tabs.addTab(self.packet_table, "Packet List")
         self.packet_tabs.addTab(self.air_bits_text, "Air Bits")
         self.packet_dock = self._dock("Packet Analysis", self.packet_tabs)
@@ -1895,13 +1892,10 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         )
 
     def _render_packet_analysis(self, result: DectPacketResult) -> None:
-        self.decode_tree.clear()
         p0_internal_bit = 16 if result.preamble_mode == "Prolonged" else 0
-        for field in result.packet_analysis.root_fields:
-            item = self._packet_field_item(field, result.bits, p0_internal_bit)
-            self.decode_tree.addTopLevelItem(item)
-            item.setExpanded(True)
-        self.decode_tree.expandToDepth(2)
+        self.packet_tabs.render_packet(result.packet_analysis,
+                                     p0_internal_bit=p0_internal_bit,
+                                     dect_bits=result.bits)
         grouped = " ".join(
             "".join(str(int(bit)) for bit in result.bits[start : start + 8])
             for start in range(0, result.bits.size, 8)
@@ -1927,49 +1921,8 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
                 self.packet_table.setItem(row, column, QtWidgets.QTableWidgetItem(text))
         self.packet_table.selectRow(self._selected_result_index)
 
-    def _packet_field_item(
-        self,
-        field: PacketField,
-        bits: np.ndarray,
-        p0_internal_bit: int,
-    ) -> QtWidgets.QTreeWidgetItem:
-        stop = min(field.stop_bit, bits.size)
-        value = "" if field.value is None else str(field.value)
-        bit_range = (
-            "N/A"
-            if stop <= field.start_bit
-            else str(field.start_bit)
-            if stop == field.start_bit + 1
-            else f"{field.start_bit}–{stop - 1}"
-        )
-        dect_start, dect_stop = dect_p_range(
-            field.start_bit, stop, p0_internal_bit
-        )
-        dect_symbols = (
-            "N/A"
-            if dect_start is None or dect_stop is None or dect_stop <= dect_start
-            else f"p{dect_start}"
-            if dect_stop == dect_start + 1
-            else f"p{dect_start}–p{dect_stop - 1}"
-        )
-        item = QtWidgets.QTreeWidgetItem(
-            (field.name, value, bit_range, dect_symbols, str(field.status))
-        )
-        color = dedicated_status_color(field.status)
-        if color is not None:
-            item.setForeground(4, QtGui.QBrush(color))
-        for column, text in enumerate(
-            (field.name, value, bit_range, dect_symbols, str(field.status))
-        ):
-            tooltip = str(text)
-            if field.meaning:
-                tooltip = f"{tooltip}\n{field.meaning}" if tooltip else field.meaning
-            item.setToolTip(column, tooltip)
-        for child in field.children:
-            item.addChild(
-                self._packet_field_item(child, bits, p0_internal_bit)
-            )
-        return item
+    def _packet_field_item(self, field, bits, p0_internal_bit):
+        return dect_tree_item(field, bits, p0_internal_bit)
 
     def _reset_plot_scales(self) -> None:
         for name, plot in self._plot_widgets():

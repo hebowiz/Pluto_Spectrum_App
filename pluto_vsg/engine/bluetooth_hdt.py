@@ -13,7 +13,8 @@ from pluto_protocol.bluetooth.hdt import (
     map_hdt_symbols,
     puncture,
 )
-from pluto_protocol.model import GeneratedPacketBits
+from pluto_protocol.model import BitRepresentation, GeneratedPacketBits
+from pluto_protocol.bluetooth.common import prbs15_period
 from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
 from pluto_vsg.engine.base import (
     ConstellationTrace,
@@ -23,7 +24,7 @@ from pluto_vsg.engine.base import (
 from pluto_vsg.engine.bluetooth_br import (
     _append_field_boundaries, _extend_edge_phase, _placed_power_envelope, _srrc_taps,
 )
-from pluto_vsg.model import PayloadSourceKind, WaveformProject, waveform_timing_samples, validate_project
+from pluto_vsg.model import HDTPayloadSourceKind, WaveformProject, waveform_timing_samples, validate_project
 from pluto_vsg.rf_level import iq_level_metadata, measure_iq_levels
 
 
@@ -34,11 +35,13 @@ def hdt_payload_bits(project: WaveformProject) -> np.ndarray:
     count = int(settings.payload_length_bytes) * 8
     if not count:
         return np.empty(0, dtype=np.uint8)
-    if settings.payload_source == PayloadSourceKind.PRBS9:
+    if settings.payload_source == HDTPayloadSourceKind.PRBS9:
         source = prbs9_period()
+    elif settings.payload_source == HDTPayloadSourceKind.PRBS15:
+        source = prbs15_period()
     else:
         pattern = settings.payload_pattern.strip().replace(" ", "")
-        if settings.payload_source == PayloadSourceKind.FIXED:
+        if settings.payload_source == HDTPayloadSourceKind.FIXED:
             pattern = pattern[:1]
         source = np.asarray([int(bit) for bit in pattern], dtype=np.uint8)
     return source[np.arange(count) % source.size]
@@ -81,7 +84,8 @@ class BluetoothHDTWaveformEngine:
         control = map_hdt_symbols(control_bits, "HDT2")
         control_termination = map_hdt_symbols(np.zeros(4, dtype=np.uint8), "HDT2")
         payload_termination = map_hdt_symbols(
-            np.zeros(2 * definition.bits_per_symbol, dtype=np.uint8), settings.rate
+            np.zeros(2 * definition.bits_per_symbol, dtype=np.uint8), settings.rate,
+            symbol_offset=payload_symbols.size,
         )
         symbols = np.concatenate(
             (
@@ -142,10 +146,14 @@ class BluetoothHDTWaveformEngine:
                     np.concatenate((payload_symbols, payload_termination)),
                 ),
             ),
-            packet_bits=GeneratedPacketBits(format0_bits, "bluetooth.hdt", settings.rate.value, context={"rate_indicator": definition.rate_indicator, "packet_format": 0}),
+            packet_bits=GeneratedPacketBits(
+                np.concatenate((control_data, format0_bits)), "bluetooth.hdt",
+                settings.rate.value, representation=BitRepresentation.LOGICAL,
+                context={"rate_indicator": definition.rate_indicator, "packet_format": 0},
+            ),
             metadata={
                 "project_name": project.name, "standard": project.standard.value,
-                "packet_name": f"{settings.rate.value} RF Test Packet", "phy": settings.rate.value,
+                "packet_name": f"{settings.rate.value} " + ("RF Test Packet" if settings.payload_source in {HDTPayloadSourceKind.PRBS9, HDTPayloadSourceKind.PRBS15} and abs(settings.rrc_rolloff - 0.4) < 1e-12 else "Custom Format 0 Packet"), "phy": settings.rate.value,
                 "modulation": definition.modulation, "payload_code_rate": definition.payload_code_rate,
                 "payload_bits": payload, "format0_bits": format0_bits,
                 "control_header_bits": control_data, "coded_payload_bits": coded,

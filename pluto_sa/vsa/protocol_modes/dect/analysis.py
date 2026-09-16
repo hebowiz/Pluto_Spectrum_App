@@ -9,7 +9,7 @@ from typing import Mapping
 import numpy as np
 from scipy.optimize import least_squares
 
-from pluto_protocol.dect.classic import DectClassicDecoder
+from pluto_protocol import analyze_packet
 from pluto_protocol.dect.rf_modulation import identify_rf_pattern
 from pluto_protocol.model import (
     PacketAnalysisResult,
@@ -1205,7 +1205,7 @@ def analyze_dect_recording(
             else False if power_time.overall_status == "FAIL"
             else None
         )
-        packet_analysis = DectClassicDecoder().decode(
+        packet_analysis = analyze_packet(
             PacketDecodeInput(
                 bits,
                 protocol_hint="dect.classic",

@@ -25,6 +25,8 @@ from pluto_sa.vsa.ui.measurement_chrome import (
     install_measurement_plot_menu,
     make_measurement_plot,
 )
+from pluto_sa.vsa.ui.packet_decode import PacketDecodeTabs, apply_analysis_font
+from pluto_vsg.protocol import analyze_generation_result
 from pluto_vsg.backends import (
     PlutoOutputBackend,
     PlutoPlaybackMode,
@@ -52,6 +54,7 @@ from pluto_vsg.model import (
     DectBFieldSource,
     DectPacketType,
     PayloadSourceKind,
+    HDTPayloadSourceKind,
     StandardProfile,
     WaveformProject,
     bluetooth_packet_is_edr,
@@ -711,7 +714,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         if settings is None:
             raise ValueError("Bluetooth HDT settings are required")
         self.name_value = QtWidgets.QLabel(project.name)
-        hdt_carriers = bluetooth_classic_carriers()
+        hdt_carriers = bluetooth_le_carriers()
         hdt_nominal_hz = min(
             (frequency for _label, frequency in hdt_carriers),
             key=lambda frequency: abs(frequency - project.center_frequency_hz),
@@ -730,11 +733,11 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             definition = hdt_definition(rate)
             self.rate_combo.addItem(f"{rate.value} / {definition.modulation} / code {definition.payload_code_rate}", rate)
         self.rate_combo.setCurrentIndex(self.rate_combo.findData(HDTRate(settings.rate)))
-        self.length_spin = DeferredSpinBox(); self.length_spin.setRange(0, 509); self.length_spin.setValue(settings.payload_length_bytes)
+        self.length_spin = DeferredSpinBox(); self.length_spin.setRange(1, 510); self.length_spin.setValue(settings.payload_length_bytes)
         self.source_combo = QtWidgets.QComboBox()
-        for source in PayloadSourceKind:
+        for source in HDTPayloadSourceKind:
             self.source_combo.addItem(source.value, source)
-        self.source_combo.setCurrentIndex(self.source_combo.findData(PayloadSourceKind(settings.payload_source)))
+        self.source_combo.setCurrentIndex(self.source_combo.findData(HDTPayloadSourceKind(settings.payload_source)))
         self.pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern)
         self.rolloff_spin = DeferredDoubleSpinBox(); self.rolloff_spin.setRange(0.01, 1.0); self.rolloff_spin.setDecimals(3); self.rolloff_spin.setValue(settings.rrc_rolloff)
         self.sps_spin = DeferredSpinBox(); self.sps_spin.setRange(4, 64); self.sps_spin.setValue(project.samples_per_symbol)
@@ -751,6 +754,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self.fall_delay_spin = DeferredDoubleSpinBox(); self.fall_delay_spin.setRange(-1000.0, 1000.0); self.fall_delay_spin.setValue(project.power_envelope.fall_delay_symbols)
         self.ramp_combo = QtWidgets.QComboBox(); self.ramp_combo.addItems(["Cosine", "Linear"]); self.ramp_combo.setCurrentText(project.power_envelope.shape)
         self.training_value = QtWidgets.QLabel("Enabled (required / automatic)")
+        self.packet_profile_label = QtWidgets.QLabel()
         self._timing_controls = tuple(
             SymbolTimeControl(control, lambda: 2_000_000.0)
             for control in (
@@ -764,6 +768,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         )
         self.tabs = packet_settings_tabs(
             (
+                ("Packet Format", QtWidgets.QLabel("Format 0; minimum Initial Portion (Short / Format 1 / CTE not generated)")),
                 ("HDT Rate / Modulation", self.rate_combo),
                 ("Payload Length [byte]", self.length_spin),
                 ("Packet Length", self.packet_duration_label),
@@ -783,6 +788,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             (
                 ("Project Name", self.name_value),
                 ("Training / Preamble", self.training_value),
+                ("Packet Profile", self.packet_profile_label),
                 ("Payload Source", self.source_combo),
                 ("Payload Pattern", self.pattern_edit),
             ),
@@ -806,16 +812,26 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self.carrier_combo.currentIndexChanged.connect(self._update_preview)
         self.frequency_offset_spin.valueChanged.connect(self._update_preview)
         self.source_combo.currentIndexChanged.connect(self._source_changed)
+        self.rolloff_spin.valueChanged.connect(self._update_preview)
         self.period_spin.valueChanged.connect(self._update_post_idle_reference)
         self._source_changed()
         self._update_period_constraints()
 
     def _source_changed(self, _value=None) -> None:
         self.pattern_edit.setEnabled(
-            PayloadSourceKind(self.source_combo.currentData()) is not PayloadSourceKind.PRBS9
+            HDTPayloadSourceKind(self.source_combo.currentData()) in {HDTPayloadSourceKind.FIXED, HDTPayloadSourceKind.PATTERN}
         )
+        self._update_preview()
 
     def _update_preview(self, _value=None) -> None:
+        rf_test = (
+            self.source_combo.currentData() in {HDTPayloadSourceKind.PRBS9, HDTPayloadSourceKind.PRBS15}
+            and abs(self.rolloff_spin.value() - 0.4) < 1e-12
+        )
+        self.packet_profile_label.setText(
+            "RF Test Format 0 (PRBS9 / PRBS15, SRRC 0.4)"
+            if rf_test else "Custom Format 0 (not the RF Test configuration)"
+        )
         nominal_hz = float(self.carrier_combo.currentData())
         actual_hz = nominal_hz + self.frequency_offset_spin.value() * 1e3
         self.actual_frequency_label.setText(
@@ -870,7 +886,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             return
         settings = replace(self._project.bluetooth_hdt,
             rate=HDTRate(self.rate_combo.currentData()), payload_length_bytes=self.length_spin.value(),
-            payload_source=PayloadSourceKind(self.source_combo.currentData()), payload_pattern=self.pattern_edit.text(),
+            payload_source=HDTPayloadSourceKind(self.source_combo.currentData()), payload_pattern=self.pattern_edit.text(),
             rrc_rolloff=self.rolloff_spin.value(), pre_idle_symbols=self.pre_idle_spin.value(),
             post_idle_symbols=0, training_enabled=True,
         )
@@ -2083,6 +2099,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self.block_library.setEnabled(False)
         self.field_table = QtWidgets.QTreeWidget()
+        apply_analysis_font(self.field_table)
         self.field_table.setColumnCount(6)
         self.field_table.setHeaderLabels(
             [
@@ -2110,11 +2127,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self._edit_composer_block
         )
         composer_tabs = QtWidgets.QTabWidget()
+        apply_analysis_font(composer_tabs)
         composer_tabs.addTab(self.composer_view, "Visual Composer")
         composer_tabs.addTab(self.field_table, "Field Tree")
         inspector_widget = QtWidgets.QWidget()
         inspector_layout = QtWidgets.QVBoxLayout(inspector_widget)
         self.inspector = QtWidgets.QTableWidget(0, 2)
+        apply_analysis_font(self.inspector)
         self.inspector.setHorizontalHeaderLabels(["Parameter", "Current"])
         self.inspector.horizontalHeader().setSectionResizeMode(
             QtWidgets.QHeaderView.ResizeMode.Stretch
@@ -2126,19 +2145,15 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             "Edit Bluetooth BR / EDR Settings..."
         )
         self.edit_settings_button.clicked.connect(self._edit_project_settings)
-        self.generate_button = QtWidgets.QPushButton("Generate Waveform (F5)")
-        self.generate_button.clicked.connect(self.generate_waveform)
         inspector_layout.addWidget(self.inspector)
         inspector_layout.addWidget(self.edit_settings_button)
-        inspector_layout.addWidget(self.generate_button)
         upper.addWidget(_Panel("Block Library", self.block_library))
         upper.addWidget(_Panel("Packet Composer", composer_tabs))
-        upper.addWidget(_Panel("Inspector", inspector_widget))
         upper.setStretchFactor(0, 1)
         upper.setStretchFactor(1, 3)
-        upper.setStretchFactor(2, 2)
 
         previews = QtWidgets.QTabWidget()
+        apply_analysis_font(previews)
         self.iq_waveform_plot = self._make_plot("Normalized Amplitude", "Time (us)")
         self.iq_waveform_legend = self.iq_waveform_plot.addLegend()
         self.power_plot = self._make_plot("IQ Power (dBFS)", "Time (us)")
@@ -2162,8 +2177,22 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
         splitter.setSizes([450, 450])
+        self.packet_decode = PacketDecodeTabs()
+        self._verified_packet = None
+        inspector_column = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        inspector_column.addWidget(_Panel("Inspector", inspector_widget))
+        inspector_column.addWidget(_Panel("Packet Decode", self.packet_decode))
+        inspector_column.setStretchFactor(0, 1)
+        inspector_column.setStretchFactor(1, 1)
+        inspector_column.setSizes([450, 450])
+        self.workspace_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.workspace_splitter.addWidget(splitter)
+        self.workspace_splitter.addWidget(inspector_column)
+        self.workspace_splitter.setStretchFactor(0, 2)
+        self.workspace_splitter.setStretchFactor(1, 1)
+        self.workspace_splitter.setSizes([820, 410])
         outer = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        outer.addWidget(splitter)
+        outer.addWidget(self.workspace_splitter)
         outer.addWidget(self._build_vsg_control_panel())
         outer.setStretchFactor(0, 1)
         outer.setStretchFactor(1, 0)
@@ -2228,7 +2257,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.power_step_button = self._make_control_button("Power Step", value=True)
         self.frequency_button = self._make_control_button("Frequency", value=True)
         self.frequency_settings_button = self._make_control_button("Freq Settings")
-        self.instrument_settings_button = self._make_control_button("Inst Settings")
+        self.verify_packet_button = self._make_control_button("Verify Packet")
+        self.instrument_settings_button = self._make_control_button("Device")
         for widget in (
             self.rf_button,
             self.mod_button,
@@ -2238,6 +2268,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.power_step_button,
             self.frequency_button,
             self.frequency_settings_button,
+            self.verify_packet_button,
             self.instrument_settings_button,
         ):
             layout.addWidget(widget)
@@ -2251,6 +2282,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.power_step_button.clicked.connect(self._edit_power_step)
         self.frequency_button.clicked.connect(self._edit_frequency)
         self.frequency_settings_button.clicked.connect(self._edit_frequency_settings)
+        self.verify_packet_button.clicked.connect(self._verify_packet)
         self.instrument_settings_button.clicked.connect(self._edit_pluto_settings)
         self._update_vsg_control_labels()
         panel = _Panel("VSG Control", content)
@@ -2721,6 +2753,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._edit_project_settings()
 
     def generate_waveform(self) -> None:
+        self.packet_decode.clear_packet()
+        self._verified_packet = None
         try:
             engine = {
                 StandardProfile.BLUETOOTH_LE: BluetoothLEWaveformEngine,
@@ -2731,8 +2765,16 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.result = engine.generate(self.project)
         except ValueError as error:
             self.result = None
+            self.verify_packet_button.setEnabled(False)
             QtWidgets.QMessageBox.warning(self, "Waveform Generation", str(error))
             return
+        self.verify_packet_button.setEnabled(self.result.packet_bits is not None)
+        self.verify_packet_button.setToolTip(
+            "Decode generated transmitted bits using the shared VSA packet decoder. "
+            "This does not demodulate IQ or verify RF performance."
+            if self.result.packet_bits is not None else
+            "Packet decoding is not available for this waveform template."
+        )
         self._update_previews(self.result)
         level_metrics = generation_result_iq_levels(self.result)
         minimum_power, maximum_power = self._power_limits_dbm()
@@ -2779,6 +2821,25 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         if hasattr(self, "power_button"):
             self._update_vsg_control_labels()
+
+    def _verify_packet(self) -> None:
+        if self.result is None or self.result.packet_bits is None:
+            return
+        self.packet_decode.clear_packet()
+        self._verified_packet = None
+        try:
+            packet = analyze_generation_result(self.result)
+        except (ValueError, RuntimeError) as error:
+            QtWidgets.QMessageBox.warning(self, "Verify Packet", str(error))
+            return
+        self._verified_packet = packet
+        self.packet_decode.render_packet(
+            packet, p0_internal_bit=int(self.result.packet_bits.context.get("p0_internal_bit", 0)),
+        )
+        self.statusBar().showMessage(
+            f"Packet decoded: {packet.protocol_name} / {packet.packet_type or packet.phy_name or '--'} "
+            f"({len(packet.issues)} issue(s)); generated bits, not IQ demodulation"
+        )
 
     def _power_limits_dbm(self) -> tuple[float, float]:
         active_rms_dbfs = 0.0
@@ -3535,7 +3596,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.pluto_stop_action.setEnabled(transmitting)
         if hasattr(self, "rf_button"):
             self.edit_settings_button.setEnabled(not active)
-            self.generate_button.setEnabled(not active)
+            self.verify_packet_button.setEnabled(
+                not preparing and self.result is not None and self.result.packet_bits is not None
+            )
             self.rf_button.setEnabled(not preparing)
             self.mod_button.setEnabled(not active)
             self.continuous_button.setEnabled(not active)

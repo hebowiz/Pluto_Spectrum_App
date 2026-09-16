@@ -35,7 +35,7 @@ def bluetooth_hdt_fields(settings: BluetoothHDTSettings) -> tuple[FieldDefinitio
     payload_mod = ModulationDefinition(_MODULATION_KIND[definition.modulation], symbol_rate, FilterKind.ROOT_RAISED_COSINE, settings.rrc_rolloff)
     coded_bits = hdt_coded_payload_bit_count(settings)
     fields = [
-        FieldDefinition("Training / Preamble", 74, 148, DataSourceKind.COMPUTED, "STS x9 + GI + LTS x2", qpsk),
+        FieldDefinition("Training / Preamble", 74, None, DataSourceKind.COMPUTED, "STS x9 + GI + LTS x2", qpsk),
         FieldDefinition("Control Header", 62, 57, DataSourceKind.COMPUTED, f"RI={definition.rate_indicator:03b}, HEC-C", qpsk),
         FieldDefinition("Control Terminating Symbols", 2, None, DataSourceKind.COMPUTED, "00, 00", qpsk),
     ]
@@ -43,7 +43,7 @@ def bluetooth_hdt_fields(settings: BluetoothHDTSettings) -> tuple[FieldDefinitio
         fields.append(FieldDefinition(
             "Coded PDU Header / Payload / CRC", math.ceil(coded_bits / definition.bits_per_symbol),
             (int(settings.payload_length_bytes) + 5) * 8,
-            (DataSourceKind.PRBS if settings.payload_source.value == "PRBS-9" else DataSourceKind(settings.payload_source.value)),
+            (DataSourceKind.PRBS if settings.payload_source.value in {"PRBS-9", "PRBS-15"} else DataSourceKind(settings.payload_source.value)),
             settings.payload_source.value, payload_mod,
         ))
         fields.append(FieldDefinition(

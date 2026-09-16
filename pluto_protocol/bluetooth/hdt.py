@@ -9,6 +9,7 @@ import numpy as np
 
 from pluto_protocol.bitops import bits_hex_octets_lsb
 from pluto_protocol.model import (
+    BitRepresentation,
     DecodeProbeResult,
     FieldStatus,
     IssueSeverity,
@@ -152,8 +153,8 @@ def hdt_rf_test_control_bits(
     """Build the 57 logical Control Header bits for an RF PHY format-0 packet."""
 
     payload_length = int(payload_length_bytes)
-    if not 0 <= payload_length <= 509:
-        raise ValueError("HDT RF test format-0 payload length must be between 0 and 509 bytes")
+    if not 1 <= payload_length <= 510:
+        raise ValueError("HDT RF test format-0 payload length must be between 1 and 510 bytes")
     definition = hdt_definition(rate)
     pdu_length = payload_length + 1  # one-octet ACL Initial Portion
     header = np.concatenate(
@@ -176,8 +177,8 @@ def hdt_rf_test_format0_bits(payload_bits: np.ndarray) -> np.ndarray:
     payload = np.asarray(payload_bits, dtype=np.uint8)
     if payload.ndim != 1 or np.any(payload > 1) or payload.size % 8:
         raise ValueError("HDT payload must be a whole number of binary octets")
-    if payload.size > 509 * 8:
-        raise ValueError("HDT RF test format-0 payload cannot exceed 509 bytes")
+    if payload.size > 510 * 8:
+        raise ValueError("HDT RF test format-0 payload cannot exceed 510 bytes")
     pdu = np.concatenate((np.zeros(8, dtype=np.uint8), payload))
     crc = hdt_crc32(pdu)
     return np.concatenate((pdu, _msb_bits(crc, 32)))
@@ -198,7 +199,7 @@ def hdt_coded_payload_bit_count(
     )
 
 
-def map_hdt_symbols(bits: np.ndarray, rate: HDTRate | str) -> np.ndarray:
+def map_hdt_symbols(bits: np.ndarray, rate: HDTRate | str, *, symbol_offset: int = 0) -> np.ndarray:
     """Map coded MSB-first bits to the HDT air-interface constellation."""
 
     definition = hdt_definition(rate)
@@ -216,7 +217,7 @@ def map_hdt_symbols(bits: np.ndarray, rate: HDTRate | str) -> np.ndarray:
         )
         odd_phases = np.asarray([np.pi / 2.0, np.pi, 0.0, -np.pi / 2.0])
         phases = np.where(
-            np.arange(labels.size) % 2 == 0,
+            (np.arange(labels.size) + symbol_offset) % 2 == 0,
             even_phases[labels],
             odd_phases[labels],
         )
@@ -259,7 +260,7 @@ def _field(
 
 @dataclass(frozen=True)
 class BluetoothHDTDecoder:
-    """Decode the HDT training/control/coded-payload stream used by the PHY."""
+    """Decode the shared FEC-decoded HDT Control Header / PDU bitstream."""
 
     protocol_id: str = PROTOCOL_ID
     protocol_name: str = "Bluetooth HDT"
@@ -269,206 +270,130 @@ class BluetoothHDTDecoder:
         return DecodeProbeResult(
             self.protocol_id,
             confidence,
-            "HDT QPSK training, control header and coded payload layout",
+            "HDT protocol hint; logical Control Header and PDU layout",
         )
 
     def decode(self, packet: PacketDecodeInput) -> PacketAnalysisResult:
+        """Interpret FEC-decoded Control Header + Format-0 PDU bits.
+
+        Training, convolutional tails and symbol padding are PHY quantities,
+        not logical packet fields. Both VSA and VSG supply this same layout.
+        """
         bits = packet.bits
-        context = packet.context
-        training_count = int(context.get("training_bit_count", 148))
-        control_count = int(context.get("control_bit_count", 20))
-        training = bits[: min(bits.size, training_count)]
-        control_start = training_count
-        control = bits[
-            control_start : min(bits.size, control_start + control_count)
-        ]
-        issues: list[PacketIssue] = []
-        fields: list[PacketField] = [
-            _field(
-                "training",
-                "Training / Preamble",
-                0,
-                training,
-                f"{training.size // 2} QPSK symbol(s)",
-                "Packet synchronization and carrier/timing estimation",
-                FieldStatus.VALID if training.size == training_count else FieldStatus.WARNING,
+        def unsupported(code: str, message: str) -> PacketAnalysisResult:
+            return PacketAnalysisResult(
+                "1.0", self.protocol_id, self.protocol_name, packet.phy_hint,
+                None, (), (), (PacketIssue(code, message, IssueSeverity.ERROR),),
+                PacketIntegritySummary(None, None, False), packet.source, bits,
             )
-        ]
-        if control.size < 15:
-            issues.append(
-                PacketIssue(
-                    "truncated_control_header",
-                    "Packet ends before the HDT rate and payload length are complete",
-                    IssueSeverity.WARNING,
-                    control_start,
-                    control_start + control.size,
-                )
-            )
-            fields.append(
-                _field(
-                    "control_header",
-                    "Control Header",
-                    control_start,
-                    control,
-                    status=FieldStatus.WARNING,
-                )
-            )
-            return self._result(packet, None, None, fields, issues, False)
-
-        rate_indicator = int(
-            sum(int(control[index]) << (2 - index) for index in range(3))
-        )
-        rate = next(
-            (
-                candidate
-                for candidate, definition in HDT_DEFINITIONS.items()
-                if definition.rate_indicator == rate_indicator
-            ),
-            None,
-        )
-        length_bits = control[3:15]
-        payload_length = int(
-            sum(int(length_bits[index]) << index for index in range(12))
-        )
-        tail = control[15:20]
-        ri_status = FieldStatus.VALID if rate is not None else FieldStatus.INVALID
+        if packet.representation != BitRepresentation.LOGICAL:
+            return unsupported("unsupported_bit_representation",
+                               "HDT requires FEC-decoded logical bits")
+        if bits.size < 57:
+            return unsupported("truncated_control_header",
+                               "HDT Control Header requires 57 logical bits")
+        control_data = bits[:57]
+        lsb = lambda values: sum(int(bit) << i for i, bit in enumerate(values))
+        msb = lambda values: sum(int(bit) << (len(values)-1-i) for i, bit in enumerate(values))
+        pca = int(packet.context.get("pca", HDT_RF_TEST_PCA))
+        pca_a = lsb(control_data[:16])
+        nesn = lsb(control_data[16:19])
+        packet_format_indicator = lsb(control_data[19:20])
+        rate_indicator = lsb(control_data[20:23])
+        control_rfu = lsb(control_data[23:24])
+        pdu_octets = lsb(control_data[24:33])
+        received_hec = msb(control_data[33:57])
+        calculated_hec = hdt_crc24(control_data[:33], init=pca & 0xFFFFFF)
+        hec_valid = received_hec == calculated_hec
+        rate = next((r for r, d in HDT_DEFINITIONS.items()
+                     if d.rate_indicator == rate_indicator), None)
         if rate is None:
-            issues.append(
-                PacketIssue(
-                    "unsupported_rate_indicator",
-                    f"Unsupported HDT rate indicator 0b{rate_indicator:03b}",
-                    IssueSeverity.ERROR,
-                    control_start,
-                    control_start + 3,
-                )
-            )
-        rate_meaning = (
-            "Unknown/reserved HDT rate"
-            if rate is None
-            else (
-                f"{rate.value}: {hdt_definition(rate).modulation}, "
-                f"code rate {hdt_definition(rate).payload_code_rate}"
-            )
-        )
+            return unsupported("unsupported_rate_indicator",
+                               f"Unsupported HDT rate indicator {rate_indicator}")
+        if packet_format_indicator != 0:
+            return unsupported("unsupported_packet_format",
+                               "HDT Format 1 decoding is not implemented")
+        if pdu_octets < 1:
+            return unsupported("invalid_pdu_length", "Format 0 requires an Initial Portion")
+        expected = 57 + pdu_octets * 8 + 32
+        if bits.size < expected:
+            return unsupported("truncated_payload",
+                               f"Expected {expected} logical bits, received {bits.size}")
+        definition = hdt_definition(rate)
+        payload_length = pdu_octets - 1
+        format0_bits = bits[57:expected]
+        pdu_bits = format0_bits[:-32]
+        payload_bits = pdu_bits[8:]
+        if pdu_bits[0] or pdu_bits[1]:
+            return unsupported("unsupported_pdu_header",
+                               "Extended header / Rx power header decoding is not implemented")
+        received_crc = msb(format0_bits[-32:])
+        calculated_crc = hdt_crc32(pdu_bits, init=int(packet.context.get("crc_init", HDT_RF_TEST_CRC32_INIT)))
+        crc_valid = received_crc == calculated_crc
+        legacy_crc_match = received_crc == hdt_crc32(pdu_bits, init=0x00555555)
         control_children = (
-            _field(
-                "rate_indicator",
-                "Rate Indicator",
-                control_start,
-                control[:3],
-                f"0b{rate_indicator:03b}",
-                rate_meaning,
-                ri_status,
-            ),
-            _field(
-                "payload_length",
-                "Payload Length",
-                control_start + 3,
-                length_bits,
-                payload_length,
-                f"{payload_length} byte(s) before channel coding",
-                FieldStatus.VALID,
-            ),
-            _field(
-                "encoder_tail",
-                "Encoder Tail",
-                control_start + 15,
-                tail,
-                "".join(str(int(value)) for value in tail),
-                "Terminates the K=6 convolutional encoder",
-                FieldStatus.VALID if tail.size == 5 and not np.any(tail) else FieldStatus.WARNING,
-            ),
+            PacketField("pca_a", "PCA-A", 0, 16, control_data[:16], f"0x{pca_a:04X}"),
+            PacketField("nesn", "NESN", 16, 19, control_data[16:19], nesn),
+            PacketField("pfi", "PFI", 19, 20, control_data[19:20], packet_format_indicator, "Packet format 0"),
+            PacketField("rate_indicator", "Rate Indicator", 20, 23, control_data[20:23], f"{rate.value} (0b{rate_indicator:03b})", f"{rate.value}: {definition.modulation}, code rate {definition.payload_code_rate}", FieldStatus.VALID),
+            PacketField("rfu", "RFU", 23, 24, control_data[23:24], control_rfu),
+            PacketField("pdu_control", "PDU Control", 24, 33, control_data[24:33], pdu_octets, f"{pdu_octets} octet(s), excluding CRC"),
+            PacketField("hec_c", "HEC-C", 33, 57, control_data[33:57], f"0x{received_hec:06X}", f"Calculated 0x{calculated_hec:06X}", FieldStatus.VALID if hec_valid else FieldStatus.INVALID),
         )
-        fields.append(
-            _field(
-                "control_header",
-                "Control Header",
-                control_start,
-                control,
-                f"RI=0b{rate_indicator:03b}, Length={payload_length}",
-                "Convolutionally decoded PHY control information",
-                FieldStatus.VALID if rate is not None else FieldStatus.INVALID,
-                control_children,
-            )
-        )
-
-        payload_start = control_start + control_count
-        payload = bits[payload_start:]
-        expected_payload_bits = (
-            hdt_coded_payload_bit_count(rate, payload_length)
-            if rate is not None
-            else int(context.get("expected_payload_bit_count", payload.size))
-        )
-        complete = payload.size >= expected_payload_bits
-        payload = payload[:expected_payload_bits]
-        if not complete:
-            issues.append(
-                PacketIssue(
-                    "truncated_payload",
-                    f"Expected {expected_payload_bits} coded payload bits, received {payload.size}",
-                    IssueSeverity.WARNING,
-                    payload_start,
-                    payload_start + payload.size,
-                )
-            )
-        definition = hdt_definition(rate) if rate is not None else None
-        fields.append(
-            _field(
-                "payload",
-                "Coded Payload",
-                payload_start,
-                payload,
-                bits_hex_octets_lsb(payload),
-                (
-                    f"{payload_length} logical byte(s), {payload.size} transmitted bit(s)"
-                    + (
-                        ""
-                        if definition is None
-                        else f"; {definition.modulation}, code rate {definition.payload_code_rate}"
-                    )
+        payload_offset = 57
+        pdu_stop = payload_offset + pdu_bits.size
+        payload_children = (
+            PacketField(
+                "pdu_header", "PDU Header", payload_offset, payload_offset + 8,
+                pdu_bits[:8], f"0x{lsb(pdu_bits[:8]):02X}",
+                "ACL Format 0 Initial Portion", children=(
+                    _field("xhp", "XHP", 57, pdu_bits[:1], lsb(pdu_bits[:1])),
+                    _field("rx_pp", "RxPP", 58, pdu_bits[1:2], lsb(pdu_bits[1:2])),
+                    _field("md", "MD", 59, pdu_bits[2:3], lsb(pdu_bits[2:3])),
+                    _field("sn", "SN", 60, pdu_bits[3:6], lsb(pdu_bits[3:6])),
+                    _field("llid", "LLID", 63, pdu_bits[6:8], lsb(pdu_bits[6:8])),
                 ),
-                FieldStatus.VALID if complete else FieldStatus.WARNING,
-            )
+            ),
+            PacketField(
+                "payload_body",
+                "Payload",
+                payload_offset + 8,
+                pdu_stop,
+                payload_bits,
+                bits_hex_octets_lsb(payload_bits),
+                f"{payload_bits.size // 8} byte(s)",
+            ),
+            PacketField("crc32", "CRC-32", pdu_stop, pdu_stop + 32, format0_bits[-32:], f"0x{received_crc:08X}", f"Calculated 0x{calculated_crc:08X}", FieldStatus.VALID if crc_valid else FieldStatus.INVALID),
         )
-        return self._result(packet, rate, payload_length, fields, issues, complete)
-
-    def _result(
-        self,
-        packet: PacketDecodeInput,
-        rate: HDTRate | None,
-        payload_length: int | None,
-        fields: list[PacketField],
-        issues: list[PacketIssue],
-        complete: bool,
-    ) -> PacketAnalysisResult:
-        phy = rate.value if rate is not None else packet.phy_hint
-        definition = hdt_definition(rate) if rate is not None else None
-        summary = (
-            PacketSummaryItem("protocol", "Protocol", self.protocol_name, self.protocol_name),
-            PacketSummaryItem("phy", "Detected PHY", phy, phy or "Unknown"),
-            PacketSummaryItem(
-                "payload_modulation",
-                "Payload Modulation",
-                None if definition is None else definition.modulation,
-                "Unknown" if definition is None else definition.modulation,
-            ),
-            PacketSummaryItem(
-                "payload_length",
-                "Payload Length",
-                payload_length,
-                "Unknown" if payload_length is None else f"{payload_length} byte(s)",
-            ),
+        issues: tuple[PacketIssue, ...] = tuple(
+            issue
+            for issue in (
+                None if hec_valid else PacketIssue("invalid_hec_c", "HEC-C does not match the Control Header", IssueSeverity.ERROR, 33, 57),
+                None if crc_valid else PacketIssue("invalid_crc32", "CRC-32 does not match the PDU Header and Payload" + ("; received value matches legacy 0x00555555 initialization" if legacy_crc_match else ""), IssueSeverity.ERROR, pdu_stop, pdu_stop + 32),
+                None if bits.size == expected else PacketIssue("trailing_logical_bits", "Logical stream contains bits after the declared Format 0 PDU / CRC", IssueSeverity.WARNING, expected, bits.size),
+            )
+            if issue is not None
         )
         return PacketAnalysisResult(
             "1.0",
-            self.protocol_id,
-            self.protocol_name,
-            phy,
-            phy,
-            summary,
-            tuple(fields),
-            tuple(issues),
-            PacketIntegritySummary(None, None, complete),
+            "bluetooth.hdt",
+            "Bluetooth HDT",
+            rate.value,
+            rate.value,
+            (
+                PacketSummaryItem("protocol", "Protocol", "Bluetooth HDT", "Bluetooth HDT"),
+                PacketSummaryItem("phy", "Detected PHY", rate.value, rate.value),
+                PacketSummaryItem("payload_length", "Payload Length", payload_length, f"{payload_length} byte(s)"),
+                PacketSummaryItem("hec_c", "HEC-C", hec_valid, "Pass" if hec_valid else "Fail", FieldStatus.VALID if hec_valid else FieldStatus.INVALID),
+                PacketSummaryItem("crc32", "CRC-32", crc_valid, "Pass" if crc_valid else "Fail", FieldStatus.VALID if crc_valid else FieldStatus.INVALID),
+            ),
+            (
+                PacketField("training", "Training / Preamble", 0, 0, np.empty(0, dtype=np.uint8), "74 symbols", "STS x9 + GI + LTS x2", FieldStatus.VALID),
+                PacketField("control_header", "Control Header", 0, 57, control_data, f"RI=0b{rate_indicator:03b}, PDU={pdu_octets} octets", "RF PHY test Control Header", FieldStatus.VALID if hec_valid else FieldStatus.INVALID, control_children),
+                PacketField("payload", "PDU Header / Payload / CRC", payload_offset, payload_offset + format0_bits.size, format0_bits, f"{payload_length} payload byte(s)", "Packet format 0 decoded bitstream", FieldStatus.VALID if crc_valid else FieldStatus.INVALID, payload_children),
+            ),
+            issues,
+            PacketIntegritySummary(hec_valid, crc_valid, True),
             packet.source,
             packet.bits,
         )

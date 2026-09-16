@@ -16,16 +16,11 @@ from pluto_sa.vsa.dc import apply_robust_dc_removal
 from pluto_sa.vsa.demod.gfsk import _detect_bursts
 from pluto_protocol.bitops import bits_hex_octets_lsb
 from pluto_protocol.model import (
-    FieldStatus,
-    IssueSeverity,
+    BitRepresentation,
     PacketAnalysisResult,
     PacketField,
-    PacketIntegritySummary,
-    PacketIssue,
-    PacketSourceInfo,
-    PacketSummaryItem,
 )
-from pluto_protocol.bluetooth.common import le_whitening_sequence
+from pluto_protocol.bluetooth.common import le_whitening_sequence, prbs15_period
 from pluto_protocol.bluetooth.hdt import (
     HDT_DEFINITIONS,
     HDT_RF_TEST_CRC32_INIT,
@@ -1667,8 +1662,8 @@ def analyze_bluetooth_hdt_recording(
             np.abs(symbols[:, None] - qpsk_alphabets), axis=1
         ).astype(np.int16)
 
-    # RF Test Packets have a known PRBS-9 payload, so Appendix C's internally
-    # generated reference is available before any payload decision is made.
+    # RF Test Packets have PRBS9 or PRBS15 payloads. Preserve the PRBS9 path;
+    # its fixed reference is available before any payload decision is made.
     prbs9 = prbs9_period()
     expected_payload_bits = prbs9[
         np.arange(payload_length * 8, dtype=np.int64) % prbs9.size
@@ -1691,6 +1686,24 @@ def analyze_bluetooth_hdt_recording(
         start_symbol=_HDT_PAYLOAD_START_SYMBOL,
         payload_reference=payload_evm_reference,
     )
+    # Only try the alternative reference when PRBS9 is a poor match.
+    # This does not change the SRRC, preamble fit, timing or gain constraints.
+    reference_error = float(np.mean(np.abs(payload_evm_measured - payload_evm_reference) ** 2))
+    if reference_error > 0.04:
+        prbs15 = prbs15_period()
+        alternative_bits = prbs15[np.arange(payload_length * 8) % prbs15.size]
+        alternative_reference = map_hdt_symbols(
+            puncture(convolutional_encode(hdt_rf_test_format0_bits(alternative_bits)),
+                     definition.payload_code_rate), rate,
+        )[:payload_measurement_symbol_count]
+        alternative_estimate, alternative_measured = estimate_hdt_payload(
+            filtered_iq, hdt_reference, samples_per_symbol=samples_per_symbol,
+            start_symbol=_HDT_PAYLOAD_START_SYMBOL,
+            payload_reference=alternative_reference,
+        )
+        alternative_error = float(np.mean(np.abs(alternative_measured - alternative_reference) ** 2))
+        if alternative_error < reference_error:
+            payload_estimate, payload_evm_measured = alternative_estimate, alternative_measured
     payload_evm_first_center = (
         first_center + _HDT_PAYLOAD_START_SYMBOL * samples_per_symbol
     )
@@ -1774,6 +1787,7 @@ def analyze_bluetooth_hdt_recording(
             dtype=np.uint8,
         ),
         rate,
+        symbol_offset=payload_symbol_count,
     )
     terminating_measured = payload_sig_corrected_all[payload_symbol_count:]
 
@@ -1882,60 +1896,13 @@ def analyze_bluetooth_hdt_recording(
         payload_sample_range=(payload_start, payload_stop),
         payload_evm_sample_range=(payload_start, payload_evm_stop_sample),
     )
-    control_children = (
-        PacketField("pca_a", "PCA-A", 0, 16, control_data[:16], f"0x{pca_a:04X}"),
-        PacketField("nesn", "NESN", 16, 19, control_data[16:19], nesn),
-        PacketField("pfi", "PFI", 19, 20, control_data[19:20], packet_format_indicator, "Packet format 0"),
-        PacketField("rate_indicator", "Rate Indicator", 20, 23, control_data[20:23], f"{rate.value} (0b{rate_indicator:03b})", f"{rate.value}: {definition.modulation}, code rate {definition.payload_code_rate}", FieldStatus.VALID),
-        PacketField("rfu", "RFU", 23, 24, control_data[23:24], control_rfu),
-        PacketField("pdu_control", "PDU Control", 24, 33, control_data[24:33], pdu_octets, f"{pdu_octets} octet(s), excluding CRC"),
-        PacketField("hec_c", "HEC-C", 33, 57, control_data[33:57], f"0x{received_hec:06X}", f"Calculated 0x{calculated_hec:06X}", FieldStatus.VALID if hec_valid else FieldStatus.INVALID),
-    )
-    payload_offset = 57
-    pdu_stop = payload_offset + pdu_bits.size
-    payload_children = (
-        PacketField("pdu_header", "PDU Header", payload_offset, payload_offset + 8, pdu_bits[:8], f"0x{_hdt_lsb_value(pdu_bits[:8]):02X}"),
-        PacketField(
-            "payload_body",
-            "Payload",
-            payload_offset + 8,
-            pdu_stop,
-            payload_bits,
-            bits_hex_octets_lsb(payload_bits),
-            f"{payload_bits.size // 8} byte(s)",
-        ),
-        PacketField("crc32", "CRC-32", pdu_stop, pdu_stop + 32, format0_bits[-32:], f"0x{received_crc:08X}", f"Calculated 0x{calculated_crc:08X}", FieldStatus.VALID if crc_valid else FieldStatus.INVALID),
-    )
-    issues: tuple[PacketIssue, ...] = tuple(
-        issue
-        for issue in (
-            None if hec_valid else PacketIssue("invalid_hec_c", "HEC-C does not match the Control Header", IssueSeverity.ERROR, 33, 57),
-            None if crc_valid else PacketIssue("invalid_crc32", "CRC-32 does not match the PDU Header and Payload" + ("; received value matches legacy 0x00555555 initialization" if legacy_crc_match else ""), IssueSeverity.ERROR, pdu_stop, pdu_stop + 32),
-        )
-        if issue is not None
-    )
-    packet = PacketAnalysisResult(
-        "1.0",
-        "bluetooth.hdt",
-        "Bluetooth HDT",
-        rate.value,
-        rate.value,
-        (
-            PacketSummaryItem("protocol", "Protocol", "Bluetooth HDT", "Bluetooth HDT"),
-            PacketSummaryItem("phy", "Detected PHY", rate.value, rate.value),
-            PacketSummaryItem("payload_length", "Payload Length", payload_length, f"{payload_length} byte(s)"),
-            PacketSummaryItem("hec_c", "HEC-C", hec_valid, "Pass" if hec_valid else "Fail", FieldStatus.VALID if hec_valid else FieldStatus.INVALID),
-            PacketSummaryItem("crc32", "CRC-32", crc_valid, "Pass" if crc_valid else "Fail", FieldStatus.VALID if crc_valid else FieldStatus.INVALID),
-        ),
-        (
-            PacketField("training", "Training / Preamble", 0, 0, np.empty(0, dtype=np.uint8), "74 symbols", "STS x9 + GI + LTS x2", FieldStatus.VALID),
-            PacketField("control_header", "Control Header", 0, 57, control_data, f"RI=0b{rate_indicator:03b}, PDU={pdu_octets} octets", "RF PHY test Control Header", FieldStatus.VALID if hec_valid else FieldStatus.INVALID, control_children),
-            PacketField("payload", "PDU Header / Payload / CRC", payload_offset, payload_offset + format0_bits.size, format0_bits, f"{payload_length} payload byte(s)", "Packet format 0 decoded bitstream", FieldStatus.VALID if crc_valid else FieldStatus.INVALID, payload_children),
-        ),
-        issues,
-        PacketIntegritySummary(hec_valid, crc_valid, True),
-        PacketSourceInfo("iq", int(match_index) - 1, None, recording.center_frequency_hz, packet_start, payload_stop),
-        packet_bits,
+    packet = analyze_demodulated_packet_bits(
+        packet_bits, protocol_id="bluetooth.hdt", phy_name=rate.value,
+        representation=BitRepresentation.LOGICAL,
+        context={"pca": HDT_RF_TEST_PCA, "crc_init": HDT_RF_TEST_CRC32_INIT},
+        packet_index=int(match_index) - 1,
+        center_frequency_hz=recording.center_frequency_hz,
+        start_sample=packet_start, stop_sample=payload_stop,
     )
     cfo_hz = (
         hdt_reference.carrier_error_rad_per_symbol

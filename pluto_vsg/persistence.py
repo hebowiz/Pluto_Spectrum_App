@@ -24,6 +24,7 @@ from pluto_vsg.model import (
     ModulationDefinition,
     ModulationKind,
     PayloadSourceKind,
+    HDTPayloadSourceKind,
     PowerEnvelopeDefinition,
     StandardProfile,
     WaveformProject,
@@ -108,7 +109,7 @@ def project_to_dict(project: WaveformProject) -> dict[str, object]:
         payload["bluetooth_hdt"] = {
             **asdict(project.bluetooth_hdt),
             "rate": HDTRate(project.bluetooth_hdt.rate).value,
-            "payload_source": PayloadSourceKind(project.bluetooth_hdt.payload_source).value,
+            "payload_source": HDTPayloadSourceKind(project.bluetooth_hdt.payload_source).value,
         }
     if project.wifi is not None:
         payload["wifi"] = {
@@ -196,7 +197,7 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
         bluetooth_hdt = BluetoothHDTSettings(**{
             **bluetooth_hdt_payload,
             "rate": HDTRate(str(bluetooth_hdt_payload["rate"])),
-            "payload_source": PayloadSourceKind(str(bluetooth_hdt_payload["payload_source"])),
+            "payload_source": HDTPayloadSourceKind(str(bluetooth_hdt_payload["payload_source"])),
         })
     wifi_payload = payload.get("wifi")
     wifi = None

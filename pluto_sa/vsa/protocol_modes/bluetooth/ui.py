@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, replace
 import json
@@ -13,7 +12,6 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common.numeric_input import DeferredDoubleSpinBox, DeferredSpinBox
-from pluto_protocol.model import FieldStatus, PacketField
 from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_sa.vsa.model import IQRecording, ModulationFamily
 from pluto_sa.vsa.analysis import capture_power_traces, recording_spectrum_trace
@@ -35,7 +33,6 @@ from pluto_sa.vsa.ui.display_processing import (
 )
 from pluto_sa.vsa.ui.capture_thread import PlutoSingleCaptureThread
 from pluto_sa.vsa.ui.measurement_chrome import (
-    DedicatedPacketAnalysisTree,
     DedicatedSummaryTable,
     IQ_PLANE_LIMIT,
     FREQUENCY_CONSTELLATION_X_LIMIT,
@@ -64,6 +61,9 @@ from pluto_sa.vsa.ui.measurement_chrome import (
 )
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
 from pluto_sa.vsa.ui.iq_export import export_iq_recording
+from pluto_sa.vsa.ui.packet_decode import (
+    PacketDecodeTabs, bluetooth_tree_item, field_bit_range, payload_field,
+)
 
 from .model import (
     BluetoothAnalysisProfile,
@@ -211,14 +211,7 @@ def format_air_bits(bits: np.ndarray, group: int = 8) -> str:
     return f"Air bits (first transmitted bit at left)\n{binary}\n\nOctets (LSB-first)\n{hexadecimal}"
 
 
-def payload_field(fields: Iterable[PacketField]) -> PacketField | None:
-    for field in fields:
-        if field.field_id in {"payload", "payload_body"}:
-            return field
-        found = payload_field(field.children)
-        if found is not None:
-            return found
-    return None
+
 
 
 def infer_le_channel(center_frequency_hz: float) -> int:
@@ -232,22 +225,7 @@ def infer_le_channel(center_frequency_hz: float) -> int:
     return 37
 
 
-class _PacketAnalysisTree(DedicatedPacketAnalysisTree):
-    def __init__(self, parent=None) -> None:
-        super().__init__(
-            ("Field", "Value", "Stream", "Bit Range", "Status"),
-            (120, 120, 105, 72, 55),
-            expand_columns=(0, 1),
-            parent=parent,
-        )
 
-
-class _AutoHeightIssuesTable(QtWidgets.QTableWidget):
-    """Recalculate wrapped issue rows whenever the available width changes."""
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        QtCore.QTimer.singleShot(0, self.resizeRowsToContents)
 
 
 class _SummaryTable(DedicatedSummaryTable):
@@ -1013,35 +991,18 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.symbol_dock = self._dock("Symbol Plot", self.symbol_tabs)
         self.splitDockWidget(self.spectrum_dock, self.symbol_dock, QtCore.Qt.Orientation.Vertical)
 
-        self.packet_tabs = QtWidgets.QTabWidget()
-        self.decode_tree = _PacketAnalysisTree()
-        self.decode_tree.setHeaderLabels(("Field", "Value", "Stream", "Bit Range", "Status"))
-        self.decode_tree.setWordWrap(True)
-        self.payload_text = QtWidgets.QPlainTextEdit(readOnly=True)
+        self.packet_tabs = PacketDecodeTabs()
+        self.decode_tree = self.packet_tabs.decode_tree
+        self.payload_text = self.packet_tabs.payload_text
+        self.issues_table = self.packet_tabs.issues_table
         self.packet_table = QtWidgets.QTableWidget(0, 5)
         self.packet_table.setHorizontalHeaderLabels(("#", "PHY", "Type", "Integrity", "Bits"))
         apply_dedicated_table_style(self.packet_table)
         self.packet_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.packet_table.cellClicked.connect(self._packet_row_clicked)
-        self.issues_table = _AutoHeightIssuesTable(0, 4)
-        self.issues_table.setHorizontalHeaderLabels(("Severity", "Code", "Message", "Bit Range"))
-        apply_dedicated_table_style(self.issues_table)
-        self.issues_table.setWordWrap(True)
-        self.issues_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
-        self.issues_table.verticalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
-        issues_header = self.issues_table.horizontalHeader()
-        for column in (0, 1, 3):
-            issues_header.setSectionResizeMode(
-                column, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-            )
-        issues_header.setSectionResizeMode(
-            2, QtWidgets.QHeaderView.ResizeMode.Stretch
-        )
         self.air_bits_text = QtWidgets.QPlainTextEdit(readOnly=True)
-        for label, widget in (("Decode", self.decode_tree), ("Payload Hex", self.payload_text), ("Packet List", self.packet_table), ("Issues", self.issues_table), ("Air Bits", self.air_bits_text)):
-            self.packet_tabs.addTab(widget, label)
+        self.packet_tabs.insertTab(2, self.packet_table, "Packet List")
+        self.packet_tabs.addTab(self.air_bits_text, "Air Bits")
         self.packet_dock = self._dock("Packet Analysis", self.packet_tabs)
         self.splitDockWidget(self.summary_dock, self.packet_dock, QtCore.Qt.Orientation.Vertical)
         QtCore.QTimer.singleShot(0, self._equalize_docks)
@@ -3064,87 +3025,14 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             "Bluetooth measurement history cleared; current packet retained"
         )
 
-    @staticmethod
-    def _field_bit_range(field: PacketField, bit_offset: int) -> str:
-        bit_count = int(field.stop_bit) - int(field.start_bit)
-        if bit_count <= 0:
-            return "N/A"
-        start = int(field.start_bit) - int(bit_offset)
-        stop = int(field.stop_bit) - int(bit_offset) - 1
-        return str(start) if start == stop else f"{start}\N{EN DASH}{stop}"
+    _field_bit_range = staticmethod(field_bit_range)
 
-    def _tree_item(
-        self,
-        field: PacketField,
-        *,
-        stream: str,
-        bit_offset: int,
-    ) -> QtWidgets.QTreeWidgetItem:
-        value = str(field.value)
-        if field.field_id == "payload" and field.children:
-            value = "\N{EM DASH}"
-        bit_range = self._field_bit_range(field, bit_offset)
-        item = QtWidgets.QTreeWidgetItem(
-            (field.name, value, stream, bit_range, field.status.value)
-        )
-        item.setTextAlignment(
-            1,
-            QtCore.Qt.AlignmentFlag.AlignLeft
-            | QtCore.Qt.AlignmentFlag.AlignVCenter,
-        )
-        color = dedicated_status_color(field.status)
-        if color:
-            item.setForeground(4, QtGui.QBrush(color))
-        for column, text in enumerate(
-            (
-                field.name,
-                str(field.value),
-                f"{stream}: {field.meaning}" if field.meaning else stream,
-                bit_range,
-                field.status.value,
-            )
-        ):
-            item.setToolTip(column, text)
-        for child in field.children:
-            item.addChild(
-                self._tree_item(
-                    child,
-                    stream=stream,
-                    bit_offset=bit_offset,
-                )
-            )
-        return item
+    def _tree_item(self, field, *, stream, bit_offset):
+        return bluetooth_tree_item(field, stream=stream, bit_offset=bit_offset)
 
     def _render_packet(self, result: BluetoothDedicatedResult) -> None:
         packet = result.packet
-        self.decode_tree.clear()
-        for field in packet.root_fields:
-            if packet.protocol_id == "bluetooth.hdt":
-                stream = {
-                    "training": "Training symbols",
-                    "control_header": "Control Header",
-                    "payload": "PDU+Payload",
-                }.get(field.field_id, "Packet")
-                bit_offset = field.start_bit if field.field_id == "payload" else 0
-            else:
-                stream = "Packet"
-                bit_offset = 0
-            self.decode_tree.addTopLevelItem(
-                self._tree_item(
-                    field,
-                    stream=stream,
-                    bit_offset=bit_offset,
-                )
-            )
-        self.decode_tree.expandToDepth(1)
-        QtCore.QTimer.singleShot(0, self.decode_tree._fit_columns)
-        payload = payload_field(packet.root_fields)
-        if payload is None:
-            self.payload_text.setPlainText("Payload field was not decoded")
-        else:
-            values = np.packbits(np.pad(payload.raw_bits, (0, (-payload.raw_bits.size) % 8)), bitorder="little")
-            lines = [f"{offset:04X}: " + " ".join(f"{int(value):02X}" for value in values[offset : offset + 16]) for offset in range(0, values.size, 16)]
-            self.payload_text.setPlainText("\n".join(lines) or "(empty payload)")
+        self.packet_tabs.render_packet(packet)
         listed = self._results or (result,)
         self.packet_table.setRowCount(len(listed))
         for row, listed_result in enumerate(listed):
@@ -3156,15 +3044,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
                 self.packet_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
         if listed:
             self.packet_table.selectRow(self._selected_result_index)
-        self.issues_table.setRowCount(len(packet.issues))
-        self.issues_table.verticalHeader().setSectionResizeMode(
-            QtWidgets.QHeaderView.ResizeMode.ResizeToContents
-        )
-        for row, issue in enumerate(packet.issues):
-            bit_range = "--" if issue.start_bit is None else f"{issue.start_bit}:{issue.stop_bit}"
-            for column, value in enumerate((issue.severity.value, issue.code, issue.message, bit_range)):
-                self.issues_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
-        self.issues_table.resizeRowsToContents()
+
         self.air_bits_text.setPlainText(format_air_bits(packet.raw_bits))
 
     @QtCore.Slot(int, int)
