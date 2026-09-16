@@ -162,6 +162,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             files = (
                 command("Import IQ", workspace._open_iq, workspace.open_iq_action),
                 command("Export IQ", workspace._export_iq_recording, workspace.export_iq_action),
+                command("Export VSG Project", workspace._export_vsg_project, workspace.export_vsg_action),
             )
             return WorkspacePanelSpec(
                 mode,
@@ -187,6 +188,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             files = (
                 command("Import IQ", workspace._open_iq, workspace.open_iq_action),
                 command("Export IQ", workspace._export_iq_recording, workspace.export_iq_action),
+                command("Export VSG Project", workspace._export_vsg_project, workspace.export_vsg_action),
             )
             return WorkspacePanelSpec(
                 mode,
@@ -278,7 +280,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 widget.clear()
         for name in ("export_iq_action", "export_symbol_table_action", "refresh_analysis_action",
                      "previous_result_action", "next_result_action", "export_modulation_action",
-                     "export_power_action"):
+                     "export_power_action", "export_vsg_action"):
             action = getattr(workspace, name, None)
             if action is not None:
                 action.setEnabled(False)

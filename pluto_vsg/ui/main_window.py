@@ -17,6 +17,7 @@ from pluto_common.numeric_input import (
     DeferredSpinBox,
     ensure_valid_numeric_inputs,
     get_deferred_double,
+    get_deferred_int,
 )
 from pluto_common.runtime_paths import diagnostic_log_path
 
@@ -236,7 +237,6 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
         self.length_spin = DeferredSpinBox(); self.length_spin.setRange(1, 4095); self.length_spin.setValue(settings.payload_length_bytes)
         self.pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern_hex)
         self.period_spin = DeferredDoubleSpinBox(); self.period_spin.setRange(1.0, 10_000_000.0); self.period_spin.setDecimals(1); self.period_spin.setValue(settings.packet_period_us); self.period_spin.setSuffix(" us")
-        self.repeat_spin = DeferredSpinBox(); self.repeat_spin.setRange(1, 1000); self.repeat_spin.setValue(project.repeat_count)
         self.ssid_edit = QtWidgets.QLineEdit(settings.ssid)
         self.bssid_edit = QtWidgets.QLineEdit(settings.bssid)
         self.sequence_spin = DeferredSpinBox(); self.sequence_spin.setRange(0, 4095); self.sequence_spin.setValue(settings.sequence_number)
@@ -252,7 +252,6 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
                 ("Sample Rate", self.sample_rate_combo),
                 ("Pattern / PRBS Length [byte]", self.length_spin),
                 ("Packet Period", self.period_spin),
-                ("Repeat Count", self.repeat_spin),
                 ("Ramp", QtWidgets.QLabel("Disabled (automatic OFDM packet boundary)")),
                 ("Calculated PHY values", self.derived_label),
             ),
@@ -320,7 +319,7 @@ class _WiFiSettingsDialog(QtWidgets.QDialog):
                     + self.frequency_offset_spin.value() * 1e3
                 ),
             )
-            candidate = replace(candidate, name=self.name_edit.text().strip(), repeat_count=self.repeat_spin.value())
+            candidate = replace(candidate, name=self.name_edit.text().strip(), repeat_count=self._project.repeat_count)
             issues = validate_project(candidate)
             if issues: raise ValueError("\n".join(issue.message for issue in issues))
         except ValueError as error:
@@ -397,7 +396,6 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
         self.sps_spin = self._integer_spin(4, 64, project.samples_per_symbol)
         self.sample_rate_label = QtWidgets.QLabel()
         self.packet_duration_label = QtWidgets.QLabel()
-        self.repeat_spin = self._integer_spin(1, 1000, project.repeat_count)
         self.deviation_spin = self._double_spin(1.0, 2000.0, settings.frequency_deviation_hz / 1e3, 3)
         self.bt_spin = self._double_spin(0.05, 2.0, settings.gaussian_bt, 3)
         self.pre_idle_spin = self._integer_spin(0, 1_000_000, settings.pre_idle_symbols)
@@ -434,7 +432,6 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             ("Packet Length", self.packet_duration_label),
             ("Samples / Symbol", self.sps_spin),
             ("Sample Rate", self.sample_rate_label),
-            ("Repeat Count", self.repeat_spin),
             ("FSK Deviation [kHz]", self.deviation_spin),
             ("Gaussian B*T", self.bt_spin),
             ("Pre Idle", self._timing_controls[0]),
@@ -670,7 +667,7 @@ class _BluetoothLESettingsDialog(QtWidgets.QDialog):
             ),
             samples_per_symbol=self.sps_spin.value(),
             sample_rate_hz=symbol_rate_hz * self.sps_spin.value(),
-            repeat_count=self.repeat_spin.value(),
+            repeat_count=self._project.repeat_count,
             period_symbols=self.period_spin.value(),
             fields=bluetooth_le_fields(settings),
             bluetooth_le=settings,
@@ -745,7 +742,6 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self.sps_spin = DeferredSpinBox(); self.sps_spin.setRange(4, 64); self.sps_spin.setValue(project.samples_per_symbol)
         self.sample_rate_label = QtWidgets.QLabel()
         self.packet_duration_label = QtWidgets.QLabel()
-        self.repeat_spin = DeferredSpinBox(); self.repeat_spin.setRange(1, 1000); self.repeat_spin.setValue(project.repeat_count)
         self.pre_idle_spin = DeferredSpinBox(); self.pre_idle_spin.setRange(0, 100000); self.pre_idle_spin.setValue(settings.pre_idle_symbols)
         self._minimum_period_symbols = minimum_period_symbols(project)
         self.period_spin = DeferredDoubleSpinBox(); self.period_spin.setRange(0.0, 1_000_000.0); self.period_spin.setDecimals(3); self.period_spin.setValue(effective_period_symbols(project))
@@ -810,7 +806,6 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
                 ("Samples / Symbol", self.sps_spin),
                 ("Sample Rate", self.sample_rate_label),
                 ("SRRC Roll-off", self.rolloff_spin),
-                ("Repeat Count", self.repeat_spin),
                 ("Pre Idle", self._timing_controls[0]),
                 ("Packet Period", self._timing_controls[1]),
                 ("Derived Post Idle", self.post_idle_value),
@@ -883,9 +878,16 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
         self.hec_edit.setEnabled(not self.hec_auto_check.isChecked())
         self.crc_edit.setEnabled(not self.crc_auto_check.isChecked())
         definition = hdt_definition(self.rate_combo.currentData())
+        received_pdu = self._project.manual_packet_fields.get("hdt_pdu_control")
+        pdu_control = (
+            sum(int(b) << i for i, b in enumerate(received_pdu))
+            if received_pdu is not None else self.length_spin.value() + 1
+        )
+        rfu = int(self._project.manual_packet_fields.get("hdt_rfu", "0"))
         self.control_readback.setText(
-            f"PFI=0; RI=0b{definition.rate_indicator:03b}; RFU=0; "
-            f"PDU Control={self.length_spin.value() + 1} octets; FEC tail=00000"
+            f"PFI=0; RI=0b{definition.rate_indicator:03b}; RFU={rfu}; "
+            f"PDU Control={pdu_control} octets"
+            f"{' (Manual)' if received_pdu is not None else ''}; FEC tail=00000"
         )
         rf_test = False
         try:
@@ -897,6 +899,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             control = hdt_rf_test_control_bits(
                 fields.rate, fields.payload_length_bytes, pca=fields.pca, nesn=fields.nesn,
                 hec_override=None if fields.hec_auto else fields.hec_manual,
+                pdu_control_override=pdu_control if received_pdu is not None else None, rfu=rfu,
             )
             payload = hdt_payload_bits(replace(self._project, bluetooth_hdt=fields))
             pdu = hdt_rf_test_format0_bits(
@@ -1007,7 +1010,7 @@ class _BluetoothHDTSettingsDialog(QtWidgets.QDialog):
             center_frequency_hz=(float(self.carrier_combo.currentData()) + self.frequency_offset_spin.value() * 1e3),
             sample_rate_hz=2_000_000.0 * self.sps_spin.value(),
             samples_per_symbol=self.sps_spin.value(),
-            repeat_count=self.repeat_spin.value(),
+            repeat_count=self._project.repeat_count,
             period_symbols=self.period_spin.value(),
             fields=bluetooth_hdt_fields(settings),
             bluetooth_hdt=settings,
@@ -1048,7 +1051,6 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
         self.sps_spin = self._integer_spin(4, 64, project.samples_per_symbol)
         self.sample_rate_label = QtWidgets.QLabel()
         self.packet_duration_label = QtWidgets.QLabel()
-        self.repeat_spin = self._integer_spin(1, 1000, project.repeat_count)
         self.lap_edit = QtWidgets.QLineEdit(f"{settings.lap:06X}")
         self.uap_edit = QtWidgets.QLineEdit(f"{settings.uap:02X}")
         self.clock_edit = QtWidgets.QLineEdit(f"{settings.clock_6_1:02X}")
@@ -1223,7 +1225,6 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             ("Packet Length", self.packet_duration_label),
             ("Samples / Symbol", self.sps_spin),
             ("Sample Rate", self.sample_rate_label),
-            ("Repeat Count", self.repeat_spin),
             ("FSK Deviation [kHz]", self.deviation_spin),
             ("Gaussian B*T", self.bt_spin),
             ("EDR Guard", self._timing_controls[6]),
@@ -1476,7 +1477,7 @@ class _BluetoothSettingsDialog(QtWidgets.QDialog):
             center_frequency_hz=float(self.carrier_combo.currentData()),
             sample_rate_hz=self.sps_spin.value() * 1e6,
             samples_per_symbol=self.sps_spin.value(),
-            repeat_count=self.repeat_spin.value(),
+            repeat_count=self._project.repeat_count,
             period_symbols=self.period_spin.value(),
             fields=bluetooth_br_fields(settings),
             bluetooth_br=settings,
@@ -2173,6 +2174,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         file_menu.addAction(self.exit_action)
         edit_menu = menu_bar.addMenu("Edit")
         edit_menu.addActions([self.undo_action, self.redo_action])
+        self.packet_fields_action = edit_menu.addAction("Received Packet Fields...")
+        self.packet_fields_action.triggered.connect(self._edit_received_fields)
         waveform_menu = menu_bar.addMenu("Waveform")
         waveform_menu.addAction(self.settings_action)
         waveform_menu.addAction(self.rf_test_preset_action)
@@ -2336,6 +2339,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.rf_button = self._make_control_button("RF\nOFF", value=True)
         self.mod_button = self._make_control_button("Mod\nON", value=True)
         self.continuous_button = self._make_control_button("Continuous\nON", value=True)
+        self.repetitions_button = self._make_control_button("Repeat Count", value=True)
+        self.repetitions_button.setToolTip("Number of packets for Continuous OFF; ignored for Continuous ON and CW")
         self.power_button = self._make_control_button("Power", value=True)
         self.power_up_button = QtWidgets.QToolButton()
         self.power_up_button.setArrowType(QtCore.Qt.ArrowType.UpArrow)
@@ -2375,6 +2380,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.rf_button,
             self.mod_button,
             self.continuous_button,
+            self.repetitions_button,
             power_row,
             self.estimated_peak_label,
             self.power_step_button,
@@ -2388,6 +2394,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.rf_button.clicked.connect(self._toggle_rf)
         self.mod_button.clicked.connect(self._toggle_modulation)
         self.continuous_button.clicked.connect(self._toggle_continuous)
+        self.repetitions_button.clicked.connect(self._edit_repetitions)
         self.power_button.clicked.connect(self._edit_output_power)
         self.power_up_button.clicked.connect(lambda: self._step_output_power(+1.0))
         self.power_down_button.clicked.connect(lambda: self._step_output_power(-1.0))
@@ -2632,6 +2639,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self._update_previews(self.result)
 
     def _refresh_project_view(self) -> None:
+        self.packet_fields_action.setEnabled(self.project.wifi is None)
         self.field_table.clear()
         self._field_items_by_block_id: dict[str, QtWidgets.QTreeWidgetItem] = {}
 
@@ -2681,13 +2689,21 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             ("Center", f"{self.project.center_frequency_hz / 1e6:.6f} MHz"),
             ("Sample Rate", f"{self.project.sample_rate_hz / 1e6:.3f} MS/s"),
             ("Samples / Symbol", str(self.project.samples_per_symbol)),
-            ("Repeat Count", str(self.project.repeat_count)),
             ("Period", f"{effective_period_symbols(self.project):.3f} symbols"),
             (
                 "Post Idle",
                 f"{effective_post_idle_symbols(self.project):.3f} symbols",
             ),
         ]
+        if self.project.manual_packet_fields:
+            parameters.insert(2, (
+                "Received Fields", f"{len(self.project.manual_packet_fields)} Manual overrides (Edit menu)",
+            ))
+        self.edit_settings_button.setToolTip(
+            "Received fields stay Manual when other settings change. "
+            "Use Edit > Received Packet Fields to select Auto or edit their values."
+            if self.project.manual_packet_fields else ""
+        )
         if settings is not None:
             parameters.extend(
                 [
@@ -2971,6 +2987,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.continuous_button.setText(
             f"Continuous\n{'ON' if self._continuous_enabled else 'OFF'}"
         )
+        self.repetitions_button.setText(f"Repeat Count\n{self.project.repeat_count}")
         self.power_button.setText(f"Power\n{self._pluto_output_power_dbm:.2f} dBm")
         self.power_step_button.setText(f"Power Step\n{self._power_step_db:g} dB")
         self.frequency_button.setText(
@@ -3031,6 +3048,22 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             )
             return
         self._apply_output_power(target)
+
+    def _edit_repetitions(self) -> None:
+        value, accepted = get_deferred_int(
+            self, "Repeat Count", "Number of packets (Continuous OFF)", self.project.repeat_count, 1, 1000,
+        )
+        if accepted and value != self.project.repeat_count:
+            self._commit_project_change(replace(self.project, repeat_count=value), "Change repeat count")
+
+    def _edit_received_fields(self) -> None:
+        from pluto_vsg.ui.packet_fields import PacketFieldsDialog
+        dialog = PacketFieldsDialog(self.project, self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._commit_project_change(
+                replace(self.project, manual_packet_fields=dialog.manual_fields),
+                "Change received packet fields",
+            )
 
     def _edit_power_step(self) -> None:
         value, accepted = get_deferred_double(
@@ -3714,6 +3747,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.rf_button.setEnabled(not preparing)
             self.mod_button.setEnabled(not active)
             self.continuous_button.setEnabled(not active)
+            self.repetitions_button.setEnabled(not active)
+            self.packet_fields_action.setEnabled(not active and self.project.wifi is None)
             self.frequency_button.setEnabled(not active)
             self.frequency_settings_button.setEnabled(not active)
             self.instrument_settings_button.setEnabled(not active)

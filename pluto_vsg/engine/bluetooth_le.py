@@ -7,6 +7,7 @@ import math
 import numpy as np
 
 from pluto_protocol.model import GeneratedPacketBits
+from pluto_vsg.packet_fields import packet_field_bits
 from pluto_protocol.bluetooth.common import prbs15_period
 from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
 from pluto_vsg.engine.base import FieldBoundary, GenerationResult
@@ -164,6 +165,7 @@ class BluetoothLEWaveformEngine:
             dtype=np.uint8,
         )
         length_bits = _bits_lsb(settings.payload_length_bytes, 8)
+        length_bits = packet_field_bits(project, "le_length", length_bits)
         payload_bits = le_payload_bits(project)
         pdu_bits = np.concatenate((header_bits, length_bits, payload_bits))
         crc_bits = (
@@ -172,6 +174,9 @@ class BluetoothLEWaveformEngine:
             else np.empty(0, dtype=np.uint8)
         )
         pdu_crc_bits = np.concatenate((pdu_bits, crc_bits))
+        if settings.crc_enabled:
+            crc_bits = packet_field_bits(project, "le_crc", crc_bits)
+            pdu_crc_bits = np.concatenate((pdu_bits, crc_bits))
         whitening_bits = (
             le_whitening_sequence(settings.whitening_channel_index, pdu_crc_bits.size)
             if settings.whitening_enabled

@@ -87,6 +87,9 @@ class BluetoothHDTWaveformEngine:
             settings.rate, settings.payload_length_bytes, pca=settings.pca,
             nesn=settings.nesn,
             hec_override=None if settings.hec_auto else settings.hec_manual,
+            pdu_control_override=(sum(int(b) << i for i, b in enumerate(project.manual_packet_fields["hdt_pdu_control"]))
+                                  if "hdt_pdu_control" in project.manual_packet_fields else None),
+            rfu=(int(project.manual_packet_fields.get("hdt_rfu", "0"))),
         )
         control_bits = convolutional_encode(control_data)
         control = map_hdt_symbols(control_bits, "HDT2")

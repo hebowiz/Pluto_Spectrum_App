@@ -153,6 +153,8 @@ def hdt_rf_test_control_bits(
     pca: int = HDT_RF_TEST_PCA,
     nesn: int = 1,
     hec_override: int | None = None,
+    pdu_control_override: int | None = None,
+    rfu: int = 0,
 ) -> np.ndarray:
     """Build a 57-bit Format-0 Control Header; defaults are the RF Test profile."""
 
@@ -160,14 +162,16 @@ def hdt_rf_test_control_bits(
     if not 1 <= payload_length <= 510:
         raise ValueError("HDT RF test format-0 payload length must be between 1 and 510 bytes")
     definition = hdt_definition(rate)
-    pdu_length = payload_length + 1  # one-octet ACL Initial Portion
+    pdu_length = payload_length + 1 if pdu_control_override is None else pdu_control_override
+    if not 0 <= pdu_length <= 511 or rfu not in (0, 1):
+        raise ValueError("Invalid PDU Control / RFU")
     header = np.concatenate(
         (
             _lsb_bits((pca >> 24) & 0xFFFF, 16),
             _lsb_bits(nesn, 3),
             _lsb_bits(0, 1),
             _lsb_bits(definition.rate_indicator, 3),
-            _lsb_bits(0, 1),
+            _lsb_bits(rfu, 1),
             _lsb_bits(pdu_length, 9),
         )
     )

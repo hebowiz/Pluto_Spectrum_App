@@ -54,6 +54,7 @@ from pluto_sa.vsa.ui.measurement_chrome import (
 )
 from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
 from pluto_sa.vsa.ui.iq_export import export_iq_recording
+from pluto_sa.vsa.ui.packet_export import export_packet_project, update_export_action
 from pluto_sa.vsa.ui.display_processing import (
     FSKDisplayData,
     build_fsk_display_data,
@@ -193,6 +194,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.export_iq_action = file_menu.addAction("Export IQ Recording...")
         self.export_iq_action.setEnabled(False)
         self.export_iq_action.triggered.connect(self._export_iq_recording)
+        self.export_vsg_action = file_menu.addAction("Export VSG Project...")
+        update_export_action(self.export_vsg_action, None)
+        self.export_vsg_action.triggered.connect(self._export_vsg_project)
         self.export_modulation_action = file_menu.addAction(
             "Export GFSK Modulation Debug CSV..."
         )
@@ -923,6 +927,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self._preferences.setValue("directories/iq", str(Path(path).resolve().parent))
         self._preferences.sync()
         self.load_recording(recording)
+
+    def _export_vsg_project(self) -> None:
+        export_packet_project(self, None if self._result is None else self._result.packet_analysis)
 
     def _export_iq_recording(self) -> None:
         export_iq_recording(
@@ -1892,6 +1899,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         )
 
     def _render_packet_analysis(self, result: DectPacketResult) -> None:
+        update_export_action(self.export_vsg_action, result.packet_analysis)
         p0_internal_bit = 16 if result.preamble_mode == "Prolonged" else 0
         self.packet_tabs.render_packet(result.packet_analysis,
                                      p0_internal_bit=p0_internal_bit,

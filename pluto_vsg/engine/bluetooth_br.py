@@ -34,6 +34,7 @@ from pluto_vsg.model import (
     validate_project,
 )
 from pluto_vsg.rf_level import iq_level_metadata, measure_iq_levels
+from pluto_vsg.packet_fields import packet_field_bits
 
 
 _BR_SYMBOL_RATE_HZ = 1_000_000.0
@@ -127,7 +128,9 @@ def _header_data_bits(project: WaveformProject) -> np.ndarray:
         | (int(settings.arqn) << 8)
         | (int(settings.seqn) << 9)
     )
-    return _bits_lsb(packed, 10)
+    bits = _bits_lsb(packed, 10)
+    bits[3:7] = packet_field_bits(project, "br_type", bits[3:7])
+    return bits
 
 
 def _packet_header_bits(project: WaveformProject) -> tuple[np.ndarray, int]:
@@ -153,7 +156,7 @@ def _unwhitened_packet_bits(
     header, _hec = _packet_header_bits(project)
     header_air = fec13_encode(header)
     return np.concatenate(
-        (access_code_bits(settings.lap), header_air, payload_bits)
+        (packet_field_bits(project, "br_access", access_code_bits(settings.lap)), header_air, payload_bits)
     )
 
 
@@ -392,9 +395,14 @@ class BluetoothBRWaveformEngine:
                 8 if packet_kind == BluetoothPacketKind.DH1 else 16,
             )
         )
+        length_stop = 8 if payload_header.size == 8 else 13
+        payload_header[3:length_stop] = packet_field_bits(project, "br_length", payload_header[3:length_stop])
+        if payload_header.size == 16:
+            payload_header[13:] = packet_field_bits(project, "br_rfu", payload_header[13:])
         payload_crc = _bytes_to_air_bits(
             payload_crc_bytes(np.concatenate((payload_header, body)), settings.uap)
         )
+        payload_crc = packet_field_bits(project, "br_crc", payload_crc)
         payload = np.concatenate((payload_header, body, payload_crc))
         header, transmitted_hec = _packet_header_bits(project)
         edr_phase_indices = np.empty(0, dtype=np.int16)
@@ -407,7 +415,7 @@ class BluetoothBRWaveformEngine:
             header_air = fec13_encode(header ^ whitening[: header.size])
             payload_air = payload ^ whitening[header.size :]
             packet_bits = np.concatenate(
-                (access_code_bits(settings.lap), header_air, payload_air)
+                (packet_field_bits(project, "br_access", access_code_bits(settings.lap)), header_air, payload_air)
             )
         elif not is_edr:
             packet_bits = _unwhitened_packet_bits(project, payload)
@@ -421,7 +429,7 @@ class BluetoothBRWaveformEngine:
             else:
                 payload_air = payload
             header_air = fec13_encode(header)
-            gfsk_bits = np.concatenate((access_code_bits(settings.lap), header_air))
+            gfsk_bits = np.concatenate((packet_field_bits(project, "br_access", access_code_bits(settings.lap)), header_air))
             gfsk = _modulate_gfsk(
                 gfsk_bits,
                 samples_per_symbol=samples_per_symbol,
@@ -436,8 +444,11 @@ class BluetoothBRWaveformEngine:
                 else EDR_SYNC_BITS_3MBPS
             )
             trailer = np.zeros(2 * bits_per_symbol, dtype=np.uint8)
+            sync = packet_field_bits(project, "edr_sync", sync)
+            trailer = packet_field_bits(project, "edr_trailer", trailer)
             pad_count = (-payload_air.size) % bits_per_symbol
             padding = np.zeros(pad_count, dtype=np.uint8)
+            padding = packet_field_bits(project, "edr_padding", padding)
             psk_bits = np.concatenate((sync, payload_air, padding, trailer))
             edr_phase_indices = _phase_indices(psk_bits, bits_per_symbol)
             psk = _modulate_edr(

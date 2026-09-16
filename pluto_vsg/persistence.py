@@ -145,6 +145,8 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
     payload = document.get("project")
     if not isinstance(payload, dict):
         raise ValueError("Project payload is missing")
+    if not isinstance(payload.get("manual_packet_fields", {}), dict):
+        raise ValueError("Invalid received packet field settings")
     field_payloads = payload.get("fields", [])
     if not isinstance(field_payloads, list):
         raise ValueError("Project fields must be a list")
@@ -258,6 +260,7 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
         bluetooth_hdt=bluetooth_hdt,
         wifi=wifi,
         dect=dect,
+        manual_packet_fields=dict(payload.get("manual_packet_fields", {})),
     )
     issues = validate_project(project)
     if issues:

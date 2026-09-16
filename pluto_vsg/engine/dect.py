@@ -152,6 +152,8 @@ def dect_packet_bits(project: WaveformProject) -> tuple[np.ndarray, dict[str, np
         raise ValueError("DECT settings are required")
     packet_type = DectPacketType(settings.packet_type)
     s_field = dect_s_field_text(settings)
+    from pluto_vsg.packet_fields import packet_field_bits
+    s_field = "".join(str(int(b)) for b in packet_field_bits(project, "dect_s", _bits(s_field)))
     preamble = _bits(s_field[:16])
     sync_word = _bits(s_field[16:])
     header = _bits(settings.a_header_bits)
@@ -172,6 +174,8 @@ def dect_packet_bits(project: WaveformProject) -> tuple[np.ndarray, dict[str, np
     a_field = np.concatenate((a_information, r_crc))
     parts = [preamble, sync_word, a_field]
     prolonged = preamble if settings.prolonged_preamble else np.empty(0, dtype=np.uint8)
+    if settings.prolonged_preamble:
+        prolonged = packet_field_bits(project, "dect_prolonged", prolonged)
     if prolonged.size:
         parts.insert(0, prolonged)
 

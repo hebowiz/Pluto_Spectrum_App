@@ -126,12 +126,14 @@ class PacketAnalysisResult:
     integrity: PacketIntegritySummary
     source: PacketSourceInfo
     raw_bits: np.ndarray
+    decode_context: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "summary", tuple(self.summary))
         object.__setattr__(self, "root_fields", tuple(self.root_fields))
         object.__setattr__(self, "issues", tuple(self.issues))
         object.__setattr__(self, "raw_bits", _readonly_bits(self.raw_bits))
+        object.__setattr__(self, "decode_context", MappingProxyType(dict(self.decode_context)))
 
 
 @dataclass(frozen=True)

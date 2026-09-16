@@ -318,6 +318,7 @@ class VSAControlPanel(QtWidgets.QFrame):
             def sync() -> None:
                 running = "Stop" in action.text()
                 button.setEnabled(action.isEnabled())
+                button.setToolTip(action.toolTip())
                 if running_button:
                     button.setChecked(running)
                 if display_label == "Continuous":

@@ -101,9 +101,6 @@ class DectSettingsDialog(QtWidgets.QDialog):
             max(0, self.samples_per_symbol_combo.findData(project.samples_per_symbol))
         )
         self.sample_rate_value = QtWidgets.QLabel()
-        self.repeat_spin = DeferredSpinBox()
-        self.repeat_spin.setRange(1, 1000)
-        self.repeat_spin.setValue(project.repeat_count)
         self.deviation_spin = DeferredDoubleSpinBox()
         self.deviation_spin.setRange(1.0, 1500.0)
         self.deviation_spin.setDecimals(3)
@@ -318,7 +315,6 @@ class DectSettingsDialog(QtWidgets.QDialog):
                 ("Prolonged Preamble", self.prolonged_check),
                 ("Samples / Symbol", self.samples_per_symbol_combo),
                 ("Sample Rate", self.sample_rate_value),
-                ("Repeat Count", self.repeat_spin),
                 ("Peak Frequency Deviation", self.deviation_spin),
                 ("Gaussian B*T", self.bt_spin),
                 ("Pre Idle", timing[0]),
@@ -544,7 +540,7 @@ class DectSettingsDialog(QtWidgets.QDialog):
             name=f"DECT {packet_type.value} Packet",
             sample_rate_hz=1_152_000.0 * sps,
             samples_per_symbol=sps,
-            repeat_count=self.repeat_spin.value(),
+            repeat_count=self._base_project.repeat_count,
             period_symbols=self.period_spin.value(),
             # Carrier selection belongs to the main VSG Frequency Settings
             # dialog. Packet-field edits must preserve a manual Frequency.

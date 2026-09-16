@@ -370,6 +370,7 @@ class WaveformProject:
     bluetooth_hdt: BluetoothHDTSettings | None = None
     wifi: WiFiSettings | None = None
     dect: DectSettings | None = None
+    manual_packet_fields: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -428,6 +429,8 @@ def effective_post_idle_symbols(project: WaveformProject) -> float:
 
 def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
     issues: list[ValidationIssue] = []
+    from pluto_vsg.packet_fields import validate_manual_fields
+    issues.extend(validate_manual_fields(project))
     if not project.name.strip():
         issues.append(ValidationIssue("name", "Project name must not be empty."))
     if project.sample_rate_hz <= 0.0:

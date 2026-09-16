@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Protocol
+from dataclasses import replace
 
 from pluto_protocol.model import DecodeProbeResult, PacketAnalysisResult, PacketDecodeInput
 
@@ -39,7 +40,7 @@ class ProtocolRegistry:
             if not probes:
                 raise ValueError("no protocol decoders are registered")
             protocol_id = probes[0].protocol_id
-        return self.get(protocol_id).decode(packet)
+        return replace(self.get(protocol_id).decode(packet), decode_context=packet.context)
 
 
 def default_registry() -> ProtocolRegistry:
