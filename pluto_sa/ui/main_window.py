@@ -2356,6 +2356,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }"
             "QPushButton { background-color: #303030; color: white; border: 1px solid #666; padding: 8px; }"
             "QPushButton:hover { background-color: #3c3c3c; }"
+            "QPushButton:checked { background-color: #176b87; border-color: #37b7dc; }"
+            "QToolButton { background-color: #303030; color: white; border: 1px solid #666; }"
+            "QToolButton:hover { background-color: #3c3c3c; }"
+            "QToolButton:disabled { background-color: #292929; }"
         )
         panel_layout = QtWidgets.QVBoxLayout(panel)
         panel_layout.setContentsMargins(10, 10, 10, 10)
@@ -2514,6 +2518,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._apply_groupbox_title_font(sweep_group)
         sweep_layout = QtWidgets.QVBoxLayout(sweep_group)
         self.cont_button = self._make_control_button("Continuous")
+        self.cont_button.setCheckable(True)
         self.single_button = self._make_control_button("Single")
         self.reset_button = self._make_control_button("Reset")
         sweep_layout.addWidget(self.cont_button)
@@ -2629,6 +2634,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _open_calibration_menu_from_analyzer(self) -> None:
         self._show_calibration_menu()
+        # Opening the submenu does not select Calibration mode by itself.
+        self._update_analyzer_mode_selection_page()
 
     def _on_calibration_start_clicked(self) -> None:
         if self._is_calibration_mode():
@@ -2641,6 +2648,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         page_layout = QtWidgets.QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(10)
+        self.analyzer_mode_button_group = QtWidgets.QButtonGroup(page)
+        self.analyzer_mode_button_group.setExclusive(True)
 
         for mode in (
             AnalyzerMode.REALTIME_SA,
@@ -2649,6 +2658,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
         ):
             button = self._make_control_button(self._analyzer_mode_display_name(mode))
+            button.setCheckable(True)
+            self.analyzer_mode_button_group.addButton(button)
             button.clicked.connect(
                 lambda _checked=False, selected_mode=mode: self._change_analyzer_mode(
                     selected_mode
@@ -2657,8 +2668,14 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             self.analyzer_mode_option_buttons[mode] = button
             page_layout.addWidget(button)
 
-        self.calibration_mode_entry_button = self._make_control_button(AnalyzerMode.CALIBRATION.value)
-        self.calibration_mode_entry_button.clicked.connect(self._open_calibration_menu_from_analyzer)
+        self.calibration_mode_entry_button = self._make_control_button(
+            AnalyzerMode.CALIBRATION.value
+        )
+        self.calibration_mode_entry_button.setCheckable(True)
+        self.analyzer_mode_button_group.addButton(self.calibration_mode_entry_button)
+        self.calibration_mode_entry_button.clicked.connect(
+            self._open_calibration_menu_from_analyzer
+        )
         page_layout.addWidget(self.calibration_mode_entry_button)
 
         page_layout.addStretch(1)
@@ -2674,8 +2691,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.freq_center_button = self._make_control_button("Center")
         self.cf_step_button = self._make_control_button("CF Step")
         self.freq_span_button = self._make_control_button("Freq Span")
-        self.freq_center_left_button = self._make_control_button("<-")
-        self.freq_center_right_button = self._make_control_button("->")
+        self.freq_center_left_button = self._make_arrow_control_button(
+            QtCore.Qt.ArrowType.LeftArrow
+        )
+        self.freq_center_right_button = self._make_arrow_control_button(
+            QtCore.Qt.ArrowType.RightArrow
+        )
         self.freq_start_stop_button = self._make_control_button("Start/Stop")
         self.wideband_chunk_width_button = self._make_value_control_button(
             "Chunk Width"
@@ -2990,8 +3011,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         trace_button = self._make_control_button("Trace")
         frequency_button = self._make_control_button("Frequency")
         step_button = self._make_control_button("Step")
-        left_button = self._make_control_button("<-")
-        right_button = self._make_control_button("->")
+        left_button = self._make_arrow_control_button(QtCore.Qt.ArrowType.LeftArrow)
+        right_button = self._make_arrow_control_button(QtCore.Qt.ArrowType.RightArrow)
         peak_search_button = self._make_control_button("Peak Search")
         continuous_peak_button = self._make_control_button("Continuous Peak")
         marker_to_center_button = self._make_control_button("Mkr->CF")
@@ -3275,6 +3296,18 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
     def _make_control_button(self, text: str) -> QtWidgets.QPushButton:
         button = QtWidgets.QPushButton(text)
         return configure_control_button(button, value=False)
+
+    def _make_arrow_control_button(
+        self, arrow_type: QtCore.Qt.ArrowType
+    ) -> QtWidgets.QToolButton:
+        button = QtWidgets.QToolButton()
+        button.setArrowType(arrow_type)
+        configure_control_button(button, value=False)
+        button.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        return button
 
     def _make_value_control_button(self, label_text: str) -> QtWidgets.QPushButton:
         button = QtWidgets.QPushButton(label_text)
@@ -4857,15 +4890,12 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _update_analyzer_mode_selection_page(self) -> None:
         for mode, button in self.analyzer_mode_option_buttons.items():
-            prefix = (
-                SELECTED_BUTTON_PREFIX
-                if mode == self.config.analyzer_mode
-                else UNSELECTED_BUTTON_PREFIX
-            )
-            button.setText(f"{prefix}{self._analyzer_mode_display_name(mode)}")
+            button.setText(self._analyzer_mode_display_name(mode))
+            button.setChecked(mode == self.config.analyzer_mode)
         if hasattr(self, "calibration_mode_entry_button"):
-            self.calibration_mode_entry_button.setText(
-                f"{UNSELECTED_BUTTON_PREFIX}{AnalyzerMode.CALIBRATION.value}"
+            self.calibration_mode_entry_button.setText(AnalyzerMode.CALIBRATION.value)
+            self.calibration_mode_entry_button.setChecked(
+                self.config.analyzer_mode == AnalyzerMode.CALIBRATION
             )
 
     def _update_trace_type_selection_page(self, trace_index: int) -> None:
@@ -5368,10 +5398,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         )
 
     def _update_continuous_button(self) -> None:
-        label = "Continuous"
-        if self.sweep_state == SWEEP_STATE_RUNNING:
-            label = f"{SELECTED_BUTTON_PREFIX}{label}"
-        self.cont_button.setText(label)
+        self.cont_button.setText("Continuous")
+        self.cont_button.setChecked(self.sweep_state == SWEEP_STATE_RUNNING)
 
     def _update_sweep_detector_selection_page(self) -> None:
         for detector_mode, button in self.sweep_detector_option_buttons.items():
