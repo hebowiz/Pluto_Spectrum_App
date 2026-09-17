@@ -91,7 +91,6 @@ MIN_WIDEBAND_START_HZ = 80_000_000
 MAX_WIDEBAND_STOP_HZ = 5_990_000_000
 WIDEBAND_SIDE_GUARD_HZ = 5_000_000
 WIDEBAND_LO_SETTLE_US = 200
-WIDEBAND_FLUSH_READS = 5
 TIME_ANALYZER_BUFFER_POINTS = 1000
 TIME_ANALYZER_WARMUP_DISCARD_COUNT = 5
 HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES = 65_536
@@ -1676,19 +1675,19 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             runtime.current_chunk_index = 0
         chunk_index = runtime.current_chunk_index
         center_hz = int(runtime.chunk_centers_hz[chunk_index])
-        actual_lo_before_retune_hz = self.receiver.get_current_lo_hz()
         self.receiver.retune_lo(center_hz, update_config=False)
-        actual_lo_after_retune_hz = self.receiver.get_current_lo_hz()
         if WIDEBAND_LO_SETTLE_US > 0:
             time.sleep(WIDEBAND_LO_SETTLE_US / 1_000_000.0)
-        flush_actual_total = 0
         capture_size = int(self.config.fft_size)
-        for _ in range(WIDEBAND_FLUSH_READS):
-            flush_actual_total += self.receiver.discard_block(capture_size)
-        actual_lo_before_capture_hz = self.receiver.get_current_lo_hz()
-        iq_block = self.receiver.capture_iq_block(capture_size, source="wideband")
+        # Recreate the IIO buffer after every retune.  The receiver intentionally
+        # keeps multiple DMA buffers queued for continuous modes; draining a fixed
+        # number here can therefore return IQ captured at the previous chunk LO.
+        iq_block = self.receiver.capture_iq_block(
+            capture_size,
+            source="wideband",
+            fresh=True,
+        )
         iq = iq_block.iq
-        actual_lo_during_capture_hz = self.receiver.get_current_lo_hz()
         processor_window_len = len(self._wideband_chunk_processor.window)
         if len(iq) != processor_window_len:
             self._invalidate_wideband_runtime()

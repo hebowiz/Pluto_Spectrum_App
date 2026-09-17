@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
+from pluto_sa.signal.spectrum_processor import SpectrumProcessor
 from pluto_sa.ui.main_window import (
     RealtimeSpectrumWindow,
+    WidebandRuntimeState,
     plan_wideband_chunks,
     resolve_wideband_chunk_capture_span_hz,
 )
@@ -68,3 +72,67 @@ def test_invalid_wideband_chunk_width_falls_back_to_10mhz() -> None:
     config = SpectrumConfig(wideband_chunk_width_hz=15_000_000)
 
     assert config.wideband_chunk_width_hz == 10_000_000
+
+
+def test_wideband_capture_recreates_iio_buffer_after_each_retune() -> None:
+    config = SpectrumConfig(
+        analyzer_mode=AnalyzerMode.WIDEBAND_REALTIME_SA,
+        fft_size=64,
+        wideband_chunk_width_hz=10_000_000,
+    )
+    chunk_config = SpectrumConfig(
+        analyzer_mode=AnalyzerMode.REALTIME_SA,
+        center_freq_hz=105_000_000,
+        display_span_hz=20_000_000,
+        fft_size=64,
+    )
+    processor = SpectrumProcessor(chunk_config)
+    display_bin_count = len(processor.get_display_freq_axis_ghz())
+
+    class Receiver:
+        def __init__(self) -> None:
+            self.capture_calls: list[tuple[int, str, bool]] = []
+
+        def retune_lo(self, center_hz: int, *, update_config: bool) -> None:
+            assert center_hz == 105_000_000
+            assert update_config is False
+
+        def capture_iq_block(
+            self,
+            sample_count: int,
+            *,
+            source: str,
+            fresh: bool,
+        ) -> SimpleNamespace:
+            self.capture_calls.append((sample_count, source, fresh))
+            return SimpleNamespace(iq=np.zeros(sample_count, dtype=np.complex64))
+
+    receiver = Receiver()
+    owner = SimpleNamespace(
+        config=config,
+        receiver=receiver,
+        _wideband_chunk_config=chunk_config,
+        _wideband_chunk_processor=processor,
+        _wideband_runtime_state=WidebandRuntimeState(
+            start_hz=100_000_000,
+            stop_hz=120_000_000,
+            chunk_centers_hz=np.array([105_000_000, 115_000_000]),
+            chunk_freq_ranges_hz=[
+                (100_000_000, 110_000_000),
+                (110_000_000, 120_000_000),
+            ],
+            chunk_source_ranges=[(0, display_bin_count), (0, display_bin_count)],
+            chunk_slice_ranges=[
+                (0, display_bin_count),
+                (display_bin_count, 2 * display_bin_count),
+            ],
+            composite_freq_axis_ghz=np.zeros(2 * display_bin_count),
+            composite_display_db=np.zeros(2 * display_bin_count),
+        ),
+        _apply_display_power_correction_with_frequency=lambda power, **_kwargs: power,
+        _invalidate_wideband_runtime=lambda: None,
+    )
+
+    RealtimeSpectrumWindow._update_wideband_spectrum(owner)
+
+    assert receiver.capture_calls == [(64, "wideband", True)]
