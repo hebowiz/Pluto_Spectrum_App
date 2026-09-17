@@ -690,6 +690,23 @@ def test_dedicated_hdt_decodes_real_hdt7_5_and_identifies_legacy_crc_init() -> N
     assert metrics["Pre-packet emissions"].result == "N/A"
 
 
+def test_dedicated_hdt_detects_packet_tx_lts_variant() -> None:
+    recording = FileIQSource.load(
+        Path(__file__).with_name("fixtures") / "RT_Packet_TX_HDT7P5_temp.npz"
+    )
+
+    results = analyze_bluetooth_hdt_recordings(
+        recording,
+        profile=BluetoothAnalysisProfile.RF_PHY_TEST,
+    )
+
+    assert len(results) == 2
+    assert all(result.packet.phy_name == HDTRate.HDT7_5.value for result in results)
+    assert all(result.metadata["hdt_lts_root"] == 1 for result in results)
+    assert all(result.metadata["hdt_lts_phase"] == 2 for result in results)
+    assert all(result.metadata["hdt_control_path_errors"] == 0 for result in results)
+
+
 @pytest.mark.parametrize(
     ("filename", "whitening", "expected_phy", "expected_packet", "expected_start"),
     (

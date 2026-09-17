@@ -135,15 +135,31 @@ def hdt_crc32(bits: np.ndarray, *, init: int = HDT_RF_TEST_CRC32_INIT) -> int:
     return state
 
 
-def hdt_rf_test_training_symbols() -> np.ndarray:
-    """Return the standard 74-symbol RF PHY test preamble (STS x9, GI, LTS x2)."""
+def hdt_training_symbols(
+    *,
+    lts_root: int = HDT_RF_TEST_LTS_ROOT,
+    lts_phase: int = HDT_RF_TEST_LTS_PHASE,
+) -> np.ndarray:
+    """Return a 74-symbol HDT preamble for the selected LTS root and phase."""
 
+    root = int(lts_root)
+    phase = int(lts_phase)
+    if not 1 <= root <= 16:
+        raise ValueError("HDT LTS root must be between 1 and 16")
+    if not 0 <= phase <= 16:
+        raise ValueError("HDT LTS phase must be between 0 and 16")
     short = np.tile(np.asarray([-1.0, -1.0j, 1.0j, 1.0]), 9)
     index = np.arange(17, dtype=np.float64)
     long = np.exp(
-        -1j * np.pi * HDT_RF_TEST_LTS_ROOT * index * (index + 1.0) / 17.0
-    ) * np.exp(1j * 2.0 * np.pi * HDT_RF_TEST_LTS_PHASE / 17.0)
+        -1j * np.pi * root * index * (index + 1.0) / 17.0
+    ) * np.exp(1j * 2.0 * np.pi * phase / 17.0)
     return np.asarray(np.concatenate((short, long[-4:], long, long)), dtype=np.complex64)
+
+
+def hdt_rf_test_training_symbols() -> np.ndarray:
+    """Return the standard 74-symbol RF PHY test preamble (STS x9, GI, LTS x2)."""
+
+    return hdt_training_symbols()
 
 
 def hdt_rf_test_control_bits(
@@ -424,6 +440,7 @@ __all__ = [
     "HDT_RF_TEST_CRC32_INIT", "HDT_RF_TEST_LTS_PHASE", "HDT_RF_TEST_LTS_ROOT",
     "HDT_RF_TEST_PCA", "convolutional_encode", "hdt_coded_payload_bit_count",
     "hdt_crc24", "hdt_crc32", "hdt_definition", "hdt_rf_test_control_bits",
-    "hdt_rf_test_format0_bits", "hdt_rf_test_training_symbols", "map_hdt_symbols",
+    "hdt_rf_test_format0_bits", "hdt_rf_test_training_symbols", "hdt_training_symbols",
+    "map_hdt_symbols",
     "puncture",
 ]

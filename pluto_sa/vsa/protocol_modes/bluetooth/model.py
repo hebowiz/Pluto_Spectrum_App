@@ -33,6 +33,7 @@ from pluto_protocol.bluetooth.hdt import (
     hdt_definition,
     hdt_rf_test_format0_bits,
     hdt_rf_test_training_symbols,
+    hdt_training_symbols,
     map_hdt_symbols,
     puncture,
 )
@@ -1210,6 +1211,45 @@ _HDT_TERMINATING_SYMBOLS = 2
 _HDT_PAYLOAD_START_SYMBOL = (
     _HDT_TRAINING_SYMBOLS + _HDT_CONTROL_SYMBOLS + _HDT_TERMINATING_SYMBOLS
 )
+_HDT_TRAINING_VARIANTS = tuple(
+    (root, phase, hdt_training_symbols(lts_root=root, lts_phase=phase))
+    for root in range(1, 17)
+    for phase in range(17)
+)
+_HDT_TRAINING_REFERENCE_MATRIX = np.stack(
+    [reference for _root, _phase, reference in _HDT_TRAINING_VARIANTS]
+).astype(np.complex128)
+_HDT_TRAINING_REFERENCE_NORMS = np.linalg.norm(
+    _HDT_TRAINING_REFERENCE_MATRIX, axis=1
+)
+
+
+def _identify_hdt_training_reference(
+    observed: np.ndarray,
+) -> tuple[np.ndarray, float, int, int]:
+    """Identify an HDT LTS variant after estimating carrier error from STS."""
+
+    values = np.asarray(observed, dtype=np.complex128)[:_HDT_TRAINING_SYMBOLS]
+    if values.size < _HDT_TRAINING_SYMBOLS:
+        raise ValueError("HDT training sequence is incomplete")
+    short_reference = _HDT_TRAINING_REFERENCE_MATRIX[0, :36]
+    short_axis = np.arange(short_reference.size, dtype=np.float64)
+    phase_error = np.unwrap(
+        np.angle(values[: short_reference.size] * np.conj(short_reference))
+    )
+    phase_step, phase_intercept = np.polyfit(short_axis, phase_error, 1)
+    axis = np.arange(values.size, dtype=np.float64)
+    corrected = values * np.exp(-1j * (phase_intercept + phase_step * axis))
+    denominator = np.maximum(
+        _HDT_TRAINING_REFERENCE_NORMS * np.linalg.norm(corrected),
+        np.finfo(np.float64).tiny,
+    )
+    scores = np.abs(_HDT_TRAINING_REFERENCE_MATRIX.conj() @ corrected) / denominator
+    selected = int(np.argmax(scores))
+    root, phase, reference = _HDT_TRAINING_VARIANTS[selected]
+    return reference, float(scores[selected]), root, phase
+
+
 def _hdt_qpsk_constellation(symbol_indices: np.ndarray) -> np.ndarray:
     even_phases = np.asarray(
         [np.pi / 4.0, 3.0 * np.pi / 4.0, -np.pi / 4.0, -3.0 * np.pi / 4.0]
@@ -1292,18 +1332,8 @@ def _hdt_training_matches(
             if index + reference.size > sampled.size:
                 continue
             observed = sampled[index : index + reference.size]
-            phase_error = np.unwrap(np.angle(observed * np.conj(reference)))
-            axis = np.arange(reference.size, dtype=np.float64)
-            phase_step, phase_intercept = np.polyfit(axis, phase_error, 1)
-            corrected = observed * np.exp(
-                -1j * (phase_intercept + phase_step * axis)
-            )
-            score = float(
-                np.abs(np.vdot(reference, corrected))
-                / max(
-                    np.linalg.norm(reference) * np.linalg.norm(corrected),
-                    np.finfo(np.float64).tiny,
-                )
+            _identified, score, _root, _lts_phase = (
+                _identify_hdt_training_reference(observed)
             )
             if score >= 0.80:
                 candidates.append((score, int(phase + index * integer_sps)))
@@ -1522,7 +1552,12 @@ def analyze_bluetooth_hdt_recording(
     coarse_first_center, _detection_correlation = matches[int(match_index) - 1]
     samples_per_symbol = recording.sample_rate_hz / _HDT_SYMBOL_RATE_HZ
     filtered_recording = replace(recording, iq=filtered_iq)
-    training_reference = hdt_rf_test_training_symbols()
+    coarse_training = _hdt_sample_symbols(
+        filtered_recording, coarse_first_center, _HDT_TRAINING_SYMBOLS
+    )
+    training_reference, _reference_score, lts_root, lts_phase = (
+        _identify_hdt_training_reference(coarse_training)
+    )
     hdt_reference = estimate_hdt_reference(
         filtered_iq,
         coarse_first_symbol_center_sample=coarse_first_center,
@@ -2195,6 +2230,8 @@ def analyze_bluetooth_hdt_recording(
             "hdt_payload_terminating_symbol_count": _HDT_TERMINATING_SYMBOLS,
             "hdt_payload_reference_source": "decoded_reencoded_bits",
             "hdt_rate_indicator": rate_indicator,
+            "hdt_lts_root": lts_root,
+            "hdt_lts_phase": lts_phase,
             "hdt_pca_a": pca_a,
             "hdt_nesn": nesn,
             "hdt_packet_format_indicator": packet_format_indicator,
