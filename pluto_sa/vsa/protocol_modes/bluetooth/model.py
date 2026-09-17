@@ -24,6 +24,8 @@ from pluto_protocol.bluetooth.common import le_whitening_sequence, prbs15_period
 from pluto_protocol.bluetooth.hdt import (
     HDT_DEFINITIONS,
     HDT_RF_TEST_CRC32_INIT,
+    HDT_RF_TEST_LTS_PHASE,
+    HDT_RF_TEST_LTS_ROOT,
     HDT_RF_TEST_PCA,
     HDTRate,
     convolutional_encode,
@@ -73,6 +75,8 @@ from pluto_sa.vsa.profiles.bluetooth_edr import (
 from pluto_sa.vsa.protocol import analyze_demodulated_packet_bits
 from pluto_sa.vsa.session import VSASession
 from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement.hdt import (
+    HDTPayloadEstimate,
+    HDTReferenceEstimate,
     apply_hdt_payload_estimate,
     apply_hdt_reference,
     build_hdt_evm_result,
@@ -1250,6 +1254,58 @@ def _identify_hdt_training_reference(
     return reference, float(scores[selected]), root, phase
 
 
+def _estimate_hdt_payload_decision_directed(
+    filtered_iq: np.ndarray,
+    preamble: HDTReferenceEstimate,
+    *,
+    samples_per_symbol: float,
+    start_symbol: int,
+    symbol_count: int,
+    alphabets: np.ndarray,
+) -> tuple[HDTPayloadEstimate, np.ndarray]:
+    """Estimate arbitrary-payload carrier phase from nearest HDT symbols."""
+
+    base = apply_hdt_reference(
+        filtered_iq,
+        preamble,
+        samples_per_symbol=samples_per_symbol,
+        start_symbol=start_symbol,
+        symbol_count=symbol_count,
+    ).astype(np.complex128)
+    axis = np.arange(base.size, dtype=np.float64)
+    candidates = np.asarray(alphabets, dtype=np.complex128)
+    phase_intercept = 0.0
+    phase_step = 0.0
+    corrected = base
+    for _iteration in range(4):
+        if candidates.ndim == 1:
+            labels = np.argmin(
+                np.abs(corrected[:, None] - candidates[None, :]), axis=1
+            )
+            ideal = candidates[labels]
+        else:
+            labels = np.argmin(np.abs(corrected[:, None] - candidates), axis=1)
+            ideal = candidates[np.arange(corrected.size), labels]
+        phase_error = np.unwrap(np.angle(corrected * np.conj(ideal)))
+        delta_step, delta_intercept = np.polyfit(axis, phase_error, 1)
+        phase_intercept += float(delta_intercept)
+        phase_step += float(delta_step)
+        corrected = base * np.exp(
+            -1j * (phase_intercept + phase_step * axis)
+        )
+    estimate = HDTPayloadEstimate(
+        phase_rad=float(
+            preamble.phase_rad
+            + preamble.phase_step_rad_per_symbol * int(start_symbol)
+            - phase_intercept
+        ),
+        phase_step_rad_per_symbol=float(
+            preamble.phase_step_rad_per_symbol - phase_step
+        ),
+    )
+    return estimate, np.asarray(corrected, dtype=np.complex64)
+
+
 def _hdt_qpsk_constellation(symbol_indices: np.ndarray) -> np.ndarray:
     even_phases = np.asarray(
         [np.pi / 4.0, 3.0 * np.pi / 4.0, -np.pi / 4.0, -3.0 * np.pi / 4.0]
@@ -1655,7 +1711,13 @@ def analyze_bluetooth_hdt_recording(
         )
     if packet_format_indicator != 0 or pdu_octets < 1:
         raise RuntimeError("Bluetooth HDT analyzer currently requires packet format 0")
-    payload_length = pdu_octets - 1
+    rf_test_length_convention = (
+        lts_root == HDT_RF_TEST_LTS_ROOT
+        and lts_phase == HDT_RF_TEST_LTS_PHASE
+    )
+    payload_length = pdu_octets - (1 if rf_test_length_convention else 4)
+    if payload_length < 0:
+        raise RuntimeError("Bluetooth HDT PDU Control is shorter than packet overhead")
     definition = hdt_definition(rate)
     coded_payload_bits = hdt_coded_payload_bit_count(rate, payload_length)
     payload_symbol_count = int(
@@ -1666,10 +1728,13 @@ def analyze_bluetooth_hdt_recording(
     )
     payload_stop = int(round(payload_start + payload_symbol_count * samples_per_symbol))
     payload_measurement_symbol_count = min(1000, payload_symbol_count)
+    explicit_terminating_symbol_count = (
+        _HDT_TERMINATING_SYMBOLS if rf_test_length_convention else 0
+    )
     payload_terminating_stop = int(
         round(
             payload_start
-            + (payload_symbol_count + _HDT_TERMINATING_SYMBOLS)
+            + (payload_symbol_count + explicit_terminating_symbol_count)
             * samples_per_symbol
         )
     )
@@ -1680,7 +1745,7 @@ def analyze_bluetooth_hdt_recording(
 
     payload_signal = _hdt_signal(rate)
     payload_session: VSASession | None = None
-    format0_bit_count = (pdu_octets + 4) * 8
+    format0_bit_count = (payload_length + 5) * 8
 
     def payload_labels(symbols: np.ndarray) -> np.ndarray:
         if definition.modulation in {"8PSK", "16QAM"}:
@@ -1697,48 +1762,77 @@ def analyze_bluetooth_hdt_recording(
             np.abs(symbols[:, None] - qpsk_alphabets), axis=1
         ).astype(np.int16)
 
-    # RF Test Packets have PRBS9 or PRBS15 payloads. Preserve the PRBS9 path;
-    # its fixed reference is available before any payload decision is made.
-    prbs9 = prbs9_period()
-    expected_payload_bits = prbs9[
-        np.arange(payload_length * 8, dtype=np.int64) % prbs9.size
-    ]
-    expected_format0_bits = hdt_rf_test_format0_bits(expected_payload_bits)
-    expected_coded_bits = puncture(
-        convolutional_encode(expected_format0_bits),
-        definition.payload_code_rate,
-    )[:coded_payload_bits]
-    expected_payload_reference = map_hdt_symbols(
-        expected_coded_bits, rate
-    )[:payload_symbol_count]
-    payload_evm_reference = expected_payload_reference[
-        :payload_measurement_symbol_count
-    ]
-    payload_estimate, payload_evm_measured = estimate_hdt_payload(
-        filtered_iq,
-        hdt_reference,
-        samples_per_symbol=samples_per_symbol,
-        start_symbol=_HDT_PAYLOAD_START_SYMBOL,
-        payload_reference=payload_evm_reference,
-    )
-    # Only try the alternative reference when PRBS9 is a poor match.
-    # This does not change the SRRC, preamble fit, timing or gain constraints.
-    reference_error = float(np.mean(np.abs(payload_evm_measured - payload_evm_reference) ** 2))
-    if reference_error > 0.04:
-        prbs15 = prbs15_period()
-        alternative_bits = prbs15[np.arange(payload_length * 8) % prbs15.size]
-        alternative_reference = map_hdt_symbols(
-            puncture(convolutional_encode(hdt_rf_test_format0_bits(alternative_bits)),
-                     definition.payload_code_rate), rate,
-        )[:payload_measurement_symbol_count]
-        alternative_estimate, alternative_measured = estimate_hdt_payload(
-            filtered_iq, hdt_reference, samples_per_symbol=samples_per_symbol,
+    if rf_test_length_convention:
+        # RF Test Packets have PRBS9 or PRBS15 payloads. Preserve the PRBS9
+        # path; its fixed reference is available before any payload decision.
+        prbs9 = prbs9_period()
+        expected_payload_bits = prbs9[
+            np.arange(payload_length * 8, dtype=np.int64) % prbs9.size
+        ]
+        expected_format0_bits = hdt_rf_test_format0_bits(expected_payload_bits)
+        expected_coded_bits = puncture(
+            convolutional_encode(expected_format0_bits),
+            definition.payload_code_rate,
+        )[:coded_payload_bits]
+        expected_payload_reference = map_hdt_symbols(
+            expected_coded_bits, rate
+        )[:payload_symbol_count]
+        payload_evm_reference = expected_payload_reference[
+            :payload_measurement_symbol_count
+        ]
+        payload_estimate, payload_evm_measured = estimate_hdt_payload(
+            filtered_iq,
+            hdt_reference,
+            samples_per_symbol=samples_per_symbol,
             start_symbol=_HDT_PAYLOAD_START_SYMBOL,
-            payload_reference=alternative_reference,
+            payload_reference=payload_evm_reference,
         )
-        alternative_error = float(np.mean(np.abs(alternative_measured - alternative_reference) ** 2))
-        if alternative_error < reference_error:
-            payload_estimate, payload_evm_measured = alternative_estimate, alternative_measured
+        # Only try the alternative reference when PRBS9 is a poor match.
+        reference_error = float(
+            np.mean(np.abs(payload_evm_measured - payload_evm_reference) ** 2)
+        )
+        if reference_error > 0.04:
+            prbs15 = prbs15_period()
+            alternative_bits = prbs15[np.arange(payload_length * 8) % prbs15.size]
+            alternative_reference = map_hdt_symbols(
+                puncture(
+                    convolutional_encode(hdt_rf_test_format0_bits(alternative_bits)),
+                    definition.payload_code_rate,
+                ),
+                rate,
+            )[:payload_measurement_symbol_count]
+            alternative_estimate, alternative_measured = estimate_hdt_payload(
+                filtered_iq,
+                hdt_reference,
+                samples_per_symbol=samples_per_symbol,
+                start_symbol=_HDT_PAYLOAD_START_SYMBOL,
+                payload_reference=alternative_reference,
+            )
+            alternative_error = float(
+                np.mean(np.abs(alternative_measured - alternative_reference) ** 2)
+            )
+            if alternative_error < reference_error:
+                payload_estimate = alternative_estimate
+                payload_evm_measured = alternative_measured
+    else:
+        if definition.modulation == "pi/4-QPSK":
+            blind_alphabets = _hdt_qpsk_constellation(
+                np.arange(payload_measurement_symbol_count)
+            )
+        else:
+            blind_alphabets = psk_constellation(
+                payload_signal.modulation, BLUETOOTH_HDT_MAPPING
+            )
+        payload_estimate, payload_evm_measured = (
+            _estimate_hdt_payload_decision_directed(
+                filtered_iq,
+                hdt_reference,
+                samples_per_symbol=samples_per_symbol,
+                start_symbol=_HDT_PAYLOAD_START_SYMBOL,
+                symbol_count=payload_measurement_symbol_count,
+                alphabets=blind_alphabets,
+            )
+        )
     payload_evm_first_center = (
         first_center + _HDT_PAYLOAD_START_SYMBOL * samples_per_symbol
     )
@@ -1783,7 +1877,7 @@ def analyze_bluetooth_hdt_recording(
         samples_per_symbol=samples_per_symbol,
         start_symbol=_HDT_PAYLOAD_START_SYMBOL,
         payload_symbol_offset=0,
-        symbol_count=payload_symbol_count + _HDT_TERMINATING_SYMBOLS,
+        symbol_count=payload_symbol_count + explicit_terminating_symbol_count,
     )
     payload_sig_corrected = payload_sig_corrected_all[:payload_symbol_count]
     measurement_payload_labels = payload_labels(payload_sig_corrected)
@@ -1818,7 +1912,7 @@ def analyze_bluetooth_hdt_recording(
     payload_evm_reference = fixed_payload_reference[:payload_measurement_symbol_count]
     terminating_reference = map_hdt_symbols(
         np.zeros(
-            _HDT_TERMINATING_SYMBOLS * definition.bits_per_symbol,
+            explicit_terminating_symbol_count * definition.bits_per_symbol,
             dtype=np.uint8,
         ),
         rate,
@@ -1934,7 +2028,11 @@ def analyze_bluetooth_hdt_recording(
     packet = analyze_demodulated_packet_bits(
         packet_bits, protocol_id="bluetooth.hdt", phy_name=rate.value,
         representation=BitRepresentation.LOGICAL,
-        context={"pca": HDT_RF_TEST_PCA, "crc_init": HDT_RF_TEST_CRC32_INIT},
+        context={
+            "pca": HDT_RF_TEST_PCA,
+            "crc_init": HDT_RF_TEST_CRC32_INIT,
+            "pdu_control_includes_crc": not rf_test_length_convention,
+        },
         packet_index=int(match_index) - 1,
         center_frequency_hz=recording.center_frequency_hz,
         start_sample=packet_start, stop_sample=payload_stop,
@@ -2227,7 +2325,11 @@ def analyze_bluetooth_hdt_recording(
             "hdt_output_power_window_stop_sample": payload_terminating_stop,
             "hdt_payload_evm_symbol_count": payload_measurement_symbol_count,
             "hdt_payload_evm_stop_sample": payload_evm_stop_sample,
-            "hdt_payload_terminating_symbol_count": _HDT_TERMINATING_SYMBOLS,
+            "hdt_payload_terminating_symbol_count": (
+                explicit_terminating_symbol_count
+            ),
+            "hdt_pdu_control_includes_crc": not rf_test_length_convention,
+            "hdt_payload_length_bytes": payload_length,
             "hdt_payload_reference_source": "decoded_reencoded_bits",
             "hdt_rate_indicator": rate_indicator,
             "hdt_lts_root": lts_root,

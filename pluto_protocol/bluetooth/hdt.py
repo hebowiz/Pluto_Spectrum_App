@@ -351,12 +351,19 @@ class BluetoothHDTDecoder:
                                "HDT Format 1 decoding is not implemented")
         if pdu_octets < 1:
             return unsupported("invalid_pdu_length", "Format 0 requires an Initial Portion")
-        expected = 57 + pdu_octets * 8 + 32
+        pdu_control_includes_crc = bool(
+            packet.context.get("pdu_control_includes_crc", False)
+        )
+        payload_length = pdu_octets - (4 if pdu_control_includes_crc else 1)
+        if payload_length < 0:
+            return unsupported(
+                "invalid_pdu_length", "PDU Control is shorter than the packet overhead"
+            )
+        expected = 57 + (payload_length + 1) * 8 + 32
         if bits.size < expected:
             return unsupported("truncated_payload",
                                f"Expected {expected} logical bits, received {bits.size}")
         definition = hdt_definition(rate)
-        payload_length = pdu_octets - 1
         format0_bits = bits[57:expected]
         pdu_bits = format0_bits[:-32]
         payload_bits = pdu_bits[8:]
@@ -373,7 +380,15 @@ class BluetoothHDTDecoder:
             PacketField("pfi", "PFI", 19, 20, control_data[19:20], packet_format_indicator, "Packet format 0"),
             PacketField("rate_indicator", "Rate Indicator", 20, 23, control_data[20:23], f"{rate.value} (0b{rate_indicator:03b})", f"{rate.value}: {definition.modulation}, code rate {definition.payload_code_rate}", FieldStatus.VALID),
             PacketField("rfu", "RFU", 23, 24, control_data[23:24], control_rfu),
-            PacketField("pdu_control", "PDU Control", 24, 33, control_data[24:33], pdu_octets, f"{pdu_octets} octet(s), excluding CRC"),
+            PacketField(
+                "pdu_control", "PDU Control", 24, 33, control_data[24:33],
+                pdu_octets,
+                (
+                    f"{pdu_octets} octet(s), payload plus CRC"
+                    if pdu_control_includes_crc
+                    else f"{pdu_octets} octet(s), excluding CRC"
+                ),
+            ),
             PacketField("hec_c", "HEC-C", 33, 57, control_data[33:57], f"0x{received_hec:06X}", f"Calculated 0x{calculated_hec:06X}", FieldStatus.VALID if hec_valid else FieldStatus.INVALID),
         )
         payload_offset = 57

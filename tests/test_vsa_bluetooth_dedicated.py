@@ -705,6 +705,27 @@ def test_dedicated_hdt_detects_packet_tx_lts_variant() -> None:
     assert all(result.metadata["hdt_lts_root"] == 1 for result in results)
     assert all(result.metadata["hdt_lts_phase"] == 2 for result in results)
     assert all(result.metadata["hdt_control_path_errors"] == 0 for result in results)
+    assert all(result.metadata["hdt_pdu_control_octets"] == 54 for result in results)
+    assert all(result.metadata["hdt_pdu_control_includes_crc"] for result in results)
+    assert all(result.metadata["hdt_payload_length_bytes"] == 50 for result in results)
+    assert all(result.metadata["hdt_payload_symbol_count"] == 119 for result in results)
+    assert all(
+        result.metadata["hdt_payload_terminating_symbol_count"] == 0
+        for result in results
+    )
+    assert all(result.metadata["hdt_payload_path_errors"] == 0 for result in results)
+    assert all(
+        result.metadata["hdt_payload_evm_rms_percent"] < 6.0
+        for result in results
+    )
+    assert all(
+        abs(
+            result.metadata["hdt_preamble_carrier_error_hz"]
+            - result.metadata["hdt_payload_carrier_error_hz"]
+        )
+        < 500.0
+        for result in results
+    )
 
 
 @pytest.mark.parametrize(
