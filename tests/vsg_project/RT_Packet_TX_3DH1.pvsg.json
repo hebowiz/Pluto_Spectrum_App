@@ -1,0 +1,357 @@
+{
+  "format": "pluto-vsg-project",
+  "version": 1,
+  "project": {
+    "name": "Received 3-DH1 Packet",
+    "standard": "Bluetooth BR / EDR",
+    "sample_rate_hz": 8000000.0,
+    "samples_per_symbol": 8,
+    "repeat_count": 1,
+    "period_symbols": null,
+    "center_frequency_hz": 2440000000.0,
+    "fields": [
+      {
+        "name": "Access Code",
+        "symbol_count": 72,
+        "logical_bit_count": 72,
+        "data_source": "Computed",
+        "data": "BD_ADDR",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": [
+          {
+            "name": "Preamble",
+            "symbol_count": 4,
+            "logical_bit_count": 4,
+            "data_source": "Computed",
+            "data": "Computed",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "Sync Word",
+            "symbol_count": 64,
+            "logical_bit_count": 64,
+            "data_source": "Computed",
+            "data": "LAP + BCH",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "Trailer",
+            "symbol_count": 4,
+            "logical_bit_count": 4,
+            "data_source": "Computed",
+            "data": "Computed",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          }
+        ]
+      },
+      {
+        "name": "Header",
+        "symbol_count": 54,
+        "logical_bit_count": 18,
+        "data_source": "Computed",
+        "data": "Header + HEC + 1/3 FEC",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": [
+          {
+            "name": "LT_ADDR",
+            "symbol_count": 9,
+            "logical_bit_count": 3,
+            "data_source": "Computed",
+            "data": "Computed",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "TYPE",
+            "symbol_count": 12,
+            "logical_bit_count": 4,
+            "data_source": "Computed",
+            "data": "Computed",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "FLOW",
+            "symbol_count": 3,
+            "logical_bit_count": 1,
+            "data_source": "Computed",
+            "data": "Computed",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "ARQN",
+            "symbol_count": 3,
+            "logical_bit_count": 1,
+            "data_source": "Computed",
+            "data": "Computed",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "SEQN",
+            "symbol_count": 3,
+            "logical_bit_count": 1,
+            "data_source": "Computed",
+            "data": "Computed",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          },
+          {
+            "name": "HEC",
+            "symbol_count": 24,
+            "logical_bit_count": 8,
+            "data_source": "Computed",
+            "data": "0xEA (manual) + 1/3 FEC",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "GFSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Gaussian",
+              "filter_parameter": 0.5
+            },
+            "children": []
+          }
+        ]
+      },
+      {
+        "name": "Guard",
+        "symbol_count": 5,
+        "logical_bit_count": null,
+        "data_source": "Computed",
+        "data": "Hold GFSK phase",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "GFSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Gaussian",
+          "filter_parameter": 0.5
+        },
+        "children": []
+      },
+      {
+        "name": "EDR Data",
+        "symbol_count": 245,
+        "logical_bit_count": null,
+        "data_source": "Computed",
+        "data": "3-DH1",
+        "relative_power_db": 0.0,
+        "modulation": {
+          "kind": "8DPSK",
+          "symbol_rate_hz": 1000000.0,
+          "filter_kind": "Root Raised Cosine",
+          "filter_parameter": 0.4
+        },
+        "children": [
+          {
+            "name": "EDR Sync",
+            "symbol_count": 11,
+            "logical_bit_count": 30,
+            "data_source": "Computed",
+            "data": "Reference + Sync Word",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "8DPSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Root Raised Cosine",
+              "filter_parameter": 0.4
+            },
+            "children": []
+          },
+          {
+            "name": "EDR Payload",
+            "symbol_count": 232,
+            "logical_bit_count": 696,
+            "data_source": "Pattern",
+            "data": "1111111110000011110111110001011100110010000010010100111011010001111001111100110110001010100100011100011011010101110001001100010001000000001000010001100001001110010101011000011011110100110111001000101000010101101001111110110010010010110111111001001101010011001100000001100011001010001101001011111110100010110001110101100101100111100011111011101000001101011011011101100000101101011111010101010000001010010101111001011101110000001110011101001001111010111010100010010000110011100001011110110110011010000111011110000111111111000001111011111000101110011001000001001010011101101000111100111110011011000101010010001110001101101010111000100110001000100000000100001000110000",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "8DPSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Root Raised Cosine",
+              "filter_parameter": 0.4
+            },
+            "children": [
+              {
+                "name": "Payload Header",
+                "symbol_count": 6,
+                "logical_bit_count": 16,
+                "data_source": "Computed",
+                "data": "LLID=0, FLOW=0, LENGTH=83",
+                "relative_power_db": 0.0,
+                "modulation": {
+                  "kind": "8DPSK",
+                  "symbol_rate_hz": 1000000.0,
+                  "filter_kind": "Root Raised Cosine",
+                  "filter_parameter": 0.4
+                },
+                "children": []
+              },
+              {
+                "name": "Payload Body",
+                "symbol_count": 221,
+                "logical_bit_count": 664,
+                "data_source": "Pattern",
+                "data": "1111111110000011110111110001011100110010000010010100111011010001111001111100110110001010100100011100011011010101110001001100010001000000001000010001100001001110010101011000011011110100110111001000101000010101101001111110110010010010110111111001001101010011001100000001100011001010001101001011111110100010110001110101100101100111100011111011101000001101011011011101100000101101011111010101010000001010010101111001011101110000001110011101001001111010111010100010010000110011100001011110110110011010000111011110000111111111000001111011111000101110011001000001001010011101101000111100111110011011000101010010001110001101101010111000100110001000100000000100001000110000",
+                "relative_power_db": 0.0,
+                "modulation": {
+                  "kind": "8DPSK",
+                  "symbol_rate_hz": 1000000.0,
+                  "filter_kind": "Root Raised Cosine",
+                  "filter_parameter": 0.4
+                },
+                "children": []
+              },
+              {
+                "name": "Payload CRC",
+                "symbol_count": 5,
+                "logical_bit_count": 16,
+                "data_source": "Computed",
+                "data": "CRC-16",
+                "relative_power_db": 0.0,
+                "modulation": {
+                  "kind": "8DPSK",
+                  "symbol_rate_hz": 1000000.0,
+                  "filter_kind": "Root Raised Cosine",
+                  "filter_parameter": 0.4
+                },
+                "children": []
+              }
+            ]
+          },
+          {
+            "name": "EDR Trailer",
+            "symbol_count": 2,
+            "logical_bit_count": 6,
+            "data_source": "Computed",
+            "data": "Trailer",
+            "relative_power_db": 0.0,
+            "modulation": {
+              "kind": "8DPSK",
+              "symbol_rate_hz": 1000000.0,
+              "filter_kind": "Root Raised Cosine",
+              "filter_parameter": 0.4
+            },
+            "children": []
+          }
+        ]
+      }
+    ],
+    "power_envelope": {
+      "enabled": true,
+      "on_level_db": 0.0,
+      "idle_level_db": -120.0,
+      "rise_symbols": 1.0,
+      "fall_symbols": 1.0,
+      "rise_delay_symbols": -1.0,
+      "fall_delay_symbols": 1.0,
+      "shape": "Cosine"
+    },
+    "bluetooth_br": {
+      "packet_kind": "3-DH1",
+      "lap": 13014654,
+      "uap": 107,
+      "clock_6_1": 43,
+      "lt_addr": 0,
+      "flow": 0,
+      "arqn": 0,
+      "seqn": 0,
+      "hec_auto": false,
+      "hec_manual": 234,
+      "whitening_enabled": false,
+      "payload_length_bytes": 83,
+      "payload_llid": 0,
+      "payload_flow": 0,
+      "payload_source": "Pattern",
+      "payload_pattern": "1111111110000011110111110001011100110010000010010100111011010001111001111100110110001010100100011100011011010101110001001100010001000000001000010001100001001110010101011000011011110100110111001000101000010101101001111110110010010010110111111001001101010011001100000001100011001010001101001011111110100010110001110101100101100111100011111011101000001101011011011101100000101101011111010101010000001010010101111001011101110000001110011101001001111010111010100010010000110011100001011110110110011010000111011110000111111111000001111011111000101110011001000001001010011101101000111100111110011011000101010010001110001101101010111000100110001000100000000100001000110000",
+      "frequency_deviation_hz": 160000.0,
+      "carrier_frequency_offset_hz": 0.0,
+      "gaussian_bt": 0.5,
+      "edr_guard_symbols": 5,
+      "edr_guard_relative_power_db": 0.0,
+      "edr_guard_ramp_in_symbols": 1.0,
+      "edr_guard_ramp_out_symbols": 1.0,
+      "edr_guard_ramp_shape": "Cosine",
+      "edr_rolloff": 0.4,
+      "edr_relative_power_db": 0.0,
+      "pre_idle_symbols": 8,
+      "post_idle_symbols": 8
+    },
+    "bluetooth_le": null,
+    "bluetooth_hdt": null,
+    "wifi": null,
+    "dect": null,
+    "manual_packet_fields": {
+      "br_access": "101010110111110011000010110110011001100111111001101001011000111100101010",
+      "br_type": "0001",
+      "br_length": "1100101000",
+      "br_crc": "1100001101111101",
+      "br_rfu": "000",
+      "edr_sync": "010111010111010111111010010010",
+      "edr_trailer": "000000"
+    }
+  }
+}
