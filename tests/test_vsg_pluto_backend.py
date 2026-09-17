@@ -15,8 +15,12 @@ from pluto_vsg.backends import (
     pluto_output_power_range_dbm,
 )
 from pluto_vsg.engine import GenerationResult
-from pluto_vsg.model import validate_project
-from pluto_vsg.profiles import bluetooth_br_edr_project
+from pluto_vsg.model import (
+    MAX_PACKET_REPETITIONS,
+    maximum_finite_repeat_count,
+    validate_project,
+)
+from pluto_vsg.profiles import bluetooth_br_edr_project, bluetooth_hdt_project
 
 
 class _FakeAttr:
@@ -56,6 +60,7 @@ class _FakeContext:
 
     def __init__(self) -> None:
         self.timeout_ms = None
+        self.timeout_history: list[int] = []
         self.phy = type("FakePhy", (), {})()
         self.phy.name = "ad9361-phy"
         self.phy.channels = []
@@ -72,6 +77,7 @@ class _FakeContext:
 
     def set_timeout(self, timeout_ms: int) -> None:
         self.timeout_ms = int(timeout_ms)
+        self.timeout_history.append(self.timeout_ms)
 
     def _calibration_mode_written(self, value: str) -> None:
         _FakePluto.events.append(f"calib:{value}")
@@ -97,6 +103,7 @@ class _FakePluto:
         self.uri = uri
         self._ctx = _FakeContext()
         self.transmitted: np.ndarray | None = None
+        self.transmitted_history: list[np.ndarray] = []
         self.destroy_count = 0
         self.zero_source_count = 0
         self.tx_enabled_history: list[list[int]] = []
@@ -154,6 +161,7 @@ class _FakePluto:
             self.events.append("dac_zero")
             return
         self.transmitted = np.asarray(values).copy()
+        self.transmitted_history.append(self.transmitted)
         self.events.append("buffer_transferred")
 
     def tx_destroy_buffer(self) -> None:
@@ -295,6 +303,55 @@ def test_pluto_backend_transfers_complete_schedule_once_with_noncyclic_dma(monke
     assert device.tx_lo_powerdown is True
 
 
+def test_pluto_backend_splits_finite_schedule_on_packet_boundaries(
+    monkeypatch,
+) -> None:
+    import pluto_vsg.backends.pluto as module
+
+    _install_fakes(monkeypatch)
+    prefix_count = round(0.002 * 8_000_000)
+    suffix_count = round(0.002 * 8_000_000)
+    frame = np.asarray([0.25, 0.5j, -0.75, -1j], dtype=np.complex64)
+    monkeypatch.setattr(
+        module,
+        "_MAX_NONCYCLIC_DMA_PAYLOAD_BYTES",
+        (prefix_count + suffix_count + frame.size * 2) * 4,
+    )
+    result = GenerationResult(iq=np.tile(frame, 5), sample_rate_hz=8_000_000.0)
+    backend = PlutoOutputBackend(_settings(burst_count=5))
+
+    backend.prepare()
+    backend.transfer(result)
+    backend.start()
+
+    device = _FakePluto.instances[-1]
+    assert backend._finite_chunk_packet_counts == [2, 2, 1]
+    assert len(device.transmitted_history) == 3
+    assert len({chunk.size for chunk in device.transmitted_history}) == 1
+    recovered = []
+    for chunk, packet_count in zip(
+        device.transmitted_history,
+        backend._finite_chunk_packet_counts,
+        strict=True,
+    ):
+        payload_size = packet_count * frame.size
+        recovered.append(chunk[prefix_count : prefix_count + payload_size])
+    np.testing.assert_allclose(
+        np.concatenate(recovered),
+        result.iq * (2**15 - 1),
+        rtol=0.0,
+        atol=1e-3,
+    )
+    report = backend.diagnostic_report()
+    assert report["finite_chunk_count"] == 3
+    assert report["finite_chunk_packet_counts"] == [2, 2, 1]
+    assert [item["success"] for item in report["finite_chunk_pushes"]] == [
+        True,
+        True,
+        True,
+    ]
+
+
 def test_pluto_backend_honors_stop_requested_during_buffer_transfer(monkeypatch) -> None:
     _install_fakes(monkeypatch)
     original_tx = _FakePluto.tx
@@ -401,11 +458,106 @@ def test_pluto_backend_diagnostic_report_is_json_safe(monkeypatch) -> None:
     }
     assert observations["before_noncyclic_push"]["tx_gain_db"] == -30.0
     assert report["superframe_sample_count"] > report["sample_count"]
+    assert report["host_superframe_bytes"] == report["superframe_sample_count"] * 8
+    assert report["iio_operation_timeout_ms"] == 3_000
+    assert report["tx_push_elapsed_ms"] is not None
+    assert report["tx_push_elapsed_ms"] >= 0.0
+    assert report["stream_commit_elapsed_ms"] is not None
+    assert report["stream_commit_elapsed_ms"] >= 0.0
+    assert report["failure_stage"] is None
     assert report["settings"]["digital_backoff_db"] == 0.0
     assert report["dac_full_scale"] == 2**15 - 1
     assert report["dac_peak_code"] == pytest.approx(2**15 - 1)
     assert report["dma_buffer_duration_ms"] > report["waveform_duration_ms"]
     assert "after_requested_gain" not in observations
+
+
+def test_pluto_backend_reports_noncyclic_push_timeout_stage(monkeypatch) -> None:
+    _install_fakes(monkeypatch)
+    original_tx = _FakePluto.tx
+
+    def timeout_during_transfer(device, values=None):
+        if values is not None:
+            raise TimeoutError("IIO transfer timed out")
+        original_tx(device, values)
+
+    monkeypatch.setattr(_FakePluto, "tx", timeout_during_transfer)
+    backend = PlutoOutputBackend(_settings(burst_count=1))
+    backend.prepare()
+    backend.transfer(
+        GenerationResult(iq=np.ones(8, dtype=np.complex64), sample_rate_hz=8_000_000.0)
+    )
+
+    with pytest.raises(TimeoutError, match="IIO transfer timed out"):
+        backend.start()
+
+    report = backend.diagnostic_report()
+    names = [event["name"] for event in report["events"]]
+    assert report["failure_stage"] == "noncyclic_push"
+    assert report["tx_push_elapsed_ms"] is not None
+    assert report["stream_commit_elapsed_ms"] is None
+    assert "noncyclic_push_failed:TimeoutError" in names
+    assert "noncyclic_push_completed" not in names
+
+
+def test_pluto_backend_reports_noncyclic_stream_commit_timeout_stage(
+    monkeypatch,
+) -> None:
+    _install_fakes(monkeypatch)
+
+    def timeout_during_commit(_device):
+        raise TimeoutError("IIO stream commit timed out")
+
+    monkeypatch.setattr(
+        PlutoOutputBackend,
+        "_commit_noncyclic_stream",
+        staticmethod(timeout_during_commit),
+    )
+    backend = PlutoOutputBackend(_settings(burst_count=1))
+    backend.prepare()
+    backend.transfer(
+        GenerationResult(iq=np.ones(8, dtype=np.complex64), sample_rate_hz=8_000_000.0)
+    )
+
+    with pytest.raises(TimeoutError, match="IIO stream commit timed out"):
+        backend.start()
+
+    report = backend.diagnostic_report()
+    names = [event["name"] for event in report["events"]]
+    assert report["failure_stage"] == "noncyclic_stream_commit"
+    assert report["tx_push_elapsed_ms"] is not None
+    assert report["stream_commit_elapsed_ms"] is not None
+    assert "noncyclic_push_completed" in names
+    assert "noncyclic_stream_commit_failed:TimeoutError" in names
+    assert "packet_schedule_submitted" not in names
+
+
+def test_pluto_backend_extends_timeout_only_for_large_finite_transfer(
+    monkeypatch,
+) -> None:
+    _install_fakes(monkeypatch)
+    monkeypatch.setattr(
+        PlutoOutputBackend,
+        "finite_transfer_timeout_ms",
+        property(lambda _backend: 5_000),
+    )
+    backend = PlutoOutputBackend(_settings(burst_count=1))
+    backend.prepare()
+    backend.transfer(
+        GenerationResult(iq=np.ones(8, dtype=np.complex64), sample_rate_hz=8_000_000.0)
+    )
+
+    backend.start()
+
+    device = _FakePluto.instances[-1]
+    assert device._ctx.timeout_history == [3_000, 5_000, 3_000]
+    names = [event["name"] for event in backend.diagnostic_report()["events"]]
+    assert "finite_timeout_applied" in names
+    assert "finite_timeout_restored" in names
+
+
+def test_finite_timeout_covers_sixty_mib_iio_chunk_and_queue_wait() -> None:
+    assert PlutoOutputBackend._finite_timeout_for_buffer_bytes(125_829_120) == 5_250
 
 
 def test_pluto_backend_skips_equivalent_rf_parameter_rewrites() -> None:
@@ -522,7 +674,7 @@ def test_pluto_backend_preserves_nonidentical_packet_schedule() -> None:
 
     prefix_count = round(0.002 * 8_000_000)
     np.testing.assert_allclose(
-        backend._superframe[prefix_count : prefix_count + 4],
+        backend._build_finite_chunk(0)[0][prefix_count : prefix_count + 4],
         result.iq * (2**15 - 1),
         rtol=0.0,
         atol=1e-3,
@@ -542,7 +694,7 @@ def test_pluto_backend_applies_configured_digital_backoff() -> None:
     prefix_count = round(0.002 * 8_000_000)
     expected = (2**15 - 1) * 10.0 ** (-6.0 / 20.0)
     np.testing.assert_allclose(
-        backend._superframe[prefix_count : prefix_count + 4],
+        backend._build_finite_chunk(0)[0][prefix_count : prefix_count + 4],
         expected,
         rtol=0.0,
         atol=1e-3,
@@ -797,7 +949,7 @@ def test_pluto_transmit_rejects_unprepared_device_without_reconfiguring(
         {"dma_preroll_s": -0.001},
         {"stop_guard_s": 0.001},
         {"burst_count": 0},
-        {"burst_count": 1001},
+        {"burst_count": 10_001},
         {"playback_mode": "unsupported"},
     ),
 )
@@ -806,9 +958,34 @@ def test_pluto_backend_rejects_unsupported_output_settings(change) -> None:
         PlutoOutputBackend(_settings(**change))
 
 
-def test_vsg_packet_repetition_is_limited_to_one_thousand() -> None:
-    project = replace(bluetooth_br_edr_project(), repeat_count=1001)
+def test_vsg_packet_repetition_is_limited_to_ten_thousand() -> None:
+    base = bluetooth_br_edr_project()
+    maximum = maximum_finite_repeat_count(base)
+    accepted = replace(base, repeat_count=maximum)
+    project = replace(base, repeat_count=maximum + 1)
 
+    assert not any(issue.path == "repeat_count" for issue in validate_project(accepted))
     issues = validate_project(project)
 
     assert any(issue.path == "repeat_count" for issue in issues)
+
+
+def test_hdt_1_25_ms_period_allows_ten_thousand_packets() -> None:
+    project = replace(bluetooth_hdt_project(), period_symbols=2_500.0)
+
+    assert maximum_finite_repeat_count(project) == 10_000
+
+
+def test_single_period_template_plans_ten_thousand_packets_without_full_schedule() -> None:
+    backend = PlutoOutputBackend(
+        _settings(burst_count=10_000, single_period_template=True)
+    )
+    frame = np.asarray([0.25, 0.5j, -0.75, -1j], dtype=np.complex64)
+
+    backend.transfer(GenerationResult(iq=frame, sample_rate_hz=8_000_000.0))
+
+    assert backend._buffer is not None
+    assert backend._buffer.size == frame.size
+    assert sum(backend._finite_chunk_packet_counts) == 10_000
+    assert backend.diagnostic_report()["sample_count"] == 40_000
+    assert MAX_PACKET_REPETITIONS == 10_000

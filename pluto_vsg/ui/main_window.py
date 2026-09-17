@@ -63,13 +63,19 @@ from pluto_vsg.model import (
     bluetooth_packet_properties,
     effective_post_idle_symbols,
     effective_period_symbols,
+    maximum_finite_repeat_count,
     minimum_period_symbols,
     validate_project,
     WiFiPSDUSource,
     WiFiScramblerSeedMode,
     WiFiSettings,
 )
-from pluto_vsg.persistence import load_project, save_project
+from pluto_vsg.persistence import (
+    load_project,
+    project_from_dict,
+    project_to_dict,
+    save_project,
+)
 from pluto_vsg.rf_level import generation_result_iq_levels
 from pluto_vsg.profiles import (
     bluetooth_br_edr_project,
@@ -104,6 +110,13 @@ from pluto_vsg.ui.frequency_settings import (
     effective_rf_frequency_hz,
     with_manual_rf_frequency,
 )
+
+
+_STARTUP_STATE_SCHEMA = "pluto-vsg-startup-state"
+_STARTUP_STATE_VERSION = 1
+_STARTUP_STATE_KEY = "startup/state"
+_STARTUP_GEOMETRY_KEY = "startup/geometry"
+_STARTUP_WINDOW_STATE_KEY = "startup/window_state"
 from pluto_vsg.ui.packet_settings import (
     SymbolTimeControl,
     bluetooth_classic_carriers,
@@ -2009,12 +2022,37 @@ class _ProjectChangeCommand(QtGui.QUndoCommand):
 class PlutoVSGWindow(QtWidgets.QMainWindow):
     """Own project state, generation, preview and first export workflow."""
 
-    def __init__(self, project: WaveformProject | None = None) -> None:
+    def __init__(
+        self,
+        project: WaveformProject | None = None,
+        *,
+        preferences: QtCore.QSettings | None = None,
+        restore_startup_state: bool = False,
+    ) -> None:
         super().__init__()
-        self.project = project or bluetooth_br_edr_project()
+        self._preferences = preferences or QtCore.QSettings(
+            "PlutoSpectrumApp", "PlutoVSG"
+        )
+        self._persist_startup_state = bool(restore_startup_state)
+        restored = (
+            self._load_startup_state()
+            if self._persist_startup_state and project is None
+            else {}
+        )
+        restored_project = restored.get("project")
+        self.project = (
+            project
+            or (
+                restored_project
+                if isinstance(restored_project, WaveformProject)
+                else None
+            )
+            or bluetooth_br_edr_project()
+        )
         self.result: GenerationResult | None = None
-        self.project_path: Path | None = None
-        self._field_display_mode = "all"
+        restored_path = str(restored.get("project_path", "") or "")
+        self.project_path: Path | None = Path(restored_path) if restored_path else None
+        self._field_display_mode = str(restored.get("field_display_mode", "all"))
         self._plot_initial_ranges: dict[
             str, tuple[list[float], list[float]]
         ] = {}
@@ -2029,7 +2067,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._shutdown_stop_requested = False
         self.undo_stack = QtGui.QUndoStack(self)
         self._selected_composer_block: ComposerBlock | None = None
-        preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
+        preferences = self._preferences
         self._pluto_uri = str(preferences.value("pluto_tx/uri", "") or "")
         self._pluto_digital_backoff_db = float(
             preferences.value("pluto_tx/digital_backoff_db", 0.0)
@@ -2061,8 +2099,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self._pluto_playback_mode = PlutoPlaybackMode.CONTINUOUS
         self._rf_enabled = False
-        self._modulation_enabled = True
-        self._continuous_enabled = True
+        self._modulation_enabled = bool(restored.get("modulation_enabled", True))
+        self._continuous_enabled = bool(restored.get("continuous_enabled", True))
         self._power_step_db = float(preferences.value("pluto_tx/power_step_db", 10.0))
         self._frequency_selections = {
             self.project.standard: default_frequency_selection(self.project)
@@ -2073,8 +2111,80 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._build_menus()
         self._build_workspace()
         self._configure_plot_interaction()
+        if self._persist_startup_state:
+            geometry = self._preferences.value(_STARTUP_GEOMETRY_KEY)
+            if geometry is not None:
+                self.restoreGeometry(geometry)
+            window_state = self._preferences.value(_STARTUP_WINDOW_STATE_KEY)
+            if window_state is not None:
+                self.restoreState(window_state)
         self._refresh_project_view()
         self.generate_waveform()
+
+    def _load_startup_state(self) -> dict[str, object]:
+        serialized = self._preferences.value(_STARTUP_STATE_KEY, "", type=str)
+        if not serialized:
+            return {}
+        try:
+            document = json.loads(serialized)
+            if not isinstance(document, dict):
+                raise ValueError("startup state root must be an object")
+            if document.get("schema") != _STARTUP_STATE_SCHEMA:
+                raise ValueError("startup state schema is invalid")
+            if int(document.get("version", 0)) != _STARTUP_STATE_VERSION:
+                raise ValueError("startup state version is unsupported")
+            project_document = document.get("project")
+            if not isinstance(project_document, dict):
+                raise ValueError("startup project is missing")
+            return {
+                "project": project_from_dict(project_document),
+                "project_path": document.get("project_path", ""),
+                "field_display_mode": document.get("field_display_mode", "all"),
+                "modulation_enabled": document.get("modulation_enabled", True),
+                "continuous_enabled": document.get("continuous_enabled", True),
+            }
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+
+    def _save_startup_state(self) -> None:
+        if not self._persist_startup_state:
+            return
+        document = {
+            "schema": _STARTUP_STATE_SCHEMA,
+            "version": _STARTUP_STATE_VERSION,
+            "project": project_to_dict(self.project),
+            "project_path": "" if self.project_path is None else str(self.project_path),
+            "field_display_mode": self._field_display_mode,
+            "modulation_enabled": self._modulation_enabled,
+            "continuous_enabled": self._continuous_enabled,
+        }
+        self._preferences.setValue(
+            _STARTUP_STATE_KEY,
+            json.dumps(document, ensure_ascii=False, separators=(",", ":")),
+        )
+        self._preferences.setValue(_STARTUP_GEOMETRY_KEY, self.saveGeometry())
+        self._preferences.setValue(_STARTUP_WINDOW_STATE_KEY, self.saveState())
+        self._preferences.setValue("pluto_tx/uri", self._pluto_uri)
+        self._preferences.setValue(
+            "pluto_tx/digital_backoff_db", self._pluto_digital_backoff_db
+        )
+        self._preferences.setValue(
+            "pluto_tx/output_power_dbm", self._pluto_output_power_dbm
+        )
+        self._preferences.setValue(
+            "pluto_tx/rf_bandwidth_hz", self._pluto_bandwidth_hz
+        )
+        self._preferences.setValue(
+            "pluto_tx/lead_in_guard_s", self._pluto_lead_in_guard_s
+        )
+        self._preferences.setValue(
+            "pluto_tx/dma_preroll_s", self._pluto_dma_preroll_s
+        )
+        self._preferences.setValue(
+            "pluto_tx/stop_guard_s", self._pluto_stop_guard_s
+        )
+        self._preferences.setValue("pluto_tx/power_step_db", self._power_step_db)
+        self._preferences.sync()
 
     def _update_pluto_window_title(self) -> None:
         identity = short_pluto_identity(self._pluto_uri)
@@ -2890,7 +3000,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 StandardProfile.WIFI: WiFiLegacyOFDMWaveformEngine,
                 StandardProfile.DECT: DectWaveformEngine,
             }.get(self.project.standard, BluetoothBRWaveformEngine)()
-            self.result = engine.generate(self.project)
+            self.result = engine.generate(replace(self.project, repeat_count=1))
         except ValueError as error:
             self.result = None
             self.verify_packet_button.setEnabled(False)
@@ -3002,9 +3112,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
 
     def _save_power_preferences(self) -> None:
-        preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
-        preferences.setValue("pluto_tx/output_power_dbm", self._pluto_output_power_dbm)
-        preferences.setValue("pluto_tx/power_step_db", self._power_step_db)
+        self._preferences.setValue(
+            "pluto_tx/output_power_dbm", self._pluto_output_power_dbm
+        )
+        self._preferences.setValue("pluto_tx/power_step_db", self._power_step_db)
 
     def _apply_output_power(self, value_dbm: float) -> None:
         self._pluto_output_power_dbm = float(value_dbm)
@@ -3050,8 +3161,14 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._apply_output_power(target)
 
     def _edit_repetitions(self) -> None:
+        maximum = maximum_finite_repeat_count(self.project)
         value, accepted = get_deferred_int(
-            self, "Repeat Count", "Number of packets (Continuous OFF)", self.project.repeat_count, 1, 1000,
+            self,
+            "Repeat Count",
+            f"Number of packets (Continuous OFF; maximum {maximum} for this period)",
+            self.project.repeat_count,
+            1,
+            maximum,
         )
         if accepted and value != self.project.repeat_count:
             self._commit_project_change(replace(self.project, repeat_count=value), "Change repeat count")
@@ -3153,9 +3270,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
 
     def _update_previews(self, result: GenerationResult) -> None:
         complete_iq = np.asarray(result.iq)
-        repeat_count = max(1, int(self.project.repeat_count))
-        if complete_iq.size % repeat_count == 0:
-            preview_sample_count = complete_iq.size // repeat_count
+        metadata_period = int(result.metadata.get("period_sample_count", 0) or 0)
+        if 0 < metadata_period <= complete_iq.size:
+            preview_sample_count = metadata_period
         else:
             # Waveform engines are expected to return an integer number of
             # repetitions. Fall back to the complete result rather than hide
@@ -3401,7 +3518,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self, "Export IQ", "waveform.npz", "NumPy IQ (*.npz)"
         )
         if path:
-            save_npz(path, self.result, self.project)
+            save_npz(path, self.result, replace(self.project, repeat_count=1))
             self.statusBar().showMessage(f"Exported {Path(path).name}")
 
     def _export_iq_tar(self) -> None:
@@ -3416,7 +3533,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             "R&S IQ TAR (*.iq.tar)",
         )
         if path:
-            save_iq_tar(path, self.result, self.project)
+            save_iq_tar(path, self.result, replace(self.project, repeat_count=1))
             self.statusBar().showMessage(f"Exported {Path(path).name}")
 
     def _export_wv(self) -> None:
@@ -3433,7 +3550,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         if not path:
             return
         try:
-            save_wv(path, self.result, self.project)
+            save_wv(path, self.result, replace(self.project, repeat_count=1))
         except (OSError, ValueError) as error:
             QtWidgets.QMessageBox.critical(self, "Export R&S WV", str(error))
             return
@@ -3471,6 +3588,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             playback_mode=self._pluto_playback_mode,
             waveform_active_rms_dbfs=active_rms_dbfs,
             waveform_peak_dbfs=peak_dbfs,
+            single_period_template=True,
         )
 
     def _pluto_configuration_signature(self) -> tuple[object, ...]:
@@ -3512,7 +3630,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._pluto_output_power_dbm = min(
             maximum_power, max(minimum_power, self._pluto_output_power_dbm)
         )
-        preferences = QtCore.QSettings("PlutoSpectrumApp", "PlutoVSG")
+        preferences = self._preferences
         preferences.setValue("pluto_tx/uri", self._pluto_uri)
         # Preserve the derived legacy value for older application versions.
         preferences.setValue(
@@ -3632,7 +3750,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._rf_enabled = True
         self._set_pluto_busy(preparing=False, transmitting=True)
         if self._pluto_playback_mode is PlutoPlaybackMode.CONTINUOUS:
-            period_samples = self.result.iq.size // self.project.repeat_count
+            period_samples = int(
+                self.result.metadata.get(
+                    "period_sample_count", self.result.iq.size
+                )
+            )
             period_ms = 1e3 * period_samples / self.result.sample_rate_hz
             self.statusBar().showMessage(
                 "Starting continuous Pluto TX: "
@@ -3640,7 +3762,17 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 f"{self.project.center_frequency_hz / 1e6:.6f} MHz; use Stop to end"
             )
         else:
-            duration_ms = 1e3 * self.result.iq.size / self.result.sample_rate_hz
+            period_samples = int(
+                self.result.metadata.get(
+                    "period_sample_count", self.result.iq.size
+                )
+            )
+            duration_ms = (
+                1e3
+                * period_samples
+                * self.project.repeat_count
+                / self.result.sample_rate_hz
+            )
             self.statusBar().showMessage(
                 f"Starting finite Pluto TX: {self.project.repeat_count} packet(s), "
                 f"{duration_ms:.3f} ms, "
@@ -3786,4 +3918,5 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             event.ignore()
             return
         self._shutdown_stop_requested = False
+        self._save_startup_state()
         super().closeEvent(event)

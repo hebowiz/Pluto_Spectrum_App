@@ -9,6 +9,9 @@ from pluto_protocol.bluetooth.hdt import HDTRate, HDT_RF_TEST_PCA, HDT_RF_TEST_C
 from pluto_protocol.dect.rf_modulation import DectRFPattern, DectScramblingMode
 
 
+MAX_PACKET_REPETITIONS = 10_000
+
+
 class StandardProfile(StrEnum):
     USER = "User"
     BLUETOOTH_BR_EDR = "Bluetooth BR / EDR"
@@ -427,6 +430,20 @@ def effective_post_idle_symbols(project: WaveformProject) -> float:
     return max(0, period - minimum) / float(project.samples_per_symbol)
 
 
+def finite_period_sample_count(project: WaveformProject) -> int:
+    if project.wifi is not None:
+        return round(
+            float(project.wifi.packet_period_us)
+            * 1e-6
+            * float(project.sample_rate_hz)
+        )
+    return waveform_timing_samples(project)[3]
+
+
+def maximum_finite_repeat_count(project: WaveformProject) -> int:
+    return MAX_PACKET_REPETITIONS
+
+
 def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
     issues: list[ValidationIssue] = []
     from pluto_vsg.packet_fields import validate_manual_fields
@@ -445,10 +462,11 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
         )
     if project.repeat_count < 1:
         issues.append(ValidationIssue("repeat_count", "Repeat count must be positive."))
-    elif project.repeat_count > 1000:
+    elif project.repeat_count > MAX_PACKET_REPETITIONS:
         issues.append(
             ValidationIssue(
-                "repeat_count", "Pluto VSG supports at most 1000 packet repetitions."
+                "repeat_count",
+                f"Repeat count must not exceed {MAX_PACKET_REPETITIONS:,}.",
             )
         )
     if project.period_symbols is not None:

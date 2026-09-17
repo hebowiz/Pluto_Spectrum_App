@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pyqtgraph as pg
 import numpy as np
 import pytest
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_sa.vsa.iqtar import load_iq_tar
 from pluto_sa.vsa.profiles.bluetooth_br import (
@@ -114,6 +114,69 @@ def test_new_menu_uses_shared_le_and_plain_hdt_packet_actions() -> None:
         assert window.project.bluetooth_le.phy == BluetoothLEPhy.LE_1M
     finally:
         window.close()
+
+
+def test_vsg_preview_keeps_one_period_for_ten_thousand_packet_project() -> None:
+    pg.mkQApp("Pluto VSG compact repeat preview")
+    project = replace(bluetooth_hdt_project(), repeat_count=10_000)
+    window = PlutoVSGWindow(project)
+    try:
+        assert window.result is not None
+        assert window.result.iq.size == window.result.metadata["period_sample_count"]
+        settings = window._current_pluto_settings()
+        assert settings.burst_count == 10_000
+        assert settings.single_period_template is True
+    finally:
+        window.close()
+
+
+def test_vsg_restores_last_project_controls_and_window_state(tmp_path) -> None:
+    pg.mkQApp("Pluto VSG startup state persistence")
+    settings_path = tmp_path / "vsg-settings.ini"
+    preferences = QtCore.QSettings(
+        str(settings_path), QtCore.QSettings.Format.IniFormat
+    )
+    project = replace(
+        bluetooth_hdt_project(),
+        name="Restored HDT project",
+        repeat_count=10_000,
+        period_symbols=2_500.0,
+    )
+    first = PlutoVSGWindow(
+        project,
+        preferences=preferences,
+        restore_startup_state=True,
+    )
+    try:
+        first.project_path = tmp_path / "restored.pvsg.json"
+        first._modulation_enabled = False
+        first._continuous_enabled = False
+        first._field_display_mode = "off"
+        first._pluto_uri = "usb:persisted"
+        first._pluto_lead_in_guard_s = 0.023
+        first._power_step_db = 2.5
+        first.resize(1234, 777)
+    finally:
+        first.close()
+
+    restored = PlutoVSGWindow(
+        preferences=preferences,
+        restore_startup_state=True,
+    )
+    try:
+        assert restored.project == project
+        assert restored.project_path == tmp_path / "restored.pvsg.json"
+        assert restored._modulation_enabled is False
+        assert restored._continuous_enabled is False
+        assert restored._field_display_mode == "off"
+        assert restored._pluto_uri == "usb:persisted"
+        assert restored._pluto_lead_in_guard_s == pytest.approx(0.023)
+        assert restored._power_step_db == pytest.approx(2.5)
+        assert restored._rf_enabled is False
+        assert preferences.contains("startup/geometry")
+        assert preferences.contains("startup/window_state")
+    finally:
+        restored.close()
 
 
 def test_le_carrier_list_and_offset_define_generated_frequency() -> None:

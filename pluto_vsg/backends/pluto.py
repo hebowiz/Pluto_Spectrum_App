@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -21,6 +22,7 @@ from pluto_common import (
 )
 from pluto_vsg.backends.base import BackendCapabilities
 from pluto_vsg.engine import GenerationResult
+from pluto_vsg.model import MAX_PACKET_REPETITIONS
 from pluto_vsg.rf_level import generation_result_iq_levels
 
 
@@ -29,9 +31,15 @@ _PLUTO_MUTED_GAIN_DB = -89.75
 _DEFAULT_STARTUP_DELAY_S = 0.010
 _DEFAULT_DMA_PREROLL_S = 0.010
 _DEFAULT_COMPLETION_MARGIN_S = 0.100
-_MAX_BURST_COUNT = 1000
 _NONCYCLIC_SUFFIX_GUARD_S = 0.002
 _IIO_OPERATION_TIMEOUT_MS = 3_000
+_FINITE_TX_MIN_HOST_THROUGHPUT_BYTES_PER_S = 32 * 1024 * 1024
+# Repeated non-cyclic pushes may first wait for the preceding DMA block to
+# finish before the next USB copy begins. Keep roughly one maximum HDT chunk
+# duration in addition to the conservative host-transfer estimate.
+_FINITE_TX_TIMEOUT_MARGIN_MS = 1_500
+_IIO_COMPLEX_SAMPLE_BYTES = 4
+_MAX_NONCYCLIC_DMA_PAYLOAD_BYTES = 60 * 1024 * 1024
 _SERIAL_PATTERN = re.compile(r"\bserial\s*[=:]\s*([^\s,;]+)", re.IGNORECASE)
 
 # Provisional conducted-power calibration measured at 2440 MHz with a
@@ -166,6 +174,7 @@ class PlutoTransmitSettings:
     playback_mode: PlutoPlaybackMode = PlutoPlaybackMode.FINITE
     waveform_active_rms_dbfs: float = 0.0
     waveform_peak_dbfs: float = 0.0
+    single_period_template: bool = False
 
     @property
     def resolved_hardware_gain_db(self) -> float:
@@ -194,6 +203,10 @@ class PlutoOutputBackend:
         self._validate_settings(settings)
         self._buffer: np.ndarray | None = None
         self._superframe: np.ndarray | None = None
+        self._finite_chunk_packet_counts: list[int] = []
+        self._finite_chunk_pushes: list[dict[str, object]] = []
+        self._finite_chunk_sample_count = 0
+        self._finite_prefix_count = 0
         self._sample_count = 0
         self._frame_sample_count = 0
         self._waveform_peak = 0.0
@@ -218,6 +231,10 @@ class PlutoOutputBackend:
         self._firmware: tuple[int, int] | None = None
         self._calibration_mode: str | None = None
         self._calibration_mode_raw: str | None = None
+        self._tx_push_elapsed_ms: float | None = None
+        self._stream_commit_elapsed_ms: float | None = None
+        self._failure_stage: str | None = None
+        self._failed_chunk_index: int | None = None
         self._state = "MUTED"
         self._trace_started_utc = datetime.now(timezone.utc).isoformat()
 
@@ -362,14 +379,27 @@ class PlutoOutputBackend:
             ),
             "dac_full_scale": _PLUTO_DAC_FULL_SCALE,
             "dac_peak_code": self._dac_peak_code,
-            "superframe_sample_count": 0
-            if self._superframe is None
-            else int(self._superframe.size),
+            "superframe_sample_count": self.dma_total_sample_count,
+            "host_superframe_bytes": self.dma_total_host_bytes,
+            "finite_chunk_count": len(self._finite_chunk_packet_counts),
+            "finite_chunk_sample_count": self._finite_chunk_sample_count,
+            "finite_chunk_packet_counts": list(self._finite_chunk_packet_counts),
+            "finite_chunk_pushes": list(self._finite_chunk_pushes),
+            "maximum_noncyclic_dma_payload_bytes": (
+                _MAX_NONCYCLIC_DMA_PAYLOAD_BYTES
+            ),
+            "iio_operation_timeout_ms": _IIO_OPERATION_TIMEOUT_MS,
+            "finite_transfer_timeout_ms": self.finite_transfer_timeout_ms,
+            "tx_push_elapsed_ms": self._tx_push_elapsed_ms,
+            "stream_commit_elapsed_ms": self._stream_commit_elapsed_ms,
+            "failure_stage": self._failure_stage,
+            "failed_chunk_index": self._failed_chunk_index,
             "preload_guard_ms": self._preload_guard_s * 1e3,
             "waveform_duration_ms": self.waveform_duration_s * 1e3,
             "frame_duration_ms": self.frame_duration_s * 1e3,
             "period_duration_ms": self.frame_duration_s * 1e3,
             "dma_buffer_duration_ms": self.dma_buffer_duration_s * 1e3,
+            "last_dma_buffer_duration_ms": self.last_dma_buffer_duration_s * 1e3,
             "events": events,
             "hardware_observations": observations,
         }
@@ -439,8 +469,11 @@ class PlutoOutputBackend:
             raise ValueError("Pluto TX DMA pre-roll must not be negative")
         if settings.stop_guard_s < 0.010:
             raise ValueError("Pluto TX completion guard must be at least 10 ms")
-        if not 1 <= int(settings.burst_count) <= _MAX_BURST_COUNT:
-            raise ValueError("Pluto packet count must be between 1 and 1000")
+        if not 1 <= int(settings.burst_count) <= MAX_PACKET_REPETITIONS:
+            raise ValueError(
+                f"Pluto packet count must be between 1 and "
+                f"{MAX_PACKET_REPETITIONS:,}"
+            )
         if int(settings.burst_count) != settings.burst_count:
             raise ValueError("Pluto packet count must be an integer")
 
@@ -479,10 +512,7 @@ class PlutoOutputBackend:
                 # Keep all hardware access on the TX owner thread, but give
                 # the context a finite upper bound so cleanup can finish (or
                 # fail safely with the LO already powered down).
-                context = getattr(sdr, "_ctx", None)
-                set_timeout = getattr(context, "set_timeout", None)
-                if callable(set_timeout):
-                    set_timeout(_IIO_OPERATION_TIMEOUT_MS)
+                cls._set_iio_timeout(sdr, _IIO_OPERATION_TIMEOUT_MS)
                 return sdr, uri, lease
             except Exception as error:
                 errors.append(f"{uri or 'auto'}: {error}")
@@ -490,10 +520,20 @@ class PlutoOutputBackend:
         detail = "; ".join(errors) or "no usable IIO context"
         raise RuntimeError(f"Unable to open selected ADALM-Pluto ({detail})")
 
+    @staticmethod
+    def _set_iio_timeout(sdr, timeout_ms: int) -> bool:
+        context = getattr(sdr, "_ctx", None)
+        set_timeout = getattr(context, "set_timeout", None)
+        if not callable(set_timeout):
+            return False
+        set_timeout(int(timeout_ms))
+        return True
+
     def transfer(self, result: GenerationResult) -> None:
-        iq = np.asarray(result.iq, dtype=np.complex128).reshape(-1)
-        if not iq.size:
+        source_iq = np.asarray(result.iq).reshape(-1)
+        if not source_iq.size:
             raise ValueError("Cannot transmit an empty waveform")
+        iq = np.asarray(source_iq, dtype=np.complex128)
         if not np.all(np.isfinite(iq)):
             raise ValueError("Pluto transmission requires finite IQ samples")
         if float(np.max(np.abs(iq))) > 1.0 + 1e-6:
@@ -502,8 +542,14 @@ class PlutoOutputBackend:
             raise ValueError("Transferred waveform sample rate differs from Pluto TX settings")
 
         burst_count = int(self.settings.burst_count)
-        if iq.size % burst_count:
+        if self.settings.single_period_template:
+            frame_sample_count = int(iq.size)
+            schedule_sample_count = frame_sample_count * burst_count
+        elif iq.size % burst_count:
             raise ValueError("Generated IQ cannot be divided into equal Pluto frames")
+        else:
+            frame_sample_count = int(iq.size // burst_count)
+            schedule_sample_count = int(iq.size)
         self._waveform_peak = float(np.max(np.abs(iq)))
         level_metrics = generation_result_iq_levels(result)
         if level_metrics.active_sample_count == 0 or not np.isfinite(
@@ -548,8 +594,12 @@ class PlutoOutputBackend:
         imag = np.clip(iq.imag, -1.0, 1.0) * dac_scale
         self._buffer = (real + 1j * imag).astype(np.complex64)
         self._dac_peak_code = float(np.max(np.abs(self._buffer)))
-        self._sample_count = int(iq.size)
-        self._frame_sample_count = int(iq.size // burst_count)
+        self._sample_count = schedule_sample_count
+        self._frame_sample_count = frame_sample_count
+        self._finite_chunk_packet_counts = []
+        self._finite_chunk_pushes = []
+        self._finite_chunk_sample_count = 0
+        self._finite_prefix_count = 0
         playback_mode = PlutoPlaybackMode(self.settings.playback_mode)
         if playback_mode is PlutoPlaybackMode.CONTINUOUS:
             # GenerationResult contains the complete finite schedule. A cyclic
@@ -567,14 +617,53 @@ class PlutoOutputBackend:
         suffix_count = int(
             round(_NONCYCLIC_SUFFIX_GUARD_S * self.settings.sample_rate_hz)
         )
-        self._superframe = np.concatenate(
-            (
-                np.zeros(prefix_count, dtype=np.complex64),
-                self._buffer,
-                np.zeros(suffix_count, dtype=np.complex64),
-            )
+        maximum_chunk_samples = (
+            _MAX_NONCYCLIC_DMA_PAYLOAD_BYTES // _IIO_COMPLEX_SAMPLE_BYTES
         )
+        guard_samples = prefix_count + suffix_count
+        packets_per_chunk = (
+            maximum_chunk_samples - guard_samples
+        ) // self._frame_sample_count
+        if packets_per_chunk < 1:
+            raise ValueError(
+                "One packet period plus Pluto DMA guards exceeds the finite "
+                "chunk size limit"
+            )
+        packets_per_chunk = min(burst_count, packets_per_chunk)
+        self._finite_chunk_sample_count = (
+            prefix_count
+            + packets_per_chunk * self._frame_sample_count
+            + suffix_count
+        )
+        self._finite_prefix_count = prefix_count
+        for first_packet in range(0, burst_count, packets_per_chunk):
+            packet_count = min(packets_per_chunk, burst_count - first_packet)
+            self._finite_chunk_packet_counts.append(packet_count)
+        self._superframe = None
+        self._record_event("finite_chunk_plan_prepared")
         self._record_event("host_frame_prepared")
+
+    def _build_finite_chunk(self, index: int) -> tuple[np.ndarray, float]:
+        if self._buffer is None:
+            raise RuntimeError("Finite chunk source is unavailable")
+        started = time.monotonic()
+        packet_count = self._finite_chunk_packet_counts[index]
+        chunk = np.zeros(self._finite_chunk_sample_count, dtype=np.complex64)
+        payload_start = self._finite_prefix_count
+        payload_stop = payload_start + packet_count * self._frame_sample_count
+        destination = chunk[payload_start:payload_stop].reshape(
+            packet_count, self._frame_sample_count
+        )
+        if self.settings.single_period_template:
+            destination[:] = self._buffer[: self._frame_sample_count]
+        else:
+            first_packet = sum(self._finite_chunk_packet_counts[:index])
+            source_start = first_packet * self._frame_sample_count
+            source_stop = source_start + packet_count * self._frame_sample_count
+            destination[:] = self._buffer[source_start:source_stop].reshape(
+                packet_count, self._frame_sample_count
+            )
+        return chunk, (time.monotonic() - started) * 1e3
 
     @property
     def waveform_duration_s(self) -> float:
@@ -592,9 +681,51 @@ class PlutoOutputBackend:
 
     @property
     def dma_buffer_duration_s(self) -> float:
-        if self._superframe is None:
-            return 0.0
-        return self._superframe.size / self.settings.sample_rate_hz
+        return self.dma_total_sample_count / self.settings.sample_rate_hz
+
+    @property
+    def last_dma_buffer_duration_s(self) -> float:
+        if self._finite_chunk_packet_counts:
+            return self._finite_chunk_sample_count / self.settings.sample_rate_hz
+        if self._superframe is not None:
+            return self._superframe.size / self.settings.sample_rate_hz
+        return 0.0
+
+    @property
+    def dma_total_sample_count(self) -> int:
+        if self._finite_chunk_packet_counts:
+            return (
+                len(self._finite_chunk_packet_counts)
+                * self._finite_chunk_sample_count
+            )
+        return 0 if self._superframe is None else int(self._superframe.size)
+
+    @property
+    def dma_total_host_bytes(self) -> int:
+        if self._finite_chunk_packet_counts:
+            return self.dma_total_sample_count * np.dtype(np.complex64).itemsize
+        return 0 if self._superframe is None else int(self._superframe.nbytes)
+
+    @staticmethod
+    def _finite_timeout_for_buffer_bytes(buffer_bytes: int) -> int:
+        estimated_transfer_ms = (
+            max(0, int(buffer_bytes))
+            / _FINITE_TX_MIN_HOST_THROUGHPUT_BYTES_PER_S
+            * 1e3
+        )
+        return max(
+            _IIO_OPERATION_TIMEOUT_MS,
+            int(np.ceil(estimated_transfer_ms + _FINITE_TX_TIMEOUT_MARGIN_MS)),
+        )
+
+    @property
+    def finite_transfer_timeout_ms(self) -> int:
+        buffer_bytes = (
+            self._finite_chunk_sample_count * np.dtype(np.complex64).itemsize
+            if self._finite_chunk_packet_counts
+            else 0 if self._superframe is None else int(self._superframe.nbytes)
+        )
+        return self._finite_timeout_for_buffer_bytes(buffer_bytes)
 
     @staticmethod
     def _firmware_version(sdr) -> tuple[int, int] | None:
@@ -907,12 +1038,15 @@ class PlutoOutputBackend:
         return True
 
     def start(self) -> None:
-        if self._buffer is None or self._superframe is None:
+        playback_mode = PlutoPlaybackMode(self.settings.playback_mode)
+        waveform_ready = self._superframe is not None or bool(
+            self._finite_chunk_packet_counts
+        )
+        if self._buffer is None or not waveform_ready:
             raise RuntimeError("Transfer a waveform before starting Pluto TX")
         sdr, uri, lease = self._open_pluto(self.settings.connection_uri)
         self._opened_uri = uri
         self._sdr = sdr
-        playback_mode = PlutoPlaybackMode(self.settings.playback_mode)
         try:
             # TX LO powerdown is the hard mute. Gain attenuation remains a
             # second layer, but is not relied upon to suppress preparation.
@@ -972,7 +1106,19 @@ class PlutoOutputBackend:
             if playback_mode is PlutoPlaybackMode.CONTINUOUS:
                 self._observe_hardware("before_cyclic_push", sdr)
                 self._record_event("cyclic_push_started")
-                sdr.tx(self._superframe)
+                push_started = time.monotonic()
+                try:
+                    sdr.tx(self._superframe)
+                except Exception as error:
+                    self._failure_stage = "cyclic_push"
+                    self._record_event(
+                        f"cyclic_push_failed:{type(error).__name__}"
+                    )
+                    raise
+                finally:
+                    self._tx_push_elapsed_ms = (
+                        time.monotonic() - push_started
+                    ) * 1e3
                 self._record_event("cyclic_push_completed")
                 self._record_event("continuous_playback_started")
                 while not self._stop_event.wait(0.025):
@@ -983,18 +1129,138 @@ class PlutoOutputBackend:
                 # short zero prefix is intentionally part of the buffer so any
                 # DMA/DAC source transition cannot truncate the first packet.
                 self._observe_hardware("before_noncyclic_push", sdr)
-                self._record_event("noncyclic_push_started")
-                sdr.tx(self._superframe)
-                self._record_event("noncyclic_push_completed")
-                if self._commit_noncyclic_stream(sdr):
-                    self._record_event("noncyclic_stream_committed")
-                self._record_event("packet_schedule_submitted")
+                finite_timeout_ms = self.finite_transfer_timeout_ms
+                timeout_extended = finite_timeout_ms > _IIO_OPERATION_TIMEOUT_MS
+                if timeout_extended:
+                    try:
+                        timeout_extended = self._set_iio_timeout(
+                            sdr, finite_timeout_ms
+                        )
+                    except Exception as error:
+                        self._failure_stage = "finite_timeout_apply"
+                        self._record_event(
+                            f"finite_timeout_apply_failed:{type(error).__name__}"
+                        )
+                        raise
+                    if timeout_extended:
+                        self._record_event("finite_timeout_applied")
+                transfer_error: Exception | None = None
+                try:
+                    self._record_event("noncyclic_push_started")
+                    push_started = time.monotonic()
+                    try:
+                        with ThreadPoolExecutor(
+                            max_workers=1,
+                            thread_name_prefix="pluto-vsg-chunk",
+                        ) as chunk_executor:
+                            chunk, generation_ms = self._build_finite_chunk(0)
+                            self._record_event("finite_double_buffer_started")
+                            for zero_index, packet_count in enumerate(
+                                self._finite_chunk_packet_counts
+                            ):
+                                index = zero_index + 1
+                                if self._stop_event.is_set():
+                                    self._record_event(
+                                        "finite_chunk_sequence_cancelled"
+                                    )
+                                    return
+                                next_future = (
+                                    chunk_executor.submit(
+                                        self._build_finite_chunk,
+                                        zero_index + 1,
+                                    )
+                                    if zero_index + 1
+                                    < len(self._finite_chunk_packet_counts)
+                                    else None
+                                )
+                                self._record_event(
+                                    f"finite_chunk_{index}_push_started"
+                                )
+                                chunk_started = time.monotonic()
+                                chunk_report: dict[str, object] = {
+                                    "index": index,
+                                    "packet_count": packet_count,
+                                    "sample_count": int(chunk.size),
+                                    "host_bytes": int(chunk.nbytes),
+                                    "iio_payload_bytes": int(chunk.size)
+                                    * _IIO_COMPLEX_SAMPLE_BYTES,
+                                    "generation_ms": generation_ms,
+                                    "success": False,
+                                }
+                                try:
+                                    sdr.tx(chunk)
+                                except Exception as error:
+                                    self._failed_chunk_index = index
+                                    chunk_report["error"] = (
+                                        f"{type(error).__name__}: {error}"
+                                    )
+                                    raise
+                                else:
+                                    chunk_report["success"] = True
+                                    self._record_event(
+                                        f"finite_chunk_{index}_push_completed"
+                                    )
+                                finally:
+                                    chunk_report["elapsed_ms"] = (
+                                        time.monotonic() - chunk_started
+                                    ) * 1e3
+                                    self._finite_chunk_pushes.append(chunk_report)
+                                if next_future is not None:
+                                    chunk, generation_ms = next_future.result()
+                    except Exception as error:
+                        self._failure_stage = "noncyclic_push"
+                        self._record_event(
+                            f"noncyclic_push_failed:{type(error).__name__}"
+                        )
+                        raise
+                    finally:
+                        self._tx_push_elapsed_ms = (
+                            time.monotonic() - push_started
+                        ) * 1e3
+                    self._record_event("noncyclic_push_completed")
+                    commit_started = time.monotonic()
+                    try:
+                        stream_committed = self._commit_noncyclic_stream(sdr)
+                    except Exception as error:
+                        self._failure_stage = "noncyclic_stream_commit"
+                        self._record_event(
+                            "noncyclic_stream_commit_failed:"
+                            f"{type(error).__name__}"
+                        )
+                        raise
+                    finally:
+                        self._stream_commit_elapsed_ms = (
+                            time.monotonic() - commit_started
+                        ) * 1e3
+                    if stream_committed:
+                        self._record_event("noncyclic_stream_committed")
+                    self._record_event("packet_schedule_submitted")
+                except Exception as error:
+                    transfer_error = error
+                    raise
+                finally:
+                    if timeout_extended:
+                        try:
+                            self._set_iio_timeout(sdr, _IIO_OPERATION_TIMEOUT_MS)
+                        except Exception as error:
+                            self._record_event(
+                                "finite_timeout_restore_failed:"
+                                f"{type(error).__name__}"
+                            )
+                            if transfer_error is None:
+                                self._failure_stage = "finite_timeout_restore"
+                                raise
+                        else:
+                            self._record_event("finite_timeout_restored")
                 # libiio implementations differ on whether push returns after
                 # queueing or after playback. Keep the user completion margin
                 # as a post-submit hold, but do not inflate the DMA buffer with
                 # a long zero tail: large one-shot USB buffers proved unreliable.
                 self._wait_precise(
-                    max(self.dma_buffer_duration_s, self.settings.stop_guard_s)
+                    max(
+                        self.last_dma_buffer_duration_s,
+                        self.settings.stop_guard_s,
+                    )
                 )
                 self._record_event("finite_buffer_elapsed")
         except Exception:

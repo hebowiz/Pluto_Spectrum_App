@@ -8,7 +8,7 @@ from pluto_vsg.ui.main_window import PlutoVSGWindow
 
 
 def build_vsg_window() -> PlutoVSGWindow:
-    return PlutoVSGWindow()
+    return PlutoVSGWindow(restore_startup_state=True)
 
 
 def main() -> int:
