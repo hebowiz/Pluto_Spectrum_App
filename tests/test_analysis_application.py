@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_sa.vsa.ui.application_window import PlutoAnalysisWindow
 
@@ -82,14 +82,62 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
         assert window.control_panel.buttons["Analyzer Mode"].text() == (
             "Analyzer Mode\nGeneric VSA"
         )
+        assert window.control_panel.buttons["Analyzer Mode"].minimumHeight() == 72
+        assert window.control_panel.buttons["Device"].minimumHeight() == 50
+        assert [
+            window.control_panel.system_group.layout().itemAt(index).widget().text()
+            for index in range(window.control_panel.system_group.layout().count())
+            if window.control_panel.system_group.layout().itemAt(index).widget()
+            is not None
+        ] == ["State", "File", "Device"]
+        assert window.control_panel.back_button.minimumHeight() == 50
+        window.control_panel.buttons["Analyzer Mode"].click()
+        assert window.control_panel.stack.currentWidget() is window.control_panel.mode_page
+        right_click = QtGui.QMouseEvent(
+            QtCore.QEvent.Type.MouseButtonPress,
+            QtCore.QPointF(2.0, 2.0),
+            QtCore.QPointF(2.0, 2.0),
+            QtCore.Qt.MouseButton.RightButton,
+            QtCore.Qt.MouseButton.RightButton,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+        QtWidgets.QApplication.sendEvent(
+            window.control_panel.buttons["mode:generic"], right_click
+        )
+        assert window.control_panel.stack.currentWidget() is window.control_panel.main_page
         single_action = window.generic_workspace.run_single_action
         continuous_action = window.generic_workspace.run_continuous_action
         single_action.setText("Stop Single")
         assert window.control_panel.buttons["Single"].isChecked()
         assert not window.control_panel.buttons["Continuous"].isEnabled()
+        assert not window.control_panel.buttons["Analyzer Mode"].isEnabled()
+        assert not window.control_panel.buttons["Signal Description"].isEnabled()
+        assert not window.control_panel.buttons["Input / Frontend"].isEnabled()
+        assert not window.control_panel.buttons["Device"].isEnabled()
+        assert not window.control_panel.buttons["Preset"].isEnabled()
+        assert not window.control_panel.buttons["Recall"].isEnabled()
+        assert all(
+            not button.isEnabled()
+            for key, button in window.control_panel.buttons.items()
+            if key.startswith("mode:")
+        )
+        bluetooth_mode_button = window.control_panel.buttons["mode:bluetooth"]
+        bluetooth_mode_button.click()
+        assert not bluetooth_mode_button.isChecked()
         single_action.setText("Run Single")
         assert not window.control_panel.buttons["Single"].isChecked()
         assert window.control_panel.buttons["Continuous"].isEnabled()
+        assert window.control_panel.buttons["Analyzer Mode"].isEnabled()
+        assert window.control_panel.buttons["Signal Description"].isEnabled()
+        assert window.control_panel.buttons["Input / Frontend"].isEnabled()
+        assert window.control_panel.buttons["Device"].isEnabled()
+        assert window.control_panel.buttons["Preset"].isEnabled()
+        assert window.control_panel.buttons["Recall"].isEnabled()
+        assert all(
+            button.isEnabled()
+            for key, button in window.control_panel.buttons.items()
+            if key.startswith("mode:")
+        )
         continuous_action.setText("Stop Continuous")
         assert window.control_panel.buttons["Continuous"].isChecked()
         single_action.setEnabled(False)
@@ -155,6 +203,38 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
         window.close()
         window.deleteLater()
     assert source.close_count == 1
+
+
+def test_vsa_control_navigation_restores_main_scroll_position(tmp_path) -> None:
+    app = pg.mkQApp("VSA control scroll history")
+    preferences = QtCore.QSettings(
+        str(tmp_path / "analysis-scroll.ini"),
+        QtCore.QSettings.Format.IniFormat,
+    )
+    window = PlutoAnalysisWindow(
+        pluto_source=_SharedPlutoSource(), preferences=preferences
+    )
+    window.show()
+    app.processEvents()
+    scroll = window.control_panel.main_page.verticalScrollBar()
+    try:
+        position = min(120, scroll.maximum())
+        assert position > 0
+        scroll.setValue(position)
+
+        window.control_panel.buttons["State"].click()
+        app.processEvents()
+        assert (
+            window.control_panel.stack.currentWidget()
+            is window.control_panel.system_page
+        )
+
+        window.control_panel.navigate_back()
+        app.processEvents()
+        assert scroll.value() == position
+    finally:
+        window.close()
+        window.deleteLater()
 
 
 def test_close_requests_capture_stop_then_closes_shared_source(tmp_path) -> None:

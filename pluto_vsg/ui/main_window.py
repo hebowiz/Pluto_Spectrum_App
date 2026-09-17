@@ -12,6 +12,15 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.control_panel import (
+    CONTROL_BUTTON_FONT_SCALE,
+    CONTROL_PANEL_WIDTH,
+    CONTROL_VALUE_BUTTON_HEIGHT,
+    ControlPanelNavigator,
+    add_back_button_footer,
+    configure_control_button,
+    make_control_group,
+)
 from pluto_common.numeric_input import (
     DeferredDoubleSpinBox,
     DeferredSpinBox,
@@ -194,8 +203,17 @@ def _cw_generation_result(
 
 
 class _Panel(QtWidgets.QGroupBox):
+    TITLE_LEFT_INSET_PX = 8
+
     def __init__(self, title: str, child: QtWidgets.QWidget) -> None:
         super().__init__(title)
+        self.setObjectName("vsgWorkspacePanel")
+        self.setStyleSheet(
+            "QGroupBox#vsgWorkspacePanel::title { "
+            "subcontrol-origin: margin; "
+            f"left: {self.TITLE_LEFT_INSET_PX}px; "
+            "padding: 0 1px; }"
+        )
         self.setFont(panel_title_font(self.font()))
         child_font = QtGui.QFont(child.font())
         child_font.setBold(False)
@@ -2065,7 +2083,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.result: GenerationResult | None = None
         restored_path = str(restored.get("project_path", "") or "")
         self.project_path: Path | None = Path(restored_path) if restored_path else None
-        self._field_display_mode = str(restored.get("field_display_mode", "all"))
+        # Field boundaries are part of the standard VSG preview.  Keep this
+        # compatibility attribute fixed so startup data written by older
+        # versions cannot restore the retired "off" setting.
+        self._field_display_mode = "all"
         self._plot_initial_ranges: dict[
             str, tuple[list[float], list[float]]
         ] = {}
@@ -2121,9 +2142,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.project.standard: default_frequency_selection(self.project)
         }
         self._update_pluto_window_title()
-        self.resize(1500, 900)
+        # Match the unified VSA shell so switching between instruments does
+        # not resize or reposition the user's working area unexpectedly.
+        self.resize(1600, 960)
         self._build_actions()
-        self._build_menus()
+        self._install_window_shortcuts()
         self._build_workspace()
         self._configure_plot_interaction()
         if self._persist_startup_state:
@@ -2154,7 +2177,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return {
                 "project": project_from_dict(project_document),
                 "project_path": document.get("project_path", ""),
-                "field_display_mode": document.get("field_display_mode", "all"),
                 "modulation_enabled": document.get("modulation_enabled", True),
                 "continuous_enabled": document.get("continuous_enabled", True),
             }
@@ -2169,7 +2191,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             "version": _STARTUP_STATE_VERSION,
             "project": project_to_dict(self.project),
             "project_path": "" if self.project_path is None else str(self.project_path),
-            "field_display_mode": self._field_display_mode,
             "modulation_enabled": self._modulation_enabled,
             "continuous_enabled": self._continuous_enabled,
         }
@@ -2226,14 +2247,12 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.open_action.triggered.connect(self._open_project)
         self.save_action = QtGui.QAction("Save", self)
         self.save_action.triggered.connect(self._save_project)
-        self.save_as_action = QtGui.QAction("Save As...", self)
-        self.save_as_action.triggered.connect(self._save_project_as)
         self.settings_action = QtGui.QAction("Bluetooth BR / EDR Settings...", self)
         self.settings_action.triggered.connect(self._edit_project_settings)
-        self.rf_test_preset_action = QtGui.QAction(
-            "Apply Default Bluetooth RF Test Packet Preset", self
+        self.packet_fields_action = QtGui.QAction(
+            "Received Packet Fields...", self
         )
-        self.rf_test_preset_action.triggered.connect(self._apply_rf_test_preset)
+        self.packet_fields_action.triggered.connect(self._edit_received_fields)
         self.generate_action = QtGui.QAction("Generate Waveform", self)
         self.generate_action.setShortcut(QtGui.QKeySequence("F5"))
         self.generate_action.triggered.connect(self.generate_waveform)
@@ -2258,77 +2277,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.pluto_stop_action = QtGui.QAction("Stop Pluto Transmission", self)
         self.pluto_stop_action.setEnabled(False)
         self.pluto_stop_action.triggered.connect(self._stop_pluto_transmission)
-        self.validate_action = QtGui.QAction("Validate Project", self)
-        self.validate_action.triggered.connect(self._show_validation)
-        self.exit_action = QtGui.QAction("Exit", self)
-        self.exit_action.triggered.connect(self.close)
-        self.field_display_group = QtGui.QActionGroup(self)
-        self.field_display_group.setExclusive(True)
-        self.field_display_actions: dict[str, QtGui.QAction] = {}
-        for mode, label in (
-            ("all", "Major + Minor Fields"),
-            ("major", "Major Fields Only"),
-            ("off", "Hide Field Boundaries"),
-        ):
-            action = QtGui.QAction(label, self, checkable=True)
-            action.setData(mode)
-            action.setChecked(mode == self._field_display_mode)
-            action.triggered.connect(self._field_display_changed)
-            self.field_display_group.addAction(action)
-            self.field_display_actions[mode] = action
-
-    def _build_menus(self) -> None:
-        menu_bar = self.menuBar()
-        file_menu = menu_bar.addMenu("File")
-        new_menu = file_menu.addMenu("New")
-        new_menu.addActions(
-            [
-                self.new_action,
-                self.new_le_action,
-                self.new_hdt_action,
-                self.new_wifi_action,
-                self.new_dect_action,
-            ]
+    def _install_window_shortcuts(self) -> None:
+        # These actions used to live in the menu bar.  Register them directly
+        # on the window so their shortcuts remain available without reserving
+        # any menu-bar space.
+        self.addActions(
+            [self.undo_action, self.redo_action, self.generate_action]
         )
-        file_menu.addActions([self.open_action, self.save_action, self.save_as_action])
-        file_menu.addSeparator()
-        file_menu.addActions(
-            [self.export_npz_action, self.export_iqtar_action, self.export_wv_action]
-        )
-        file_menu.addSeparator()
-        file_menu.addAction(self.exit_action)
-        edit_menu = menu_bar.addMenu("Edit")
-        edit_menu.addActions([self.undo_action, self.redo_action])
-        self.packet_fields_action = edit_menu.addAction("Received Packet Fields...")
-        self.packet_fields_action.triggered.connect(self._edit_received_fields)
-        waveform_menu = menu_bar.addMenu("Waveform")
-        waveform_menu.addAction(self.settings_action)
-        waveform_menu.addAction(self.rf_test_preset_action)
-        waveform_menu.addSeparator()
-        for label in (
-            "Packet Composer",
-            "Data Sources and Lists",
-            "Modulation Profiles",
-            "Filters",
-            "Power Envelope and Control Tracks",
-            "Impairments / Dirty Transmitter",
-            "Recording Layout / Sequence",
-        ):
-            waveform_menu.addAction(label).setEnabled(False)
-        waveform_menu.addSeparator()
-        waveform_menu.addAction(self.generate_action)
-        graphics_menu = menu_bar.addMenu("Graphics")
-        graphics_menu.addAction("Save Layout").setEnabled(False)
-        graphics_menu.addAction("Restore Layout").setEnabled(False)
-        graphics_menu.addSeparator()
-        field_menu = graphics_menu.addMenu("Field Boundaries")
-        field_menu.addActions(self.field_display_group.actions())
-        output_menu = menu_bar.addMenu("Output")
-        output_menu.addAction(self.pluto_settings_action)
-        tools_menu = menu_bar.addMenu("Tools")
-        tools_menu.addAction(self.validate_action)
-        tools_menu.addAction("Device Capabilities").setEnabled(False)
-        menu_bar.addMenu("Help")
 
     def _build_workspace(self) -> None:
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
@@ -2436,24 +2391,19 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         outer.addWidget(self._build_vsg_control_panel())
         outer.setStretchFactor(0, 1)
         outer.setStretchFactor(1, 0)
-        outer.setSizes([1250, 245])
+        outer.setSizes([1360, 240])
         self.setCentralWidget(outer)
 
     @staticmethod
     def _make_control_button(
         text: str,
         *,
-        value: bool = False,
+        value: bool | None = None,
         rf_indicator: bool = False,
     ) -> QtWidgets.QPushButton:
         button_class = _RFStateButton if rf_indicator else QtWidgets.QPushButton
         button = button_class(text)
-        font = QtGui.QFont(button.font())
-        if font.pointSizeF() > 0.0:
-            font.setPointSizeF(font.pointSizeF() * 1.45)
-        font.setBold(True)
-        button.setFont(font)
-        button.setMinimumHeight(72 if value else 58)
+        configure_control_button(button, value=value)
         button.setStyleSheet(
             "QPushButton { background-color: #303030; color: white; "
             "border: 1px solid #666; padding: 8px; }"
@@ -2469,8 +2419,17 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def _build_vsg_control_panel(self) -> QtWidgets.QWidget:
         content = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(content)
-        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setContentsMargins(4, 2, 4, 4)
         layout.setSpacing(8)
+        self.vsg_control_page_title = QtWidgets.QLabel("Main Menu")
+        self.vsg_control_page_title.hide()
+        self.vsg_control_stack = QtWidgets.QStackedWidget()
+        layout.addWidget(self.vsg_control_stack, 1)
+
+        main_content = QtWidgets.QWidget()
+        main_layout = QtWidgets.QVBoxLayout(main_content)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(8)
         self.rf_button = self._make_control_button(
             "Calibration", value=True, rf_indicator=True
         )
@@ -2491,8 +2450,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 "QToolButton:hover { background-color: #3c3c3c; }"
                 "QToolButton:disabled { background-color: #292929; }"
             )
-        self.power_up_button.setMinimumSize(38, 34)
-        self.power_down_button.setMinimumSize(38, 34)
+        power_arrow_height = (CONTROL_VALUE_BUTTON_HEIGHT - 4) // 2
+        self.power_up_button.setMinimumWidth(38)
+        self.power_down_button.setMinimumWidth(38)
+        self.power_up_button.setFixedHeight(power_arrow_height)
+        self.power_down_button.setFixedHeight(power_arrow_height)
         power_row = QtWidgets.QWidget()
         power_layout = QtWidgets.QHBoxLayout(power_row)
         power_layout.setContentsMargins(0, 0, 0, 0)
@@ -2507,13 +2469,26 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.estimated_peak_label = QtWidgets.QLabel()
         self.estimated_peak_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         peak_font = QtGui.QFont(self.estimated_peak_label.font())
+        if peak_font.pointSizeF() > 0.0:
+            peak_font.setPointSizeF(
+                peak_font.pointSizeF()
+                * ((1.0 + CONTROL_BUTTON_FONT_SCALE) / 2.0)
+            )
         peak_font.setBold(True)
         self.estimated_peak_label.setFont(peak_font)
         self.power_step_button = self._make_control_button("Power Step", value=True)
         self.frequency_button = self._make_control_button("Frequency", value=True)
         self.frequency_settings_button = self._make_control_button("Freq Settings")
+        self.packet_settings_button = self._make_control_button("Packet Settings")
+        self.received_fields_button = self._make_control_button(
+            "Received Packet\nFields"
+        )
         self.verify_packet_button = self._make_control_button("Verify Packet")
+        self.project_button = self._make_control_button("Project")
+        self.file_button = self._make_control_button("File")
         self.instrument_settings_button = self._make_control_button("Device")
+
+        self.vsg_setup_group = make_control_group("VSG SETUP")
         for widget in (
             self.rf_button,
             self.mod_button,
@@ -2524,11 +2499,122 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.power_step_button,
             self.frequency_button,
             self.frequency_settings_button,
+        ):
+            self.vsg_setup_group.layout().addWidget(widget)
+
+        self.packet_group = make_control_group("PACKET")
+        for widget in (
+            self.packet_settings_button,
+            self.received_fields_button,
             self.verify_packet_button,
+        ):
+            self.packet_group.layout().addWidget(widget)
+
+        self.system_group = make_control_group("SYSTEM")
+        for widget in (
+            self.project_button,
+            self.file_button,
             self.instrument_settings_button,
         ):
-            layout.addWidget(widget)
-        layout.addStretch(1)
+            self.system_group.layout().addWidget(widget)
+        for group in (
+            self.vsg_setup_group,
+            self.packet_group,
+            self.system_group,
+        ):
+            main_layout.addWidget(group)
+        main_layout.addStretch(1)
+
+        main_page = QtWidgets.QScrollArea()
+        main_page.setWidgetResizable(True)
+        main_page.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        main_page.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        main_page.setWidget(main_content)
+        self.vsg_main_control_page = main_page
+
+        def simple_page() -> tuple[QtWidgets.QWidget, QtWidgets.QVBoxLayout]:
+            page = QtWidgets.QWidget()
+            page_layout = QtWidgets.QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(10)
+            return page, page_layout
+
+        def action_button(
+            label: str, action: QtGui.QAction
+        ) -> QtWidgets.QPushButton:
+            button = self._make_control_button(label)
+            button.clicked.connect(action.trigger)
+
+            def sync() -> None:
+                button.setEnabled(action.isEnabled())
+                button.setToolTip(action.toolTip())
+
+            action.changed.connect(sync)
+            sync()
+            return button
+
+        self.vsg_project_page, project_layout = simple_page()
+        self.project_open_button = action_button("Open", self.open_action)
+        self.project_save_button = action_button("Save", self.save_action)
+        self.project_new_button = self._make_control_button("New")
+        for button in (
+            self.project_open_button,
+            self.project_save_button,
+            self.project_new_button,
+        ):
+            project_layout.addWidget(button)
+        project_layout.addStretch(1)
+
+        self.vsg_new_project_page, new_layout = simple_page()
+        self.new_bluetooth_button = action_button(
+            "Bluetooth BR/EDR", self.new_action
+        )
+        self.new_bluetooth_le_button = action_button(
+            "Bluetooth LE", self.new_le_action
+        )
+        self.new_bluetooth_hdt_button = action_button(
+            "Bluetooth HDT", self.new_hdt_action
+        )
+        self.new_wifi_button = action_button("Wi-Fi", self.new_wifi_action)
+        self.new_dect_button = action_button("DECT", self.new_dect_action)
+        for button in (
+            self.new_bluetooth_button,
+            self.new_bluetooth_le_button,
+            self.new_bluetooth_hdt_button,
+            self.new_wifi_button,
+            self.new_dect_button,
+        ):
+            new_layout.addWidget(button)
+        new_layout.addStretch(1)
+
+        self.vsg_file_page, file_layout = simple_page()
+        self.export_npz_button = action_button("Export NPZ", self.export_npz_action)
+        self.export_iqtar_button = action_button(
+            "Export IQ TAR", self.export_iqtar_action
+        )
+        self.export_wv_button = action_button("Export WV", self.export_wv_action)
+        for button in (
+            self.export_npz_button,
+            self.export_iqtar_button,
+            self.export_wv_button,
+        ):
+            file_layout.addWidget(button)
+        file_layout.addStretch(1)
+
+        for page in (
+            self.vsg_main_control_page,
+            self.vsg_project_page,
+            self.vsg_new_project_page,
+            self.vsg_file_page,
+        ):
+            self.vsg_control_stack.addWidget(page)
+
+        self.vsg_control_back_button = self._make_control_button("Back")
+        self.vsg_control_back_button.hide()
+        add_back_button_footer(layout, self.vsg_control_back_button)
+
         self.rf_button.clicked.connect(self._toggle_rf)
         self.mod_button.clicked.connect(self._toggle_modulation)
         self.continuous_button.clicked.connect(self._toggle_continuous)
@@ -2539,17 +2625,74 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.power_step_button.clicked.connect(self._edit_power_step)
         self.frequency_button.clicked.connect(self._edit_frequency)
         self.frequency_settings_button.clicked.connect(self._edit_frequency_settings)
+        self.packet_settings_button.clicked.connect(self._edit_project_settings)
+        self.received_fields_button.clicked.connect(self._edit_received_fields)
+
+        def sync_packet_setting_buttons() -> None:
+            self.packet_settings_button.setEnabled(self.settings_action.isEnabled())
+            self.received_fields_button.setEnabled(
+                self.packet_fields_action.isEnabled()
+            )
+
+        self.settings_action.changed.connect(sync_packet_setting_buttons)
+        self.packet_fields_action.changed.connect(sync_packet_setting_buttons)
+        sync_packet_setting_buttons()
         self.verify_packet_button.clicked.connect(self._verify_packet)
+        self.project_button.clicked.connect(
+            lambda: self._show_vsg_control_page(
+                "Project", self.vsg_project_page
+            )
+        )
+        self.file_button.clicked.connect(
+            lambda: self._show_vsg_control_page("File", self.vsg_file_page)
+        )
+        self.project_new_button.clicked.connect(
+            lambda: self._show_vsg_control_page(
+                "New Project", self.vsg_new_project_page
+            )
+        )
         self.instrument_settings_button.clicked.connect(self._edit_pluto_settings)
         self._update_vsg_control_labels()
-        panel = _Panel("VSG Control", content)
+        panel = _Panel("Main Menu", content)
         panel_font = QtGui.QFont(panel.font())
         if panel_font.pointSizeF() > 0.0:
             panel_font.setPointSizeF(panel_font.pointSizeF() * (1.45 / 1.3))
         panel.setFont(panel_font)
-        panel.setMinimumWidth(225)
-        panel.setMaximumWidth(285)
+        panel.setFixedWidth(CONTROL_PANEL_WIDTH)
+        self.vsg_control_panel = panel
+        self._vsg_control_navigator = ControlPanelNavigator(
+            panel=panel,
+            title_label=self.vsg_control_page_title,
+            stack=self.vsg_control_stack,
+            main_page=self.vsg_main_control_page,
+            back_button=self.vsg_control_back_button,
+            apply_title=self._apply_vsg_control_title,
+        )
+        self._vsg_control_navigator.show_main()
         return panel
+
+    def _apply_vsg_control_title(
+        self, title: str, _page: QtWidgets.QWidget
+    ) -> None:
+        self.vsg_control_page_title.setText(title)
+        self.vsg_control_panel.setTitle(title)
+
+    def _show_vsg_control_page(
+        self,
+        title: str,
+        page: QtWidgets.QWidget,
+        *,
+        remember: bool = True,
+    ) -> None:
+        self._vsg_control_navigator.show_page(
+            title, page, remember=remember
+        )
+
+    def _show_vsg_main_controls(self) -> None:
+        self._vsg_control_navigator.show_main()
+
+    def _navigate_vsg_control_back(self) -> None:
+        self._vsg_control_navigator.navigate_back()
 
     @staticmethod
     def _make_plot(left: str, bottom: str) -> pg.PlotWidget:
@@ -2766,15 +2909,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._refresh_project_view()
         self.generate_waveform()
         self._configuration_maybe_changed(previous_signature)
-
-    def _field_display_changed(self, checked: bool) -> None:
-        if not checked:
-            return
-        action = self.sender()
-        if isinstance(action, QtGui.QAction):
-            self._field_display_mode = str(action.data())
-        if self.result is not None:
-            self._update_previews(self.result)
 
     def _refresh_project_view(self) -> None:
         self.packet_fields_action.setEnabled(self.project.wifi is None)
@@ -3129,13 +3263,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         elif self._rf_enabled:
             rf_state = "ON"
         elif self._rf_transfer_pending:
-            rf_state = "TRANSFERRING..."
+            rf_state = "Transferring..."
         elif calibration_required:
             rf_state = "Calibration"
         else:
             rf_state = "RF\nOFF"
         self.rf_button.setText(
-            f"RF\n{rf_state}" if rf_state in {"ON", "TRANSFERRING..."} else rf_state
+            f"RF\n{rf_state}" if rf_state in {"ON", "Transferring..."} else rf_state
         )
         self.rf_button.setChecked(self._rf_enabled)
         self.mod_button.setText(f"Mod\n{'ON' if self._modulation_enabled else 'OFF'}")
@@ -3329,20 +3463,19 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.iq_waveform_plot.plot(time_us, iq.imag, pen=ACCENT_COLOR, name="Q")
         self.power_plot.plot(time_us, power_dbfs, pen=TRACE_COLOR)
         self.frequency_plot.plot(time_us[1:], frequency_khz, pen=TRACE_COLOR)
-        if self._field_display_mode != "off":
-            for plot in (
-                self.iq_waveform_plot,
-                self.power_plot,
-                self.frequency_plot,
-            ):
-                self._add_field_guides(
-                    plot,
-                    result,
-                    include_minor=self._field_display_mode == "all",
-                    include_labels=True,
-                    preview_stop_sample=preview_sample_count,
-                    single_repeat_preview=single_repeat_preview,
-                )
+        for plot in (
+            self.iq_waveform_plot,
+            self.power_plot,
+            self.frequency_plot,
+        ):
+            self._add_field_guides(
+                plot,
+                result,
+                include_minor=True,
+                include_labels=True,
+                preview_stop_sample=preview_sample_count,
+                single_repeat_preview=single_repeat_preview,
+            )
 
         fft_size = min(
             16384, max(256, 1 << (max(1, iq.size) - 1).bit_length())
@@ -3529,23 +3662,21 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._configuration_maybe_changed(previous_signature)
 
     def _save_project(self) -> None:
-        if self.project_path is None:
-            self._save_project_as()
-            return
-        save_project(self.project_path, self.project)
-        self.statusBar().showMessage(f"Saved {self.project_path.name}")
-
-    def _save_project_as(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Pluto VSG Project",
-            "waveform.pvsg.json",
+            (
+                str(self.project_path)
+                if self.project_path is not None
+                else "waveform.pvsg.json"
+            ),
             "Pluto VSG Project (*.pvsg.json)",
         )
         if not path:
             return
         self.project_path = Path(path)
-        self._save_project()
+        save_project(self.project_path, self.project)
+        self.statusBar().showMessage(f"Saved {self.project_path.name}")
 
     def _export_npz(self) -> None:
         if self.result is None:
@@ -3910,6 +4041,17 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.close()
 
     def _set_pluto_busy(self, *, preparing: bool, transmitting: bool) -> None:
+        main_scroll = (
+            self.vsg_main_control_page.verticalScrollBar()
+            if hasattr(self, "vsg_main_control_page")
+            else None
+        )
+        main_scroll_value = main_scroll.value() if main_scroll is not None else 0
+        if preparing and hasattr(self, "rf_button") and self.rf_button.hasFocus():
+            # Disabling the clicked Calibration button can make QScrollArea
+            # chase the next focusable child. Drop that focus before changing
+            # enabled states and restore the user's exact scroll position.
+            self.rf_button.clearFocus()
         active = preparing or transmitting
         for action in (
             self.new_action,
@@ -3918,6 +4060,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.new_wifi_action,
             self.new_dect_action,
             self.open_action,
+            self.save_action,
             self.settings_action,
             self.generate_action,
             self.pluto_settings_action,
@@ -3939,12 +4082,21 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.packet_fields_action.setEnabled(not active and self.project.wifi is None)
             self.frequency_button.setEnabled(not active)
             self.frequency_settings_button.setEnabled(not active)
+            self.project_button.setEnabled(not active)
             self.instrument_settings_button.setEnabled(not active)
             self.power_button.setEnabled(not preparing)
             self.power_up_button.setEnabled(not preparing)
             self.power_down_button.setEnabled(not preparing)
             self.power_step_button.setEnabled(not preparing)
             self._update_vsg_control_labels()
+        if main_scroll is not None:
+            main_scroll.setValue(main_scroll_value)
+            QtCore.QTimer.singleShot(
+                0,
+                lambda bar=main_scroll, value=main_scroll_value: bar.setValue(
+                    value
+                ),
+            )
 
     def _show_validation(self) -> None:
         issues = validate_project(self.project)

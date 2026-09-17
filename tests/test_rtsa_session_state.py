@@ -8,10 +8,15 @@ from pluto_sa.config.session_state import (
     decode_session_state,
     encode_session_state,
     load_session_state,
+    load_session_state_file,
     save_session_state,
+    save_session_state_file,
 )
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtWidgets
+from pluto_common.control_panel import ControlPanelNavigator
 import pluto_sa.main as main_module
 import pluto_sa.ui.session_window as session_window_module
 
@@ -32,6 +37,84 @@ class FakeSettings:
 
     def sync(self):
         self.sync_count += 1
+
+
+def test_rtsa_system_frame_uses_state_then_device_and_state_hierarchy():
+    pg.mkQApp("RTSA system state controls")
+    window = QtWidgets.QMainWindow()
+    window.main_menu_page = QtWidgets.QWidget()
+    main_layout = QtWidgets.QVBoxLayout(window.main_menu_page)
+    main_layout.addStretch(1)
+    window.control_stack = QtWidgets.QStackedWidget()
+    window.control_stack.addWidget(window.main_menu_page)
+    window._make_control_button = lambda text: QtWidgets.QPushButton(text)
+    window._apply_groupbox_title_font = lambda _group: None
+    window._show_control_page = lambda *_args, **_kwargs: None
+    window._on_state_recall_clicked = lambda: None
+    window._on_state_save_clicked = lambda: None
+    window._on_restore_defaults_clicked = lambda: None
+    window._on_device_clicked = lambda: None
+    window._install_control_panel_event_filters = lambda: None
+
+    session_window_module.SessionRealtimeSpectrumWindow._install_system_frame(window)
+
+    assert [
+        window.system_group.layout().itemAt(index).widget().text()
+        for index in range(window.system_group.layout().count())
+        if window.system_group.layout().itemAt(index).widget() is not None
+    ] == ["State", "Device"]
+    assert [
+        window.state_page.layout().itemAt(index).widget().text()
+        for index in range(window.state_page.layout().count())
+        if window.state_page.layout().itemAt(index).widget() is not None
+    ] == ["Recall", "Save", "Preset"]
+    assert not hasattr(window, "file_button")
+    window.close()
+
+
+def test_shared_control_scroll_resets_child_and_restores_parent():
+    app = pg.mkQApp("shared control scroll history")
+    panel = QtWidgets.QWidget()
+    panel.resize(240, 300)
+    layout = QtWidgets.QVBoxLayout(panel)
+    title = QtWidgets.QLabel("Main Menu")
+    stack = QtWidgets.QStackedWidget()
+    main_page = QtWidgets.QWidget()
+    main_page.setMinimumHeight(900)
+    child_page = QtWidgets.QWidget()
+    child_page.setMinimumHeight(700)
+    stack.addWidget(main_page)
+    stack.addWidget(child_page)
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(stack)
+    back = QtWidgets.QPushButton("Back")
+    layout.addWidget(title)
+    layout.addWidget(scroll, 1)
+    layout.addWidget(back)
+    navigator = ControlPanelNavigator(
+        panel=panel,
+        title_label=title,
+        stack=stack,
+        main_page=main_page,
+        back_button=back,
+        scroll_area=scroll,
+    )
+    panel.show()
+    app.processEvents()
+    main_position = min(120, scroll.verticalScrollBar().maximum())
+    assert main_position > 0
+    scroll.verticalScrollBar().setValue(main_position)
+
+    navigator.show_page("Child", child_page)
+    app.processEvents()
+    assert scroll.verticalScrollBar().value() == 0
+
+    scroll.verticalScrollBar().setValue(60)
+    navigator.navigate_back()
+    app.processEvents()
+    assert scroll.verticalScrollBar().value() == main_position
+    panel.close()
 
 
 def test_session_state_round_trip():
@@ -178,6 +261,64 @@ def test_qsettings_compatible_save_and_load():
     assert settings.sync_count == 1
     assert restored is not None
     assert restored.analyzer_mode == AnalyzerMode.REALTIME_SA
+
+
+def test_session_state_file_round_trip(tmp_path):
+    state = RTSASessionState(
+        analyzer_mode=AnalyzerMode.WIDEBAND_REALTIME_SA,
+        config_values=capture_config_values(SpectrumConfig()),
+        shared_center_freq_hz=2_440_000_000,
+        profiled_analyzer_mode=AnalyzerMode.WIDEBAND_REALTIME_SA,
+    )
+    path = tmp_path / "all-modes.rtsastate.json"
+
+    save_session_state_file(path, state)
+
+    assert load_session_state_file(path) == state
+
+
+def test_complete_state_capture_includes_every_mode_profile():
+    active = RTSASessionState(
+        analyzer_mode=AnalyzerMode.SWEEP_SA,
+        config_values={"center_freq_hz": 915_000_000},
+        shared_center_freq_hz=915_000_000,
+        mode_states=(
+            RTSASessionState(
+                analyzer_mode=AnalyzerMode.SWEEP_SA,
+                config_values={"sweep_time_ms": 321.0},
+            ),
+        ),
+        profiled_analyzer_mode=AnalyzerMode.SWEEP_SA,
+    )
+    window = type("WindowHarness", (), {})()
+    window._capture_session_state = lambda: active
+    window._make_default_session_state = lambda mode: RTSASessionState(
+        analyzer_mode=mode,
+        config_values={"rbw_hz": 1_000_000.0},
+    )
+    window._state_as_mode_profile = (
+        session_window_module.SessionRealtimeSpectrumWindow._state_as_mode_profile
+    )
+
+    captured = (
+        session_window_module.SessionRealtimeSpectrumWindow._capture_complete_session_state(
+            window
+        )
+    )
+
+    assert captured.profiled_analyzer_mode == AnalyzerMode.SWEEP_SA
+    assert tuple(profile.analyzer_mode for profile in captured.mode_states) == (
+        AnalyzerMode.REALTIME_SA,
+        AnalyzerMode.WIDEBAND_REALTIME_SA,
+        AnalyzerMode.SWEEP_SA,
+        AnalyzerMode.HIGH_SPEED_TIME_ANALYZER,
+    )
+    sweep_profile = next(
+        profile
+        for profile in captured.mode_states
+        if profile.analyzer_mode == AnalyzerMode.SWEEP_SA
+    )
+    assert sweep_profile.config_values["sweep_time_ms"] == 321.0
 
 
 def test_device_change_replaces_receiver_and_restarts_current_mode(monkeypatch):

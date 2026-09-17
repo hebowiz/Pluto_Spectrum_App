@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pyqtgraph as pg
 import numpy as np
 import pytest
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_sa.vsa.iqtar import load_iq_tar
 from pluto_sa.vsa.profiles.bluetooth_br import (
@@ -61,6 +61,7 @@ from pluto_vsg.profiles import (
 )
 from pluto_vsg.ui.main_window import (
     PlutoVSGWindow,
+    _Panel,
     _BluetoothHDTSettingsDialog,
     _BluetoothLESettingsDialog,
     _BluetoothSettingsDialog,
@@ -168,7 +169,7 @@ def test_vsg_restores_last_project_controls_and_window_state(tmp_path) -> None:
         assert restored.project_path == tmp_path / "restored.pvsg.json"
         assert restored._modulation_enabled is False
         assert restored._continuous_enabled is False
-        assert restored._field_display_mode == "off"
+        assert restored._field_display_mode == "all"
         assert restored._pluto_uri == "usb:persisted"
         assert restored._pluto_lead_in_guard_s == pytest.approx(0.023)
         assert restored._power_step_db == pytest.approx(2.5)
@@ -328,15 +329,10 @@ def test_vsg_window_starts_with_composer_shell() -> None:
         assert window.result is not None
         iq_traces = window.iq_waveform_plot.listDataItems()
         assert [trace.name() for trace in iq_traces] == ["I", "Q"]
-        assert [action.text() for action in window.menuBar().actions()] == [
-            "File",
-            "Edit",
-            "Waveform",
-            "Graphics",
-            "Output",
-            "Tools",
-            "Help",
-        ]
+        assert window.findChild(QtWidgets.QMenuBar) is None
+        assert window.undo_action in window.actions()
+        assert window.redo_action in window.actions()
+        assert window.generate_action in window.actions()
     finally:
         window.close()
 
@@ -356,6 +352,7 @@ def test_vsg_control_panel_defaults_and_auto_bandwidth() -> None:
     pg.mkQApp("Pluto VSG control panel defaults")
     window = PlutoVSGWindow()
     try:
+        assert window.size() == QtCore.QSize(1600, 960)
         assert window.rf_button.text() == "Calibration"
         assert window.rf_button.isCheckable() is True
         assert window.rf_button.isChecked() is False
@@ -364,6 +361,166 @@ def test_vsg_control_panel_defaults_and_auto_bandwidth() -> None:
         settings = window._current_pluto_settings()
         assert settings.rf_bandwidth_hz == settings.sample_rate_hz
         assert window.frequency_button.text().endswith("MHz")
+        assert window.rf_button.minimumHeight() == 72
+        assert window.mod_button.minimumHeight() == 72
+        assert window.continuous_button.minimumHeight() == 72
+        assert window.frequency_button.minimumHeight() == 72
+        assert window.packet_settings_button.minimumHeight() == 50
+        assert window.received_fields_button.minimumHeight() == 72
+        assert window.project_button.minimumHeight() == 50
+        assert window.vsg_control_back_button.minimumHeight() == 50
+        assert window.vsg_control_panel.minimumWidth() == 240
+        assert window.vsg_control_panel.maximumWidth() == 240
+        workspace_panels = window.findChildren(_Panel)
+        assert workspace_panels
+        assert all(
+            f"left: {_Panel.TITLE_LEFT_INSET_PX}px" in panel.styleSheet()
+            for panel in workspace_panels
+        )
+        assert (
+            window.estimated_peak_label.font().pointSizeF()
+            > window.font().pointSizeF()
+        )
+        assert (
+            window.estimated_peak_label.font().pointSizeF()
+            < window.power_button.font().pointSizeF()
+        )
+        assert window.vsg_control_panel.title() == "Main Menu"
+        assert window.vsg_control_page_title.isHidden()
+        assert window.vsg_setup_group.title() == "VSG SETUP"
+        assert window.packet_group.title() == "PACKET"
+        assert window.system_group.title() == "SYSTEM"
+        assert window.vsg_setup_group.layout().indexOf(window.rf_button) >= 0
+        assert (
+            window.vsg_setup_group.layout().indexOf(
+                window.frequency_settings_button
+            )
+            >= 0
+        )
+        assert window.packet_group.layout().indexOf(window.packet_settings_button) >= 0
+        assert window.packet_group.layout().indexOf(window.verify_packet_button) >= 0
+        assert window.system_group.layout().indexOf(window.project_button) >= 0
+        assert window.system_group.layout().indexOf(window.instrument_settings_button) >= 0
+        assert window.power_up_button.height() == 34
+        assert window.power_down_button.height() == 34
+        assert (
+            window.power_up_button.height()
+            + window.power_down_button.height()
+            + 4
+            == window.power_button.minimumHeight()
+        )
+        assert not hasattr(window, "save_as_action")
+    finally:
+        window.close()
+
+
+def test_vsg_control_panel_project_file_and_new_navigation() -> None:
+    pg.mkQApp("Pluto VSG hierarchical controls")
+    window = PlutoVSGWindow()
+    try:
+        assert window.vsg_control_stack.currentWidget() is window.vsg_main_control_page
+        window.project_button.click()
+        assert window.vsg_control_page_title.text() == "Project"
+        assert window.vsg_control_panel.title() == "Project"
+        assert window.vsg_control_stack.currentWidget() is window.vsg_project_page
+        assert window.project_open_button.text() == "Open"
+        assert window.project_save_button.text() == "Save"
+
+        window.project_new_button.click()
+        assert window.vsg_control_page_title.text() == "New Project"
+        assert window.vsg_control_stack.currentWidget() is window.vsg_new_project_page
+        assert [
+            window.new_bluetooth_button.text(),
+            window.new_bluetooth_le_button.text(),
+            window.new_bluetooth_hdt_button.text(),
+            window.new_wifi_button.text(),
+            window.new_dect_button.text(),
+        ] == ["Bluetooth BR/EDR", "Bluetooth LE", "Bluetooth HDT", "Wi-Fi", "DECT"]
+
+        right_click = QtGui.QMouseEvent(
+            QtCore.QEvent.Type.MouseButtonPress,
+            QtCore.QPointF(2.0, 2.0),
+            QtCore.QPointF(2.0, 2.0),
+            QtCore.Qt.MouseButton.RightButton,
+            QtCore.Qt.MouseButton.RightButton,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+        QtWidgets.QApplication.sendEvent(window.new_dect_button, right_click)
+        assert window.vsg_control_stack.currentWidget() is window.vsg_project_page
+        assert window.vsg_control_panel.title() == "Project"
+        window._show_vsg_main_controls()
+        window.file_button.click()
+        assert window.vsg_control_page_title.text() == "File"
+        assert window.vsg_control_stack.currentWidget() is window.vsg_file_page
+        assert [
+            window.export_npz_button.text(),
+            window.export_iqtar_button.text(),
+            window.export_wv_button.text(),
+        ] == ["Export NPZ", "Export IQ TAR", "Export WV"]
+    finally:
+        window.close()
+
+
+def test_vsg_control_navigation_restores_main_scroll_position() -> None:
+    app = pg.mkQApp("Pluto VSG control scroll history")
+    window = PlutoVSGWindow()
+    window.show()
+    app.processEvents()
+    scroll = window.vsg_main_control_page.verticalScrollBar()
+    try:
+        position = min(120, scroll.maximum())
+        assert position > 0
+        scroll.setValue(position)
+
+        window.project_button.click()
+        app.processEvents()
+        assert window.vsg_control_stack.currentWidget() is window.vsg_project_page
+
+        window._navigate_vsg_control_back()
+        app.processEvents()
+        assert scroll.value() == position
+    finally:
+        window.close()
+
+
+def test_vsg_calibration_state_keeps_control_scroll_position() -> None:
+    app = pg.mkQApp("Pluto VSG calibration scroll stability")
+    window = PlutoVSGWindow()
+    window.show()
+    app.processEvents()
+    scroll = window.vsg_main_control_page.verticalScrollBar()
+    try:
+        scroll.setValue(0)
+        window.rf_button.setFocus()
+        window._calibration_in_progress = True
+        window._set_pluto_busy(preparing=True, transmitting=False)
+        app.processEvents()
+
+        assert scroll.value() == 0
+        assert window.rf_button.text() == "Calibrating..."
+    finally:
+        window._calibration_in_progress = False
+        window._set_pluto_busy(preparing=False, transmitting=False)
+        window.close()
+
+
+def test_vsg_save_always_prompts_for_a_filename(tmp_path, monkeypatch) -> None:
+    pg.mkQApp("Pluto VSG named save")
+    window = PlutoVSGWindow()
+    previous = tmp_path / "previous.pvsg.json"
+    selected = tmp_path / "selected.pvsg.json"
+    window.project_path = previous
+    monkeypatch.setattr(
+        QtWidgets.QFileDialog,
+        "getSaveFileName",
+        lambda *_args, **_kwargs: (str(selected), ""),
+    )
+    try:
+        window.project_save_button.click()
+        assert window.project_path == selected
+        assert selected.exists()
+        assert not previous.exists()
+        assert load_project(selected) == window.project
     finally:
         window.close()
 
@@ -375,7 +532,7 @@ def test_vsg_rf_button_shows_transfer_then_blue_on_state() -> None:
         window._pluto_prepared_signature = window._pluto_configuration_signature()
         window._rf_transfer_pending = True
         window._update_vsg_control_labels()
-        assert window.rf_button.text() == "RF\nTRANSFERRING..."
+        assert window.rf_button.text() == "RF\nTransferring..."
         assert window.rf_button.isChecked() is False
 
         window._tx_thread = object()

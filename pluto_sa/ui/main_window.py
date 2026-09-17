@@ -18,6 +18,12 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.control_panel import (
+    CONTROL_PANEL_WIDTH,
+    ControlPanelNavigator,
+    add_back_button_footer,
+    configure_control_button,
+)
 from pluto_common.numeric_input import get_deferred_double, get_deferred_int
 from pluto_common.runtime_paths import application_data_dir, is_frozen_application
 
@@ -143,7 +149,6 @@ UNBOUNDED_DOUBLE_MAX = 1_000_000_000_000.0
 UNBOUNDED_INT_MIN = -2_147_483_648
 UNBOUNDED_INT_MAX = 2_147_483_647
 PLOT_SPACING = 12
-CONTROL_PANEL_WIDTH = 240
 WINDOW_WIDTH = 1600
 WINDOW_HEIGHT = 960
 OUTER_MARGIN_TOTAL = 24
@@ -265,7 +270,6 @@ PERSISTENCE_DECAY_VALUES = {
 SELECTED_BUTTON_PREFIX = "> "
 UNSELECTED_BUTTON_PREFIX = "  "
 RIGHT_PANE_GROUP_TITLE_FONT_SCALE = 1.45
-RIGHT_PANE_BUTTON_FONT_SCALE = 1.45
 AXIS_LABEL_FONT_SIZE_PT = 12
 
 
@@ -2222,15 +2226,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         outer_layout.setStretch(1, 0)
 
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
-        if event.type() == QtCore.QEvent.Type.MouseButtonPress and isinstance(event, QtGui.QMouseEvent):
-            if (
-                event.button() == QtCore.Qt.MouseButton.RightButton
-                and self._is_control_panel_target(watched)
-            ):
-                if self._can_navigate_back():
-                    self._navigate_back()
-                event.accept()
-                return True
         if (
             event.type() == QtCore.QEvent.Type.Wheel
             and isinstance(event, QtGui.QWheelEvent)
@@ -2388,11 +2383,8 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.control_scroll.setWidget(self.control_stack)
         panel_layout.addWidget(self.control_scroll, stretch=1)
 
-        footer_layout = QtWidgets.QHBoxLayout()
-        footer_layout.addStretch(1)
         self.back_button = self._make_control_button("Back")
-        footer_layout.addWidget(self.back_button)
-        panel_layout.addLayout(footer_layout)
+        add_back_button_footer(panel_layout, self.back_button)
 
         self.main_menu_page = self._build_main_menu_page()
         self.analyzer_mode_page = self._build_analyzer_mode_page()
@@ -2454,24 +2446,25 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self.control_stack.addWidget(self.calibration_page)
         self.control_stack.addWidget(self.persistence_decay_page)
         self.control_stack.addWidget(self.sweep_page)
-        self.back_button.clicked.connect(
-            self._navigate_back
+        self._control_navigator = ControlPanelNavigator(
+            panel=self.control_panel,
+            title_label=self.control_title_label,
+            stack=self.control_stack,
+            main_page=self.main_menu_page,
+            back_button=self.back_button,
+            apply_title=self._apply_control_page_title,
+            scroll_area=self.control_scroll,
         )
+        self._page_history = self._control_navigator.history
         for index, page in enumerate(self.trace_detail_pages):
             self.page_title_colors[page] = TRACE_COLORS[index]
-        self._show_control_page("Main Menu", self.main_menu_page)
-        self._install_control_panel_event_filters()
+        self._control_navigator.show_main()
 
         return panel
 
     def _install_control_panel_event_filters(self) -> None:
-        if not hasattr(self, "control_panel"):
-            return
-        self.control_panel.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.NoContextMenu)
-        self.control_panel.installEventFilter(self)
-        for widget in self.control_panel.findChildren(QtWidgets.QWidget):
-            widget.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.NoContextMenu)
-            widget.installEventFilter(self)
+        if hasattr(self, "_control_navigator"):
+            self._control_navigator.refresh_event_filters()
 
     def _build_main_menu_page(self) -> QtWidgets.QWidget:
         page = QtWidgets.QWidget()
@@ -3254,29 +3247,24 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         *,
         push_history: bool = True,
     ) -> None:
-        current_page = self.control_stack.currentWidget()
-        if push_history and current_page is not None and current_page is not page:
-            self._page_history.append((self.control_title_label.text(), current_page))
+        self._control_navigator.show_page(
+            title, page, remember=push_history
+        )
+
+    def _apply_control_page_title(
+        self, title: str, page: QtWidgets.QWidget
+    ) -> None:
         self.control_title_label.setText(title)
         title_color = self.page_title_colors.get(page, "white")
         self.control_title_label.setStyleSheet(
             f"color: {title_color}; padding: 4px 2px;"
         )
-        self.control_stack.setCurrentWidget(page)
-        self._update_back_button_visibility()
 
     def _navigate_back(self) -> None:
-        if not self._page_history:
-            return
-
-        title, page = self._page_history.pop()
-        self._show_control_page(title, page, push_history=False)
+        self._control_navigator.navigate_back()
 
     def _update_back_button_visibility(self) -> None:
-        current_page = self.control_stack.currentWidget()
-        show_back = current_page is not self.main_menu_page and len(self._page_history) > 0
-        self.back_button.setEnabled(show_back)
-        self.back_button.setVisible(show_back)
+        self._control_navigator.update_back_button()
 
     def _apply_groupbox_title_font(self, group_box: QtWidgets.QGroupBox) -> None:
         group_font = QtGui.QFont(group_box.font())
@@ -3286,16 +3274,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
 
     def _make_control_button(self, text: str) -> QtWidgets.QPushButton:
         button = QtWidgets.QPushButton(text)
-        button_font = QtGui.QFont(button.font())
-        button_font.setPointSizeF(button_font.pointSizeF() * RIGHT_PANE_BUTTON_FONT_SCALE)
-        button_font.setBold(True)
-        button.setFont(button_font)
-        button.setMinimumHeight(50)
-        return button
+        return configure_control_button(button, value=False)
 
     def _make_value_control_button(self, label_text: str) -> QtWidgets.QPushButton:
-        button = self._make_control_button(label_text)
-        button.setMinimumHeight(72)
+        button = QtWidgets.QPushButton(label_text)
+        configure_control_button(button, value=True)
         button.setStyleSheet(
             "QPushButton {"
             " background-color: #303030;"

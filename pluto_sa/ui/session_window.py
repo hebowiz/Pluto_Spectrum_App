@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from pyqtgraph.Qt import QtCore, QtWidgets
@@ -19,7 +20,9 @@ from pluto_sa.config.session_state import (
     capture_mode_config_values,
     clear_session_state,
     load_session_state,
+    load_session_state_file,
     save_session_state,
+    save_session_state_file,
 )
 from pluto_sa.config.spectrum_config import SpectrumConfig
 from pluto_sa.modes.analyzer_mode import AnalyzerMode
@@ -66,35 +69,95 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         super()._apply_display_mode()
 
     def _install_system_frame(self) -> None:
-        """Add SYSTEM -> System -> Preset / Device navigation."""
+        """Add SYSTEM -> State / Device navigation."""
 
-        system_group = QtWidgets.QGroupBox("SYSTEM")
-        self._apply_groupbox_title_font(system_group)
-        system_layout = QtWidgets.QVBoxLayout(system_group)
-        self.system_menu_button = self._make_control_button("System")
-        system_layout.addWidget(self.system_menu_button)
+        self.system_group = QtWidgets.QGroupBox("SYSTEM")
+        self._apply_groupbox_title_font(self.system_group)
+        system_layout = QtWidgets.QVBoxLayout(self.system_group)
+        self.state_button = self._make_control_button("State")
+        self.device_button = self._make_control_button("Device")
+        system_layout.addWidget(self.state_button)
+        system_layout.addWidget(self.device_button)
 
         main_layout = self.main_menu_page.layout()
         insert_index = max(0, main_layout.count() - 1)
-        main_layout.insertWidget(insert_index, system_group)
+        main_layout.insertWidget(insert_index, self.system_group)
 
-        self.system_page = QtWidgets.QWidget()
-        system_page_layout = QtWidgets.QVBoxLayout(self.system_page)
-        system_page_layout.setContentsMargins(0, 0, 0, 0)
-        system_page_layout.setSpacing(10)
+        self.state_page = QtWidgets.QWidget()
+        state_page_layout = QtWidgets.QVBoxLayout(self.state_page)
+        state_page_layout.setContentsMargins(0, 0, 0, 0)
+        state_page_layout.setSpacing(10)
+        self.recall_state_button = self._make_control_button("Recall")
+        self.save_state_button = self._make_control_button("Save")
         self.preset_button = self._make_control_button("Preset")
-        self.device_button = self._make_control_button("Device")
-        system_page_layout.addWidget(self.preset_button)
-        system_page_layout.addWidget(self.device_button)
-        system_page_layout.addStretch(1)
-        self.control_stack.addWidget(self.system_page)
+        state_page_layout.addWidget(self.recall_state_button)
+        state_page_layout.addWidget(self.save_state_button)
+        state_page_layout.addWidget(self.preset_button)
+        state_page_layout.addStretch(1)
+        self.control_stack.addWidget(self.state_page)
 
-        self.system_menu_button.clicked.connect(
-            lambda: self._show_control_page("System", self.system_page)
+        self.state_button.clicked.connect(
+            lambda: self._show_control_page("State", self.state_page)
         )
+        self.recall_state_button.clicked.connect(self._on_state_recall_clicked)
+        self.save_state_button.clicked.connect(self._on_state_save_clicked)
         self.preset_button.clicked.connect(self._on_restore_defaults_clicked)
         self.device_button.clicked.connect(self._on_device_clicked)
         self._install_control_panel_event_filters()
+
+    def _state_directory(self) -> str:
+        stored = str(self._session_settings.value("directories/state", "") or "")
+        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
+
+    def _remember_state_directory(self, path: str | Path) -> None:
+        self._session_settings.setValue("directories/state", str(Path(path).parent))
+        self._session_settings.sync()
+
+    def _on_state_save_clicked(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save RTSA State",
+            self._state_directory(),
+            "RTSA state (*.rtsastate.json);;JSON files (*.json)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".rtsastate.json"):
+            path += ".rtsastate.json"
+        try:
+            self.save_state_path(path)
+        except (OSError, TypeError, ValueError) as error:
+            QtWidgets.QMessageBox.critical(self, "State Save Error", str(error))
+            return
+        self._remember_state_directory(path)
+        self.statusBar().showMessage(f"State saved - {Path(path).name}")
+
+    def save_state_path(self, path: str | Path) -> None:
+        save_session_state_file(path, self._capture_complete_session_state())
+
+    def _on_state_recall_clicked(self) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Recall RTSA State",
+            self._state_directory(),
+            "RTSA state (*.rtsastate.json *.json);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.recall_state_path(path)
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            QtWidgets.QMessageBox.critical(self, "State Recall Error", str(error))
+            return
+        self._remember_state_directory(path)
+        self.statusBar().showMessage(f"State recalled - {Path(path).name}")
+
+    def recall_state_path(self, path: str | Path) -> None:
+        self._restore_state_bundle(
+            load_session_state_file(path),
+            start_if_needed=True,
+        )
+        save_session_state(self._session_settings, self._capture_session_state())
 
     def _on_device_clicked(self) -> None:
         """Select another Pluto, initialize it, and restart the current mode."""
@@ -422,6 +485,56 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
             ),
             profiled_analyzer_mode=current_mode,
         )
+
+    def _capture_complete_session_state(self) -> RTSASessionState:
+        """Capture every mode profile plus the mode active at Save time."""
+
+        state = self._capture_session_state()
+        profiles = {
+            profile.analyzer_mode: profile for profile in state.mode_states
+        }
+        for mode in PROFILED_ANALYZER_MODES:
+            if mode not in profiles:
+                profiles[mode] = self._state_as_mode_profile(
+                    self._make_default_session_state(mode)
+                )
+        return RTSASessionState(
+            analyzer_mode=state.analyzer_mode,
+            config_values=state.config_values,
+            realtime_graph_view_mode=state.realtime_graph_view_mode,
+            persistence_enabled=state.persistence_enabled,
+            traces=state.traces,
+            markers=state.markers,
+            shared_center_freq_hz=state.shared_center_freq_hz,
+            mode_states=tuple(profiles[mode] for mode in PROFILED_ANALYZER_MODES),
+            profiled_analyzer_mode=state.profiled_analyzer_mode,
+        )
+
+    def _restore_state_bundle(
+        self,
+        state: RTSASessionState,
+        *,
+        start_if_needed: bool,
+    ) -> None:
+        """Restore all saved profiles and select the mode saved with them."""
+
+        self._load_mode_session_states(state)
+        target_mode = self._normalize_profiled_mode(
+            state.profiled_analyzer_mode or state.analyzer_mode
+        )
+        target_state = self._mode_session_states.get(target_mode)
+        if target_state is None:
+            target_state = self._legacy_mode_state(state, target_mode)
+            self._mode_session_states[target_mode] = target_state
+        self._mode_profile_restore_in_progress = True
+        try:
+            self._apply_session_state(
+                self._state_with_shared_center(target_state),
+                start_if_needed=start_if_needed,
+            )
+        finally:
+            self._mode_profile_restore_in_progress = False
+        self._last_profiled_analyzer_mode = target_mode
 
     def _apply_shared_center_to_config(self, center_freq_hz: int) -> None:
         """Move a mode-local start/stop window to the one shared center."""

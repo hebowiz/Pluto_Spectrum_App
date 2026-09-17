@@ -7,9 +7,14 @@ from dataclasses import dataclass
 
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from pluto_common.control_panel import (
+    CONTROL_PANEL_WIDTH,
+    ControlPanelNavigator,
+    add_back_button_footer,
+    configure_control_button,
+    make_control_group,
+)
 
-CONTROL_PANEL_WIDTH = 240
-BUTTON_FONT_SCALE = 1.45
 
 
 @dataclass(frozen=True)
@@ -59,7 +64,6 @@ class VSAControlPanel(QtWidgets.QFrame):
             "QPushButton:disabled { color: #888; background-color: #252525; }"
         )
         self._spec: WorkspacePanelSpec | None = None
-        self._history: list[QtWidgets.QWidget] = []
         self._bound_actions: list[tuple[QtGui.QAction, Callable[[], None]]] = []
         self.buttons: dict[str, QtWidgets.QPushButton] = {}
 
@@ -76,19 +80,13 @@ class VSAControlPanel(QtWidgets.QFrame):
 
         self.stack = QtWidgets.QStackedWidget()
         layout.addWidget(self.stack, 1)
-        footer = QtWidgets.QHBoxLayout()
-        footer.addStretch(1)
         self.back_button = self._make_button("Back")
-        self.back_button.clicked.connect(self.navigate_back)
-        footer.addWidget(self.back_button)
-        layout.addLayout(footer)
+        add_back_button_footer(layout, self.back_button)
         self.back_button.hide()
-        self._install_back_filter(self)
 
     def set_workspace(self, spec: WorkspacePanelSpec) -> None:
         self._disconnect_actions()
         self._spec = spec
-        self._history.clear()
         self.buttons.clear()
         while self.stack.count():
             widget = self.stack.widget(0)
@@ -106,24 +104,26 @@ class VSAControlPanel(QtWidgets.QFrame):
             self.file_page,
         ):
             self.stack.addWidget(page)
-            self._install_back_filter(page)
-        self._show_page("Main Menu", self.main_page, remember=False)
+        if hasattr(self, "_navigator"):
+            self._navigator.reset(self.main_page)
+        else:
+            self._navigator = ControlPanelNavigator(
+                panel=self,
+                title_label=self.title_label,
+                stack=self.stack,
+                main_page=self.main_page,
+                back_button=self.back_button,
+            )
+            self._navigator.show_main()
         self._sync_sweep_group()
 
     def show_main_menu(self) -> None:
         if self._spec is None:
             return
-        self._history.clear()
-        self._show_page("Main Menu", self.main_page, remember=False)
+        self._navigator.show_main()
 
     def navigate_back(self) -> None:
-        if not self._history:
-            self.show_main_menu()
-            return
-        title, page = self._history.pop()
-        self.title_label.setText(title)
-        self.stack.setCurrentWidget(page)
-        self.back_button.setVisible(bool(self._history) or page is not self.main_page)
+        self._navigator.navigate_back()
 
     def _show_page(
         self,
@@ -132,12 +132,7 @@ class VSAControlPanel(QtWidgets.QFrame):
         *,
         remember: bool = True,
     ) -> None:
-        current = self.stack.currentWidget()
-        if remember and current is not None and current is not page:
-            self._history.append((self.title_label.text(), current))
-        self.title_label.setText(title)
-        self.stack.setCurrentWidget(page)
-        self.back_button.setVisible(page is not self.main_page)
+        self._navigator.show_page(title, page, remember=remember)
 
     def _build_main_page(self, spec: WorkspacePanelSpec) -> QtWidgets.QWidget:
         content = QtWidgets.QWidget()
@@ -150,7 +145,6 @@ class VSAControlPanel(QtWidgets.QFrame):
         mode_button = self._make_button(
             f"Analyzer Mode\n{spec.mode_label}"
         )
-        mode_button.setMinimumHeight(68)
         mode_button.clicked.connect(
             lambda: self._show_page("Analyzer Mode", self.mode_page)
         )
@@ -213,9 +207,23 @@ class VSAControlPanel(QtWidgets.QFrame):
                 refresh_enabled and not busy
             )
             self.buttons["Reset"].setEnabled(reset_enabled and not busy)
-            for label in ("Preset", "Recall"):
+            # Capture settings and the shared Pluto target are immutable while
+            # an acquisition owns the device. Disable every entry point that
+            # would otherwise be rejected by the application, including mode
+            # buttons when the user is already viewing the Analyzer Mode page.
+            locked_labels = (
+                "Analyzer Mode",
+                "Device",
+                "Preset",
+                "Recall",
+                *(command.label for command in spec.setup),
+            )
+            for label in locked_labels:
                 button = self.buttons.get(label)
                 if button is not None:
+                    button.setEnabled(not busy)
+            for label, button in self.buttons.items():
+                if label.startswith("mode:"):
                     button.setEnabled(not busy)
 
         for action in watched_actions:
@@ -226,10 +234,11 @@ class VSAControlPanel(QtWidgets.QFrame):
         layout.addWidget(sweep)
 
         system = self._group("SYSTEM")
+        self.system_group = system
         for label, callback in (
-            ("Device", self.device_requested.emit),
             ("State", lambda: self._show_page("State", self.system_page)),
             ("File", lambda: self._show_page("File", self.file_page)),
+            ("Device", self.device_requested.emit),
         ):
             button = self._make_button(label)
             button.clicked.connect(lambda _checked=False, callback=callback: callback())
@@ -353,12 +362,7 @@ class VSAControlPanel(QtWidgets.QFrame):
 
     def _make_button(self, text: str) -> QtWidgets.QPushButton:
         button = QtWidgets.QPushButton(text)
-        font = QtGui.QFont(button.font())
-        font.setPointSizeF(font.pointSizeF() * BUTTON_FONT_SCALE)
-        font.setBold(True)
-        button.setFont(font)
-        button.setMinimumHeight(50)
-        return button
+        return configure_control_button(button)
 
     @staticmethod
     def _simple_page() -> QtWidgets.QWidget:
@@ -369,28 +373,4 @@ class VSAControlPanel(QtWidgets.QFrame):
         return page
 
     def _group(self, title: str) -> QtWidgets.QGroupBox:
-        group = QtWidgets.QGroupBox(title)
-        font = QtGui.QFont(group.font())
-        font.setBold(True)
-        group.setFont(font)
-        layout = QtWidgets.QVBoxLayout(group)
-        layout.setSpacing(8)
-        return group
-
-    def _install_back_filter(self, root: QtWidgets.QWidget) -> None:
-        root.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.NoContextMenu)
-        root.installEventFilter(self)
-        for child in root.findChildren(QtWidgets.QWidget):
-            child.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.NoContextMenu)
-            child.installEventFilter(self)
-
-    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
-        if (
-            event.type() == QtCore.QEvent.Type.MouseButtonPress
-            and isinstance(event, QtGui.QMouseEvent)
-            and event.button() == QtCore.Qt.MouseButton.RightButton
-            and self.stack.currentWidget() is not self.main_page
-        ):
-            self.navigate_back()
-            return True
-        return super().eventFilter(watched, event)
+        return make_control_group(title)

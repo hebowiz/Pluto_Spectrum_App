@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from pathlib import Path
 from typing import Any, Mapping
 
 from pluto_sa.config.spectrum_config import SpectrumConfig
@@ -271,3 +272,15 @@ def save_session_state(settings, state: RTSASessionState) -> None:
 def clear_session_state(settings) -> None:
     settings.remove(RTSA_SESSION_KEY)
     settings.sync()
+
+
+def load_session_state_file(path: str | Path) -> RTSASessionState:
+    """Load a user-selected RTSA state file."""
+
+    return decode_session_state(Path(path).read_text(encoding="utf-8"))
+
+
+def save_session_state_file(path: str | Path, state: RTSASessionState) -> None:
+    """Save a complete RTSA state bundle to a user-selected file."""
+
+    Path(path).write_text(encode_session_state(state), encoding="utf-8")
