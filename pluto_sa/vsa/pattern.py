@@ -119,6 +119,8 @@ class PatternSearchSettings:
     meas_only_if_pattern_symbols_correct: bool = True
     match_selection: MatchSelectionPolicy = MatchSelectionPolicy.FIRST
     match_index: int = 1
+    preferred_match_start_sample: int | None = None
+    preferred_match_radius_samples: int | None = None
     iq_power_trigger: IQPowerTriggerSettings = field(
         default_factory=IQPowerTriggerSettings
     )
@@ -134,6 +136,21 @@ class PatternSearchSettings:
             self, "match_selection", MatchSelectionPolicy(self.match_selection)
         )
         object.__setattr__(self, "match_index", int(self.match_index))
+        if self.preferred_match_start_sample is not None:
+            object.__setattr__(
+                self,
+                "preferred_match_start_sample",
+                int(self.preferred_match_start_sample),
+            )
+        if self.preferred_match_radius_samples is not None:
+            radius = int(self.preferred_match_radius_samples)
+            if radius < 0:
+                raise ValueError("preferred_match_radius_samples must be non-negative")
+            if self.preferred_match_start_sample is None:
+                raise ValueError(
+                    "preferred_match_radius_samples requires a preferred match start"
+                )
+            object.__setattr__(self, "preferred_match_radius_samples", radius)
 
     @property
     def effective_correlation_threshold(self) -> float:
@@ -2034,6 +2051,18 @@ class PatternAnalyzer:
                 start_coordinate = float(
                     sampled_centers[int(index) + symbol_offset]
                 )
+                if search.preferred_match_radius_samples is not None:
+                    start_sample = int(
+                        round(
+                            start_coordinate
+                            / analysis_rate_hz
+                            * recording.sample_rate_hz
+                        )
+                    )
+                    if abs(
+                        start_sample - int(search.preferred_match_start_sample)
+                    ) > int(search.preferred_match_radius_samples):
+                        continue
                 candidates.append(
                     (
                         float(scores[index]),
@@ -2134,13 +2163,36 @@ class PatternAnalyzer:
             raise ValueError(
                 "no symbol-correct pattern match satisfies the search requirements"
             )
-        best, selected_match_index, eligible_match_count = _select_match_candidate(
-            eligible_candidates,
-            search.match_selection,
-            search.match_index,
-            time_key=lambda item: item[5],
-            score_key=lambda item: item[0],
-        )
+        if search.preferred_match_start_sample is None:
+            best, selected_match_index, eligible_match_count = (
+                _select_match_candidate(
+                    eligible_candidates,
+                    search.match_selection,
+                    search.match_index,
+                    time_key=lambda item: item[5],
+                    score_key=lambda item: item[0],
+                )
+            )
+        else:
+            ordered_candidates = sorted(
+                eligible_candidates, key=lambda item: item[5]
+            )
+            target = int(search.preferred_match_start_sample)
+            best = min(
+                ordered_candidates,
+                key=lambda item: abs(
+                    int(
+                        round(
+                            float(item[5])
+                            / analysis_rate_hz
+                            * recording.sample_rate_hz
+                        )
+                    )
+                    - target
+                ),
+            )
+            selected_match_index = ordered_candidates.index(best) + 1
+            eligible_match_count = len(ordered_candidates)
         score, phase, index, waveform_symbols, centers, _ = best
         eligible_match_start_samples = tuple(
             int(

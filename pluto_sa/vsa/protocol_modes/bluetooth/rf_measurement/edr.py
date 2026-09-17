@@ -286,6 +286,7 @@ def measure_edr_devm(
     reference_symbol_center = float(first_symbol_center_sample) - sps
     blocks: list[EDRDEVMBlockResult] = []
     all_devm: list[np.ndarray] = []
+    previous_fit: np.ndarray | None = None
 
     for block_index, start in enumerate(range(0, labels.size, block_size)):
         stop = start + block_size
@@ -331,15 +332,50 @@ def measure_edr_devm(
             initial_phase_step * float(symbol_rate_hz) / (2.0 * np.pi)
         )
 
-        timing_grid = np.linspace(-0.5 * sps, 0.5 * sps, 17)
-        frequency_grid = np.unique(
-            np.clip(
-                initial_omega0_hz
-                + np.linspace(-100_000.0, 100_000.0, 9),
-                -EDR_RESIDUAL_FREQUENCY_SEARCH_HZ,
-                EDR_RESIDUAL_FREQUENCY_SEARCH_HZ,
+        if previous_fit is None:
+            # The first block has no packet-local history, so retain the full
+            # acquisition grid for exactly the same capture range as before.
+            timing_grid = np.linspace(-0.5 * sps, 0.5 * sps, 17)
+            frequency_grid = np.unique(
+                np.clip(
+                    initial_omega0_hz
+                    + np.linspace(-100_000.0, 100_000.0, 9),
+                    -EDR_RESIDUAL_FREQUENCY_SEARCH_HZ,
+                    EDR_RESIDUAL_FREQUENCY_SEARCH_HZ,
+                )
             )
-        )
+        else:
+            # Timing and residual CFO are continuous within one packet.  Use
+            # the preceding block as the dense local seed while retaining a
+            # sparse full-range guard against timing drift or a bad block.
+            previous_timing, previous_frequency = map(float, previous_fit)
+            timing_grid = np.unique(
+                np.clip(
+                    np.concatenate(
+                        (
+                            previous_timing
+                            + sps * np.asarray((-0.125, 0.0, 0.125)),
+                            sps * np.asarray((-0.5, -0.25, 0.0, 0.25, 0.5)),
+                        )
+                    ),
+                    -0.5 * sps,
+                    0.5 * sps,
+                )
+            )
+            frequency_grid = np.unique(
+                np.clip(
+                    np.concatenate(
+                        (
+                            previous_frequency
+                            + np.asarray((-25_000.0, 0.0, 25_000.0)),
+                            initial_omega0_hz
+                            + np.asarray((-100_000.0, 0.0, 100_000.0)),
+                        )
+                    ),
+                    -EDR_RESIDUAL_FREQUENCY_SEARCH_HZ,
+                    EDR_RESIDUAL_FREQUENCY_SEARCH_HZ,
+                )
+            )
         coarse_parameters = min(
             (
                 np.asarray((timing, frequency), dtype=np.float64)
@@ -362,6 +398,7 @@ def measure_edr_devm(
             x_scale=np.asarray([max(0.25, 0.25 * sps), 10_000.0]),
             max_nfev=120,
         )
+        previous_fit = np.asarray(fitted.x, dtype=np.float64)
         timing_samples, residual_frequency_hz = map(float, fitted.x)
         boundary_reached = bool(
             abs(abs(timing_samples) - 0.5 * sps) <= max(1e-6, 1e-4 * sps)

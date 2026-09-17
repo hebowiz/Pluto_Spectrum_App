@@ -787,6 +787,8 @@ def _analyze_known_pattern(
     minimum_correlation: float,
     match_index: int = 1,
     match_selection: MatchSelectionPolicy = MatchSelectionPolicy.INDEX,
+    preferred_match_start_sample: int | None = None,
+    preferred_match_radius_samples: int | None = None,
     iq_power_trigger: IQPowerTriggerSettings | None = None,
     generate_display_products: bool = True,
 ) -> VSASession:
@@ -813,6 +815,8 @@ def _analyze_known_pattern(
             iq_correlation_threshold=float(minimum_correlation),
             match_selection=MatchSelectionPolicy(match_selection),
             match_index=max(1, int(match_index)),
+            preferred_match_start_sample=preferred_match_start_sample,
+            preferred_match_radius_samples=preferred_match_radius_samples,
         ),
         ResultRangeSettings(result_length=max(1, int(result_length))),
         demodulation=demodulation,
@@ -902,6 +906,7 @@ def _analyze_edr_payload_at_sync(
     *,
     result_length: int,
     expected_sync_sample: int,
+    sync_search_radius_samples: int,
     minimum_correlation: float = 0.72,
     generate_display_products: bool = True,
 ) -> VSASession:
@@ -915,62 +920,20 @@ def _analyze_edr_payload_at_sync(
     pass must select the eligible match closest to that position.
     """
 
-    # The caller has already confirmed this sync in a narrow, deterministic
-    # post-header window.  In the packet-local crop the first eligible match
-    # is therefore the expected one in normal operation.  Selecting it
-    # directly avoids the old STRONGEST pass followed by a second INDEX pass.
-    # If an earlier accidental match is ever admitted, retain the original
-    # full-accuracy strongest/nearest path as a safety fallback.
-    first_session = _analyze_known_pattern(
-        recording,
-        signal,
-        sync,
-        result_length=result_length,
-        minimum_correlation=minimum_correlation,
-        match_index=1,
-        match_selection=MatchSelectionPolicy.INDEX,
-        generate_display_products=generate_display_products,
-    )
-    first_start = int(first_session.pattern_result.pattern_start_sample)
-    samples_per_symbol = recording.sample_rate_hz / signal.symbol_rate_hz
-    if abs(first_start - int(expected_sync_sample)) <= max(
-        1, int(round(0.5 * samples_per_symbol))
-    ):
-        return first_session
-
-    session = _analyze_known_pattern(
-        recording,
-        signal,
-        sync,
-        result_length=result_length,
-        minimum_correlation=minimum_correlation,
-        match_index=1,
-        match_selection=MatchSelectionPolicy.STRONGEST,
-        generate_display_products=generate_display_products,
-    )
-    starts = tuple(
-        int(value)
-        for value in session.pattern_result.metadata.get(
-            "eligible_match_start_samples", ()
-        )
-    )
-    if not starts:
-        return session
-    nearest_index = min(
-        range(len(starts)),
-        key=lambda index: abs(starts[index] - int(expected_sync_sample)),
-    )
-    selected_start = int(session.pattern_result.pattern_start_sample)
-    if selected_start == starts[nearest_index]:
-        return session
+    # Select the candidate nearest the deterministic BR/EDR boundary in the
+    # pattern search itself.  The analyzer already has every eligible
+    # candidate, so rerunning the complete PSK search merely to change the
+    # selected index is unnecessary.
     return _analyze_known_pattern(
         recording,
         signal,
         sync,
         result_length=result_length,
         minimum_correlation=minimum_correlation,
-        match_index=nearest_index + 1,
+        match_index=1,
         match_selection=MatchSelectionPolicy.INDEX,
+        preferred_match_start_sample=int(expected_sync_sample),
+        preferred_match_radius_samples=max(0, int(sync_search_radius_samples)),
         generate_display_products=generate_display_products,
     )
 
@@ -1029,6 +992,7 @@ def _edr_air_bits_at_classic_boundary(
                 sync,
                 result_length=int(sync.size) + int(np.ceil(16.0 / width)) + 2,
                 expected_sync_sample=expected_start - search_start,
+                sync_search_radius_samples=timing_tolerance,
                 minimum_correlation=_EDR_SYNC_ACQUISITION_CORRELATION,
                 generate_display_products=False,
             )
@@ -2682,7 +2646,11 @@ def analyze_bluetooth_classic_recording(
                 # refinement and above 0.99 afterwards.
                 minimum_correlation=_EDR_SYNC_ACQUISITION_CORRELATION,
                 expected_sync_sample=edr_sync_start - sync_search_start,
-                generate_display_products=_generate_display_products,
+                sync_search_radius_samples=sync_timing_tolerance,
+                # This pass exists only to confirm the PHY and decode Length.
+                # Materialize plot products once, after the exact packet-local
+                # result has been selected (or this session becomes fallback).
+                generate_display_products=False,
             )
             correlation = float(sync_session.pattern_result.correlation)
             edr_sync_correlation = correlation
@@ -2786,8 +2754,11 @@ def analyze_bluetooth_classic_recording(
                 sync,
                 result_length=exact_result_symbols,
                 expected_sync_sample=detected_sync_start - crop_start,
+                sync_search_radius_samples=sync_timing_tolerance,
                 minimum_correlation=_EDR_SYNC_ACQUISITION_CORRELATION,
-                generate_display_products=_generate_display_products,
+                # Avoid building products for a candidate which may still be
+                # rejected by the final correlation/timing checks below.
+                generate_display_products=False,
             )
             payload_correlation = float(
                 candidate_session.pattern_result.correlation
@@ -2820,6 +2791,16 @@ def analyze_bluetooth_classic_recording(
             analysis_sample_offset = crop_start
         except Exception as error:
             edr_error = str(error)
+
+    if (
+        analysis_session is not None
+        and phy is not BluetoothClassicPhy.BR
+        and _generate_display_products
+    ):
+        # Deferred generation is idempotent.  It covers both the exact EDR
+        # result and the already-confirmed narrow fallback without repeating
+        # work during provisional synchronization.
+        analysis_session.generate_display_products()
 
     if analysis_session is None and requested_phy in {
         BluetoothClassicPhy.EDR_2M,
