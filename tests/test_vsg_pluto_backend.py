@@ -352,6 +352,43 @@ def test_pluto_backend_splits_finite_schedule_on_packet_boundaries(
     ]
 
 
+def test_finite_tx_reports_first_completed_push_once_and_stays_active_between_chunks(
+    monkeypatch,
+) -> None:
+    import pluto_vsg.backends.pluto as module
+
+    _install_fakes(monkeypatch)
+    prefix_count = round(0.002 * 8_000_000)
+    suffix_count = round(0.002 * 8_000_000)
+    frame = np.ones(4, dtype=np.complex64)
+    monkeypatch.setattr(
+        module,
+        "_MAX_NONCYCLIC_DMA_PAYLOAD_BYTES",
+        (prefix_count + suffix_count + frame.size * 2) * 4,
+    )
+    backend = PlutoOutputBackend(_settings(burst_count=5))
+    backend.prepare()
+    backend.transfer(
+        GenerationResult(iq=np.tile(frame, 5), sample_rate_hz=8_000_000.0)
+    )
+    callback_events: list[int] = []
+
+    backend.start(
+        on_first_tx_completed=lambda: callback_events.append(
+            len(_FakePluto.instances[-1].transmitted_history)
+        )
+    )
+
+    assert callback_events == [1]
+    names = [event["name"] for event in backend.diagnostic_report()["events"]]
+    assert names.index("finite_chunk_1_push_completed") < names.index(
+        "first_tx_completed"
+    )
+    assert names.index("first_tx_completed") < names.index(
+        "finite_chunk_2_push_started"
+    )
+
+
 def test_pluto_backend_honors_stop_requested_during_buffer_transfer(monkeypatch) -> None:
     _install_fakes(monkeypatch)
     original_tx = _FakePluto.tx
@@ -431,6 +468,30 @@ def test_pluto_backend_repeats_one_period_with_cyclic_dma_until_stopped(
     assert "cleanup_dac_zero_completed" in names
     assert "post_cleanup_readback_skipped_after_stop" in names
     assert "noncyclic_stream_committed" not in names
+
+
+def test_continuous_tx_reports_first_completed_push_before_playback(monkeypatch) -> None:
+    _install_fakes(monkeypatch)
+    frame = np.ones(8, dtype=np.complex64)
+    backend = PlutoOutputBackend(
+        _settings(burst_count=1, playback_mode=PlutoPlaybackMode.CONTINUOUS)
+    )
+    backend.prepare()
+    backend.transfer(GenerationResult(iq=frame, sample_rate_hz=8_000_000.0))
+    callback_events: list[str] = []
+
+    def first_tx_completed() -> None:
+        callback_events.append("completed")
+        backend.stop()
+
+    backend.start(on_first_tx_completed=first_tx_completed)
+
+    assert callback_events == ["completed"]
+    names = [event["name"] for event in backend.diagnostic_report()["events"]]
+    assert names.index("cyclic_push_completed") < names.index("first_tx_completed")
+    assert names.index("first_tx_completed") < names.index(
+        "continuous_playback_started"
+    )
 
 
 def test_pluto_backend_diagnostic_report_is_json_safe(monkeypatch) -> None:

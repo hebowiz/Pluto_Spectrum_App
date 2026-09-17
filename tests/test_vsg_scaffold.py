@@ -356,12 +356,80 @@ def test_vsg_control_panel_defaults_and_auto_bandwidth() -> None:
     pg.mkQApp("Pluto VSG control panel defaults")
     window = PlutoVSGWindow()
     try:
-        assert window.rf_button.text() == "RF\nOFF"
+        assert window.rf_button.text() == "Calibration"
+        assert window.rf_button.isCheckable() is True
+        assert window.rf_button.isChecked() is False
         assert window.mod_button.text() == "Mod\nON"
         assert window.continuous_button.text() == "Continuous\nON"
         settings = window._current_pluto_settings()
         assert settings.rf_bandwidth_hz == settings.sample_rate_hz
         assert window.frequency_button.text().endswith("MHz")
+    finally:
+        window.close()
+
+
+def test_vsg_rf_button_shows_transfer_then_blue_on_state() -> None:
+    pg.mkQApp("Pluto VSG RF button states")
+    window = PlutoVSGWindow()
+    try:
+        window._pluto_prepared_signature = window._pluto_configuration_signature()
+        window._rf_transfer_pending = True
+        window._update_vsg_control_labels()
+        assert window.rf_button.text() == "RF\nTRANSFERRING..."
+        assert window.rf_button.isChecked() is False
+
+        window._tx_thread = object()
+        window._pluto_first_tx_completed()
+        assert window.rf_button.text() == "RF\nON"
+        assert window.rf_button.isChecked() is True
+
+        window._pluto_transmission_finished(True, "complete")
+        assert window.rf_button.text() == "RF\nOFF"
+        assert window.rf_button.isChecked() is False
+    finally:
+        window._tx_thread = None
+        window.close()
+
+
+def test_vsg_calibration_button_starts_without_confirmation(monkeypatch) -> None:
+    pg.mkQApp("Pluto VSG direct RF calibration")
+    window = PlutoVSGWindow()
+    started_states: list[tuple[str, bool]] = []
+
+    def start_calibration() -> None:
+        started_states.append(
+            (window.rf_button.text(), window.rf_button.isChecked())
+        )
+
+    monkeypatch.setattr(window, "_start_pluto_preparation", start_calibration)
+    try:
+        window._pluto_prepared_signature = None
+        window.rf_button.click()
+
+        assert started_states == [("Calibration", False)]
+        assert window.rf_button.text() == "Calibration"
+        assert window.rf_button.isChecked() is False
+    finally:
+        window.close()
+
+
+def test_vsg_rf_button_tracks_calibration_lifecycle() -> None:
+    pg.mkQApp("Pluto VSG RF calibration lifecycle")
+    window = PlutoVSGWindow()
+    try:
+        assert window.rf_button.text() == "Calibration"
+        assert window.rf_button.isChecked() is False
+
+        window._calibration_in_progress = True
+        window._update_vsg_control_labels()
+        assert window.rf_button.text() == "Calibrating..."
+        assert window.rf_button.isChecked() is False
+
+        window._calibration_in_progress = False
+        window._pluto_prepared_signature = window._pluto_configuration_signature()
+        window._update_vsg_control_labels()
+        assert window.rf_button.text() == "RF\nOFF"
+        assert window.rf_button.isChecked() is False
     finally:
         window.close()
 

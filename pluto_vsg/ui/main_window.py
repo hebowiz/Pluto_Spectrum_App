@@ -205,6 +205,16 @@ class _Panel(QtWidgets.QGroupBox):
         layout.addWidget(child)
 
 
+class _RFStateButton(QtWidgets.QPushButton):
+    """Checkable RF indicator whose state is controlled only by hardware events."""
+
+    def nextCheckState(self) -> None:
+        # QAbstractButton normally toggles before emitting clicked(). That can
+        # paint a false blue ON state while the click handler decides whether
+        # calibration is required. Programmatic setChecked() remains available.
+        return
+
+
 class _WiFiSettingsDialog(QtWidgets.QDialog):
     """Dedicated Non-HT OFDM packet, RF and Beacon editor."""
 
@@ -1921,6 +1931,7 @@ class _PlutoOutputDialog(QtWidgets.QDialog):
 
 class _PlutoTransmitWorker(QtCore.QObject):
     finished = QtCore.Signal(bool, str)
+    first_tx_completed = QtCore.Signal()
 
     def __init__(self, backend: PlutoOutputBackend, result: GenerationResult) -> None:
         super().__init__()
@@ -1934,7 +1945,9 @@ class _PlutoTransmitWorker(QtCore.QObject):
         message = ""
         try:
             self.backend.transfer(self.result)
-            self.backend.start()
+            self.backend.start(
+                on_first_tx_completed=self.first_tx_completed.emit,
+            )
         except Exception as error:
             message = str(error)
         else:
@@ -2063,6 +2076,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._prepare_worker: _PlutoPrepareWorker | None = None
         self._pluto_prepared_signature: tuple[object, ...] | None = None
         self._preparing_signature: tuple[object, ...] | None = None
+        self._calibration_in_progress = False
         self._close_after_tx = False
         self._shutdown_stop_requested = False
         self.undo_stack = QtGui.QUndoStack(self)
@@ -2099,6 +2113,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
         self._pluto_playback_mode = PlutoPlaybackMode.CONTINUOUS
         self._rf_enabled = False
+        self._rf_transfer_pending = False
         self._modulation_enabled = bool(restored.get("modulation_enabled", True))
         self._continuous_enabled = bool(restored.get("continuous_enabled", True))
         self._power_step_db = float(preferences.value("pluto_tx/power_step_db", 10.0))
@@ -2425,8 +2440,14 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(outer)
 
     @staticmethod
-    def _make_control_button(text: str, *, value: bool = False) -> QtWidgets.QPushButton:
-        button = QtWidgets.QPushButton(text)
+    def _make_control_button(
+        text: str,
+        *,
+        value: bool = False,
+        rf_indicator: bool = False,
+    ) -> QtWidgets.QPushButton:
+        button_class = _RFStateButton if rf_indicator else QtWidgets.QPushButton
+        button = button_class(text)
         font = QtGui.QFont(button.font())
         if font.pointSizeF() > 0.0:
             font.setPointSizeF(font.pointSizeF() * 1.45)
@@ -2437,7 +2458,11 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             "QPushButton { background-color: #303030; color: white; "
             "border: 1px solid #666; padding: 8px; }"
             "QPushButton:hover { background-color: #3c3c3c; }"
+            "QPushButton:checked { background-color: #176b87; "
+            "border-color: #37b7dc; }"
             "QPushButton:disabled { color: #888; background-color: #292929; }"
+            "QPushButton:checked:disabled { color: white; "
+            "background-color: #176b87; border-color: #37b7dc; }"
         )
         return button
 
@@ -2446,7 +2471,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(content)
         layout.setContentsMargins(8, 4, 8, 8)
         layout.setSpacing(8)
-        self.rf_button = self._make_control_button("RF\nOFF", value=True)
+        self.rf_button = self._make_control_button(
+            "Calibration", value=True, rf_indicator=True
+        )
+        self.rf_button.setCheckable(True)
         self.mod_button = self._make_control_button("Mod\nON", value=True)
         self.continuous_button = self._make_control_button("Continuous\nON", value=True)
         self.repetitions_button = self._make_control_button("Repeat Count", value=True)
@@ -3092,7 +3120,24 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
     def _update_vsg_control_labels(self) -> None:
         if not hasattr(self, "rf_button"):
             return
-        self.rf_button.setText(f"RF\n{'ON' if self._rf_enabled else 'OFF'}")
+        calibration_required = (
+            self._pluto_prepared_signature
+            != self._pluto_configuration_signature()
+        )
+        if self._calibration_in_progress:
+            rf_state = "Calibrating..."
+        elif self._rf_enabled:
+            rf_state = "ON"
+        elif self._rf_transfer_pending:
+            rf_state = "TRANSFERRING..."
+        elif calibration_required:
+            rf_state = "Calibration"
+        else:
+            rf_state = "RF\nOFF"
+        self.rf_button.setText(
+            f"RF\n{rf_state}" if rf_state in {"ON", "TRANSFERRING..."} else rf_state
+        )
+        self.rf_button.setChecked(self._rf_enabled)
         self.mod_button.setText(f"Mod\n{'ON' if self._modulation_enabled else 'OFF'}")
         self.continuous_button.setText(
             f"Continuous\n{'ON' if self._continuous_enabled else 'OFF'}"
@@ -3236,27 +3281,20 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._update_vsg_control_labels()
 
     def _toggle_rf(self) -> None:
+        # A checkable QPushButton flips itself before emitting ``clicked``.
+        # Restore the hardware-backed state immediately so the calibration
+        # decision dialog cannot briefly paint RF as ON. Only the worker's
+        # first-TX-completed signal is allowed to assert this indicator.
+        self.rf_button.setChecked(self._rf_enabled)
         if self._tx_thread is not None:
             self._stop_pluto_transmission()
             return
         if self._prepare_thread is not None:
             return
         if self._pluto_prepared_signature != self._pluto_configuration_signature():
-            answer = QtWidgets.QMessageBox.question(
-                self,
-                "Pluto Calibration Required",
-                "The current frequency or baseband configuration has not been "
-                "calibrated. Run the muted AD936x TX calibration now?\n\n"
-                "RF output will remain OFF after calibration. Press RF ON again "
-                "to start transmission.",
-                QtWidgets.QMessageBox.StandardButton.Ok
-                | QtWidgets.QMessageBox.StandardButton.Cancel,
-                QtWidgets.QMessageBox.StandardButton.Ok,
-            )
-            if answer == QtWidgets.QMessageBox.StandardButton.Ok:
-                self._start_pluto_preparation()
             self._rf_enabled = False
             self._update_vsg_control_labels()
+            self._start_pluto_preparation()
             return
         self._pluto_playback_mode = (
             PlutoPlaybackMode.CONTINUOUS
@@ -3608,6 +3646,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         if previous_signature == self._pluto_configuration_signature():
             return
         self._pluto_prepared_signature = None
+        self._update_vsg_control_labels()
         self.statusBar().showMessage(
             "ADALM-Pluto configuration changed; preparation required"
         )
@@ -3678,6 +3717,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._prepare_worker = worker
         self._prepare_thread = thread
         self._preparing_signature = signature
+        self._calibration_in_progress = True
         self._set_pluto_busy(preparing=True, transmitting=False)
         self.statusBar().showMessage(
             "Preparing ADALM-Pluto: muted configuration and explicit TX calibration..."
@@ -3686,6 +3726,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(bool, str)
     def _pluto_preparation_finished(self, success: bool, message: str) -> None:
+        self._calibration_in_progress = False
         if success and self._preparing_signature == self._pluto_configuration_signature():
             self._pluto_prepared_signature = self._preparing_signature
             self.statusBar().showMessage(message)
@@ -3741,13 +3782,15 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._pluto_transmission_finished)
+        worker.first_tx_completed.connect(self._pluto_first_tx_completed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._pluto_thread_finished)
         self._tx_worker = worker
         self._tx_thread = thread
-        self._rf_enabled = True
+        self._rf_enabled = False
+        self._rf_transfer_pending = True
         self._set_pluto_busy(preparing=False, transmitting=True)
         if self._pluto_playback_mode is PlutoPlaybackMode.CONTINUOUS:
             period_samples = int(
@@ -3811,13 +3854,15 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._pluto_transmission_finished)
+        worker.first_tx_completed.connect(self._pluto_first_tx_completed)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         thread.finished.connect(self._pluto_thread_finished)
         self._tx_worker = worker
         self._tx_thread = thread
-        self._rf_enabled = True
+        self._rf_enabled = False
+        self._rf_transfer_pending = True
         self._set_pluto_busy(preparing=False, transmitting=True)
         self.statusBar().showMessage(
             "Starting Pluto CW: "
@@ -3834,9 +3879,20 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.rf_button.setEnabled(False)
         self.statusBar().showMessage("Stopping Pluto transmission...")
 
+    @QtCore.Slot()
+    def _pluto_first_tx_completed(self) -> None:
+        """Show RF ON only after the first host-to-Pluto TX call succeeds."""
+
+        if self._tx_thread is None:
+            return
+        self._rf_transfer_pending = False
+        self._rf_enabled = True
+        self._update_vsg_control_labels()
+
     @QtCore.Slot(bool, str)
     def _pluto_transmission_finished(self, success: bool, message: str) -> None:
         self._rf_enabled = False
+        self._rf_transfer_pending = False
         if success:
             self.statusBar().showMessage(message)
         else:

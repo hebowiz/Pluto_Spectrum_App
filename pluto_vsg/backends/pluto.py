@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -1037,8 +1038,22 @@ class PlutoOutputBackend:
         next(stream)
         return True
 
-    def start(self) -> None:
+    def start(
+        self,
+        on_first_tx_completed: Callable[[], None] | None = None,
+    ) -> None:
         playback_mode = PlutoPlaybackMode(self.settings.playback_mode)
+        first_tx_completed_notified = False
+
+        def notify_first_tx_completed() -> None:
+            nonlocal first_tx_completed_notified
+            if first_tx_completed_notified:
+                return
+            first_tx_completed_notified = True
+            self._record_event("first_tx_completed")
+            if on_first_tx_completed is not None:
+                on_first_tx_completed()
+
         waveform_ready = self._superframe is not None or bool(
             self._finite_chunk_packet_counts
         )
@@ -1120,6 +1135,7 @@ class PlutoOutputBackend:
                         time.monotonic() - push_started
                     ) * 1e3
                 self._record_event("cyclic_push_completed")
+                notify_first_tx_completed()
                 self._record_event("continuous_playback_started")
                 while not self._stop_event.wait(0.025):
                     self._apply_pending_hardware_gain()
@@ -1200,6 +1216,8 @@ class PlutoOutputBackend:
                                     self._record_event(
                                         f"finite_chunk_{index}_push_completed"
                                     )
+                                    if index == 1:
+                                        notify_first_tx_completed()
                                 finally:
                                     chunk_report["elapsed_ms"] = (
                                         time.monotonic() - chunk_started
