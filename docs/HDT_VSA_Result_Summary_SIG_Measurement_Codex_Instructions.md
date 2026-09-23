@@ -6,7 +6,7 @@ HDT専用VSAの `Result Summary` を、Bluetooth HDT仕様に基づく送信系R
 
 参照仕様：
 
-- `docs/HDT_VSr03_PR.pdf`
+- `references/standards/bluetooth/HDT_VSr03_PR.pdf`
 - Vol 6, Part A, Section 3.3 `Radio frequency tolerance`
 - Vol 6, Part A, Section 3.6 `LE HDT PHY`
 - Vol 6, Part A, Section 3.6.1 `Pre-packet emissions`

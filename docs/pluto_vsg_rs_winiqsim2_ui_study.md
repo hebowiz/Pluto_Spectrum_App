@@ -8,7 +8,7 @@ R&S SMCV100Bのローカルマニュアルと、R&S公式のWinIQSIM2マニュ�
 
 参照資料:
 
-- `docs/SMCV100B_UserManual_en_10.pdf`
+- `references/vendor/rohde-schwarz/SMCV100B_UserManual_en_10.pdf`
   - Custom Digital Modulation: おおむねp.106–123
   - ARB / waveform再生と転送: おおむねp.138–160
 - R&S WinIQSIM2 User Manual（公式オンライン版）

@@ -13,7 +13,7 @@ venv/
 *.log
 
 # Local proprietary specification reference (never commit)
-/docs/HDT_VSr03_PR.pdf
+/references/standards/bluetooth/HDT_VSr03_PR.pdf
 
 # PyInstaller / portable release outputs
 build/
