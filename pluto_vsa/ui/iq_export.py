@@ -6,6 +6,7 @@ from pathlib import Path
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 from pluto_vsa.dc import apply_robust_dc_removal
 from pluto_vsa.model import IQRecording
 from pluto_vsa.sources import FileIQSource
@@ -37,10 +38,7 @@ def export_iq_recording(
     )
     if not accepted:
         return None
-    stored = preferences.value(directory_key, "", type=str)
-    initial_directory = (
-        stored if stored and Path(stored).is_dir() else str(Path.cwd())
-    )
+    initial_directory = file_dialog_path(preferences, directory_key)
     path_text, _ = QtWidgets.QFileDialog.getSaveFileName(
         parent,
         "Export IQ Recording",
@@ -56,8 +54,7 @@ def export_iq_recording(
         remove_dc = str(processing).startswith("Software DC removed")
         exported = apply_robust_dc_removal(recording) if remove_dc else recording
         FileIQSource.save_npz(path, exported)
-        preferences.setValue(directory_key, str(path.resolve().parent))
-        preferences.sync()
+        remember_file_directory(preferences, directory_key, path)
         mode = "software DC removed" if remove_dc else "raw"
         status_bar.showMessage(
             f"IQ recording exported ({mode}) - {path.name}"

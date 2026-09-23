@@ -1,6 +1,6 @@
 """Isolated settings editors using the same mode-specific UI builders.
 
-Draft workspaces have no recording, physical receiver, or persistent settings.
+Draft workspaces have no recording, physical receiver, or persistent measurement settings.
 Their callbacks can update dependent widgets without touching the live mode.
 Only a successfully accepted draft is copied back to the live workspace.
 """
@@ -12,12 +12,17 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 
 class DraftPreferences:
-    """The small QSettings interface used by VSA, backed only by memory."""
+    """Isolate measurement edits while retaining file-dialog navigation history."""
 
     def __init__(self, original):
+        self._original = original
         self._values = {key: original.value(key) for key in original.allKeys()}
 
     def value(self, key, default=None, *, type=None):
+        if key.startswith(("directories/", "paths/")):
+            if type is None:
+                return self._original.value(key, default)
+            return self._original.value(key, default, type=type)
         value = self._values.get(key, default)
         if type is None or value is None:
             return value
@@ -26,6 +31,8 @@ class DraftPreferences:
         return type(value)
 
     def setValue(self, key, value):
+        if key.startswith(("directories/", "paths/")):
+            self._original.setValue(key, value)
         self._values[key] = value
 
     def contains(self, key):
@@ -38,7 +45,7 @@ class DraftPreferences:
         return list(self._values)
 
     def sync(self):
-        pass
+        self._original.sync()
 
 
 class DraftReceiver:

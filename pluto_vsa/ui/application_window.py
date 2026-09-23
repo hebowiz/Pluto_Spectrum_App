@@ -9,6 +9,7 @@ from pathlib import Path
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 from pluto_common.window_geometry import restore_window_geometry, save_window_geometry
 
 from pluto_vsa.standards.adsb1090.ui import ADSB1090Window
@@ -404,11 +405,10 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         self.control_panel.show_main_menu()
 
     def _config_directory(self) -> str:
-        stored = self._preferences.value("directories/config", "", type=str)
-        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
+        return file_dialog_path(self._preferences, "directories/config")
 
     def _remember_config_directory(self, path: str) -> None:
-        self._preferences.setValue("directories/config", str(Path(path).parent))
+        remember_file_directory(self._preferences, "directories/config", path)
 
     def _save_meas_config(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(

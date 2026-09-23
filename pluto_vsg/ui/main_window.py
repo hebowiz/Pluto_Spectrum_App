@@ -12,6 +12,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 from pluto_common.control_panel import (
     CONTROL_BUTTON_FONT_SCALE,
     CONTROL_PANEL_WIDTH,
@@ -3664,7 +3665,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open Pluto VSG Project",
-            "",
+            file_dialog_path(self._preferences, "directories/project"),
             "Pluto VSG Project (*.pvsg.json);;JSON (*.json)",
         )
         if not path:
@@ -3679,6 +3680,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             default_frequency_selection(self.project)
         )
         self.project_path = Path(path)
+        remember_file_directory(self._preferences, "directories/project", path)
         self.undo_stack.clear()
         self._refresh_project_view()
         self.generate_waveform()
@@ -3688,10 +3690,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Pluto VSG Project",
-            (
-                str(self.project_path)
-                if self.project_path is not None
-                else "waveform.pvsg.json"
+            file_dialog_path(
+                self._preferences, "directories/project",
+                filename=self.project_path.name if self.project_path else "waveform.pvsg.json",
+                default_directory=self.project_path.parent if self.project_path else None,
             ),
             "Pluto VSG Project (*.pvsg.json)",
         )
@@ -3699,6 +3701,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return
         self.project_path = Path(path)
         save_project(self.project_path, self.project)
+        remember_file_directory(self._preferences, "directories/project", self.project_path)
         self.statusBar().showMessage(f"Saved {self.project_path.name}")
 
     def _export_npz(self) -> None:
@@ -3707,10 +3710,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         if self.result is None:
             return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Export IQ", "waveform.npz", "NumPy IQ (*.npz)"
+            self, "Export IQ",
+            file_dialog_path(self._preferences, "directories/iq_npz", filename="waveform.npz"),
+            "NumPy IQ (*.npz)"
         )
         if path:
             save_npz(path, self.result, replace(self.project, repeat_count=1))
+            remember_file_directory(self._preferences, "directories/iq_npz", path)
             self.statusBar().showMessage(f"Exported {Path(path).name}")
 
     def _export_iq_tar(self) -> None:
@@ -3721,11 +3727,12 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Export R&S IQ TAR",
-            "waveform.iq.tar",
+            file_dialog_path(self._preferences, "directories/iq_tar", filename="waveform.iq.tar"),
             "R&S IQ TAR (*.iq.tar)",
         )
         if path:
             save_iq_tar(path, self.result, replace(self.project, repeat_count=1))
+            remember_file_directory(self._preferences, "directories/iq_tar", path)
             self.statusBar().showMessage(f"Exported {Path(path).name}")
 
     def _export_wv(self) -> None:
@@ -3736,7 +3743,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Export R&S WV",
-            "waveform.wv",
+            file_dialog_path(self._preferences, "directories/iq_wv", filename="waveform.wv"),
             "R&S ARB Waveform (*.wv)",
         )
         if not path:
@@ -3746,6 +3753,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         except (OSError, ValueError) as error:
             QtWidgets.QMessageBox.critical(self, "Export R&S WV", str(error))
             return
+        remember_file_directory(self._preferences, "directories/iq_wv", path)
         self.statusBar().showMessage(f"Exported {Path(path).name}")
 
     def _current_pluto_settings(self) -> PlutoTransmitSettings:

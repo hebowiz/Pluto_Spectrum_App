@@ -9,6 +9,7 @@ from typing import Any
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_common.window_geometry import restore_window_geometry, save_window_geometry
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 
 from pluto_rtsa.config.session_state import (
     RTSA_APPLICATION,
@@ -113,12 +114,10 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         self._install_control_panel_event_filters()
 
     def _state_directory(self) -> str:
-        stored = str(self._session_settings.value("directories/state", "") or "")
-        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
+        return file_dialog_path(self._session_settings, "directories/state")
 
     def _remember_state_directory(self, path: str | Path) -> None:
-        self._session_settings.setValue("directories/state", str(Path(path).parent))
-        self._session_settings.sync()
+        remember_file_directory(self._session_settings, "directories/state", path)
 
     def _on_state_save_clicked(self) -> None:
         path, _ = QtWidgets.QFileDialog.getSaveFileName(

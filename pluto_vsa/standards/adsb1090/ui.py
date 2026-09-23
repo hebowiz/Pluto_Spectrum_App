@@ -13,6 +13,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common.numeric_input import DeferredDoubleSpinBox
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 from pluto_common.config.input_frontend import InputPowerCorrection
 from pluto_vsa.standards.adsb1090.analysis import ADSB1090Analyzer
 from pluto_vsa.standards.adsb1090.decoder import (
@@ -1234,7 +1235,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self._show_aircraft_summary(self._aircraft_states[selected_icao])
 
     def _open_iq(self) -> None:
-        directory = str(self._preferences.value("paths/iq_directory", ""))
+        directory = file_dialog_path(
+            self._preferences, "directories/iq",
+            default_directory=self._preferences.value("paths/iq_directory", "", type=str),
+        )
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open 1090 MHz IQ",
@@ -1249,12 +1253,10 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "ADS-B 1090ES", str(error))
             return
-        self._preferences.setValue(
-            "paths/iq_directory", str(Path(path).resolve().parent)
-        )
+        remember_file_directory(self._preferences, "directories/iq", path)
 
     def _import_aircraft_database(self) -> None:
-        directory = str(self._preferences.value("paths/metadata_directory", ""))
+        directory = file_dialog_path(self._preferences, "paths/metadata_directory")
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Import OpenSky Aircraft Database",
@@ -1263,9 +1265,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         )
         if not path:
             return
-        self._preferences.setValue(
-            "paths/metadata_directory", str(Path(path).resolve().parent)
-        )
+        remember_file_directory(self._preferences, "paths/metadata_directory", path)
         self._start_aircraft_database_update(csv_path=path)
 
     def _download_aircraft_database(self) -> None:
@@ -1345,8 +1345,9 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         if not self._packet_history:
             self.statusBar().showMessage("Packet List is empty - nothing to export")
             return
-        directory = str(self._preferences.value("paths/export_directory", ""))
-        suggested = str(Path(directory) / "adsb1090_packets.jsonl") if directory else "adsb1090_packets.jsonl"
+        suggested = file_dialog_path(
+            self._preferences, "paths/export_directory", filename="adsb1090_packets.jsonl"
+        )
         path_text, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Export ADS-B Packet List",
@@ -1367,9 +1368,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         except OSError as error:
             QtWidgets.QMessageBox.critical(self, "Packet List Export Error", str(error))
             return
-        self._preferences.setValue(
-            "paths/export_directory", str(path.resolve().parent)
-        )
+        remember_file_directory(self._preferences, "paths/export_directory", path)
         self.statusBar().showMessage(
             f"Exported {len(self._packet_history)} ADS-B packets to {path.name}"
         )

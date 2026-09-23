@@ -226,7 +226,7 @@ def test_capture_rf_settings_are_not_invented_as_transmitter_settings():
 
 def test_vsa_file_export_and_structure_based_enablement(tmp_path, monkeypatch):
     from pluto_vsa.ui.packet_export import export_packet_project, update_export_action
-    from pyqtgraph.Qt import QtGui
+    from pyqtgraph.Qt import QtCore, QtGui
     pg.mkQApp()
     parent = QtWidgets.QMainWindow()
     action = QtGui.QAction(parent)
@@ -239,9 +239,18 @@ def test_vsa_file_export_and_structure_based_enablement(tmp_path, monkeypatch):
         assert not action.isEnabled()
         update_export_action(action, packet)
         assert action.isEnabled()
-        export_packet_project(parent, packet)
+        preferences = QtCore.QSettings(str(tmp_path / "export.ini"), QtCore.QSettings.Format.IniFormat)
+        export_packet_project(parent, packet, preferences)
         from pluto_vsg.persistence import load_project
         actual = BluetoothLEWaveformEngine().generate(load_project(path))
         np.testing.assert_array_equal(actual.packet_bits.bits, generated.packet_bits.bits)
+        initial_paths = []
+        def cancel(parent, title, initial, filters):
+            initial_paths.append(initial)
+            return "", ""
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", cancel)
+        reopened = QtCore.QSettings(str(tmp_path / "export.ini"), QtCore.QSettings.Format.IniFormat)
+        export_packet_project(parent, packet, reopened)
+        assert initial_paths == [str(tmp_path / "received_packet.pvsg.json")]
     finally:
         parent.close()

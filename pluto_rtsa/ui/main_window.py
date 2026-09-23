@@ -18,6 +18,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 from pluto_common.control_panel import (
     CONTROL_PANEL_WIDTH,
     ControlPanelNavigator,
@@ -36,6 +37,7 @@ from pluto_common.config.spectrum_config import (
 )
 from pluto_common.config.analyzer_mode import AnalyzerMode
 from pluto_rtsa.modes.sweep_controller import SweepController
+from pluto_rtsa.config.session_state import RTSA_APPLICATION, RTSA_ORGANIZATION
 from pluto_common.sdr.pluto_receiver import PlutoReceiver
 from pluto_common.sdr.continuous_acquisition import (
     ContinuousIQAcquisition,
@@ -474,6 +476,10 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         calibration_offset_db: float,
     ) -> None:
         super().__init__()
+        self._file_dialog_settings = (
+            getattr(self, "_session_settings", None)
+            or QtCore.QSettings(RTSA_ORGANIZATION, RTSA_APPLICATION)
+        )
         self.config = config
         self.receiver = receiver
         self.iq_acquisition = ContinuousIQAcquisition(receiver)
@@ -491,7 +497,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         self._settings_file_path = self._data_dir / "settings.json"
         self._last_correction_csv_path: str | None = None
         self._calibration_mode_saved_config: SpectrumConfig | None = None
-        self._calibration_last_file_dir: str | None = None
         self._sweep_like_progress = SweepLikeProgressState()
         self._time_analyzer_sweep = TimeAnalyzerSweepState()
         self._high_speed_time_analyzer = HighSpeedTimeAnalyzerCaptureState()
@@ -719,7 +724,6 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         try:
             self.calibration_controller.load_correction_csv(path)
             self.calibration_controller.set_correction_enabled(True)
-            self._calibration_last_file_dir = str(Path(path).parent)
             print(f"[CAL] Auto-load correction CSV: {path}")
             print("[CAL] Correction loaded successfully. Calibration ON.")
         except Exception as exc:
@@ -5055,10 +5059,11 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         if hasattr(self, "ext_gain_button"):
             self.ext_gain_button.setEnabled(not in_calibration)
 
-    def _default_csv_dialog_dir(self) -> str:
-        if self._calibration_last_file_dir is not None:
-            return self._calibration_last_file_dir
-        return str(self._calibration_data_dir)
+    def _default_csv_dialog_dir(self, file_kind: str) -> str:
+        return file_dialog_path(
+            self._file_dialog_settings, f"directories/{file_kind}",
+            default_directory=self._calibration_data_dir,
+        )
 
     def _on_calibration_toggle_clicked(self) -> None:
         if self.calibration_controller.sequence_is_measuring:
@@ -5077,7 +5082,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         file_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Load Calibration Correction CSV",
-            self._default_csv_dialog_dir(),
+            self._default_csv_dialog_dir("calibration_correction"),
             "CSV Files (*.csv);;All Files (*)",
         )
         if not file_path:
@@ -5091,7 +5096,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 f"Failed to load correction CSV:\n{exc}",
             )
             return
-        self._calibration_last_file_dir = str(QtCore.QFileInfo(file_path).absolutePath())
+        remember_file_directory(
+            self._file_dialog_settings, "directories/calibration_correction", file_path
+        )
         self._last_correction_csv_path = str(Path(file_path))
         try:
             self._save_app_settings()
@@ -5115,7 +5122,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
         file_path, _selected_filter = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Load Calibration Reference CSV",
-            self._default_csv_dialog_dir(),
+            self._default_csv_dialog_dir("calibration_reference"),
             "CSV Files (*.csv);;All Files (*)",
         )
         if not file_path:
@@ -5129,7 +5136,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 f"Failed to load reference CSV:\n{exc}",
             )
             return
-        self._calibration_last_file_dir = str(QtCore.QFileInfo(file_path).absolutePath())
+        remember_file_directory(
+            self._file_dialog_settings, "directories/calibration_reference", file_path
+        )
         print(
             "[CAL] Reference CSV loaded "
             f"count={summary.count} "
@@ -5205,7 +5214,7 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
                 "No calibration results to save.",
             )
             return False
-        default_dir = self._default_csv_dialog_dir()
+        default_dir = self._default_csv_dialog_dir("calibration_result")
         default_name = f"pluto_cal_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         default_save_path = str(Path(default_dir) / default_name)
         file_path, _selected_filter = QtWidgets.QFileDialog.getSaveFileName(
@@ -5257,7 +5266,9 @@ class RealtimeSpectrumWindow(QtWidgets.QMainWindow):
             )
             return False
 
-        self._calibration_last_file_dir = str(QtCore.QFileInfo(save_path).absolutePath())
+        remember_file_directory(
+            self._file_dialog_settings, "directories/calibration_result", save_path
+        )
         self._last_correction_csv_path = str(Path(save_path))
         frequency_hz = np.asarray([int(item.frequency_hz) for item in results], dtype=np.int64)
         calibration_offsets_db = np.asarray(

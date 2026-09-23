@@ -14,6 +14,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common.numeric_input import DeferredDoubleSpinBox
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 from pluto_vsa.ui.packet_decode import PacketDecodeTabs, dect_tree_item
 from pluto_common.sdr.trigger import TriggerKind
 from pluto_vsa.analysis import capture_power_traces, recording_spectrum_trace
@@ -891,8 +892,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.refresh()
 
     def _last_directory(self) -> str:
-        stored = self._preferences.value("directories/iq", "", type=str)
-        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
+        return file_dialog_path(self._preferences, "directories/iq")
 
     def _open_iq(self) -> None:
         if self.shutdown_busy_reason() is not None:
@@ -924,12 +924,14 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         except Exception as error:
             QtWidgets.QMessageBox.critical(self, "Open DECT IQ", str(error))
             return
-        self._preferences.setValue("directories/iq", str(Path(path).resolve().parent))
-        self._preferences.sync()
+        remember_file_directory(self._preferences, "directories/iq", path)
         self.load_recording(recording)
 
     def _export_vsg_project(self) -> None:
-        export_packet_project(self, None if self._result is None else self._result.packet_analysis)
+        export_packet_project(
+            self, None if self._result is None else self._result.packet_analysis,
+            self._preferences,
+        )
 
     def _export_iq_recording(self) -> None:
         export_iq_recording(
@@ -946,7 +948,10 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         path_text, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Export DECT GFSK Modulation Debug",
-            str(Path(self._last_directory()) / "dect_gfsk_modulation.csv"),
+            file_dialog_path(
+                self._preferences, "directories/dect_modulation_csv",
+                filename="dect_gfsk_modulation.csv",
+            ),
             "CSV files (*.csv);;All files (*)",
         )
         if not path_text:
@@ -1048,8 +1053,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         except OSError as error:
             QtWidgets.QMessageBox.critical(self, "Export GFSK Modulation", str(error))
             return
-        self._preferences.setValue("directories/iq", str(path.resolve().parent))
-        self._preferences.sync()
+        remember_file_directory(self._preferences, "directories/dect_modulation_csv", path)
         self.statusBar().showMessage(f"Exported DECT modulation debug: {path}")
 
     def _export_power_debug_csv(self) -> None:
@@ -1060,7 +1064,10 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         path_text, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Export DECT Power Debug",
-            str(Path(self._last_directory()) / "dect_power_measurement.csv"),
+            file_dialog_path(
+                self._preferences, "directories/dect_power_csv",
+                filename="dect_power_measurement.csv",
+            ),
             "CSV files (*.csv);;All files (*)",
         )
         if not path_text:
@@ -1090,8 +1097,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         except OSError as error:
             QtWidgets.QMessageBox.critical(self, "Export DECT Power", str(error))
             return
-        self._preferences.setValue("directories/iq", str(path.resolve().parent))
-        self._preferences.sync()
+        remember_file_directory(self._preferences, "directories/dect_power_csv", path)
         self.statusBar().showMessage(f"Exported DECT power debug: {path}")
 
     def _capture_settings(self) -> PlutoCaptureSettings:

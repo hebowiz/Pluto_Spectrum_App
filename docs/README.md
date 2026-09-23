@@ -11,6 +11,7 @@
 
 - [共通仕様](common.md)
 - [ウィンドウ位置・サイズとペイン配置](window-layout.md)
+- [ファイル保存・読み込み時のフォルダ記憶](file-dialog-folders.md)
 - [RealTime SA](modes/realtime-sa.md)
 - [WideBand RT SA](modes/wideband-rt-sa.md)
 - [Sweep SA](modes/sweep-sa.md)

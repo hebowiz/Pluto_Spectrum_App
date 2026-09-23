@@ -17,6 +17,7 @@ from scipy.ndimage import gaussian_filter
 import iio
 
 from pluto_common import discover_pluto_devices
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 from pluto_common.numeric_input import DeferredDoubleSpinBox, DeferredSpinBox
 from pluto_common.config.input_frontend import InputPowerCorrection
 from pluto_common.sdr.trigger import TriggerKind, TriggerSlope
@@ -1925,16 +1926,10 @@ class VSAWindow(QtWidgets.QMainWindow):
             del blocker
 
     def _last_directory(self, file_kind: str) -> str:
-        stored = self._preferences.value(f"directories/{file_kind}", "", type=str)
-        # Never pass an empty path to the native Windows dialog. An empty path
-        # makes Qt reuse the process-wide native-dialog history, which makes
-        # the Pattern and Config histories appear to be shared.
-        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
+        return file_dialog_path(self._preferences, f"directories/{file_kind}")
 
     def _remember_directory(self, file_kind: str, path: str | Path) -> None:
-        directory = str(Path(path).resolve().parent)
-        self._preferences.setValue(f"directories/{file_kind}", directory)
-        self._preferences.sync()
+        remember_file_directory(self._preferences, f"directories/{file_kind}", path)
 
     @staticmethod
     def _with_suffix(path: str, suffix: str) -> str:

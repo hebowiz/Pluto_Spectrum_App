@@ -12,6 +12,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common.numeric_input import DeferredDoubleSpinBox, DeferredSpinBox
+from pluto_common.file_dialogs import file_dialog_path, remember_file_directory
 from pluto_common.sdr.trigger import TriggerKind, TriggerSlope
 from pluto_vsa.model import IQRecording, ModulationFamily
 from pluto_vsa.analysis import capture_power_traces, recording_spectrum_trace
@@ -1165,14 +1166,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             self.channel_spin.blockSignals(previous)
 
     def _last_directory(self, file_kind: str) -> str:
-        stored = self._preferences.value(f"directories/{file_kind}", "", type=str)
-        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
+        return file_dialog_path(self._preferences, f"directories/{file_kind}")
 
     def _remember_directory(self, file_kind: str, path: str | Path) -> None:
-        self._preferences.setValue(
-            f"directories/{file_kind}", str(Path(path).resolve().parent)
-        )
-        self._preferences.sync()
+        remember_file_directory(self._preferences, f"directories/{file_kind}", path)
 
     @QtCore.Slot()
     def _open_iq(self) -> None:
@@ -1239,7 +1236,9 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot()
     def _export_vsg_project(self) -> None:
-        export_packet_project(self, None if self._result is None else self._result.packet)
+        export_packet_project(
+            self, None if self._result is None else self._result.packet, self._preferences
+        )
 
     def _export_iq_recording(self) -> None:
         export_iq_recording(

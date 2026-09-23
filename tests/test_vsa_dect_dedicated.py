@@ -374,7 +374,13 @@ def test_dect_modulation_reference_and_debug_export(tmp_path, monkeypatch) -> No
         prolonged_preamble=True,
     )
     result = analyze_dect_recording(recording)[0]
-    export_path = tmp_path / "dect_modulation.csv"
+    export_path = tmp_path / "modulation" / "dect_modulation.csv"
+    export_path.parent.mkdir()
+    power_path = tmp_path / "power" / "dect_power.csv"
+    power_path.parent.mkdir()
+    iq_directory = tmp_path / "iq"
+    iq_directory.mkdir()
+    window._preferences.setValue("directories/iq", str(iq_directory))
     try:
         window._recording = recording
         window._results = (result,)
@@ -397,6 +403,24 @@ def test_dect_modulation_reference_and_debug_export(tmp_path, monkeypatch) -> No
         assert "Symbol decision frequency" in exported
         assert "Ideal BT=0.5 diagnostic fit" in exported
         assert ",Nominal" in exported
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog, "getSaveFileName",
+            lambda *_args: (str(power_path), ""),
+        )
+        window._export_power_debug_csv()
+        assert power_path.is_file()
+        assert window._last_directory() == str(iq_directory)
+        initial_paths = []
+        def cancel(parent, title, initial, filters):
+            initial_paths.append(initial)
+            return "", ""
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", cancel)
+        window._export_modulation_debug_csv()
+        window._export_power_debug_csv()
+        assert initial_paths == [
+            str(export_path.parent / "dect_gfsk_modulation.csv"),
+            str(power_path.parent / "dect_power_measurement.csv"),
+        ]
     finally:
         window._config_dialog.close()
         window.close()
