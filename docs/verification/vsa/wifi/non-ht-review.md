@@ -102,6 +102,18 @@ Windows GUIでマニュアルのWi-Fi画面を再撮影し、6ペインの名称
 時系列間引き無効化について、同じ3対象の関連テストは **95 passed（29.00秒）**。
 マニュアル本文・画像・PDFは今回更新していない。次回の明示的な改訂依頼時に軸と表示動作を反映する。
 
+## IQ Power初期範囲の共通化
+
+Wi-Fiの初期表示を、選択packetの前後各10%の余白付き範囲へ変更した。
+DECTで使用している`packet_time_view_range_ms`を共通計算元とし、BluetoothのIQ Power/FSK表示の重複計算も集約した。
+Bluetoothの最小余白とcapture外まで含む既存範囲、DECTのcapture端制限と最小余白は維持する。
+Wi-Fiはcapture端で制限し、手動ズームのpacket相対保持は共通`PersistentPlotRanges`を使用する。
+
+Wi-Fi workspace、共通plot range、Bluetooth workspace、DECT Dedicatedの関連 **33件が成功（12.39秒）**。
+初期範囲、packet切替、手動ズームの相対追従とReset、未検出から再検出への遷移、
+capture/analysisのsample rateが異なる場合、View Allでの全体表示を確認した。
+マニュアルは変更していない。
+
 ## 残る制限とRF確認
 
 実RF試験は未実施。自動検証は生成IQと合成劣化のみで、市販AP/Pluto/SMCVの受信成功を保証する証拠ではない。

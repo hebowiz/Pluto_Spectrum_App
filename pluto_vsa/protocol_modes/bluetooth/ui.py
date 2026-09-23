@@ -50,6 +50,7 @@ from pluto_vsa.ui.measurement_chrome import (
     make_analysis_bandwidth_display_controls,
     make_measurement_dock,
     make_measurement_plot,
+    packet_time_view_range_ms,
     plot_complex_symbol_distribution,
     plot_frequency_symbol_distribution,
     plot_trace_symbol_points,
@@ -2320,8 +2321,10 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         if selected_ranges:
             start_ms = min(value[0] for value in selected_ranges)
             stop_ms = max(value[1] for value in selected_ranges)
-            margin = max((stop_ms - start_ms) * 0.10, 1e-6)
-            self.power_plot.setXRange(start_ms - margin, stop_ms + margin, padding=0.0)
+            self.power_plot.setXRange(*packet_time_view_range_ms(
+                packet_start_ms=start_ms, packet_stop_ms=stop_ms,
+                minimum_margin_ms=1e-6,
+            ), padding=0.0)
         self.spectrum_plot.clear()
         br_vsa = None
         if isinstance(br_session, VSASession):
@@ -2610,10 +2613,11 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
             fsk_stop_ms = (
                 recording_sample_offset + fsk_pattern.result_stop_sample
             ) / recording.sample_rate_hz * 1e3
-            fsk_margin_ms = max((fsk_stop_ms - fsk_start_ms) * 0.10, 1e-6)
             self.fsk_modulation_plot.setXRange(
-                fsk_start_ms - fsk_margin_ms,
-                fsk_stop_ms + fsk_margin_ms,
+                *packet_time_view_range_ms(
+                    packet_start_ms=fsk_start_ms, packet_stop_ms=fsk_stop_ms,
+                    minimum_margin_ms=1e-6,
+                ),
                 padding=0.0,
             )
         measured_frequency_hz = (

@@ -75,6 +75,12 @@ def test_workspace_has_six_ordered_panes_and_selected_packet_views(tmp_path):
         assert not w.summary_table.font().bold()
         w.analyze_recording(recording())
         assert w.packet_table.rowCount()==2
+        first = w._results[0]
+        first_start_ms = first.start_sample/w._recording.sample_rate_hz*1000
+        first_stop_ms = first.stop_sample/w._recording.sample_rate_hz*1000
+        left,right = w.power_plot.viewRange()[0]
+        assert 0<=left<=first_start_ms<first_stop_ms<=right
+        assert right-left<=1.2*(first_stop_ms-first_start_ms)+1e-9
         assert w.modulation_tabs.tabText(1)=='DATA - 16QAM'
         assert w.symbol_tabs.tabText(1)=='DATA - 16QAM'
         for resource,region in zip(w.resource_plots,(w._results[0].signal,w._results[0].data)):
@@ -89,6 +95,20 @@ def test_workspace_has_six_ordered_panes_and_selected_packet_views(tmp_path):
         w.packet_table.selectRow(1)
         assert w._selected_result_index==1
         assert w._results[1].start_sample > w._results[0].start_sample
+        second = w._results[1]
+        second_start_ms = second.start_sample/w._recording.sample_rate_hz*1000
+        second_stop_ms = second.stop_sample/w._recording.sample_rate_hz*1000
+        left,right = w.power_plot.viewRange()[0]
+        assert left<second_start_ms<second_stop_ms<right
+        assert right-left==pytest.approx(1.2*(second_stop_ms-second_start_ms))
+        w.power_plot.setXRange(second_start_ms+.005,second_start_ms+.010,padding=0)
+        w._render_selected()
+        np.testing.assert_allclose(w.power_plot.viewRange()[0],[second_start_ms+.005,second_start_ms+.010])
+        w.packet_table.selectRow(0)
+        np.testing.assert_allclose(w.power_plot.viewRange()[0],[first_start_ms+.005,first_start_ms+.010])
+        assert w._persistent_plot_ranges.reset('0')
+        np.testing.assert_allclose(w.power_plot.viewRange()[0],w._persistent_plot_ranges.current_defaults()['0'][0])
+        w.packet_table.selectRow(1)
         assert w.decode_tree.topLevelItem(1).text(2)=='PSDU logical'
         assert w.payload_text.toPlainText()
         plot = w.constellation_plots[1]
@@ -116,6 +136,10 @@ def test_workspace_has_six_ordered_panes_and_selected_packet_views(tmp_path):
         w.reset()
         assert w._recording is None
         assert w.packet_table.rowCount()==0
+        w.analyze_recording(IQRecording(np.zeros(40000,complex),40e6,2437e6))
+        np.testing.assert_allclose(w.power_plot.viewRange()[0],[0,1])
+        w.analyze_recording(recording())
+        assert w.power_plot.viewRange()[0][1]<.4
     finally:
         w.close()
 
@@ -243,6 +267,7 @@ def test_power_plot_preserves_low_duty_packet_and_resamples_on_zoom(tmp_path):
         w._recording = SimpleNamespace(sample_rate_hz=20e6)
         w._results = (SimpleNamespace(start_sample=start//2,stop_sample=stop//2),)
         w._render_power()
+        np.testing.assert_allclose(w.power_plot.viewRange()[0],[1_432_000/40_000,1_433_200/40_000])
         trace = w._power_display[-1]
         assert not trace.opts['autoDownsample']
         assert not trace.opts['clipToView']

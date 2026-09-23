@@ -29,7 +29,7 @@ Meas Configは既存の下書き編集・OK/Cancel、起動時保存、StateのS
 
 | 領域 | 内容 |
 | --- | --- |
-| IQ Power | capture全体のdBm対ms。表示範囲内の最小・最大を残す間引きに加え、検出packet区間へ優先的に表示点を割り当てる。ズーム・パン時は元の電力配列から再選択する。選択packetのSTF/LTF/SIG/DATAを色分け |
+| IQ Power | captureのdBm対ms。初期範囲は選択packetの前後に各10%の余白を加えた範囲（capture端で制限）。未検出時はcapture全体。表示範囲内の最小・最大を残す間引きに加え、検出packet区間へ優先的に表示点を割り当てる。ズーム・パン時は元の電力配列から再選択する。選択packetのSTF/LTF/SIG/DATAを色分け |
 | Spectrum | 従来のFFT振幅表示（dBm）を維持。内部Mask tabは解析IQの等価デジタルPSD（dBm/MHz）とIEEE 802.11-2024の上限線。全域判定には帯域・VBWが不足 |
 | Result Summary | RF/PHY測定・PHY Decode・MAC Decode・Diagnosticsを内部modelで分類。観測不足や校正条件を測定値と独立したstatusで表示 |
 | Modulation | L-SIG / DATA別tab。横軸Subcarrier Index、縦軸OFDM Symbol Index、色はEVM %。DC・pilot・nullは空白 |
@@ -41,6 +41,12 @@ IQ Powerの背景は最大2048 bucket、可視packetへ合計32768 bucket（1 pa
 選択packetには16384 bucketを割り当て、各bucketの最小・最大の実サンプルと区間境界を残す。
 サンプル数が割当点数以内のpacketは全点表示する。末尾の端数bucketも保持する。
 非等間隔の表示点を描画側で再間引きせず、View Allは拡大後もcapture全体へ戻す。
+初期範囲は`measurement_chrome.packet_time_view_range_ms`で計算し、DECT・Bluetoothと計算責務を共有する。
+規格側はpacket区間と必要な最小余白、capture端で制限するかを渡し、10%の計算を重複実装しない。
+DECTの最小余白、Bluetoothのcapture外余白を含む既存動作は維持する。
+Wi-Fiの手動ズームは共通`PersistentPlotRanges`でpacket先頭からの相対範囲として保持し、
+packet選択・再描画でも追従する。PlotのResetは選択packetの初期範囲へ戻す。
+未検出時のcapture表示と検出時のpacket表示は別contextとして扱う。
 未検出packetも背景のピークを保持し、拡大すると元配列から細部を復元する。
 これは表示専用の処理で、取得IQ・電力測定・EVMには影響しない。
 

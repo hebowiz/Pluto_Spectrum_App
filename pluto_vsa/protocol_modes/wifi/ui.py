@@ -18,6 +18,7 @@ from pluto_vsa.ui.measurement_chrome import (
     DedicatedSummaryTable, PersistentPlotRanges, IQ_POWER_DISPLAY_FLOOR_DBM, apply_dedicated_table_style,
     configure_iq_power_plot, dedicated_status_color, install_measurement_plot_menu,
     limit_iq_power_display_dbm, make_measurement_dock, make_measurement_plot,
+    packet_time_view_range_ms,
     plot_complex_symbol_distribution, plot_unit_circle, set_iq_plane_range,
     set_iq_power_default_y_range,
 )
@@ -262,8 +263,10 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
             self.packet_table.selectRow(0)
             self._render_selected()
         else:
+            self._persistent_plot_ranges.prepare_for_update()
             self._clear_results_display()
             self._render_power()
+            self._persistent_plot_ranges.finish_update(contexts={"0":"capture"})
         counts = result.counts
         self.statusBar().showMessage(
             f"Wi-Fi: {counts['detected']} detected | {counts['complete']} complete | "
@@ -292,7 +295,15 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
         bounds = (limit_iq_power_display_dbm(np.array([finite.min(),finite.max()]))
                   if finite.size else np.full(2,IQ_POWER_DISPLAY_FLOOR_DBM))
         self.power_plot.plot([0,recording.duration_s*1000],bounds,pen=None,symbol=None)
-        self.power_plot.setXRange(0,recording.duration_s*1000,padding=0)
+        time_range = (0,recording.duration_s*1000)
+        if self._results:
+            packet = self._results[self._selected_result_index]
+            time_range = packet_time_view_range_ms(
+                packet_start_ms=packet.start_sample/self._recording.sample_rate_hz*1000,
+                packet_stop_ms=packet.stop_sample/self._recording.sample_rate_hz*1000,
+                capture_stop_ms=recording.duration_s*1000,
+            )
+        self.power_plot.setXRange(*time_range,padding=0)
         self._update_power_trace()
         set_iq_power_default_y_range(self.power_plot,power)
 
@@ -396,7 +407,10 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
         for plot in (self.evm_carrier_plot,self.evm_symbol_plot,self.channel_amplitude_plot,self.channel_phase_plot,self.flatness_plot,self.mask_plot):
             plot.enableAutoRange()
         self.packet_tabs.render_packet(p.packet)
-        self._persistent_plot_ranges.finish_update(contexts={str(i+2):r.modulation if r else "none" for i,r in enumerate((p.signal,p.data))})
+        self._persistent_plot_ranges.finish_update(
+            contexts={"0":"packet",**{str(i+2):r.modulation if r else "none" for i,r in enumerate((p.signal,p.data))}},
+            relative_x_origins={"0":start*1000},
+        )
 
     def _clear_results_display(self):
         self._power_display = None

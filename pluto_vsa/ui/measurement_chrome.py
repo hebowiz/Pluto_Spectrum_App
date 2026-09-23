@@ -461,15 +461,24 @@ def packet_time_view_range_ms(
     *,
     packet_start_ms: float,
     packet_stop_ms: float,
-    capture_stop_ms: float,
+    capture_stop_ms: float | None = None,
     minimum_margin_ms: float = 0.0,
 ) -> tuple[float, float]:
-    """Return the common packet-plus-context range for time-domain plots."""
+    """Add 10% context on each side of a packet/time-domain result.
+
+    Supplying the capture end clips the range to the recording. Without it,
+    retain both margins, including time outside the capture (Bluetooth policy).
+    Protocols may specify a minimum context without duplicating the formula.
+    """
 
     duration_ms = max(0.0, float(packet_stop_ms) - float(packet_start_ms))
     margin_ms = max(0.10 * duration_ms, float(minimum_margin_ms), 1e-9)
-    lower = max(0.0, float(packet_start_ms) - margin_ms)
-    upper = min(float(capture_stop_ms), float(packet_stop_ms) + margin_ms)
+    lower = float(packet_start_ms) - margin_ms
+    upper = float(packet_stop_ms) + margin_ms
+    if capture_stop_ms is None:
+        return lower, upper
+    lower = max(0.0, lower)
+    upper = min(float(capture_stop_ms), upper)
     if upper <= lower:
         upper = min(float(capture_stop_ms), lower + max(margin_ms, 1e-9))
     return lower, upper
