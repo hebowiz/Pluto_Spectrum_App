@@ -221,7 +221,8 @@ def analyze_iq(iq: np.ndarray, sample_rate_hz: float, *, source: PacketSourceInf
         return fail("wifi.channel","Degenerate channel estimate")
     if measurements is not None:
         measurements.update(channel=h[used%64].copy(), channel_subcarriers=used.copy(),
-                            data_subcarriers=DATA.copy(), symbols=[], pilots=[], cpe=[])
+                            data_subcarriers=DATA.copy(), symbols=[], pilots=[], cpe=[],
+                            ltf_fft=np.stack((np.fft.fft(x[192:256]),np.fft.fft(x[256:320]))))
 
     def symbol(start, pilot_index):
         z = np.fft.fft(x[start+16:start+80])

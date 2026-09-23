@@ -61,13 +61,15 @@ def test_workspace_has_six_ordered_panes_and_selected_packet_views(tmp_path):
         assert [d.windowTitle() for d in docks] == ['IQ Power','Spectrum','Result Summary','Modulation','Symbol Plot','Packet Analysis']
         assert w.power_dock.x() < w.spectrum_dock.x() < w.summary_dock.x()
         assert w.modulation_dock.y() > w.power_dock.y()
-        assert w.modulation_tabs.count()==6
+        assert w.modulation_tabs.count()==7
         assert w.symbol_tabs.count()==2
         for i in range(2):
             assert w.modulation_tabs.widget(i) is w.resource_plots[i]
             assert w.symbol_tabs.widget(i) is w.constellation_plots[i]
         assert w.modulation_tabs.widget(2) is w.evm_carrier_plot
         assert w.modulation_tabs.widget(5) is w.channel_phase_plot
+        assert w.modulation_tabs.widget(6) is w.flatness_plot
+        assert w.spectrum_tabs.widget(1) is w.mask_plot
         assert isinstance(w.summary_table,DedicatedSummaryTable)
         assert w._meas_config_dialog.button_box.button(QtWidgets.QDialogButtonBox.StandardButton.Ok) is not None
         assert not w.summary_table.font().bold()
@@ -145,12 +147,28 @@ def test_draft_settings_isolated_and_startup_restore(tmp_path):
         before = w._meas_config_values()
         draft,dialog = create_draft_editor(w)
         draft.channel_combo.setCurrentIndex(10)
+        draft.frequency_reference_check.setChecked(True)
+        draft.receiver_response_check.setChecked(True)
+        draft.random_payload_check.setChecked(True)
+        draft.non_vht_dut_check.setChecked(True)
         dialog.reject()
         assert w._meas_config_values()==before
         dialog.deleteLater()
         draft.deleteLater()
         w.channel_combo.setCurrentIndex(7)
         w.duration_spin.setValue(50)
+        w.analyze_recording(recording())
+        def status(key):
+            for row in range(w.summary_table.rowCount()):
+                if w.summary_table.item(row,0).data(QtCore.Qt.ItemDataRole.UserRole)==key:
+                    return w.summary_table.item(row,3).text()
+        assert status('carrier_frequency_error')=='Not Measured'
+        w._apply_meas_config_values(dict(frequency_reference_check=True,receiver_response_check=True,
+                                        random_payload_check=True,non_vht_dut_check=True))
+        assert status('carrier_frequency_error')=='PASS'
+        assert status('spectral_flatness')=='PASS'
+        assert status('relative_constellation_error')=='Insufficient Data'
+        assert status('transmit_spectrum_mask')=='Insufficient Data'
         w._apply_meas_config_values({'density_check':True})  # Legacy file compatibility.
         assert w.symbol_trace_combo.currentText()=='Density'
         w.density_spread_combo.setCurrentIndex(w.density_spread_combo.findData(SymbolDensitySpread.MEDIUM))

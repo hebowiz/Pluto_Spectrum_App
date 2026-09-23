@@ -1,7 +1,8 @@
 """Wi-Fi capture results; logical packet coordinates and RF samples stay separate."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import numpy as np
 from pluto_protocol.model import PacketAnalysisResult
+from .results import MeasurementResult
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,8 @@ class WiFiPacketResult:
     channel_subcarriers: np.ndarray
     common_phase_error_rad: np.ndarray
     symbol_clock_error_ppm: float | None = None
+    measurements: tuple[MeasurementResult,...] = ()
+    rf_details: dict = field(default_factory=dict)
 
     @property
     def integrity(self):
@@ -53,6 +56,7 @@ class WiFiPacketResult:
 class WiFiCaptureResult:
     packets: tuple[WiFiPacketResult, ...]
     issues: tuple[str, ...] = ()
+    measurement_statistics: dict = field(default_factory=dict)
 
     @property
     def counts(self):

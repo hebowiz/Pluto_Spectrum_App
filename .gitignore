@@ -14,6 +14,7 @@ venv/
 
 # Local proprietary specification reference (never commit)
 /references/standards/bluetooth/HDT_VSr03_PR.pdf
+/references/standards/Wi-Fi/IEEE_Std_802.11-2024.pdf
 
 # PyInstaller / portable release outputs
 build/

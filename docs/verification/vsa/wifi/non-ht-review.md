@@ -1,5 +1,8 @@
 # Wi-Fi Dedicated Analyzer 実装・検証報告
 
+RF/PHY Result追加後の仕様・IEEE 802.11-2024本文の照合結果・測定別の制限は
+[測定追加の検証報告](measurement-review.md)を参照。以下の実装初期レビューと区別する。
+
 ## Architectureと共有化
 
 既存working treeのVSG独立受信器`pluto_protocol/wifi/non_ht.py`を再利用した。

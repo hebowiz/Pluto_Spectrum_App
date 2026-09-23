@@ -30,10 +30,10 @@ Meas Configは既存の下書き編集・OK/Cancel、起動時保存、StateのS
 | 領域 | 内容 |
 | --- | --- |
 | IQ Power | capture全体のdBm対ms。表示範囲内の最小・最大を残す間引きに加え、検出packet区間へ優先的に表示点を割り当てる。ズーム・パン時は元の電力配列から再選択する。選択packetのSTF/LTF/SIG/DATAを色分け |
-| Spectrum | 選択packetのactive区間。絶対RF MHz対dBmのFFT振幅表示。PSDではない |
-| Result Summary | rate/coding、power/peak、CFO、L-SIG、EVM、pilot error、MAC種別、FCS。測定値はInfo、parity/FCSはPASS/FAIL |
+| Spectrum | 従来のFFT振幅表示（dBm）を維持。内部Mask tabは解析IQの等価デジタルPSD（dBm/MHz）とIEEE 802.11-2024の上限線。全域判定には帯域・VBWが不足 |
+| Result Summary | RF/PHY測定・PHY Decode・MAC Decode・Diagnosticsを内部modelで分類。観測不足や校正条件を測定値と独立したstatusで表示 |
 | Modulation | L-SIG / DATA別tab。横軸Subcarrier Index、縦軸OFDM Symbol Index、色はEVM %。DC・pilot・nullは空白 |
-| Modulation追加tab | DATA EVM / CarrierとLTF channel相対振幅 / 位相は横軸Subcarrier Index。DATA EVM / Symbolのみ時間方向の評価のため横軸OFDM Symbol Indexを維持 |
+| Modulation追加tab | DATA EVM / Carrier、LTF channel相対振幅 / 位相、Spectral Flatnessは横軸Subcarrier Index。DATA EVM / Symbolのみ横軸OFDM Symbol Indexを維持。Flatnessの上下線はIEEE 802.11-2024のLimit |
 | Symbol Plot | L-SIG / DATA別tab。等化・CPE補正後の測定点を他モードと共通のFlat / Densityで表示。点の色・サイズ、密度処理、単位円、初期IQ範囲（±1.25）を共通化。Density SpreadはNone / Medium / Maximum |
 | Packet Analysis | 共通Decode / Payload Hex / IssuesとPacket List。選択すると他5領域も追従 |
 
@@ -63,9 +63,9 @@ STF反復の位相差からcoarse CFO、LTF反復からfine CFOを推定する�
 LTF2本のFFT平均を既知系列で割り、52本のH[k]を得てzero-forcing等化する。
 SIGNAL/DATAごとに4 pilotからCPEを推定して補正し、残差を別に保持する。
 独立したdemap/deinterleave/depuncture/Viterbi/descrambleでPSDUを復元する。
-Symbol Clock Errorは未実装につきNot Availableとし、推測値を出さない。
+Symbol Clock Frequency Errorは未実装につきValue=N/A、Result=Not Measuredとし、CFO等から推測しない。
 
-### EVMの定義
+### 診断用data-tone EVMの定義
 
 L-SIGとDATAを分け、各OFDM symbolの48 data subcarrierを測る。
 `error = measured_equalized - nearest_ideal`、全理想constellationの平均電力を1に正規化する。
@@ -73,8 +73,55 @@ L-SIGとDATAを分け、各OFDM symbolの48 data subcarrierを測る。
 packetごとの追加gain fitはしない。pilotは別の既知BPSK基準で補正後のRMS residualを%表示する。
 carrier別・symbol別EVMとCPE配列を保持する。FCS不良とPHY測定可能性は区別する。
 
-これは単一packet・data-toneの診断測定であり、52 toneや複数frameの条件を含むIEEE RF適合試験の代替ではない。
-根拠のないEVM/CFO/power Limitを設定しない。規格との関係は[検証報告](../../../verification/vsa/wifi/non-ht-review.md)を参照。
+これは単一packet・data-toneの診断測定。既存plotの意味は変更しない。
+
+### RF/PHY measurementと判定
+
+`MeasurementResult`はID、kind、value/unit、limit/status、standard_reference、
+measurement_conditions_satisfied、canonical_id、default_visible、conditions/metadataを保持する。
+kindはRF/PHY Measurement、PHY Decode、Packet/MAC Decode、Diagnosticsの4種。
+statusはPASS / FAIL / Info / Not Measured / Insufficient Data / Not Available。
+Summaryのtooltipで分類・参照版・判定できない理由を確認できる。
+
+IEEE Std 802.11-2024本文の§17.3.9、§18.4.7を照合済み。
+2.4 GHz ERP-OFDM / 5 GHz Non-HT OFDMを分離し、未知bandへ値を推測しない。
+測定可能で、必要な観測数・帯域・測定系条件が満たされた項目だけPASS/FAILを表示する。
+Meas ConfigのMeasurement Conditionsで、受信周波数基準、受信精度と有線経路、random test data、
+non-VHT DUTを個別に確認する。初期値はすべて未確認。通常設定と同様にOK/Cancel・起動時保存・State Save/Recallへ対応する。
+これらは使用者による測定系条件の申告であり、IQの自動校正やDUT能力の自動認識ではない。
+測定系・信号源を変えた場合は設定を見直す。確認済み条件と未成立理由はResultのmetadata/tooltipへ記録する。
+
+- Relative Constellation Error: DATAの48 data tone誤差と4 pilot誤差から、52 toneのpacket RMSを算出。
+  同一capture・同一decode rate・16 DATA symbols以上のPHY測定可能packetで集計する。
+  Eq.(17-28)の印刷式に従いpacket RMSを等重み平均。長いpacketを点数で重くしない。
+  20 packet未満はInsufficient Data。ランダムpayload・受信系条件が未確認ならNot Measured。
+  Table 17-20のLimitは6/9/12/18/24/36/48/54 Mbpsに対して−5/−8/−10/−13/−16/−19/−22/−25 dB。
+  対象packetがないときは選択packetの値を表示し、scopeをmetadataに保持する。
+  dB=`20 log10(rms)`、EVM RMS %=`100 rms`で同じcanonical値を変換し、EVM行のResultはInfo。
+- Carrier Frequency Error: Wi-Fi STF/LTFのcoarse+fine CFOをHzで保持。ppmで比較し、5 GHzは±20 ppm、ERPは±25 ppm。
+  受信周波数基準の確認とL-LTF同期成立が必要。
+- Spectral Flatness: CFO補正後の2 LTF FFTのtone別平均energy。等化前のinner tone平均に対する偏差。
+  outer toneも同じinner平均を基準にする。inner ±1…16は±4 dB、outer ±17…26は−6/+4 dB。
+  tone別energy・上下Limit・最小marginを保持。受信応答と有線経路の確認、52 toneを覆う帯域が必要。
+- Center Frequency Leakage: 2 LTFのDC平均energyを、active 52 tone + DCの合計energyに対してdB化。
+  任意のcapture FFTのDCを読む測定ではない。§17.3.9.7.2の上限は`max(P−15, −20) dBm`。
+  Pはchannel-training区間の合計電力を既存振幅補正で送信基準面へ換算する。
+  校正済み振幅なら相対Limitへ変換して両分岐を評価する。未校正では−15 dB以下を確認できるが、
+  それを超えた値は−20 dBm例外を評価できないためFAILとせずNot Measured。
+  受信DC・伝搬路条件とnon-VHT DUTの確認が必要。VHT STAはNon-HT送信でも§21.3.17.4.2が適用され、
+  そのRF LO位置/RBW測定は対象外のため、この確認なしに旧来Limitを適用しない。
+- Transmit Spectrum Mask: active PPDUをCFO補正し、Hann Welch（ENBW 100 kHz、50% overlap、線形power平均）でPSDを取得。
+  30 kHz instrument VBW/detectorは未再現。20/40 MS/sでは±30 MHz全域も不足するためInsufficient Data。
+  最小margin・違反位置・観測域・違反binを保持。正負両側ともupper emission limitであり、lower maskは設けない。
+  ±9/11/20/30 MHzで0/−20/−28/−40 dBr。±30 MHz以遠は校正済み振幅に限り−39 dBm/MHzとの大きい方を適用する。
+  絶対値例外を20–30 MHzの傾斜へ拡張しない。地域規制の追加maskは評価せず、正式認証判定ではない。
+- Packet Powerは既存calibrationを使うactive PPDU平均、Limit=— / Info。
+  Peak Power、EVM Peak、Pilot Error RMS、48-tone EVM、CPE、同期指標はDiagnosticsで、通常非表示。
+  Displayの追加結果チェックで詳細DecodeとDiagnosticsを表示する。
+
+Continuousはcaptureをまたいで測定統計を累積しない。Refreshで同じ録音を重複加算しない。
+FCS不良とRF精度不良を区別し、FCS良否でPHY測定を一律に除外しない。
+各Resultの条項・試験・既知制限は[測定検証報告](../../../verification/vsa/wifi/measurement-review.md)を参照。
 
 ## Packetと統計
 

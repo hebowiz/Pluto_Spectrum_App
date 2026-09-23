@@ -7,9 +7,11 @@ from pluto_protocol.wifi.non_ht import analyze_iq
 from pluto_vsa.model import IQRecording
 from .measurement import measure_region, packet_power
 from .model import WiFiCaptureResult, WiFiPacketResult
+from .rf_metrics import relative_constellation_rms, training_measurements, packet_spectrum
+from .measurements import capture_statistics, measurement_results
 
 
-def analyze_wifi_recording(recording: IQRecording, *, max_packets=128, cancelled=None):
+def analyze_wifi_recording(recording: IQRecording, *, max_packets=128, cancelled=None, measurement_conditions=None):
     fs = recording.sample_rate_hz
     if fs not in (20e6, 40e6):
         return WiFiCaptureResult((), ("Non-HT analysis requires 20 or 40 MS/s IQ",))
@@ -56,7 +58,10 @@ def analyze_wifi_recording(recording: IQRecording, *, max_packets=128, cancelled
             packet.decode_context.get("cfo_hz"), signal, data,
             diagnostic.get("channel", np.empty(0,dtype=complex)),
             diagnostic.get("channel_subcarriers", np.empty(0,dtype=int)),
-            np.asarray(diagnostic.get("cpe", []))))
+            np.asarray(diagnostic.get("cpe", [])),rf_details=dict(
+                constellation_rms=relative_constellation_rms(data,pilots[1:]),
+                training=training_measurements(diagnostic.get("ltf_fft",[])),
+                spectrum=packet_spectrum(recording,start,end,packet.decode_context.get("cfo_hz")))))
         if len(packets) >= max_packets:
             break
     issues = []
@@ -64,4 +69,7 @@ def analyze_wifi_recording(recording: IQRecording, *, max_packets=128, cancelled
         issues.append("No confirmed Non-HT packet detected")
     if len(packets) >= max_packets:
         issues.append(f"Capture analysis limited to {max_packets} packets")
-    return WiFiCaptureResult(tuple(packets), tuple(issues))
+    statistics = capture_statistics(packets)
+    packets = tuple(replace(p,measurements=measurement_results(p,recording,statistics,
+                    conditions=measurement_conditions)) for p in packets)
+    return WiFiCaptureResult(packets, tuple(issues),statistics)

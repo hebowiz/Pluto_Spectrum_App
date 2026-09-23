@@ -26,7 +26,7 @@ from .analysis import analyze_wifi_recording
 from .acquisition import WiFiAnalysisThread
 from .measurement import packet_power
 from .display import power_display_indices
-from .summary import summary_rows
+from .summary import visible_results
 
 _CONFIG_KEY = "wifi_dedicated/startup_meas_config"
 
@@ -103,6 +103,11 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
         self.power_plot.getViewBox().sigXRangeChanged.connect(self._update_power_trace)
         self.power_plot.getAxis("bottom").enableAutoSIPrefix(False)
         self.spectrum_plot = make_measurement_plot("Magnitude (dBm)","Frequency (MHz)")
+        self.spectrum_tabs = QtWidgets.QTabWidget()
+        self.spectrum_tabs.addTab(self.spectrum_plot,"Spectrum")
+        self.mask_plot = make_measurement_plot("PSD (dBm/MHz)","Frequency (MHz)")
+        self.mask_plot.addLegend()
+        self.spectrum_tabs.addTab(self.mask_plot,"Mask (IEEE 2024)")
         self.summary_table = DedicatedSummaryTable()
         self.modulation_tabs = QtWidgets.QTabWidget()
         self.symbol_tabs = QtWidgets.QTabWidget()
@@ -123,6 +128,9 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
         for label,plot in (("DATA EVM / Carrier",self.evm_carrier_plot),("DATA EVM / Symbol",self.evm_symbol_plot),
                            ("Channel Magnitude",self.channel_amplitude_plot),("Channel Phase",self.channel_phase_plot)):
             self.modulation_tabs.addTab(plot,label)
+        self.flatness_plot = make_measurement_plot("Deviation (dB)","Subcarrier Index")
+        self.flatness_plot.addLegend()
+        self.modulation_tabs.addTab(self.flatness_plot,"Spectral Flatness")
         self.packet_tabs = PacketDecodeTabs()
         self.decode_tree = self.packet_tabs.decode_tree
         self.payload_text = self.packet_tabs.payload_text
@@ -136,7 +144,7 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
         self.packet_table.itemSelectionChanged.connect(self._packet_selected)
         self.packet_tabs.addTab(self.packet_table,"Packet List")
         for attr,name,widget in (("power_dock","IQ Power",self.power_plot),
-                                 ("spectrum_dock","Spectrum",self.spectrum_plot),
+                                 ("spectrum_dock","Spectrum",self.spectrum_tabs),
                                  ("summary_dock","Result Summary",self.summary_table),
                                  ("modulation_dock","Modulation",self.modulation_tabs),
                                  ("symbol_dock","Symbol Plot",self.symbol_tabs),
@@ -149,7 +157,8 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
                            (self.summary_dock,self.packet_dock)):
             self.splitDockWidget(top,bottom,QtCore.Qt.Orientation.Vertical)
         plots = [self.power_plot,self.spectrum_plot,*self.constellation_plots,*self.resource_plots,
-                 self.evm_carrier_plot,self.evm_symbol_plot,self.channel_amplitude_plot,self.channel_phase_plot]
+                 self.evm_carrier_plot,self.evm_symbol_plot,self.channel_amplitude_plot,self.channel_phase_plot,
+                 self.flatness_plot,self.mask_plot]
         self._plots = [(str(i),p) for i,p in enumerate(plots)]
         self._persistent_plot_ranges = PersistentPlotRanges(self._plots)
         for name,plot in self._plots:
@@ -325,16 +334,34 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
         power_recording = recording if self.power_filter_check.isChecked() else self._capture_recording
         average, peak = packet_power(power_recording,start,stop)
         displayed = replace(p,packet_power_dbm=average,peak_power_dbm=peak)
-        rows = summary_rows(displayed,recording,diagnostics=self.diagnostics_check.isChecked())
-        self.summary_table.setRowCount(len(rows))
-        for row,values in enumerate(rows):
+        results = visible_results(displayed,recording,diagnostics=self.diagnostics_check.isChecked(),
+            statistics=self._result.measurement_statistics,conditions=configuration.measurement_conditions(self))
+        self.summary_table.setRowCount(len(results))
+        for row,result in enumerate(results):
+            values = result.row()
             for col,value in enumerate(values):
+                if col==0 and result.measurement_id=="carrier_frequency_error":
+                    value = "Carrier Frequency\nError"
                 item = QtWidgets.QTableWidgetItem(value)
+                item.setToolTip(result.tooltip())
+                item.setData(QtCore.Qt.ItemDataRole.UserRole,result.measurement_id)
                 color = dedicated_status_color(values[3].lower())
                 if color is not None:
                     item.setForeground(QtGui.QBrush(color))
                 self.summary_table.setItem(row,col,item)
         self.summary_table.resizeRowsToContents()
+        training = p.rf_details.get("training",{})
+        if training:
+            self.flatness_plot.plot(training["subcarriers"],training["deviation_db"],pen="y",name="Measured LTF energy")
+            self.flatness_plot.plot(training["subcarriers"],training["upper_db"],pen="r",name="IEEE 2024 upper limit")
+            self.flatness_plot.plot(training["subcarriers"],training["lower_db"],pen="c",name="IEEE 2024 lower limit")
+        self.flatness_plot.setTitle("Received LTF; see Measurement Conditions")
+        spectrum = p.rf_details.get("spectrum",{})
+        if spectrum:
+            frequency = (recording.center_frequency_hz+spectrum["offset_hz"])/1e6
+            self.mask_plot.plot(frequency,spectrum["psd_dbm_mhz"],pen="y",name="Measured PSD (digital)")
+            self.mask_plot.plot(frequency,spectrum["upper_dbm_mhz"],pen="r",name="IEEE 2024 upper limit (both sides)")
+        self.mask_plot.setTitle("Equivalent Digital Measurement; partial span / VBW unavailable")
         carriers = np.array([*range(-26,-21),*range(-20,-7),*range(-6,0),*range(1,7),*range(8,21),*range(22,27)])
         for i,region in enumerate((p.signal,p.data)):
             if region is None:
@@ -366,7 +393,7 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
             h = p.channel/np.sqrt(np.mean(abs(p.channel)**2))
             self.channel_amplitude_plot.plot(p.channel_subcarriers,20*np.log10(np.maximum(abs(h),1e-15)),pen="y")
             self.channel_phase_plot.plot(p.channel_subcarriers,np.unwrap(np.angle(h)),pen="y")
-        for plot in (self.evm_carrier_plot,self.evm_symbol_plot,self.channel_amplitude_plot,self.channel_phase_plot):
+        for plot in (self.evm_carrier_plot,self.evm_symbol_plot,self.channel_amplitude_plot,self.channel_phase_plot,self.flatness_plot,self.mask_plot):
             plot.enableAutoRange()
         self.packet_tabs.render_packet(p.packet)
         self._persistent_plot_ranges.finish_update(contexts={str(i+2):r.modulation if r else "none" for i,r in enumerate((p.signal,p.data))})

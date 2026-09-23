@@ -4,6 +4,7 @@ from pluto_common.numeric_input import DeferredDoubleSpinBox
 from pluto_vsa.ui.setup_controls import ReceiverSetupControls, TriggerControls, standardize_frontend
 from pluto_vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
 from pluto_vsa.ui.measurement_chrome import SymbolDensitySpread
+from .measurements import MeasurementConditions
 
 
 def number(value, low, high, suffix="", decimals=3):
@@ -66,7 +67,15 @@ def build_config(owner):
     for spread in SymbolDensitySpread:
         owner.density_spread_combo.addItem(spread.value, spread)
     owner.density_spread_combo.setCurrentIndex(owner.density_spread_combo.findData(SymbolDensitySpread.MAXIMUM))
-    owner.diagnostics_check = QtWidgets.QCheckBox("Show synchronization diagnostics")
+    owner.diagnostics_check = QtWidgets.QCheckBox("Show additional decode / diagnostic results")
+    owner.frequency_reference_check = QtWidgets.QCheckBox("Receiver frequency reference verified")
+    owner.receiver_response_check = QtWidgets.QCheckBox("Receiver accuracy and conducted path verified")
+    owner.receiver_response_check.setToolTip("Confirm IQ balance, phase noise, DC and frequency response accuracy, "
+        "and a characterized conducted path to the transmitter reference plane. This setting does not calibrate IQ.")
+    owner.random_payload_check = QtWidgets.QCheckBox("Test source uses random data")
+    owner.non_vht_dut_check = QtWidgets.QCheckBox("DUT is not a VHT STA (center leakage test)")
+    owner.non_vht_dut_check.setToolTip("Non-HT PPDU format does not establish DUT capability. "
+        "VHT STAs use IEEE 21.3.17.4.2 for leakage; that procedure is outside this analyzer's scope.")
     frontend = page((("Center Frequency",owner.center_spin), ("LO Offset",owner.lo_offset_spin),
                      ("Analysis Channel",owner.analysis_check), ("Analysis Center",owner.analysis_center_spin),
                      ("Analysis Bandwidth",owner.analysis_bandwidth_spin),
@@ -86,6 +95,10 @@ def build_config(owner):
                                     ("Rate",QtWidgets.QLabel("Auto from L-SIG"))))),
         ("Input / Frontend",frontend), ("Signal Capture",owner._common_setup.capture_page()),
         ("Trigger",owner._trigger_controls.page),
+        ("Measurement Conditions",page((("",owner.frequency_reference_check),
+                                        ("",owner.receiver_response_check),
+                                        ("",owner.random_payload_check),
+                                        ("",owner.non_vht_dut_check)))),
         ("Display",page((("Symbol Plot Trace",owner.symbol_trace_combo),
                          ("Density Spread",owner.density_spread_combo),
                          ("Modulation",QtWidgets.QLabel("L-SIG / DATA: OFDM index × subcarrier EVM")),
@@ -98,7 +111,14 @@ def build_config(owner):
 NUMBERS = ("center_spin", "duration_spin", "bandwidth_spin", "gain_spin", "attenuation_spin",
            "analysis_center_spin", "analysis_bandwidth_spin", "lo_offset_spin")
 CHECKS = ("analysis_check", "power_filter_check", "spectrum_filter_check",
-          "density_check", "diagnostics_check")
+          "density_check", "diagnostics_check", "frequency_reference_check", "receiver_response_check",
+          "random_payload_check", "non_vht_dut_check")
+
+
+def measurement_conditions(owner):
+    return MeasurementConditions(owner.frequency_reference_check.isChecked(),
+        owner.receiver_response_check.isChecked(),owner.random_payload_check.isChecked(),
+        owner.non_vht_dut_check.isChecked())
 
 
 def collect(owner):
