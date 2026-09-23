@@ -35,7 +35,7 @@ RTSAの測定モード・Graph Viewの保存は継続する。
 
 ## VSAのモード切替
 
-- 起動時にGeneric / Bluetooth / DECT / ADS-Bの画面を生成し、Genericを表示する。
+- 起動時にGeneral VSA / Bluetooth / DECT / ADS-Bの画面を生成し、General VSAを表示する。
 - モードを離れる直前に、その画面のドック配置・分割サイズ・フローティング状態を
   メモリー上に保存する。
 - 別窓化したペインは非アクティブなモードでは隠し、元のモードへ戻ると復元する。

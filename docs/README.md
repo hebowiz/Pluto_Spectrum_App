@@ -51,7 +51,7 @@ Windowsではリポジトリ直下のBATをダブルクリックして各アプ�
 | BAT | アプリ | Python entry point |
 |---|---|---|
 | `Pluto_RTSA.bat` | RTSA / Spectrum Analyzer | `python -m pluto_rtsa.main` |
-| `Pluto_VSA.bat` | Generic VSA / ADS-B切替 | `python -m pluto_vsa.main` |
+| `Pluto_VSA.bat` | General VSA / ADS-B切替 | `python -m pluto_vsa.main` |
 | `Pluto_VSG.bat` | IQ Waveform Generator / Pluto TX | `python -m pluto_vsg` |
 
 `.venv`が存在しない場合、またはアプリが非zero codeで終了した場合は、原因を確認できるよう

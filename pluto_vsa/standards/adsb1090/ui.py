@@ -718,7 +718,7 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self._clear_packet_history
         )
         mode_menu = self.menuBar().addMenu("Analysis Mode")
-        generic_action = mode_menu.addAction("Generic FSK / PSK VSA")
+        generic_action = mode_menu.addAction("General FSK / PSK VSA")
         generic_action.triggered.connect(
             lambda: self.analysis_mode_requested.emit("generic")
         )

@@ -28,9 +28,9 @@ Pluto VSAは、ADALM-Plutoで取得したIQまたは保存済みIQを解析す�
 
 設定ウィンドウを閉じただけではキャプチャを開始しません。キャプチャはユーザーがRun操作を行ったときだけ開始します。
 
-## 4. Generic VSA画面
+## 4. General VSA画面
 
-![Generic VSA画面構成](../images/user-manual/pluto-vsa-generic-overview.png)
+![General VSA画面構成](../images/user-manual/pluto-vsa-generic-overview.png)
 
 1. **IQ Power** — キャプチャ電力対時間。Trigger、Pattern、Result範囲も確認できます。
 2. **Spectrum** — Raw CaptureまたはAnalysis Channel後IQの周波数表示。
@@ -87,7 +87,7 @@ Continuous後もSingleの表示と動作は一致します。停止処理中は�
 - **Export IQ**: 現在のIQを保存します。
 - GenericではSymbol TableのExportも使用できます。
 
-## 7. Generic VSA
+## 7. General VSA
 
 ### 7.1 Signal Description
 
@@ -131,7 +131,7 @@ Analysis Channel後IQは、Decode、同期、Modulation、Symbol、Resultで常�
 
 FSK表示では、補正済み連続瞬時周波数、同じトレースをsymbol centerで読んだ緑点、同じ値のSymbol Plotを使用します。Bluetooth専用FSK表示はRF測定と同じBluetooth Measurement Filter後のtraceを基準にします。
 
-EDRではFSK部とPSK部を分けて確認できます。PSKタブにはVector、Phase Difference、DEVMがあります。DEVMは規格用のブロック測定であり、Generic VSAの自由同期結果をそのまま使用しません。
+EDRではFSK部とPSK部を分けて確認できます。PSKタブにはVector、Phase Difference、DEVMがあります。DEVMは規格用のブロック測定であり、General VSAの自由同期結果をそのまま使用しません。
 
 ## 9. DECT Dedicated Analyzer
 

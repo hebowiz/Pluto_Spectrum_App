@@ -367,7 +367,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(
             "Ready - Bluetooth configuration restored"
             if restored
-            else "Ready - capture IQ or reuse the current Generic VSA recording"
+            else "Ready - capture IQ or reuse the current General VSA recording"
         )
 
     def _build_menu(self) -> None:
@@ -462,7 +462,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.open_config_action.triggered.connect(self._show_meas_config)
 
         menu = self.menuBar().addMenu("Analysis Mode")
-        generic = menu.addAction("Generic FSK / PSK VSA...")
+        generic = menu.addAction("General FSK / PSK VSA...")
         generic.triggered.connect(lambda: self.analysis_mode_requested.emit("generic"))
         current = menu.addAction("Bluetooth Dedicated Analyzer")
         current.setCheckable(True)
@@ -1852,7 +1852,7 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
     @QtCore.Slot()
     def refresh(self) -> None:
         if self._recording is None:
-            self.statusBar().showMessage("Capture IQ in Bluetooth mode or load it in Generic VSA first")
+            self.statusBar().showMessage("Capture IQ in Bluetooth mode or load it in General VSA first")
             return
         if self._analysis_thread is not None and self._analysis_thread.isRunning():
             self.statusBar().showMessage("Bluetooth analysis is already running")

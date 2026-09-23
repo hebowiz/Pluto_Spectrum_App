@@ -308,7 +308,7 @@ def analyze_bluetooth_session(
     recording = session.recording
     base_result = session.result
     if recording is None or base_result is None:
-        raise RuntimeError("Generic VSA has no completed analysis result")
+        raise RuntimeError("General VSA has no completed analysis result")
     profile = BluetoothAnalysisProfile(profile)
     pattern = session.pattern_result
     result = session.carrier_corrected_pattern_range_result or session.pattern_range_result or base_result

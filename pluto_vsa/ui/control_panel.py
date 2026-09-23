@@ -257,7 +257,7 @@ class VSAControlPanel(QtWidgets.QFrame):
     def _build_mode_page(self, active_mode: str) -> QtWidgets.QWidget:
         page = self._simple_page()
         modes = (
-            ("Generic VSA", "generic"),
+            ("General VSA", "generic"),
             ("Bluetooth", "bluetooth"),
             ("DECT", "dect"),
             ("ADS-B 1090ES", "adsb1090"),

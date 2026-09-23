@@ -1,7 +1,7 @@
 # VSA 右側操作UI 設計
 
 更新日: 2026-09-13  
-対象: Generic VSA / Bluetooth Dedicated Analyzer / DECT Dedicated Analyzer / ADS-B 1090ES
+対象: General VSA / Bluetooth Dedicated Analyzer / DECT Dedicated Analyzer / ADS-B 1090ES
 
 ## 1. 目的
 
@@ -50,7 +50,7 @@
 ```text
 PlutoAnalysisWindow
   +-- workspace stack
-  |     +-- Generic VSA
+  |     +-- General VSA
   |     +-- Bluetooth
   |     +-- DECT
   |     +-- ADS-B 1090ES
@@ -112,7 +112,7 @@ Main Menu
 
 ## 4. Main Menu
 
-### 4.1 Generic VSA
+### 4.1 General VSA
 
 #### ANALYZER SETUP
 
@@ -192,7 +192,7 @@ Pluto接続先操作は`System > Device`へ移す。
 
 全モードで同じページを使う。
 
-1. `Generic VSA`
+1. `General VSA`
 2. `Bluetooth`
 3. `DECT`
 4. `ADS-B 1090ES`
@@ -245,7 +245,7 @@ Presetは「現在モードの測定設定を既知の初期値へ戻す」機�
 
 | モード | Preset |
 |---|---|
-| Generic VSA | `Default` |
+| General VSA | `Default` |
 | Bluetooth | `Default` |
 | DECT | `Default` |
 | ADS-B 1090ES | `Default` |
@@ -307,7 +307,7 @@ mode IDは次に固定する。
 
 ### 7.5 File
 
-#### Generic VSA
+#### General VSA
 
 1. `Open IQ`
 2. `Export IQ`
@@ -369,7 +369,7 @@ mode IDは次に固定する。
 
 1. 共通`VSAControlPanel`とworkspace adapterを追加する。
 2. `PlutoAnalysisWindow`をworkspace stack + control panelの横並び構成へ変更する。
-3. Generic VSAを接続し、Sweep状態と設定ページ遷移を検証する。
+3. General VSAを接続し、Sweep状態と設定ページ遷移を検証する。
 4. Bluetooth / DECTを接続し、専用設定と統計Resetを検証する。
 5. ADS-Bを接続し、OpenSky/File操作を検証する。
 6. Config version 2、全モードSave/Recall、旧Generic config互換を追加する。
@@ -397,5 +397,5 @@ mode IDは次に固定する。
 
 ## 12. 確定事項
 
-- PresetはGeneric VSA / Bluetooth / DECT / ADS-B 1090ESごとに`Default`を1つだけ持つ。
+- PresetはGeneral VSA / Bluetooth / DECT / ADS-B 1090ESごとに`Default`を1つだけ持つ。
 - `Default`はactive modeの測定設定だけを初期化し、Device URI、現在IQ、解析履歴、Plotの手動レンジには影響させない。

@@ -80,7 +80,7 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
             "File",
         }.issubset(window.control_panel.buttons)
         assert window.control_panel.buttons["Analyzer Mode"].text() == (
-            "Analyzer Mode\nGeneric VSA"
+            "Analyzer Mode\nGeneral VSA"
         )
         assert window.control_panel.buttons["Analyzer Mode"].minimumHeight() == 72
         assert window.control_panel.buttons["Device"].minimumHeight() == 50
@@ -154,7 +154,7 @@ def test_single_window_switches_complete_workspaces_and_shares_pluto(tmp_path) -
         window.control_panel.buttons["Signal Description"].click()
         assert window.generic_workspace._config_page_title.text() == "Signal Description"
         assert not window.generic_workspace._config_back_button.isVisible()
-        assert "Generic" in window.windowTitle()
+        assert "General" in window.windowTitle()
         assert window.generic_workspace._pluto_source is source
         assert window.adsb1090_workspace._pluto_source is source
         assert window.bluetooth_workspace._pluto_source is source

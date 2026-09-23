@@ -294,7 +294,7 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.open_config_action.triggered.connect(self._show_config)
 
         mode_menu = self.menuBar().addMenu("Analysis Mode")
-        mode_menu.addAction("Generic FSK / PSK VSA...").triggered.connect(
+        mode_menu.addAction("General FSK / PSK VSA...").triggered.connect(
             lambda: self.analysis_mode_requested.emit("generic")
         )
         mode_menu.addAction("Bluetooth Dedicated Analyzer...").triggered.connect(

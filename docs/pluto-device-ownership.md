@@ -14,7 +14,7 @@ RX/TXへ割り当てる運用を安全にする。個体を恒久的なTX専用/
 - direct USBと`ip:pluto.local`が同一serialなら1台として扱い、direct USBを優先する。
 - 各アプリのウィンドウタイトルには役割とserial末尾4桁を表示する。
   - `Pluto RTSA [RX: …1234]`
-  - `Pluto VSA - Generic FSK / PSK [RX: …1234]`
+  - `Pluto VSA - General FSK / PSK [RX: …1234]`
   - `Pluto VSG - IQ Waveform Generator [TX: …5678]`
 
 ## 排他制御
@@ -35,7 +35,7 @@ half-duplex state machineとRF safety条件を別途定義すること。
 
 ## VSA mode間の選択
 
-Generic VSAで選択したPluto targetをADS-B 1090ES workspaceにも渡す。
+General VSAで選択したPluto targetをADS-B 1090ES workspaceにも渡す。
 これによりmode切替で暗黙に別個体のAuto選択へ戻らない。
 
 ## Windows BAT runtime

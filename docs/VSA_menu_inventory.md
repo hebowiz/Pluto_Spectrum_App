@@ -8,7 +8,7 @@
 
 対象は Pluto VSA 共通シェルの右側操作パネルから利用できる以下4モード。
 
-- Generic VSA
+- General VSA
 - Bluetooth（BR / EDR、LE、HDT はこのモード内で選択）
 - DECT
 - ADS-B 1090ES
@@ -21,7 +21,7 @@
 
 表示順は各列の上から下。
 
-| Generic VSA | Bluetooth | DECT | ADS-B 1090ES |
+| General VSA | Bluetooth | DECT | ADS-B 1090ES |
 |---|---|---|---|
 | Analyzer Mode | Analyzer Mode | Analyzer Mode | Analyzer Mode |
 | Input / Frontend | Bluetooth Analysis | DECT Analysis | ADS-B Analysis |
@@ -35,13 +35,13 @@
 | Display | — | — | — |
 
 Analyzer Mode は2行表示で、2行目に現在モードを表示。
-その中の選択ボタンは全モード共通で `Generic VSA / Bluetooth / DECT / ADS-B 1090ES`。
+その中の選択ボタンは全モード共通で `General VSA / Bluetooth / DECT / ADS-B 1090ES`。
 
 ## 3. 設定機能の配置比較
 
 「なし」は独立した設定UIがないという意味であり、内部DSPがないという意味ではない。
 
-| 機能／項目 | Generic VSA | Bluetooth | DECT | ADS-B 1090ES |
+| 機能／項目 | General VSA | Bluetooth | DECT | ADS-B 1090ES |
 |---|---|---|---|---|
 | Protocol / PHY / 解析Profile | Signal Descriptionで変調を指定 | Bluetooth Analysis | DECT固定 | ADS-B固定 |
 | Carrier plan / RF channel | なし、数値周波数入力 | LE ChannelはBluetooth Analysisに条件付き表示 | DECT Analysis | 1090 MHz固定 |
@@ -65,7 +65,7 @@ Analyzer Mode は2行表示で、2行目に現在モードを表示。
 | Result Summary行の選択 | Result Summary | 設定UIなし | 設定UIなし | 設定UIなし |
 | Receiver location | なし | なし | なし | Receiver Location |
 
-## 4. Generic VSA：各設定ボタンの内容
+## 4. General VSA：各設定ボタンの内容
 
 ### Input / Frontend
 
@@ -308,7 +308,7 @@ Symbol、Density、Raw / Measured等の選択設定はない。
 
 ## 8. SWEEP CONTROL：共通ボタンと実際の意味
 
-| ボタン | Generic VSA | Bluetooth | DECT | ADS-B 1090ES |
+| ボタン | General VSA | Bluetooth | DECT | ADS-B 1090ES |
 |---|---|---|---|---|
 | Continuous | Capture → Analysisを停止操作まで反復 | 同左 | 同左 | 連続capture / scan |
 | Single | 1回capture / analysis | 同左 | 同左 | 同左 |
@@ -337,7 +337,7 @@ Backは階層移動用の共通ボタン。設定項目ではない。
 
 ### System > File 比較
 
-| ボタン | Generic VSA | Bluetooth | DECT | ADS-B 1090ES |
+| ボタン | General VSA | Bluetooth | DECT | ADS-B 1090ES |
 |---|---|---|---|---|
 | Open IQ | あり | あり | あり | あり |
 | Export IQ | あり | あり | あり | あり |

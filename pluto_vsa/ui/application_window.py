@@ -139,7 +139,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             )
             return WorkspacePanelSpec(
                 mode,
-                "Generic VSA",
+                "General VSA",
                 setup,
                 command("Single", workspace._run_pluto_single, workspace.run_single_action),
                 command(
@@ -549,7 +549,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self.generic_workspace._selected_pluto_target()
         )
         if target is self.generic_workspace:
-            self.setWindowTitle(f"Pluto VSA - Generic FSK / PSK [RX: {identity}]")
+            self.setWindowTitle(f"Pluto VSA - General FSK / PSK [RX: {identity}]")
         elif target is self.bluetooth_workspace:
             self.setWindowTitle(
                 f"Pluto VSA - Bluetooth Dedicated Analyzer [RX: {identity}]"
