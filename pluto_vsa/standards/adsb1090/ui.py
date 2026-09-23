@@ -652,7 +652,6 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self._shutdown_ready_emitted = False
         self._packet_selection_connected = False
         self._aircraft_selection_connected = False
-        self._dock_resize_pending = False
         self._pending_stream_views: list[_ADSBStreamView] = []
         self._stream_display_timer = QtCore.QTimer(self)
         self._stream_display_timer.setSingleShot(True)
@@ -1000,7 +999,6 @@ class ADSB1090Window(QtWidgets.QMainWindow):
         self.statusBar().showMessage("Ready - load 1090 MHz IQ or pass the current VSA capture")
 
     def _equalize_result_docks(self) -> None:
-        self._dock_resize_pending = False
         top_row = (self.power_dock, self.packet_dock, self.aircraft_dock)
         bottom_row = (
             self.ppm_dock,
@@ -1018,12 +1016,6 @@ class ADSB1090Window(QtWidgets.QMainWindow):
             self.resizeDocks(
                 [upper, lower], [400, 400], QtCore.Qt.Orientation.Vertical
             )
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        if hasattr(self, "power_dock") and not self._dock_resize_pending:
-            self._dock_resize_pending = True
-            QtCore.QTimer.singleShot(0, self._equalize_result_docks)
 
     def _restore_user_settings(self) -> None:
         sample_rate_msps = int(

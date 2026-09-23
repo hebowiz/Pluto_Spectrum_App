@@ -9,6 +9,7 @@ from pathlib import Path
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_common import short_pluto_identity
+from pluto_common.window_geometry import restore_window_geometry, save_window_geometry
 
 from pluto_vsa.standards.adsb1090.ui import ADSB1090Window
 from pluto_vsa.pluto_source import PlutoLiveSource
@@ -37,6 +38,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         self._shutdown_finalized = False
         self._pluto_source = pluto_source or PlutoLiveSource()
         self._preferences = preferences or QtCore.QSettings("PlutoSA", "PlutoVSA")
+        self._workspace_layouts: dict[str, QtCore.QByteArray] = {}
         self._stack = QtWidgets.QStackedWidget()
         central = QtWidgets.QWidget()
         central_layout = QtWidgets.QHBoxLayout(central)
@@ -98,6 +100,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         self.control_panel.save_requested.connect(self._save_meas_config)
         self._pluto_target_changed(self.generic_workspace._selected_pluto_target())
         self.resize(1600, 960)
+        restore_window_geometry(self, self._preferences)
         self.set_analysis_mode("generic")
 
     @staticmethod
@@ -326,7 +329,19 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         stop_stream = getattr(self._pluto_source, "stop_stream", None)
         if callable(stop_stream):
             stop_stream()
+        current = self._stack.currentWidget()
+        if current is not None:
+            self._workspace_layouts[self._active_mode()] = current.saveState()
+            # Floating docks are separate windows: keep inactive modes out of
+            # the way while retaining their visible state in the snapshot.
+            for dock in current.findChildren(QtWidgets.QDockWidget):
+                if dock.isFloating():
+                    dock.hide()
         self._stack.setCurrentWidget(target)
+        layout_state = self._workspace_layouts.get(str(mode))
+        if layout_state is not None:
+            target.layout().activate()
+            target.restoreState(layout_state)
         self._update_window_title(target)
         self.control_panel.set_workspace(self._panel_spec(str(mode), target))
 
@@ -574,6 +589,10 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self.dect_workspace.finalize_shutdown()
             self.generic_workspace.finalize_shutdown()
             self._pluto_source.close()
+            save_window_geometry(self, self._preferences)
+        for dock in self.findChildren(QtWidgets.QDockWidget):
+            if dock.isFloating():
+                dock.hide()
         event.accept()
         super().closeEvent(event)
 

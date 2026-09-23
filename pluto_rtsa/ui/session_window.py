@@ -8,6 +8,8 @@ from typing import Any
 
 from pyqtgraph.Qt import QtCore, QtWidgets
 
+from pluto_common.window_geometry import restore_window_geometry, save_window_geometry
+
 from pluto_rtsa.config.session_state import (
     RTSA_APPLICATION,
     RTSA_DEVICE_KEY,
@@ -48,8 +50,12 @@ from pluto_rtsa.ui.main_window import (
 class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
     """Add PC-local session persistence and a measurement-style Preset."""
 
-    def __init__(self, *args, **kwargs) -> None:
-        self._session_settings = QtCore.QSettings(RTSA_ORGANIZATION, RTSA_APPLICATION)
+    def __init__(
+        self, *args, preferences: QtCore.QSettings | None = None, **kwargs
+    ) -> None:
+        self._session_settings = preferences or QtCore.QSettings(
+            RTSA_ORGANIZATION, RTSA_APPLICATION
+        )
         self._session_acquisition_started = False
         self._mode_session_states: dict[AnalyzerMode, RTSASessionState] = {}
         self._shared_center_freq_hz: int | None = None
@@ -60,6 +66,7 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
         self._install_system_frame()
         self._apply_display_mode()
         self._restore_saved_session_on_startup()
+        restore_window_geometry(self, self._session_settings)
 
     def _resize_for_system_frame(self) -> None:
         self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
@@ -814,6 +821,7 @@ class SessionRealtimeSpectrumWindow(RealtimeSpectrumWindow):
     def closeEvent(self, event) -> None:
         try:
             save_session_state(self._session_settings, self._capture_session_state())
+            save_window_geometry(self, self._session_settings)
         except Exception as exc:
             print(f"[RTSA] Failed to save session state: {exc}")
         super().closeEvent(event)

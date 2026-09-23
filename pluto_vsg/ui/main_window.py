@@ -29,11 +29,13 @@ from pluto_common.numeric_input import (
     get_deferred_int,
 )
 from pluto_common.runtime_paths import diagnostic_log_path
+from pluto_common.window_geometry import restore_window_geometry, save_window_geometry
 
 from pluto_vsa.profiles.bluetooth_br import header_error_check
 from pluto_vsa.ui.measurement_chrome import (
     install_measurement_plot_menu,
     make_measurement_plot,
+    make_measurement_dock,
 )
 from pluto_vsa.ui.packet_decode import PacketDecodeTabs, apply_analysis_font
 from pluto_vsg.protocol import analyze_generation_result
@@ -124,7 +126,6 @@ from pluto_vsg.ui.frequency_settings import (
 _STARTUP_STATE_SCHEMA = "pluto-vsg-startup-state"
 _STARTUP_STATE_VERSION = 1
 _STARTUP_STATE_KEY = "startup/state"
-_STARTUP_GEOMETRY_KEY = "startup/geometry"
 _STARTUP_WINDOW_STATE_KEY = "startup/window_state"
 from pluto_vsg.ui.packet_settings import (
     SymbolTimeControl,
@@ -2149,13 +2150,9 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self._install_window_shortcuts()
         self._build_workspace()
         self._configure_plot_interaction()
-        if self._persist_startup_state:
-            geometry = self._preferences.value(_STARTUP_GEOMETRY_KEY)
-            if geometry is not None:
-                self.restoreGeometry(geometry)
-            window_state = self._preferences.value(_STARTUP_WINDOW_STATE_KEY)
-            if window_state is not None:
-                self.restoreState(window_state)
+        restore_window_geometry(
+            self, self._preferences, restore=self._persist_startup_state
+        )
         self._refresh_project_view()
         self.generate_waveform()
 
@@ -2198,8 +2195,8 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             _STARTUP_STATE_KEY,
             json.dumps(document, ensure_ascii=False, separators=(",", ":")),
         )
-        self._preferences.setValue(_STARTUP_GEOMETRY_KEY, self.saveGeometry())
-        self._preferences.setValue(_STARTUP_WINDOW_STATE_KEY, self.saveState())
+        save_window_geometry(self, self._preferences)
+        self._preferences.remove(_STARTUP_WINDOW_STATE_KEY)
         self._preferences.setValue("pluto_tx/uri", self._pluto_uri)
         self._preferences.setValue(
             "pluto_tx/digital_backoff_db", self._pluto_digital_backoff_db
@@ -2286,8 +2283,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         )
 
     def _build_workspace(self) -> None:
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        upper = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         self.block_library = QtWidgets.QListWidget()
         self.block_library.addItems(
             ["Fixed Data", "Pattern", "PRBS-9", "Computed Field", "Guard / Idle", "Power Ramp"]
@@ -2342,10 +2337,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.edit_settings_button.clicked.connect(self._edit_project_settings)
         inspector_layout.addWidget(self.inspector)
         inspector_layout.addWidget(self.edit_settings_button)
-        upper.addWidget(_Panel("Block Library", self.block_library))
-        upper.addWidget(_Panel("Packet Composer", composer_tabs))
-        upper.setStretchFactor(0, 1)
-        upper.setStretchFactor(1, 3)
 
         previews = QtWidgets.QTabWidget()
         apply_analysis_font(previews)
@@ -2367,32 +2358,64 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             (self.constellation_plot, "Constellation"),
         ):
             previews.addTab(widget, title)
-        splitter.addWidget(upper)
-        splitter.addWidget(_Panel("Generated IQ Preview", previews))
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([450, 450])
         self.packet_decode = PacketDecodeTabs()
         self._verified_packet = None
-        inspector_column = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        inspector_column.addWidget(_Panel("Inspector", inspector_widget))
-        inspector_column.addWidget(_Panel("Packet Decode", self.packet_decode))
-        inspector_column.setStretchFactor(0, 1)
-        inspector_column.setStretchFactor(1, 1)
-        inspector_column.setSizes([450, 450])
-        self.workspace_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        self.workspace_splitter.addWidget(splitter)
-        self.workspace_splitter.addWidget(inspector_column)
-        self.workspace_splitter.setStretchFactor(0, 2)
-        self.workspace_splitter.setStretchFactor(1, 1)
-        self.workspace_splitter.setSizes([820, 410])
+        self.workspace = QtWidgets.QMainWindow()
+        self.workspace.setDockOptions(
+            QtWidgets.QMainWindow.DockOption.AllowNestedDocks
+            | QtWidgets.QMainWindow.DockOption.AllowTabbedDocks
+        )
+
+        def dock(title: str, widget: QtWidgets.QWidget) -> QtWidgets.QDockWidget:
+            return make_measurement_dock(
+                title, widget, self.workspace, object_prefix="vsg", closable=False
+            )
+
+        self.library_dock = dock("Block Library", self.block_library)
+        self.composer_dock = dock("Packet Composer", composer_tabs)
+        self.preview_dock = dock("Generated IQ Preview", previews)
+        self.inspector_dock = dock("Inspector", inspector_widget)
+        self.packet_decode_dock = dock("Packet Decode", self.packet_decode)
+        self.workspace.addDockWidget(
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.library_dock
+        )
+        self.workspace.splitDockWidget(
+            self.library_dock, self.inspector_dock, QtCore.Qt.Orientation.Horizontal
+        )
+        self.workspace.splitDockWidget(
+            self.library_dock, self.preview_dock, QtCore.Qt.Orientation.Vertical
+        )
+        self.workspace.splitDockWidget(
+            self.inspector_dock, self.packet_decode_dock, QtCore.Qt.Orientation.Vertical
+        )
+        self.workspace.splitDockWidget(
+            self.library_dock, self.composer_dock, QtCore.Qt.Orientation.Horizontal
+        )
         outer = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        outer.addWidget(self.workspace_splitter)
+        outer.addWidget(self.workspace)
         outer.addWidget(self._build_vsg_control_panel())
         outer.setStretchFactor(0, 1)
         outer.setStretchFactor(1, 0)
         outer.setSizes([1360, 240])
         self.setCentralWidget(outer)
+        QtCore.QTimer.singleShot(0, self._initialize_workspace_sizes)
+
+    def _initialize_workspace_sizes(self) -> None:
+        """Apply the original proportions once; subsequent resizing is Qt's job."""
+        horizontal = QtCore.Qt.Orientation.Horizontal
+        vertical = QtCore.Qt.Orientation.Vertical
+        self.workspace.resizeDocks(
+            [self.preview_dock, self.packet_decode_dock], [820, 410], horizontal
+        )
+        self.workspace.resizeDocks(
+            [self.library_dock, self.composer_dock], [205, 615], horizontal
+        )
+        self.workspace.resizeDocks(
+            [self.library_dock, self.preview_dock], [450, 450], vertical
+        )
+        self.workspace.resizeDocks(
+            [self.inspector_dock, self.packet_decode_dock], [450, 450], vertical
+        )
 
     @staticmethod
     def _make_control_button(
@@ -4127,4 +4150,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return
         self._shutdown_stop_requested = False
         self._save_startup_state()
+        for dock in self.workspace.findChildren(QtWidgets.QDockWidget):
+            if dock.isFloating():
+                dock.hide()
         super().closeEvent(event)

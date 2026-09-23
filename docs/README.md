@@ -10,6 +10,7 @@
 ## ドキュメント一覧
 
 - [共通仕様](common.md)
+- [ウィンドウ位置・サイズとペイン配置](window-layout.md)
 - [RealTime SA](modes/realtime-sa.md)
 - [WideBand RT SA](modes/wideband-rt-sa.md)
 - [Sweep SA](modes/sweep-sa.md)

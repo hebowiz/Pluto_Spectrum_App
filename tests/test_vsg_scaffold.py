@@ -175,7 +175,7 @@ def test_vsg_restores_last_project_controls_and_window_state(tmp_path) -> None:
         assert restored._power_step_db == pytest.approx(2.5)
         assert restored._rf_enabled is False
         assert preferences.contains("startup/geometry")
-        assert preferences.contains("startup/window_state")
+        assert not preferences.contains("startup/window_state")
     finally:
         restored.close()
 
