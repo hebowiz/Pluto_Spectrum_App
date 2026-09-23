@@ -19,7 +19,9 @@
   - HDT rate / FEC / puncturing / CRC定義
 - `pluto_vsg/engine/bluetooth_hdt.py`
   - HDT RF Test Packet生成
-- `tests/vsa/bluetooth/test_vsa_bluetooth_dedicated.py`
+- `tests/vsa/bluetooth/test_vsa_bluetooth_hdt_analysis.py`
+- `tests/vsa/bluetooth/test_vsa_bluetooth_hdt_ui.py`
+- `tests/vsa/bluetooth/test_vsa_bluetooth_captures.py`
 
 仕様参照元として、リポジトリ内の以下のメモも使用する。
 

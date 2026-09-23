@@ -36,7 +36,10 @@ pluto_rtsa/vsa/protocol.py
 ```text
 tests/vsa/bluetooth/test_bluetooth_br_profile.py
 tests/vsa/bluetooth/test_bluetooth_edr.py
-tests/vsa/bluetooth/test_vsa_bluetooth_dedicated.py
+tests/vsa/bluetooth/test_vsa_bluetooth_rf_analysis.py
+tests/vsa/bluetooth/test_vsa_bluetooth_edr_analysis.py
+tests/vsa/bluetooth/test_vsa_bluetooth_captures.py
+tests/vsa/bluetooth/test_vsa_bluetooth_workspace_ui.py
 ```
 
 仕様メモ：
