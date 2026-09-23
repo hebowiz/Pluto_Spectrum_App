@@ -1,5 +1,7 @@
 # VSA Acquisition Trigger, Burst Search, and Pattern Search
 
+> Scope: this document owns the distinction between acquisition triggers, post-capture burst search, and pattern search. The Single-only/fresh-buffer descriptions below predate the shared continuous producer. Use [continuous acquisition](../acquisition/continuous-iq-acquisition.md) for producer/cursor lifetime, and the [document review](../../verification/vsa/README.md) for the confirmed differences. See the [design index](README.md) for document ownership.
+
 ## Purpose
 
 The VSA separates three operations, following the R&S measurement flow:

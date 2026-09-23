@@ -1,5 +1,7 @@
 # VSA 右側操作UI 設計
 
+> 参照範囲: 統合VSAの外枠・共通パネルとworkspaceの分担、設定Widgetの所有権を担当します。以下の本文は移行時の設計を含み、System配下の操作名や専用設定ページ名は現行UIと異なります。現在の操作は [ユーザーマニュアル](../../user-manual/Pluto_VSA_User_Manual_JA.md)、確認済みの差分は [文書・実装の照合](../../verification/vsa/README.md)、担当範囲は [設計索引](README.md) を参照してください。
+
 更新日: 2026-09-13  
 対象: General VSA / Bluetooth Dedicated Analyzer / DECT Dedicated Analyzer / ADS-B 1090ES
 
@@ -345,6 +347,14 @@ mode IDは次に固定する。
 - 数値入力は既存の共通validationを使い、編集中の一時的な範囲外を許容しつつ、無効値のままOK/Applyできない仕様を維持する。
 - Cancel時は編集前の値へ戻す。
 - 設定確定時は依存項目の表示とderived valueだけ更新し、Capture/Analysisは開始しない。
+
+### 設定Widgetの所有権
+
+旧共通Config UI文書のうち、画面遷移の変更後も必要な注意点をここで管理する。
+
+Config内の入力Widgetを非表示Toolbarや`QWidgetAction`へ重複登録しない。Widgetの所有先はConfigページに一本化する。
+
+Qtでは、非表示Toolbarが保持する`QWidgetAction`へ登録したWidgetを別レイアウトへ移しても、Action側の可視状態に影響されて入力欄が非表示になることがある。このため、設定値を操作するWidgetとメイン画面上の操作Widgetを共用しない。
 
 ## 9. 既存機能の移設表
 

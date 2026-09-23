@@ -1,5 +1,7 @@
 # Pluto VSA Bluetooth / Wi-Fi 専用解析モード設計案
 
+> 参照範囲: 専用モード導入の意図、RF/PHY解析とsemantic decodeの責務分離を担当します。初期提案と後日の実装記録が混在しており、Wi-Fiの統合VSA対応や汎用EVMからの全RF測定を保証する資料ではありません。モード・QAM・RF測定経路の現状は [文書・実装の照合](../../verification/vsa/README.md)、関連資料の分担は [設計索引](README.md) を参照してください。
+
 作成日: 2026-08-29  
 対象: **Pluto VSA**  
 実装優先順: **Bluetooth / BLE → Wi-Fi**  
@@ -56,10 +58,10 @@ Packet Region + PHY Classification
   - 802.11a/g Non-HT OFDM、802.11b DSSS/CCK、将来 HT の PHY / packet 生成資料
 - `docs/design/common/shared_protocol_packet_analyzer_design.md`
   - VSG / VSA 共通 semantic packet analyzer
-- `pluto_rtsa/vsa/model.py`
+- `pluto_vsa/model.py`
   - `IQRecording`、`VSAAnalysisResult`、`CompositeVSAAnalysisResult` 等
-- `pluto_rtsa/vsa/profiles/bluetooth_br.py`
-- `pluto_rtsa/vsa/profiles/bluetooth_edr.py`
+- `pluto_vsa/profiles/bluetooth_br.py`
+- `pluto_vsa/profiles/bluetooth_edr.py`
 
 重要な設計方針として、`Shared Protocol Packet Analyzer` は **packet detection、同期、復調、EVM 計算を担当しない**。
 

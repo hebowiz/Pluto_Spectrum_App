@@ -1,5 +1,7 @@
 # VSAアプリケーション設計方針
 
+> 参照範囲: session・record・解析段階の共通概念と拡張方針を担当します。以下は初期構想と実装途中の記録を含み、対応機能一覧ではありません。QAM、入力source、UI、layout保存については [文書・実装の照合](../../verification/vsa/README.md) を参照してください。位置・サイズ・内部配置の現行要件は [共通ウィンドウ仕様](../../spec/common/window-layout.md)、主題ごとの参照先は [設計索引](README.md) にあります。
+
 最終更新: 2026-08-03
 
 参照モデル: `FPL_K70_VSA_UserManual_en_12.pdf`（R&S FPL1-K70 VSA User Manual、551 pages）

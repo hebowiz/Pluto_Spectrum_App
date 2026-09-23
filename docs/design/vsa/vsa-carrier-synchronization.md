@@ -1,5 +1,7 @@
 # VSA Carrier周波数推定・補正仕様
 
+> 参照範囲: General VSAのPattern Searchにおける汎用CFO・位相・ドリフト補正の設計を担当します。Bluetooth規格別RF測定の参照信号や評価区間とは区別します。[設計索引](README.md) と [文書・実装の照合](../../verification/vsa/README.md) に関連資料の分担をまとめています。
+
 最終更新: 2026-08-07
 
 この文書は、Pattern SearchにおけるCarrier Frequency Offset（CFO）、carrier phase、linear frequency driftの計算方法と、表示・復調へ適用する補正の境界を記録する。R&S FPL1-K70 VSA User Manual rev.12のdemodulation process（pp.112-124）とDemodulation設定（pp.217-224）を用語・処理段階の参照モデルとする。

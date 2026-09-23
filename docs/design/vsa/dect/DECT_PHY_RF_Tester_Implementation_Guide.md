@@ -1,6 +1,8 @@
 # Classic DECT PHY / RF Test Specification
 ## 自作VSA / DECTテスター実装ガイド
 
+> 参照範囲: DECT PHY/RF規格を実装視点で整理したプロジェクト資料です。規格原文でも、HLM・受信試験・Active Lower Testerを含む全項目の実装済み一覧でもありません。現行解析との範囲の違いは [文書・実装の照合](../../../verification/vsa/README.md)、関連資料は [設計索引](../README.md) を参照してください。
+
 更新: 2026-09-04
 
 ---
