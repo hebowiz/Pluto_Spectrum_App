@@ -15,7 +15,7 @@ from pluto_vsa.ui.measurement_chrome import DedicatedSummaryTable, SYMBOL_PLOT_F
 from pluto_vsa.persistence import save_mode_meas_config
 from pluto_vsg.engine.wifi_legacy_ofdm import WiFiLegacyOFDMWaveformEngine
 from pluto_vsg.profiles.wifi import wifi_project
-from pluto_vsg.model import WiFiSettings
+from pluto_vsg.model import WiFiSettings, WiFiPSDUSource
 
 
 def recording():
@@ -159,6 +159,111 @@ def test_single_continuous_stop_and_shutdown_use_shared_source(tmp_path):
         w.request_shutdown()
         wait(app,lambda: w.shutdown_busy_reason() is None)
         assert source.closed==0
+    finally:
+        w.close()
+
+
+def test_packet_list_ssid_uses_summary_and_distinguishes_empty_and_absent(tmp_path,monkeypatch):
+    app = pg.mkQApp()
+    settings = (
+        WiFiSettings(ssid='Decoded Beacon',legacy_rate_mbps=24,packet_period_us=400),
+        WiFiSettings(ssid='',legacy_rate_mbps=6,packet_period_us=400),
+        WiFiSettings(psdu_source=WiFiPSDUSource.RAW_HEX,raw_psdu_hex='0800'+'00'*22,
+                     raw_includes_fcs=False,legacy_rate_mbps=54,packet_period_us=400),
+    )
+    engine = WiFiLegacyOFDMWaveformEngine()
+    waves = [engine.generate(wifi_project(s)) for s in settings]
+    w = WiFiAnalyzerWindow(pluto_source=Source(),preferences=prefs(tmp_path))
+    try:
+        w.show()
+        w.packet_tabs.setCurrentWidget(w.packet_table)
+        w.analyze_recording(IQRecording(np.concatenate([wave.iq for wave in waves]),40e6,2437e6))
+        app.processEvents()
+        table = w.packet_table
+        assert table.columnCount()==7
+        assert [table.horizontalHeaderItem(i).text() for i in range(7)]==['#','Rate','Type','SSID','Length','FCS','Power']
+        assert table.rowCount()==3
+        assert [table.item(i,3).text() for i in range(3)]==['Decoded Beacon','(empty)','—']
+        assert table.item(0,3).toolTip()=='Decoded Beacon'
+        assert table.item(1,3).toolTip()==''
+        assert w._results[2].packet.packet_type!='Beacon'
+        decoded = [{s.key:s.value for s in p.packet.summary} for p in w._results]
+        assert decoded[1]['ssid']=='' and 'ssid' not in decoded[2]
+        # Change only the decoded summary; the original MAC bytes/fields remain
+        # untouched. The UI must use this value rather than parsing them again.
+        result = w._result
+        first = result.packets[0]
+        packet = replace(first.packet,summary=tuple(replace(s,value='Summary value') if s.key=='ssid' else s
+                                                     for s in first.packet.summary))
+        w._analysis_ready(replace(result,packets=(replace(first,packet=packet),*result.packets[1:])))
+        assert table.item(0,3).text()==table.item(0,3).toolTip()=='Summary value'
+        rendered = []
+        render_packet = w.packet_tabs.render_packet
+        def observe_packet(packet):
+            rendered.append(packet)
+            render_packet(packet)
+        monkeypatch.setattr(w.packet_tabs,'render_packet',observe_packet)
+        for row in (1,2,0):
+            table.setCurrentCell(row,3)
+            selected = w._results[row]
+            assert w._selected_result_index==row
+            assert rendered[-1] is selected.packet
+            assert w.symbol_tabs.tabText(1)==w.modulation_tabs.tabText(1)=='DATA - '+selected.data.modulation
+            points = next(t for t in w.constellation_plots[1].listDataItems() if t.opts['symbol']=='o')
+            np.testing.assert_allclose(points.xData+1j*points.yData,selected.data.measured.ravel())
+            assert w._power_display[2][row]==(selected.start_sample,selected.stop_sample)
+            rates = [w.summary_table.item(i,1).text() for i in range(w.summary_table.rowCount())
+                     if w.summary_table.item(i,0).data(QtCore.Qt.ItemDataRole.UserRole)=='data_rate']
+            assert rates==[f'{settings[row].legacy_rate_mbps} Mbps']
+    finally:
+        w.close()
+
+
+@pytest.mark.parametrize('ssid',['W'*32,'Long SSID with several words 12'])
+def test_packet_list_ssid_wraps_and_refits_after_column_resize(tmp_path,ssid):
+    app = pg.mkQApp()
+    wave = WiFiLegacyOFDMWaveformEngine().generate(wifi_project(
+        WiFiSettings(ssid=ssid,legacy_rate_mbps=24,packet_period_us=400)))
+    w = WiFiAnalyzerWindow(pluto_source=Source(),preferences=prefs(tmp_path))
+    try:
+        w.show()
+        w.packet_tabs.setCurrentWidget(w.packet_table)
+        w.analyze_recording(IQRecording(wave.iq,wave.sample_rate_hz,2437e6))
+        app.processEvents()
+        table = w.packet_table
+        header = table.horizontalHeader()
+        assert table.wordWrap()
+        assert table.textElideMode()==QtCore.Qt.TextElideMode.ElideNone
+        assert header.sectionResizeMode(3)==QtWidgets.QHeaderView.ResizeMode.Stretch
+        assert all(header.sectionResizeMode(i)==QtWidgets.QHeaderView.ResizeMode.ResizeToContents for i in (0,1,2,4,5,6))
+        item = table.item(0,3)
+        assert item.text()==item.toolTip()==ssid
+        # Exercise a column resize independently of dock geometry. No manual
+        # resizeRowsToContents call: the table must update its height itself.
+        header.setSectionResizeMode(3,QtWidgets.QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(3,420)
+        app.processEvents()
+        wide_height = table.rowHeight(0)
+        table.setColumnWidth(3,70)
+        wait(app,lambda: table.rowHeight(0)>wide_height)
+        narrow_height = table.rowHeight(0)
+        assert narrow_height>2*table.fontMetrics().height()
+        assert item.text()==item.toolTip()==ssid
+        table.setColumnWidth(3,420)
+        wait(app,lambda: table.rowHeight(0)<narrow_height)
+        assert table.rowHeight(0)==wide_height
+        # In the shipped Stretch configuration, resizing the dock must also
+        # change the available width and trigger row-height recalculation.
+        header.setSectionResizeMode(3,QtWidgets.QHeaderView.ResizeMode.Stretch)
+        w.packet_dock.setFloating(True)
+        w.packet_dock.resize(800,450)
+        app.processEvents()
+        wide_width,wide_height = table.columnWidth(3),table.rowHeight(0)
+        other_columns = sum(table.columnWidth(i) for i in (0,1,2,4,5,6))
+        chrome_width = w.packet_dock.width()-table.viewport().width()
+        w.packet_dock.resize(other_columns+chrome_width+70,450)
+        wait(app,lambda: table.columnWidth(3)<wide_width and table.rowHeight(0)>wide_height)
+        assert item.text()==item.toolTip()==ssid
     finally:
         w.close()
 

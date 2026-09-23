@@ -2196,12 +2196,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         self.inspector.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
-        self.edit_settings_button = QtWidgets.QPushButton(
-            "Edit Bluetooth BR / EDR Settings..."
-        )
-        self.edit_settings_button.clicked.connect(self._edit_project_settings)
         inspector_layout.addWidget(self.inspector)
-        inspector_layout.addWidget(self.edit_settings_button)
 
         previews = QtWidgets.QTabWidget()
         apply_analysis_font(previews)
@@ -2859,7 +2854,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             parameters.insert(2, (
                 "Received Fields", f"{len(self.project.manual_packet_fields)} Manual overrides (Edit menu)",
             ))
-        self.edit_settings_button.setToolTip(
+        self.packet_settings_button.setToolTip(
             "Received fields stay Manual when other settings change. "
             "Use Edit > Received Packet Fields to select Auto or edit their values."
             if self.project.manual_packet_fields else ""
@@ -2931,15 +2926,19 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
                 ("SRRC Roll-off", f"{hdt_settings.rrc_rolloff:.3f}"),
             ])
         elif wifi_settings is not None:
+            management = wifi_settings.psdu_source in (WiFiPSDUSource.BEACON, WiFiPSDUSource.PROBE_REQUEST, WiFiPSDUSource.PROBE_RESPONSE)
+            ssid = wifi_settings.ssid or ("Wildcard / empty" if wifi_settings.psdu_source == WiFiPSDUSource.PROBE_REQUEST else "(empty)")
             parameters.extend([
                 ("PHY", "Non-HT OFDM / 20 MHz"),
                 ("Channel", f"{wifi_settings.channel} / {(2407 + 5 * wifi_settings.channel)} MHz"),
                 ("Data Rate", f"{wifi_settings.legacy_rate_mbps} Mbps"),
-                ("Frame Source", WiFiPSDUSource(wifi_settings.psdu_source).value),
+                ("Frame Type / Source", WiFiPSDUSource(wifi_settings.psdu_source).value),
                 ("Packet Period", f"{wifi_settings.packet_period_us:g} us"),
                 ("Scrambler", f"{WiFiScramblerSeedMode(wifi_settings.scrambler_seed_mode).value} / 0x{wifi_settings.scrambler_seed:02X}"),
-                ("SSID", wifi_settings.ssid if WiFiPSDUSource(wifi_settings.psdu_source) == WiFiPSDUSource.BEACON else "-"),
-                ("BSSID", wifi_settings.bssid if WiFiPSDUSource(wifi_settings.psdu_source) == WiFiPSDUSource.BEACON else "-"),
+                ("SSID", ssid if management else "-"),
+                ("Source Address", (wifi_settings.source_address or wifi_settings.bssid) if management else "-"),
+                ("Destination Address", wifi_settings.destination_address if management else "-"),
+                ("BSSID", wifi_settings.bssid if management else "-"),
             ])
         elif dect_settings is not None:
             parameters.extend(
@@ -2986,7 +2985,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             StandardProfile.DECT: "DECT Packet / Waveform Settings...",
         }).get(self.project.standard, "Bluetooth BR / EDR Settings...")
         self.settings_action.setText(settings_label)
-        self.edit_settings_button.setText(f"Edit {settings_label}")
         self._project_inspector_parameters = parameters
         self._populate_inspector(parameters)
         if hasattr(self, "frequency_button"):
@@ -3970,7 +3968,6 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             action.setEnabled(not active)
         self.pluto_stop_action.setEnabled(transmitting)
         if hasattr(self, "rf_button"):
-            self.edit_settings_button.setEnabled(not active)
             self.verify_packet_button.setEnabled(
                 not preparing and supports_packet_verification(self.result)
             )

@@ -323,6 +323,8 @@ class WiFiPSDUSource(StrEnum):
     PATTERN = "Pattern"
     PRBS9 = "PRBS-9"
     BEACON = "Beacon"
+    PROBE_REQUEST = "Probe Request"
+    PROBE_RESPONSE = "Probe Response"
 
 
 class WiFiScramblerSeedMode(StrEnum):
@@ -365,6 +367,9 @@ class WiFiSettings:
     ds_channel: int = 6
     tim_hex: str = "00010000"
     erp_information: int = 0
+    frame_control_auto: bool = True
+    extended_supported_rates_hex: str = ""
+    additional_ies_hex: str = ""
 
 
 @dataclass(frozen=True)
@@ -829,19 +834,6 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
             issues.append(ValidationIssue("wifi.channel", "Non-HT OFDM 2.4 GHz channel must be between 1 and 13."))
         if not 1 <= int(wifi_settings.scrambler_seed) <= 0x7F:
             issues.append(ValidationIssue("wifi.scrambler_seed", "Scrambler seed must be a non-zero 7-bit value."))
-        if not 0 <= int(wifi_settings.sequence_number) <= 4095:
-            issues.append(ValidationIssue("wifi.sequence_number", "Sequence number must be between 0 and 4095."))
-        if not 1 <= int(wifi_settings.beacon_interval_tu) <= 65535:
-            issues.append(ValidationIssue("wifi.beacon_interval_tu", "Beacon interval must be between 1 and 65535 TU."))
-        if len(wifi_settings.ssid.encode("utf-8")) > 32:
-            issues.append(ValidationIssue("wifi.ssid", "SSID must be at most 32 UTF-8 bytes."))
-        try:
-            parts = wifi_settings.bssid.split(":")
-            valid_bssid = len(parts) == 6 and all(len(part) == 2 and 0 <= int(part, 16) <= 255 for part in parts)
-        except ValueError:
-            valid_bssid = False
-        if not valid_bssid:
-            issues.append(ValidationIssue("wifi.bssid", "BSSID must use XX:XX:XX:XX:XX:XX notation."))
         if float(wifi_settings.packet_period_us) <= 0.0:
             issues.append(ValidationIssue("wifi.packet_period_us", "Packet period must be positive."))
         from pluto_vsg.wifi.validation import validate_wifi_settings

@@ -37,6 +37,11 @@ Meas Configは既存の下書き編集・OK/Cancel、起動時保存、StateのS
 | Symbol Plot | L-SIG / DATA別tab。等化・CPE補正後の測定点を他モードと共通のFlat / Densityで表示。点の色・サイズ、密度処理、単位円、初期IQ範囲（±1.25）を共通化。Density SpreadはNone / Medium / Maximum |
 | Packet Analysis | 共通Decode / Payload Hex / IssuesとPacket List。選択すると他5領域も追従 |
 
+Packet Listの列順は`# | Rate | Type | SSID | Length | FCS | Power`。
+BeaconのSSIDは既存のdecoded summaryから表示し、SSIDなしは`—`、空文字SSIDは`(empty)`で区別する。
+SSID列を主な可変幅とし、空白のない長いSSIDもQtの列幅依存の折り返しと行高再計算で表示する。
+元のSSID文字列は変更せず、Tooltipで全文を確認できる。
+
 IQ Powerの背景は最大2048 bucket、可視packetへ合計32768 bucket（1 packet最大8192）、
 選択packetには16384 bucketを割り当て、各bucketの最小・最大の実サンプルと区間境界を残す。
 サンプル数が割当点数以内のpacketは全点表示する。末尾の端数bucketも保持する。

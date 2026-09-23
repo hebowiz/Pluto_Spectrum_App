@@ -208,6 +208,8 @@ def project_from_dict(document: dict[str, object]) -> WaveformProject:
             raise ValueError("Invalid Wi-Fi settings")
         wifi = WiFiSettings(**{
             **wifi_payload,
+            # Legacy projects stored a literal FC; preserve even unusual values.
+            "frame_control_auto": wifi_payload.get("frame_control_auto", "frame_control" not in wifi_payload),
             "phy_format": WiFiPHYFormat(str(wifi_payload["phy_format"])),
             "psdu_source": WiFiPSDUSource(str(wifi_payload["psdu_source"])),
             "scrambler_seed_mode": WiFiScramblerSeedMode(str(wifi_payload["scrambler_seed_mode"])),

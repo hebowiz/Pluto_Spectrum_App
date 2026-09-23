@@ -100,3 +100,70 @@ RF/Timing・Fieldsの枠とfield group、保存・出力・バックエンドは
 HTではlegacy preamble部分を再利用候補とし、HT-SIG・HT DATA等は別PHYにする。
 DSSS/CCKへOFDM同期・interleave・trellisを無理に共有せず、IQからPSDUへの専用経路を追加する。
 現行の動作要件は [仕様](../../spec/vsg/wifi-non-ht.md) を参照。
+
+## Probe Request / Probe Response追加の検証
+
+ローカルのIEEE Std 802.11-2024を一次資料として照合した。元PDF・本文抜粋・規格ページ画像は配布物へ含めない。
+今回PHY engine、RF level、backend、WV exportは変更せず、MAC生成・設定・共通MAC decodeを拡張した。
+
+### 参照箇所
+
+| Clause / Table（2024版） | 照合内容・実装への反映 |
+| --- | --- |
+| 9.2.4.1.3 / Table 9-1 | Type=Management、Subtype=4 Request / 5 Response / 8 Beacon |
+| 9.2.4.3、9.2.4.4.1 | Addressとwildcard BSSID、Sequence上位12 bit / Fragment下位4 bit |
+| 9.3.3.1 / Figure 9-128 | 24-byte Management header、Address 1=DA/RA・2=SA/TA・3=BSSID、Duration |
+| 9.3.3.2 / Table 9-62 | Beacon固定fieldとIE順を維持 |
+| 9.3.3.9 / Table 9-68 | Requestは固定fieldなし、SSID・Rates・Extended Rates、非RMではDS省略可能 |
+| 9.3.3.10 / Table 9-69 | Responseの12-byte固定field、ERPでのDS・ERP IE、TIMなし |
+| 9.4.2.2 / Figure 9-209 | SSID 0〜32 octet、Requestの空SSIDはwildcard |
+| 9.4.2.3、9.4.2.11 / Figures 9-210、9-233 | Rates 1〜8 / Extended 1〜255 octet、500 kbps単位、RequestのBasic bitは受信側で無視 |
+| 9.4.2.4、9.4.2.10 | DSSS Parameter Setのchannel、ERP Informationのbit構造 |
+| 10.6.5.1、10.6.5.4、10.6.5.8 | Beacon/group/unicastの送信レートとBasic/相手対応レートの条件 |
+| 11.1.4.3.2、11.1.4.6 | active scanning、8個を超える広告rateとExtended IE |
+| 17.4.2 / Table 17-23、18.1.2 | 6/12/24 MbpsがOFDM必須、6 MbpsがERP必須に含まれること |
+| 18.1.3、18.5.3.2 | ERP SIFS=10 µs、TXTIMEに6 µs Signal Extensionを含むこと |
+
+実装対象はopen infrastructure / non-RM / non-HTのstatic試験frame。
+セキュリティ・HT/VHT/HE・Country等の条件付きIEを持つ全BSS構成を自動構築するものではない。
+Additional IEsはユーザー指定の完成TLVを追加できるが、機能の有効化条件・重複・順序の意味検証は行わない。
+
+### 実装完了項目（依頼の20項目）
+
+| No. | 項目 | 結果 |
+| --- | --- | --- |
+| 1 | 再利用 | Non-HT PHY全段、ERP 6 µs、IQ Verify経路、共通2 tab / field group、FCS、保存・出力 |
+| 2 | 新Settings | `frame_control_auto=True`、`extended_supported_rates_hex=""`、`additional_ies_hex=""` |
+| 3 | Source | `PROBE_REQUEST="Probe Request"`、`PROBE_RESPONSE="Probe Response"` |
+| 4 | frame構造 | Beacon/Response=header 24 + fixed 12 + IE + FCS 4、Request=header 24 + IE + FCS 4 |
+| 5 | Address初期値 | Request DA/BSSID=broadcast・SA末尾66、Response DA末尾66・SA/BSSID末尾55。全値とBeaconは[仕様](../../spec/vsg/wifi-non-ht.md#明示的な初期値適用)参照 |
+| 6 | IE | Request 0/1/50、Response 0/1/3/42/50、Beacon 0/1/3/5/42/50。50は非空時、追加TLVは末尾 |
+| 7 | IEEE参照 | 上表。ローカル2024版に基づく |
+| 8 | FC | Auto=0080/0040/0050、Manualは任意16-bit。Source切替でmanual値を消さない |
+| 9 | Request SSID | 検索対象。空文字=Wildcard、非空=Specific。送信元情報はSA・Rates・追加Capability等のIEで設定 |
+| 10 | Response固定field | static Timestamp、100 TU等のInterval、Capabilityを編集可能。TIM標準生成なし |
+| 11 | Rates | 既存1〜8 octetを維持しExtendedを別欄に追加。Probe presetはERP 12 ratesを8+4に分割 |
+| 12 | FCS | 3種ともAuto CRC-32 little endian / Manual送信順4 octet。不正CRCも試験用に許可 |
+| 13 | UI切替 | 6群をSourceに応じて無効化。Source変更は入力値を保持、Defaultsは明示操作。Inspectorは適用値のみ表示 |
+| 14 | Validation | 非適用fieldを除外。SSID UTF-8 byte数、Rates長、追加TLV長、適用field範囲、最終PSDU長・最小周期を確認 |
+| 15 | 共通decoder | Subtype 4/5の追加、共通IE parser、Extended Rates、wildcard意味表示、未知IE保持、種別別必須IE警告 |
+| 16 | IQ Verify | 3種×20/40 MS/s、生成metadataのPSDU/rateを偽装してもIQからPSDU一致・正しいpacket_type・FCS Validを確認 |
+| 17 | テスト | 新規Managementテスト32件、UI追加4件、Inspector/Verify追加4件。既存Beacon/全8 rate×2 Fs・VSA Wi-Fi回帰を併用 |
+| 18 | 旧project | 新fieldなしJSONのliteral FCはManualへ移行、FC自体なしならAuto。従来Beacon byte順と任意project名を維持 |
+| 19 | 実機残項目 | [手順](wifi-non-ht-hardware.md)に3種のWireshark field/FCS比較、AP応答、OS scanを記載。すべて未実施 |
+| 20 | 制限 | static replay、CSMA/CA・ACK・reactive responseなし。6 MbpsはERP向けでDSSS-only受信機との相互接続を保証しない |
+
+### 自動確認と表示確認
+
+`QT_QPA_PLATFORM=offscreen`で`.venv/Scripts/python.exe -m pytest tests/vsg tests/vsa/wifi -q`を実行し、
+**486 passed（106.26秒）**。VSGの他規格・backend・出力・UIとVSA Wi-Fiを含む関連範囲で、全体suiteの再実行ではない。
+初回のbackend 17件はsandboxのAppDataデバイスロック書き込み制限で失敗したため、同コマンドを権限付きで再実行した。
+
+`tests/vsg/test_wifi_management.py`の3つの固定byte列はheader・fixed・IEを明示し、
+CRCは反射多項式`0xEDB88320`のbit計算で独立に求めた末尾定数と比較する。
+builder/decoder相互一致だけを根拠にbyte orderを判定していない。
+既存VSAの任意FC試験は新設Manual modeを明示し、Retry/More Data等の従来assertionを維持した。
+
+Qt offscreenの実widgetを描画してRequestのMAC Header / Common IEs、Response固定fieldを確認。
+無効群、Auto FC値、送信元・宛先欄、Wildcard説明、追加IE欄が表示され、内容の欠けは認めなかった。
+今回ユーザーマニュアル・マニュアル画像・PDFは改訂しない。Probe操作説明のマニュアル追記は次回の明示依頼時に行う。

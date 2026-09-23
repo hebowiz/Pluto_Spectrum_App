@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 from pluto_vsg.model import (
     DataSourceKind, FieldDefinition, FilterKind, ModulationDefinition,
@@ -10,7 +11,7 @@ from pluto_vsg.model import (
     WiFiPSDUSource, WiFiSettings,
 )
 from pluto_vsg.wifi.common import LEGACY_RATES
-from pluto_vsg.wifi.mac import build_psdu
+from pluto_vsg.wifi.mac import MANAGEMENT_FRAME_CONTROLS, build_psdu
 
 
 def _modulation(kind: ModulationKind) -> ModulationDefinition:
@@ -45,7 +46,7 @@ def wifi_project(settings: WiFiSettings | None = None) -> WaveformProject:
     settings = settings or WiFiSettings()
     oversample = int(settings.oversample_factor)
     return WaveformProject(
-        name=("Wi-Fi Beacon" if WiFiPSDUSource(settings.psdu_source) == WiFiPSDUSource.BEACON else "Wi-Fi Non-HT OFDM Packet"),
+        name=(f"Wi-Fi {settings.psdu_source}" if settings.psdu_source in MANAGEMENT_FRAME_CONTROLS else "Wi-Fi Non-HT OFDM Packet"),
         standard=StandardProfile.WIFI,
         sample_rate_hz=20_000_000.0 * oversample,
         samples_per_symbol=80 * oversample,
@@ -59,6 +60,28 @@ def wifi_project(settings: WiFiSettings | None = None) -> WaveformProject:
 
 def wifi_beacon_project() -> WaveformProject:
     return wifi_project(WiFiSettings(psdu_source=WiFiPSDUSource.BEACON, packet_period_us=102_400.0))
+
+
+def management_defaults(source: WiFiPSDUSource, current: WiFiSettings) -> WiFiSettings:
+    """Explicit field preset; retain RF channel, sample rate and replay timing."""
+    source = WiFiPSDUSource(source)
+    if source not in MANAGEMENT_FRAME_CONTROLS:
+        raise ValueError("Management defaults require a management frame source")
+    defaults = WiFiSettings()
+    changes = {name: getattr(defaults, name) for name in (
+        "ssid", "bssid", "source_address", "destination_address", "frame_control",
+        "duration_id", "sequence_number", "fragment_number", "timestamp",
+        "beacon_interval_tu", "capability_information", "supported_rates_hex",
+        "extended_supported_rates_hex", "additional_ies_hex", "ds_channel_auto", "tim_hex", "erp_information",
+        "fcs_auto", "manual_fcs_hex", "frame_control_auto")}
+    changes.update(psdu_source=source, legacy_rate_mbps=6, ds_channel=current.channel)
+    if source == WiFiPSDUSource.PROBE_REQUEST:
+        changes.update(ssid="", bssid="FF:FF:FF:FF:FF:FF", source_address="02:11:22:33:44:66",
+                       supported_rates_hex="02040B160C121824", extended_supported_rates_hex="3048606C")
+    elif source == WiFiPSDUSource.PROBE_RESPONSE:
+        changes.update(source_address="02:11:22:33:44:55", destination_address="02:11:22:33:44:66",
+                       duration_id=60, supported_rates_hex="82848B968C129824", extended_supported_rates_hex="B048606C")
+    return replace(current, **changes)
 
 
 __all__ = ["wifi_beacon_project", "wifi_fields", "wifi_project"]

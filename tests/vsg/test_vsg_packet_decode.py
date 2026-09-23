@@ -16,6 +16,35 @@ from pluto_vsg.ui.main_window import PlutoVSGWindow
 from pluto_vsa.ui.packet_decode import PacketDecodeTabs
 
 
+@pytest.mark.parametrize("source_name", ["Beacon", "Probe Request", "Probe Response", "Raw PSDU"])
+def test_wifi_management_inspector_and_verify_button(source_name):
+    from pluto_vsg.model import WiFiPSDUSource, WiFiSettings
+    from pluto_vsg.profiles.wifi import management_defaults
+    source = WiFiPSDUSource(source_name)
+    settings = WiFiSettings(psdu_source=source, packet_period_us=1000)
+    if source != WiFiPSDUSource.RAW_HEX:
+        settings = management_defaults(source, settings)
+    pg.mkQApp("Wi-Fi management Inspector")
+    window = PlutoVSGWindow(wifi_project(settings))
+    try:
+        values = dict(window._project_inspector_parameters)
+        assert values['Frame Type / Source'] == source_name
+        if source == WiFiPSDUSource.RAW_HEX:
+            assert values['SSID'] == values['BSSID'] == values['Source Address'] == values['Destination Address'] == '-'
+        else:
+            assert values['Source Address'] == (settings.source_address or settings.bssid)
+            assert values['Destination Address'] == settings.destination_address
+            assert values['SSID'] == (settings.ssid or 'Wildcard / empty')
+            window.verify_packet_button.click()
+            assert window._verified_packet.packet_type == source_name
+            assert window._verified_packet.integrity.crc_valid is True
+            assert window.packet_decode.decode_tree.topLevelItemCount() > 0
+        assert not hasattr(window, 'edit_settings_button')
+        assert window.packet_settings_button.isEnabled()
+    finally:
+        window.close()
+
+
 def edr_project(kind):
     base = bluetooth_br_edr_project()
     settings = replace(base.bluetooth_br, packet_kind=kind)

@@ -6,9 +6,9 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_common.numeric_input import DeferredDoubleSpinBox, DeferredSpinBox, ensure_valid_numeric_inputs
 from pluto_vsg.model import WiFiPSDUSource, WiFiScramblerSeedMode, WiFiSettings, validate_project, maximum_finite_repeat_count
-from pluto_vsg.profiles.wifi import wifi_project
+from pluto_vsg.profiles.wifi import management_defaults, wifi_project
 from pluto_vsg.wifi.common import LEGACY_RATES
-from pluto_vsg.wifi.mac import build_psdu
+from pluto_vsg.wifi.mac import MANAGEMENT_FRAME_CONTROLS, build_psdu, effective_frame_control
 from .packet_settings import carrier_selector, wifi_24ghz_carriers, packet_settings_tabs, packet_field_sections
 
 
@@ -82,6 +82,15 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
         self.source_address_edit = QtWidgets.QLineEdit(s.source_address)
         self.source_address_edit.setPlaceholderText("Auto: same as BSSID")
         self.frame_control_spin = _integer(s.frame_control,0,65535,hexadecimal=True)
+        self.frame_control_mode = QtWidgets.QComboBox()
+        self.frame_control_mode.addItem("Auto", True)
+        self.frame_control_mode.addItem("Manual", False)
+        self.frame_control_mode.setCurrentIndex(self.frame_control_mode.findData(s.frame_control_auto))
+        self.frame_control_label = QtWidgets.QLabel()
+        self.defaults_button = QtWidgets.QPushButton()
+        self.defaults_button.clicked.connect(self._apply_defaults)
+        self.ssid_hint = QtWidgets.QLabel()
+        self.ssid_hint.setWordWrap(True)
         self.duration_spin = _integer(s.duration_id,0,65535)
         self.sequence_spin = _integer(s.sequence_number,0,4095)
         self.fragment_spin = _integer(s.fragment_number,0,15)
@@ -90,6 +99,9 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
         self.beacon_interval_spin.setSuffix(" TU")
         self.capability_spin = _integer(s.capability_information,0,65535,hexadecimal=True)
         self.rates_edit = QtWidgets.QLineEdit(s.supported_rates_hex)
+        self.extended_rates_edit = QtWidgets.QLineEdit(s.extended_supported_rates_hex)
+        self.additional_ies_edit = QtWidgets.QLineEdit(s.additional_ies_hex)
+        self.additional_ies_edit.setToolTip("Complete Element ID / Length / Value records. Appended in input order; check IEEE ordering and duplicates.")
         self.ds_auto_check = QtWidgets.QCheckBox("Auto: follow RF channel")
         self.ds_auto_check.setChecked(s.ds_channel_auto)
         self.ds_channel_spin = _integer(s.ds_channel,1,13)
@@ -98,21 +110,24 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
         self.fcs_check = QtWidgets.QCheckBox("Auto: calculate IEEE CRC-32")
         self.fcs_check.setChecked(s.fcs_auto)
         self.fcs_edit = QtWidgets.QLineEdit(s.manual_fcs_hex)
-        self.beacon_widgets = (self.ssid_edit,self.bssid_edit,self.destination_edit,self.source_address_edit,
-            self.frame_control_spin,self.duration_spin,self.sequence_spin,self.fragment_spin,self.timestamp_edit,
-            self.beacon_interval_spin,self.capability_spin,self.rates_edit,self.ds_auto_check,self.tim_edit,self.erp_spin)
         self.field_pages = packet_field_sections((
             ("Source / payload", (("Raw input meaning",self.raw_mode_combo),("Raw bytes [hex]",self.raw_hex_edit),
                 ("Pattern / PRBS length [byte]",self.length_spin),("Pattern [hex]",self.pattern_edit),
                 ("Pattern / PRBS",QtWidgets.QLabel("Exact synthetic PSDU bytes; no MAC header or FCS is added.")))),
-            ("Beacon MAC header", (("Frame Control",self.frame_control_spin),("Duration / ID",self.duration_spin),
-                ("Destination",self.destination_edit),("Source",self.source_address_edit),("BSSID",self.bssid_edit),
+            ("Management MAC Header", (("Frame Control Mode",self.frame_control_mode),
+                ("Generated Frame Control",self.frame_control_label),("Manual Frame Control",self.frame_control_spin),
+                ("Duration / ID",self.duration_spin),("Destination / Address 1",self.destination_edit),
+                ("Source / Address 2",self.source_address_edit),("BSSID / Address 3",self.bssid_edit),
                 ("Sequence Number (static)",self.sequence_spin),("Fragment Number",self.fragment_spin))),
-            ("Beacon fixed fields / IEs", (("Timestamp (static, microseconds)",self.timestamp_edit),
-                ("Beacon Interval",self.beacon_interval_spin),("Capability Information",self.capability_spin),
-                ("SSID",self.ssid_edit),("Supported Rates [hex octets]",self.rates_edit),
+            ("Common Management IEs", (("SSID (UTF-8, max 32 bytes)",self.ssid_edit),("SSID meaning",self.ssid_hint),
+                ("Supported Rates [1-8 hex octets]",self.rates_edit),
+                ("Extended Supported Rates [hex]",self.extended_rates_edit),
                 ("DS Parameter Set",self.ds_auto_check),("Manual DS channel",self.ds_channel_spin),
-                ("TIM body [hex]",self.tim_edit),("ERP Information",self.erp_spin))),
+                ("ERP Information",self.erp_spin),("Additional IEs [hex]",self.additional_ies_edit))),
+            ("Beacon / Probe Response Fixed Fields", (("Timestamp (static, microseconds)",self.timestamp_edit),
+                ("Beacon Interval",self.beacon_interval_spin),("Capability Information",self.capability_spin),
+                ("Timing",QtWidgets.QLabel("Advertised Beacon Interval is separate from the replay Packet Period.")))),
+            ("Beacon-only IEs", (("TIM body [hex]",self.tim_edit),)),
             ("FCS", (("FCS mode",self.fcs_check),("Manual FCS [4 transmitted hex octets]",self.fcs_edit),
                 ("L-SIG",QtWidgets.QLabel("LENGTH and parity: Auto from final PSDU. Reserved and tail: zero.")))),
         ))
@@ -125,7 +140,7 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
             ("Repeat Count",self.repeat_spin),("Scrambler",self.seed_mode_combo),("Fixed Seed",self.seed_spin),
             ("Envelope",QtWidgets.QLabel("Common ramp disabled; OFDM uses cyclic prefixes, no optional overlap window.")),
             ("Derived timing",self.derived_label)),
-            (("Project Name",self.name_edit),("PSDU Source",self.source_combo),("Field groups",self.field_pages)))
+            (("Project Name",self.name_edit),("PSDU Source",self.source_combo),("Management defaults",self.defaults_button),("Field groups",self.field_pages)))
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("Apply and Generate")
         buttons.accepted.connect(self._accept_settings)
@@ -147,6 +162,14 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
 
     def _settings(self) -> WiFiSettings:
         channel = round((float(self.channel_combo.currentData())/1e6-2407)/5)
+        source = WiFiPSDUSource(self.source_combo.currentData())
+        try:
+            text = self.timestamp_edit.text()
+            timestamp = int(text, 16 if text.lower().startswith("0x") else 10)
+        except ValueError:
+            if source in (WiFiPSDUSource.BEACON, WiFiPSDUSource.PROBE_RESPONSE):
+                raise ValueError("Timestamp must be an unsigned 64-bit integer")
+            timestamp = self._project.wifi.timestamp
         return replace(self._project.wifi,
             legacy_rate_mbps=int(self.rate_combo.currentData()),oversample_factor=int(self.sample_rate_combo.currentData()),
             scrambler_seed_mode=WiFiScramblerSeedMode(self.seed_mode_combo.currentData()),scrambler_seed=self.seed_spin.value(),
@@ -155,10 +178,42 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
             payload_length_bytes=self.length_spin.value(),payload_pattern_hex=self.pattern_edit.text(),
             ssid=self.ssid_edit.text(),bssid=self.bssid_edit.text(),destination_address=self.destination_edit.text(),
             source_address=self.source_address_edit.text(),frame_control=self.frame_control_spin.value(),duration_id=self.duration_spin.value(),
-            sequence_number=self.sequence_spin.value(),fragment_number=self.fragment_spin.value(),timestamp=int(self.timestamp_edit.text(),0) if self.timestamp_edit.text().startswith('0x') else int(self.timestamp_edit.text()),
+            sequence_number=self.sequence_spin.value(),fragment_number=self.fragment_spin.value(),timestamp=timestamp,
             beacon_interval_tu=self.beacon_interval_spin.value(),capability_information=self.capability_spin.value(),
+            frame_control_auto=bool(self.frame_control_mode.currentData()),
+            extended_supported_rates_hex=self.extended_rates_edit.text(),additional_ies_hex=self.additional_ies_edit.text(),
             supported_rates_hex=self.rates_edit.text(),ds_channel_auto=self.ds_auto_check.isChecked(),ds_channel=self.ds_channel_spin.value(),
             tim_hex=self.tim_edit.text(),erp_information=self.erp_spin.value(),fcs_auto=self.fcs_check.isChecked(),manual_fcs_hex=self.fcs_edit.text())
+
+    def _apply_defaults(self):
+        # Apply only on explicit request, including when an inactive draft is invalid.
+        source = WiFiPSDUSource(self.source_combo.currentData())
+        channel = round((float(self.channel_combo.currentData())/1e6-2407)/5)
+        s = management_defaults(source, replace(self._project.wifi, channel=channel))
+        widgets = {
+            self.ssid_edit: s.ssid, self.bssid_edit: s.bssid,
+            self.destination_edit: s.destination_address, self.source_address_edit: s.source_address,
+            self.timestamp_edit: str(s.timestamp), self.rates_edit: s.supported_rates_hex,
+            self.extended_rates_edit: s.extended_supported_rates_hex,
+            self.additional_ies_edit: s.additional_ies_hex, self.tim_edit: s.tim_hex,
+            self.fcs_edit: s.manual_fcs_hex,
+            self.frame_control_spin: s.frame_control, self.duration_spin: s.duration_id,
+            self.sequence_spin: s.sequence_number, self.fragment_spin: s.fragment_number,
+            self.beacon_interval_spin: s.beacon_interval_tu, self.capability_spin: s.capability_information,
+            self.ds_channel_spin: s.ds_channel, self.erp_spin: s.erp_information,
+        }
+        blockers = [QtCore.QSignalBlocker(w) for w in widgets]
+        for widget, value in widgets.items():
+            if isinstance(widget, QtWidgets.QLineEdit):
+                widget.setText(value)
+            else:
+                widget.setValue(value)
+        del blockers
+        self.frame_control_mode.setCurrentIndex(0)
+        self.ds_auto_check.setChecked(True)
+        self.fcs_check.setChecked(True)
+        self.rate_combo.setCurrentIndex(self.rate_combo.findData(s.legacy_rate_mbps))
+        self._refresh()
 
     def _refresh(self, *_args):
         nominal = float(self.channel_combo.currentData())
@@ -172,11 +227,24 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
         self.length_spin.setEnabled(source in (WiFiPSDUSource.PATTERN,WiFiPSDUSource.PRBS9))
         self.pattern_edit.setEnabled(source == WiFiPSDUSource.PATTERN)
         self.seed_spin.setEnabled(self.seed_mode_combo.currentData() == WiFiScramblerSeedMode.FIXED)
-        for widget in self.beacon_widgets:
-            widget.setEnabled(beacon)
-        self.ds_channel_spin.setEnabled(beacon and not self.ds_auto_check.isChecked())
+        management = source in MANAGEMENT_FRAME_CONTROLS
+        fixed = source in (WiFiPSDUSource.BEACON, WiFiPSDUSource.PROBE_RESPONSE)
+        self.defaults_button.setEnabled(management)
+        self.defaults_button.setText(f"Apply {source} Default" if management else "Apply Management Defaults")
+        append = management or (raw and not self.raw_mode_combo.currentData())
+        for index, enabled in enumerate((not management, management, management, fixed, beacon, append)):
+            self.field_pages.setItemEnabled(index, enabled)
+            self.field_pages.widget(index).setEnabled(enabled)
+        self.frame_control_spin.setEnabled(management and not self.frame_control_mode.currentData())
+        self.ds_auto_check.setEnabled(fixed)
+        self.ds_channel_spin.setEnabled(fixed and not self.ds_auto_check.isChecked())
+        self.erp_spin.setEnabled(fixed)
         self.interval_period_button.setEnabled(beacon)
-        append = beacon or (raw and not self.raw_mode_combo.currentData())
+        self.ssid_hint.setText("Search target: empty = wildcard; text = specific network. Source Address and rates identify the sending STA."
+                               if source == WiFiPSDUSource.PROBE_REQUEST else "Network name advertised by this BSS; empty is preserved.")
+        self.frame_control_label.setText(
+            f"Auto: 0x{MANAGEMENT_FRAME_CONTROLS[source]:04X} - {source}" if management and self.frame_control_mode.currentData()
+            else f"Manual: 0x{self.frame_control_spin.value():04X}" if management else "Not applicable")
         self.fcs_check.setEnabled(append)
         self.fcs_edit.setEnabled(append and not self.fcs_check.isChecked())
         try:
@@ -186,15 +254,19 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
             count = math.ceil((16+8*length+6)/rate.n_dbps)
             duration = 20+4*count
             errors = validate_project(wifi_project(s))
-            text = (f"PSDU: {length} bytes | {rate.modulation}, {rate.coding_rate}\n"
+            text = (f"Frame Type / body: {source}"
+                + (f" | FC: 0x{effective_frame_control(s):04X}\n" if management else "\n")
+                + f"PSDU: {length} bytes | {rate.modulation}, {rate.coding_rate}\n"
                 f"N_BPSC / N_CBPS / N_DBPS: {rate.n_bpsc} / {rate.n_cbps} / {rate.n_dbps}\n"
                 f"N_SYM / N_PAD: {count} / {count*rate.n_dbps-(16+8*length+6)} | L-SIG LENGTH / parity: Auto\n"
                 f"PPDU Duration: {duration} us | Duty Cycle: {100*duration/s.packet_period_us:.3f} %\n"
                 f"Signal Extension: 6 us (no transmission)\nMinimum Packet Period: {duration+6} us\n"
                 f"Configured Packet Period: {s.packet_period_us:g} us")
-            if beacon:
+            if fixed:
                 text += f"\nBeacon Interval: {s.beacon_interval_tu*1024:g} us; Timestamp / Sequence: static"
-                if not math.isclose(s.packet_period_us,s.beacon_interval_tu*1024):
+                if source == WiFiPSDUSource.PROBE_RESPONSE:
+                    text += "\nStatic response replay; Beacon Interval does not set response timing."
+                elif not math.isclose(s.packet_period_us,s.beacon_interval_tu*1024):
                     text += "\nNotice: packet period differs from advertised Beacon Interval."
             if errors:
                 text += "\n" + "\n".join(i.message for i in errors)
@@ -203,8 +275,9 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
             self.derived_label.setText(str(error))
 
     def _accept_settings(self):
-        if not ensure_valid_numeric_inputs(self,title="Invalid Wi-Fi Setting"):
-            return
+        for control in self.findChildren(QtWidgets.QAbstractSpinBox):
+            if control.isEnabled() and not ensure_valid_numeric_inputs(control, title="Invalid Wi-Fi Setting"):
+                return
         try:
             candidate = wifi_project(self._settings())
             candidate = replace(candidate,name=self.name_edit.text().strip(),repeat_count=self.repeat_spin.value(),

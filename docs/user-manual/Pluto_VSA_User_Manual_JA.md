@@ -105,7 +105,7 @@ ADS-B 1090ESを選び、Import IQまたはSingleで解析します。Packet List
 ![Wi-Fiの6ペイン。24/54 Mbpsの生成IQへ雑音・CFO・マルチパスを加え、2番目のpacketを選択した例。実RF測定ではない](../images/user-manual/pluto-vsa-wifi-overview.png)
 
 1. `Analyzer Mode > Wi-Fi`を選び、FileのImport IQで20/40 MS/sのNon-HT録音を開きます。
-2. Packet Analysisの`Packet List`で対象packetを選びます。RateはL-SIGから自動検出されます。
+2. Packet Analysisの`Packet List`で対象packetを選びます。RateはL-SIGから自動検出されます。列順は`# | Rate | Type | SSID | Length | FCS | Power`で、BeaconのSSIDを一覧で確認できます。SSIDなしは`—`、空文字SSIDは`(empty)`です。長いSSIDは列幅に応じて折り返し、Tooltipでも全文を確認できます。
 3. DecodeでL-SIG Parity、DATA Complete、PSDU Complete、FCSを個別に確認します。欠落や異常はIssuesに表示します。
 4. Symbol Plotの`L-SIG - BPSK`／`DATA - ...`で等化後のコンスタレーションを確認します。他モードと同じFlat（点）／Density（密度）表示を選べます。
 5. Modulationは横軸OFDM symbol、縦軸subcarrier、色がEVMです。DATA EVM、Channel Magnitude/Phaseも内部tabで切り替えます。

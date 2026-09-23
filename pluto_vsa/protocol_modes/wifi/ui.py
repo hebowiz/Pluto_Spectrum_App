@@ -136,10 +136,21 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
         self.decode_tree = self.packet_tabs.decode_tree
         self.payload_text = self.packet_tabs.payload_text
         self.issues_table = self.packet_tabs.issues_table
-        self.packet_table = QtWidgets.QTableWidget(0,6)
-        self.packet_table.setHorizontalHeaderLabels(("#","Rate","Type","Length","FCS","Power"))
+        self.packet_table = QtWidgets.QTableWidget(0,7)
+        self.packet_table.setHorizontalHeaderLabels(("#","Rate","Type","SSID","Length","FCS","Power"))
         apply_dedicated_table_style(self.packet_table)
-        self.packet_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        # The shared delegate wraps even SSIDs with no spaces, without editing
+        # their text. Give SSID the remaining width and refit rows after layout.
+        self.packet_table.setWordWrap(True)
+        self.packet_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+        header = self.packet_table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3,QtWidgets.QHeaderView.ResizeMode.Stretch)
+        row_resize_timer = QtCore.QTimer(self.packet_table)
+        row_resize_timer.setSingleShot(True)
+        row_resize_timer.setInterval(0)
+        row_resize_timer.timeout.connect(self.packet_table.resizeRowsToContents)
+        header.sectionResized.connect(lambda *_: row_resize_timer.start())
         self.packet_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.packet_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.packet_table.itemSelectionChanged.connect(self._packet_selected)
@@ -252,11 +263,17 @@ class WiFiAnalyzerWindow(QtWidgets.QMainWindow):
         self.packet_table.setRowCount(len(self._results))
         for index,p in enumerate(self._results):
             c = p.packet.decode_context
+            summary = {item.key:item.value for item in p.packet.summary}
+            ssid = summary.get("ssid")
+            ssid_display = "—" if ssid is None else "(empty)" if ssid=="" else str(ssid)
             power_plane = self._recording if self.power_filter_check.isChecked() else self._capture_recording
             power,_ = packet_power(power_plane,p.start_sample/self._recording.sample_rate_hz,p.stop_sample/self._recording.sample_rate_hz)
             for column,value in enumerate((index+1,c.get("rate_mbps","—"),p.packet.packet_type or "Incomplete",
-                                           c.get("length","—"),p.packet.integrity.crc_valid,f"{power:.2f}")):
-                self.packet_table.setItem(index,column,QtWidgets.QTableWidgetItem(str(value)))
+                                           ssid_display,c.get("length","—"),p.packet.integrity.crc_valid,f"{power:.2f}")):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                if column==3:
+                    item.setToolTip("" if ssid is None else str(ssid))
+                self.packet_table.setItem(index,column,item)
         self.packet_table.resizeRowsToContents()
         self.packet_table.blockSignals(False)
         if self._results:

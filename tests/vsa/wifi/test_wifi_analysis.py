@@ -134,7 +134,7 @@ def test_unknown_ie_and_mac_control_flags_remain_available():
     import binascii
     from pluto_protocol.wifi.mac import WiFiMACDecoder
     from pluto_protocol.model import PacketDecodeInput
-    frame = build_psdu(WiFiSettings(sequence_number=25,fragment_number=3,frame_control=0x2880))[:-4]
+    frame = build_psdu(WiFiSettings(sequence_number=25,fragment_number=3,frame_control=0x2880,frame_control_auto=False))[:-4]
     frame += bytes.fromhex('dd03010203')
     frame += binascii.crc32(frame).to_bytes(4,'little')
     p = WiFiMACDecoder().decode(PacketDecodeInput(np.unpackbits(np.frombuffer(frame,dtype=np.uint8),bitorder='little')))
