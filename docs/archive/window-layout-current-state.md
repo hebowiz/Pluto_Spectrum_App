@@ -4,7 +4,7 @@
 次の設計統一に向けた現状整理であり、アプリの動作変更は含まない。
 
 この文書は統一前の調査記録。統一後の現行仕様は
-[ウィンドウ位置・サイズとペイン配置](window-layout.md)を参照。
+[ウィンドウ位置・サイズとペイン配置](../spec/common/window-layout.md)を参照。
 
 数値はコードがQtに指定する論理ピクセル。タイトルバー等の外枠を含む実寸や、
 画面上の最終座標を保証する値ではない。OS、表示倍率、利用可能な画面領域、
@@ -33,11 +33,11 @@ VSGはクラス単体のコンストラクタでは保存・復元が既定で�
 通常のアプリ入口が`restore_startup_state=True`を渡す。
 
 参照:
-[RTSA基本画面](../pluto_rtsa/ui/main_window.py) の定数とコンストラクタ、
-[RTSAセッション画面](../pluto_rtsa/ui/session_window.py) の`__init__`、
-[VSA外枠](../pluto_vsa/ui/application_window.py) の`__init__`、
-[VSG入口](../pluto_vsg/main.py)、
-[VSG画面](../pluto_vsg/ui/main_window.py) の`__init__` / `_save_startup_state` / `closeEvent`。
+[RTSA基本画面](../../pluto_rtsa/ui/main_window.py) の定数とコンストラクタ、
+[RTSAセッション画面](../../pluto_rtsa/ui/session_window.py) の`__init__`、
+[VSA外枠](../../pluto_vsa/ui/application_window.py) の`__init__`、
+[VSG入口](../../pluto_vsg/main.py)、
+[VSG画面](../../pluto_vsg/ui/main_window.py) の`__init__` / `_save_startup_state` / `closeEvent`。
 
 ## 2. 内部ペインの構成・操作・保存
 
@@ -51,7 +51,7 @@ VSGはクラス単体のコンストラクタでは保存・復元が既定で�
 | ペインを閉じる操作 | なし。Graph Viewで表示を切り替える | 通常の統合VSAでは全モードのドックを閉じる操作を無効化 | 通常のペインに閉じる操作なし |
 | ペイン位置・分割比率の再起動時復元 | なし | なし | なし |
 
-共通の幅240は[共通操作パネル定義](../pluto_common/control_panel.py)から参照する。
+共通の幅240は[共通操作パネル定義](../../pluto_common/control_panel.py)から参照する。
 同じ幅でも周囲の余白・分割機構は異なる。
 
 ### RTSA
@@ -65,9 +65,9 @@ Sweep / Time Analyzer系のモードではSpectrum側だけを表示する制約
 前回のモードや表示選択によって起動時に見えるグラフは変わるが、
 ユーザーがドラッグして決めた分割比率を復元する仕組みではない。
 
-参照: [RTSA画面](../pluto_rtsa/ui/main_window.py) の`_build_ui` /
+参照: [RTSA画面](../../pluto_rtsa/ui/main_window.py) の`_build_ui` /
 `_apply_display_mode` / `_apply_analyzer_mode_ui_constraints`、
-[保存データ定義](../pluto_rtsa/config/session_state.py) の`RTSASessionState`。
+[保存データ定義](../../pluto_rtsa/config/session_state.py) の`RTSASessionState`。
 
 ### VSA
 
@@ -105,12 +105,12 @@ ADS-B単体クラスには1400×850の指定があるが、通常のVSA起動で
 外枠の1600×960とは区別する必要がある。
 
 参照:
-[外枠](../pluto_vsa/ui/application_window.py) の`__init__` / `set_analysis_mode`、
-[Generic](../pluto_vsa/ui/main_window.py) の`_build_results` / `_equalize_result_docks`、
-[Bluetooth](../pluto_vsa/protocol_modes/bluetooth/ui.py) の`_build_results` / `_equalize_docks`、
-[DECT](../pluto_vsa/protocol_modes/dect/ui.py) の`_build_results` / `_equalize_docks`、
-[ADS-B](../pluto_vsa/standards/adsb1090/ui.py) の`_build_ui` / `resizeEvent`、
-[ドック共通処理](../pluto_vsa/ui/measurement_chrome.py) の`make_measurement_dock`。
+[外枠](../../pluto_vsa/ui/application_window.py) の`__init__` / `set_analysis_mode`、
+[Generic](../../pluto_vsa/ui/main_window.py) の`_build_results` / `_equalize_result_docks`、
+[Bluetooth](../../pluto_vsa/protocol_modes/bluetooth/ui.py) の`_build_results` / `_equalize_docks`、
+[DECT](../../pluto_vsa/protocol_modes/dect/ui.py) の`_build_results` / `_equalize_docks`、
+[ADS-B](../../pluto_vsa/standards/adsb1090/ui.py) の`_build_ui` / `resizeEvent`、
+[ドック共通処理](../../pluto_vsa/ui/measurement_chrome.py) の`make_measurement_dock`。
 
 ### VSG
 
@@ -130,7 +130,7 @@ Packet ComposerはVisual Composer / Field Tree、PreviewはIQ Waveform等のタ�
 この画面の中央ウィジェット内にある`QSplitter`の`saveState()`は呼んでいない。
 タブの選択状態も保存対象に含まれていない。
 
-参照: [VSG画面](../pluto_vsg/ui/main_window.py) の`_build_workspace` /
+参照: [VSG画面](../../pluto_vsg/ui/main_window.py) の`_build_workspace` /
 `_save_startup_state`。
 
 ## 3. 設定用の別ダイアログ
@@ -147,12 +147,12 @@ Packet ComposerはVisual Composer / Field Tree、PreviewはIQ Waveform等のタ�
 VSAのMeas Configは編集用の一時ダイアログを作り、元ダイアログのサイズを渡す実装。
 これもウィンドウgeometryの永続保存とは別の処理。
 
-参照: [VSA共通設定ダイアログ](../pluto_vsa/ui/measurement_config_dialog.py)、
-[共通数値入力](../pluto_common/numeric_input.py)、
-[VSG設定群](../pluto_vsg/ui/main_window.py)、
-[DECT設定](../pluto_vsg/ui/dect_settings.py)、
-[Packet Fields](../pluto_vsg/ui/packet_fields.py)、
-[周波数設定](../pluto_vsg/ui/frequency_settings.py)。
+参照: [VSA共通設定ダイアログ](../../pluto_vsa/ui/measurement_config_dialog.py)、
+[共通数値入力](../../pluto_common/numeric_input.py)、
+[VSG設定群](../../pluto_vsg/ui/main_window.py)、
+[DECT設定](../../pluto_vsg/ui/dect_settings.py)、
+[Packet Fields](../../pluto_vsg/ui/packet_fields.py)、
+[周波数設定](../../pluto_vsg/ui/frequency_settings.py)。
 
 ## 4. 保存領域
 

@@ -204,4 +204,4 @@ Detectorは1回の評価区間の代表値、Trace Typeは複数回の蓄積方�
 | Singleが終わらない | Normalトリガで条件成立を待っていないか確認 |
 | Device busy | 同じPlutoを保持する別アプリを終了。測定停止だけでは接続を解放しない場合がある |
 
-DSPの詳細は[RBW処理](../rbw-processing.md)、各モードの技術資料は[資料一覧](../README.md)を参照してください。
+DSPの詳細は[RBW処理](../verification/rtsa/rbw-processing.md)、各モードの技術資料は[資料一覧](../README.md)を参照してください。

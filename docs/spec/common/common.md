@@ -128,7 +128,7 @@ Systemページは他の右ペイン設定ページと同じstack/historyへ入�
 - `discontinuity_before`: 直前との不連続
 - `source`: 取得を要求したモード
 
-consumerは独立cursorを持ちます。保持容量を超えた場合は`overrun`と推定可能な欠落ブロック数を返し、黙って上書きを隠しません。詳細と未完了項目は[IQストリーム改善計画](iq-streaming.md)を参照してください。
+consumerは独立cursorを持ちます。保持容量を超えた場合は`overrun`と推定可能な欠落ブロック数を返し、黙って上書きを隠しません。詳細と未完了項目は[IQストリーム改善計画](../../design/acquisition/iq-streaming.md)を参照してください。
 
 ## 10. PlutoSDR接続
 
@@ -138,4 +138,4 @@ RTSAは最後に選択したselectorをQSettingsへ保存し、次回起動時�
 
 VSAのInput/Frontendでは`Refresh Devices`で個体一覧を非同期更新します。VSGのADALM-Pluto Settingsは直前の列挙cacheを即時表示し、明示的に`Refresh`を押したときだけ非同期更新します。設定dialogを開くだけではUSB scanを始めないため、表示を待たせず、閉じる際のnative thread競合も避けます。同じPlutoがdirect USBとRNDISの両方で見える場合はserialで1台にまとめ、direct USBを優先します。VSA/VSGはそれぞれ専用`QSettings`へ独立したserial selectorを保存するため、2台構成ではRX用とTX用を明示的に分離できます。VSAのPluto selectorはMeas Configの一部ではなく、Config loadで現在のRX個体を変更しません。serialを取得できないcontextは従来どおり明示URIで選択します。
 
-解決後に実際に使われたURIは`PlutoReceiver.connection_uri`で参照できます。実機の短時間測定結果と再現手順は[PlutoSDR実機検証記録](hardware-validation.md)を参照してください。
+解決後に実際に使われたURIは`PlutoReceiver.connection_uri`で参照できます。実機の短時間測定結果と再現手順は[PlutoSDR実機検証記録](../../verification/hardware/hardware-validation.md)を参照してください。

@@ -2,11 +2,11 @@
 
 最終更新: 2026-08-07
 
-設計上の判断は[vsa-architecture.md](vsa-architecture.md)を参照してください。この文書は実際に動作する範囲、既知の制約、次の実装順を第三者が把握するための記録です。
+設計上の判断は[vsa-architecture.md](../design/vsa/vsa-architecture.md)を参照してください。この文書は実際に動作する範囲、既知の制約、次の実装順を第三者が把握するための記録です。
 
-Bluetooth BR復調の詳細は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
+Bluetooth BR復調の詳細は[vsa-bluetooth-br.md](../verification/vsa/vsa-bluetooth-br.md)を参照してください。
 
-CFO、carrier phase、linear driftの計算式とsample単位補正は[vsa-carrier-synchronization.md](vsa-carrier-synchronization.md)を参照してください。
+CFO、carrier phase、linear driftの計算式とsample単位補正は[vsa-carrier-synchronization.md](../design/vsa/vsa-carrier-synchronization.md)を参照してください。
 
 ## 1. 現在の到達点
 
@@ -363,7 +363,7 @@ Analysis BandwidthのFIR適用後は、FSKの交互patternに対して複数のs
 
 ### Post-capture I/Q Power Trigger / Pattern Search Gate
 
-2026-08-07 に、Pluto入力とファイル入力に共通のpost-capture I/Q Power Triggerを実装した。キャプチャ全体から全てのrising power eventを検出し、各active interval内の最初の有効patternを時系列Result Range候補にする。LevelはIQ Power traceと同じdBm換算、再trigger制御はHysteresis、Drop-Out、Holdoff、検索開始位置は符号付きSearch Start Offset（symbols）で設定する。新規IQでは先頭候補、Refreshでは現在Indexを維持し、既存の左右キーで候補を切り替える。詳細な演算・既定値・R&Sとの差分は[vsa-iq-power-trigger.md](vsa-iq-power-trigger.md)を参照。
+2026-08-07 に、Pluto入力とファイル入力に共通のpost-capture I/Q Power Triggerを実装した。キャプチャ全体から全てのrising power eventを検出し、各active interval内の最初の有効patternを時系列Result Range候補にする。LevelはIQ Power traceと同じdBm換算、再trigger制御はHysteresis、Drop-Out、Holdoff、検索開始位置は符号付きSearch Start Offset（symbols）で設定する。新規IQでは先頭候補、Refreshでは現在Indexを維持し、既存の左右キーで候補を切り替える。詳細な演算・既定値・R&Sとの差分は[vsa-iq-power-trigger.md](../design/vsa/vsa-iq-power-trigger.md)を参照。
 
 Burst終端制限ではlinear envelope powerを既定1 symbolで平均し、Hysteresis/Drop-Out成立位置をfilter delay補正してfalling edgeとする。`Limit Result Range to Active Interval`がONなら、pattern search用local waveformを復調前にそのedgeで制限し、復調・PSK振幅正規化・EVM/frequency error・Symbol Plot/Tableの母集団を同じactive symbol列へ統一する。そのうえでedgeより後まで続く不完全symbolをResultから除外する。2026-08-18以前は設定Result Lengthで正規化/EVMを計算した後に表示配列だけをburst長へ切り詰めていたため、3500 symbols指定を699 symbolsへtrigger制限した場合などにPSKクラスタが過大表示される不具合があった。OOKはvalid zero runと無信号をpowerだけで一意に区別できないため、最大zero runより長いDrop-Outを設定するか終端制限をOFFにする。
 
@@ -429,7 +429,7 @@ Qtは`QT_QPA_PLATFORM=offscreen`でwindow生成、初期GFSK解析、closeまで
 - Pluto acquisition Power Trigger（Run Single）は実装済み。Continuous/rearm、SCPI sourceは未実装。取得済みIQ内のmulti-event Burst Searchも実装済み。
 - Composite解析coreは動作しますがUIからsegment設定・表示はできません。
 
-Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出、DH1 Payload/CRC、PRBS-9照合までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。さらに固定2441 MHzのBR test waveformを16 MSPSで取得し、通常Access Code、Header FEC、DH1 27-byte body、PRBS-9 216 bitを0 bit errorで復元しました。このtest waveformはUAP `0x6B`のHECとPayload CRCが一致せず、Whitening OFFかつcheck初期値が別設定の可能性があります。16 MSPS全帯域への直接相関は行わず、ユーザー指定Analysis Center/Bandwidthで1 channelを抽出してから復調します。詳細値は[vsa-bluetooth-br.md](vsa-bluetooth-br.md)を参照してください。
+Bluetooth BRについてはAccess Code相関、GFSK timing/CFO/drift補正、Header rate 1/3 FEC、whitening、HEC、field抽出、DH1 Payload/CRC、PRBS-9照合までcore実装済みです。任意LAPのAccess Codeを生成でき、保存IQ解析CLIとPluto finite capture CLIがあります。2026-08-03にスマートフォンのInquiryをPlutoで実測し、4 MSPS狭帯域captureからGIAC 68 bitを相関0.9979、0 bit errorで復元しました。さらに固定2441 MHzのBR test waveformを16 MSPSで取得し、通常Access Code、Header FEC、DH1 27-byte body、PRBS-9 216 bitを0 bit errorで復元しました。このtest waveformはUAP `0x6B`のHECとPayload CRCが一致せず、Whitening OFFかつcheck初期値が別設定の可能性があります。16 MSPS全帯域への直接相関は行わず、ユーザー指定Analysis Center/Bandwidthで1 channelを抽出してから復調します。詳細値は[vsa-bluetooth-br.md](../verification/vsa/vsa-bluetooth-br.md)を参照してください。
 
 現在の数値を規格適合判定やR&SとのEVM比較へ使用してはいけません。
 

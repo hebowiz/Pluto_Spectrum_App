@@ -42,7 +42,7 @@ tests/test_vsa_bluetooth_dedicated.py
 仕様メモ：
 
 ```text
-docs/Bluetooth_RF_Test_Packet_Design_Memo_JA.md
+docs/design/common/Bluetooth_RF_Test_Packet_Design_Memo_JA.md
 ```
 
 参照するBluetooth SIG文書：

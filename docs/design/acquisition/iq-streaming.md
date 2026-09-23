@@ -258,7 +258,7 @@ python -m pytest -q
 - Waterfallの色スケール上限を測定レンジの80%へ変更し、80～100%をRedへ飽和表示。SpectrumのY軸範囲は従来どおり維持。
 - Waterfallの測定レンジ下端15%を暗いNavyへ固定し、noise floorの色変化を抑制。15～80%だけをBlue→Cyan→Green→Yellow→Redへ展開。
 - WideBand RT SAのFrequencyメニューへChunk Width 10／20／30／40 MHzを追加。左右各5 MHzと外周4% guardを維持し、測定下端から可変幅chunkを配置。最大40 MHzをdirect USB、約54.35 MSPS、2 chunksで実機確認。
-- 詳細な条件・数値・限界を[PlutoSDR実機検証記録](hardware-validation.md)へ記録。
+- 詳細な条件・数値・限界を[PlutoSDR実機検証記録](../../verification/hardware/hardware-validation.md)へ記録。
 # 2026-08-29 RTSA Span/RBW自動設計
 
 - 通常RTSAのFFT設定を`Auto`/`Advanced`へ分離し、通常利用はSpan/RBW主体とした。

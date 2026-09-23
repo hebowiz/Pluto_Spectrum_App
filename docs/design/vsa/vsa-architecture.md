@@ -4,7 +4,7 @@
 
 参照モデル: `FPL_K70_VSA_UserManual_en_12.pdf`（R&S FPL1-K70 VSA User Manual、551 pages）
 
-実装済み範囲と既知の制約: [vsa-implementation.md](vsa-implementation.md)
+実装済み範囲と既知の制約: [vsa-implementation.md](../../work-notes/vsa-implementation.md)
 
 ## 1. 基本判断
 

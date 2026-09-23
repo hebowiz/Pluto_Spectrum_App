@@ -50,11 +50,11 @@ Packet Region + PHY Classification
 
 本設計は、リポジトリ内の以下の既存設計・実装を前提とする。
 
-- `docs/Bluetooth_RF_Test_Packet_Design_Memo_JA.md`
+- `docs/design/common/Bluetooth_RF_Test_Packet_Design_Memo_JA.md`
   - BR / EDR / LE / HDT の test packet、変調、DEVM / EVM 等の基礎資料
-- `docs/WiFi_RF_Test_Packet_Design_Memo_JA.md`
+- `docs/design/vsg/WiFi_RF_Test_Packet_Design_Memo_JA.md`
   - 802.11a/g Non-HT OFDM、802.11b DSSS/CCK、将来 HT の PHY / packet 生成資料
-- `docs/shared_protocol_packet_analyzer_design.md`
+- `docs/design/common/shared_protocol_packet_analyzer_design.md`
   - VSG / VSA 共通 semantic packet analyzer
 - `pluto_rtsa/vsa/model.py`
   - `IQRecording`、`VSAAnalysisResult`、`CompositeVSAAnalysisResult` 等

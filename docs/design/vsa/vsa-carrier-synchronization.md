@@ -34,7 +34,7 @@ Gaussian impulseはR&S Appendix F.5と同じ解析定義を使う。symbol perio
 sigma_samples = sqrt(ln(2)) * samples_per_symbol / (2 pi BT)
 ```
 
-fine timingの採否は固定±0.75 sampleではなく、半symbolのEstimation Range、最適点から±0.25 sampleにおけるcost上昇率、frequency fit residual/deviation比で判定する。Result Summaryの`Fractional Timing`は推定値とreject状態、`Timing Confidence`はcost上昇率、`Frequency Fit RMS`は採用modelとno-drift modelの残差を示す。R&Sとの差分と定量評価は[vsa-fsk-synchronization-audit.md](vsa-fsk-synchronization-audit.md)を参照。
+fine timingの採否は固定±0.75 sampleではなく、半symbolのEstimation Range、最適点から±0.25 sampleにおけるcost上昇率、frequency fit residual/deviation比で判定する。Result Summaryの`Fractional Timing`は推定値とreject状態、`Timing Confidence`はcost上昇率、`Frequency Fit RMS`は採用modelとno-drift modelの残差を示す。R&Sとの差分と定量評価は[vsa-fsk-synchronization-audit.md](../../verification/vsa/vsa-fsk-synchronization-audit.md)を参照。
 
 ### 2.2 CFO、Deviation、Driftの同時推定
 

@@ -23,7 +23,7 @@
 
 仕様参照元として、リポジトリ内の以下のメモも使用する。
 
-- `docs/Bluetooth_RF_Test_Packet_Design_Memo_JA.md`
+- `docs/design/common/Bluetooth_RF_Test_Packet_Design_Memo_JA.md`
   - HDT_VSr03_PR, Vol 6, Part A, Sections 3.6, 7
   - HDT_VSr03_PR, Vol 6, Part B, Sections 2.7.1, 3.4
   - HDT_VSr03_PR, Vol 6, Part F, Sections 4.2, 5.3
