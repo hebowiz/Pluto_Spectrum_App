@@ -1,15 +1,36 @@
 # Bluetooth専用解析パイプライン補足
 
-> 参照範囲: 汎用解析・表示処理の再利用、packet座標系と表示の補足です。以下の共通化方針は規格別RF測定を含む全経路の説明ではありません。EDR DEVM・HDT EVMの専用処理との境界は [文書・実装の照合](../../../verification/vsa/README.md)、資料の分担は [設計索引](../README.md) を参照してください。
+> 参照範囲: Bluetoothの汎用解析・表示処理の再利用、専用RF測定との境界、packet座標系を説明します。利用者向けの流れは [解析補足](../../../user-manual/Pluto_VSA_Analysis_Guide_JA.md)、資料の分担は [設計索引](../README.md) を参照してください。
 
-更新日: 2026-08-30
+## General VSAとの共通化と専用処理
 
-## Generic VSAとの共通化方針
+Bluetooth専用解析は、PHY・packet境界・既知同期列から解析条件を決め、
+`VSASession`、pattern解析、表示DSPを再利用します。一方、規格別RF測定は
+専用の参照信号・評価区間・補正条件を持ち、汎用EVMをそのまま測定結果として
+採用する構成ではありません。
 
-Bluetooth専用解析は、独自の簡易復調器を持たず、Generic VSAと同じ
-`VSASession`、pattern解析、表示DSPを使用する。専用モードが担当するのは、
-PHY・packet境界・既知同期列から解析条件を自動決定する部分と、Bluetooth
-field decodeおよびBluetooth固有結果の表示である。
+```text
+IQ → packet検出・境界決定
+     +-- 汎用session / pattern解析 → FSK・PSK等の表示用結果
+     +-- 専用RF測定 → EDR DEVM / HDT EVM等 → RF結果・集計
+     +-- bit recovery → pluto_protocol → fieldの意味・payload表示
+```
+
+この図は責務の分担を示します。独立した3回の取得を行う意味ではなく、実際の
+処理ではdecodeした長さやbit列を測定区間・参照信号へ渡します。
+
+| 担当 | 現行の責務 |
+| --- | --- |
+| [Bluetooth model](../../../../pluto_vsa/protocol_modes/bluetooth/model.py) | packet検出、PHY判別、区間と参照データの準備、汎用解析・専用測定の呼出し |
+| 汎用session / 表示DSP | pattern同期、FSK/PSK/QAMの表示用解析、共通Plot操作 |
+| [rf_measurement](../../../../pluto_vsa/protocol_modes/bluetooth/rf_measurement/) | EDRの`measure_edr_devm()`、HDTの`build_hdt_evm_result()`等による規格別測定 |
+| [summary](../../../../pluto_vsa/protocol_modes/bluetooth/summary.py) | 専用測定結果から集計・limit・必要データ量に応じた表示を構成 |
+| `pluto_protocol` | 復調済みbit列のsemantic decode。IQ同期・EVM測定は担当しない |
+
+HDTでは専用経路でHeader / Payloadの同期・参照生成・EVM評価を行います。
+汎用表示側の同期条件を変えて専用RF測定値まで変える構成にしません。
+General VSAのEVMと専用RF測定値を比較するときは、参照信号、フィルタ、補正、
+評価区間が一致するかを確認します。
 
 ## FSK Measurement Filter
 
@@ -25,7 +46,7 @@ receive filterを`Auto`で適用する。
 
 ## EDR Vector / Symbol Plot
 
-EDR部はdecoded packet境界に切り詰めた局所IQをGeneric VSA共通のPSK表示DSPへ
+EDR部はdecoded packet境界に切り詰めた局所IQをGeneral VSA共通のPSK表示DSPへ
 渡す。専用packetのシンボル数は表示負荷上十分小さいため、PSK Vectorの
 サンプル間引きは行わない。pyqtgraphのauto downsamplingとclip-to-viewも
 無効にし、filter通過後の全サンプル軌跡を描く。Symbol Plotは共通の正規化・
@@ -33,9 +54,12 @@ pi/4-DQPSK/8DPSK差動処理を使用する。
 
 ## EDR品質指標
 
-Bluetooth専用画面のEDR品質指標は`Bluetooth DEVM RMS`のみを表示する。
-Generic EVMおよびDifferential Symbol EVMは内部診断値として保持できるが、
-専用Result Summaryには重複表示しない。
+汎用表示結果には`Bluetooth DEVM RMS`等の診断metadataが残っていますが、
+専用RF Summaryは`rf_measurements`を参照し、RMS DEVM、99% DEVM、Peak DEVM等を
+表示します。「Bluetooth DEVM RMSだけを表示する」という初期実装時の説明は
+現在の専用RF Summaryには適用しません。集計block数、参照データの成立条件、
+limit判定は専用測定とsummaryの責務であり、汎用EVMやDifferential Symbol EVMで
+代用しません。
 
 FSK部とPSK部の平均電力は、各部のdBm値を直接算術平均せず、いったんmWへ
 戻して線形領域で平均した後にdBmへ変換する。Result Summaryには
@@ -52,7 +76,7 @@ FSK部より高いことを示す。
 Modulation、Result Rangeを同じ時間軸に表示する。
 
 左右キーによるpacket移動、およびDisplay Config変更に伴う再描画では、
-Modulation/Symbol PlotのFSK/PSK tab選択を保持する。選択packetを変更した際は
+Modulation/Symbol PlotのFSK/PSK tab選択を実行中は保持する。これは選択タブの再起動時復元を意味しない。選択packetを変更した際は
 FSK ModulationのX rangeだけを選択packetへ追従させる。
 
 10個の内部生成2-DH1を使った開発時回帰では、10件すべてのCRCを確認し、候補
@@ -72,3 +96,4 @@ Decode treeは省略記号を使用しない。Payload/Meaningはセル内で折
 - UI: 全PSK trajectory sampleの描画、Decode tree非省略表示
 - 複数生成2-DH1: 全packet CRC、絶対sample offset、FSK/PSK個別電力
 - UI: packet移動後のFSK表示範囲、FSK/PSK tab選択保持
+- [HDT RF測定と汎用表示の独立性](../../../../tests/vsa/bluetooth/test_bluetooth_rf_measurement.py): `test_hdt_payload_phase_and_cfo_fit_is_independent_of_generic_display`

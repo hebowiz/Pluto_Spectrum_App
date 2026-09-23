@@ -1,83 +1,41 @@
 # VSAアプリケーション設計方針
 
-> 参照範囲: session・record・解析段階の共通概念と拡張方針を担当します。以下は初期構想と実装途中の記録を含み、対応機能一覧ではありません。QAM、入力source、UI、layout保存については [文書・実装の照合](../../verification/vsa/README.md) を参照してください。位置・サイズ・内部配置の現行要件は [共通ウィンドウ仕様](../../spec/common/window-layout.md)、主題ごとの参照先は [設計索引](README.md) にあります。
+> 参照範囲: session・record・解析段階の共通概念と拡張方針を担当します。現在の実装と将来構想を節ごとに区別します。操作の入口は [右側操作UI設計](VSA_UI.md)、位置・サイズ・内部配置の要件は [共通ウィンドウ仕様](../../spec/common/window-layout.md)、主題ごとの参照先は [設計索引](README.md) にあります。
 
-最終更新: 2026-08-03
+本文改訂: 2026-09-23（現行実装と初期構想の区分）
 
 参照モデル: `FPL_K70_VSA_UserManual_en_12.pdf`（R&S FPL1-K70 VSA User Manual、551 pages）
 
-実装済み範囲と既知の制約: [vsa-implementation.md](../../work-notes/vsa-implementation.md)
+現行の操作・制約は [ユーザーマニュアル](../../user-manual/Pluto_VSA_User_Manual_JA.md)、確認した実装との差分は [照合記録](../../verification/vsa/README.md) を参照してください。[初期実装メモ](../../work-notes/vsa-implementation.md) は当時の進行記録です。
 
 ## 1. 基本判断
 
 VSAは現行Spectrum Analyzerの単純な追加モードではなく、同じrepository内の別application shellとして実装します。取得、IQ record、trigger、calibration、共通plot部品は共有し、VSA session、demodulation、result model、multi-window UIはVSA側で所有します。
 
-2026-08-22追記: 通信規格専用解析を追加する段階では複数top-level windowを同時起動せず、
-単一`PlutoAnalysisWindow`内でworkspace全体を切り替える。Generic FSK/PSK VSA、ADS-B
-1090ES、将来のBluetooth/Wi-Fi専用解析は個別のmenu/dock/result modelを持つが、Plutoへの
-接続・所有権はapplication shellに1つだけ置く。Capture/DSP実行中はmode切替を禁止する。
+統合VSAは単一`PlutoAnalysisWindow`内でworkspace全体を切り替えます。現在の選択肢はGeneral VSA、Bluetooth、DECT、ADS-B 1090ESです。Pluto接続・所有権は外枠に1つだけ置き、取得・解析中はモード切替を禁止します。Wi-Fi専用workspaceとSCPI instrument sourceは拡張構想であり、この選択肢には含みません。
 
 R&S FPL VSAの用語、設定順序、result分類をUXの参照モデルとします。ただしPluto、SCPI instrument、保存IQという異なるsourceを同じ解析器へ接続できるよう、hardware固有設定は`IQSource` adapterへ分離します。
 
-### 1.1 当面の対象信号
+### 1.1 General VSAの対象信号と専用モード
 
-R&S VSAの全機能・全standard presetの再現は目標にしません。初期開発は次へ集中します。
+R&S VSAの全機能・全standard presetの再現は目標にしません。現在のmodulation定義は [model.py](../../../pluto_vsa/model.py) で管理します。
 
 - FSK family: Signal Description上は`FSK`へ統一し、Gaussian等のpulse shapingはTX Filterで表す。現行のbinary FSKに加えて将来の多値FSKへ拡張できる共通demodulator contractとする。
-- PSK family: BPSK、QPSK、OQPSK、差動PSK、pi/4-DQPSK、8DPSK。
+- PSK family: BPSK、QPSK、OQPSK、pi/4-DQPSK、8DPSK、pi/4-QPSK、8PSK。
 - 想定用途: DECT、Bluetooth BR/EDRの観測、復調、symbol/packet解析。
-- 将来拡張: QAM familyを同じsymbol/result contractへ追加。
+- QAM family: 16QAMを実装済み。同じsymbol/result contractを使いますが、振幅を保持した判定・同期を行い、差動PSKには変換しません。任意のQAM次数への対応を意味しません。
 
 DECT/Bluetoothは固定値をDSPへ埋め込まず、symbol rate、modulation、mapping、BT/Alpha、preamble/sync word、packet structure等をまとめた`AnalysisProfile`として実装します。profile値は対象規格・modeごとに定義し、manual設定で上書きできるようにします。
 
-Bluetooth EDRのように1 packet内で変調方式が切り替わる信号を最終到達点とします。このため、1 captureまたは1 result rangeにつきmodulationは1種類、という制約をarchitectureへ持ち込みません。
+Bluetooth専用解析ではEDRやHDTの区間別解析を実装しています。このため、1 captureまたは1 result rangeにつきmodulationは1種類、という制約をarchitectureへ持ち込みません。
 
 ## 2. R&Sから採用する主要モデル
 
-### 2.0 操作互換性の目標
+### 2.0 操作モデルと現行UI
 
-VSAの標準UIはR&S FPL-K70に慣れた利用者が説明なしでも辿れる使用感を目標とします。単なる配色や外観の模倣ではなく、menu名、設定の所在、操作順、run state、window追加方法、測定範囲の意味を優先して合わせます。
+R&S FPL-K70の用語と処理順を参照しますが、全メニューの互換再現は目標にしません。現在は右側の共通パネルから設定ページを直接開き、SWEEP CONTROLで取得・再解析を操作します。Config Top / Overviewを経由する初期案は通常操作には使いません。メニュー一覧は [右側操作UI設計](VSA_UI.md) に集約します。
 
-基本操作は次の対応を目標にします。
-
-| R&Sの操作概念 | 本VSAでの扱い |
-|---|---|
-| MODE > VSA | VSA専用entry point、またはSAから`Open VSA Workspace` |
-| Measurement Channel | `VSASession` tab |
-| Channel bar | 常時表示するSession summary bar |
-| Meas Config > Overview | 処理順に並ぶVSA Overview |
-| Signal Description | 同名のmodulation/signal structure設定 |
-| Input/Frontend | Source選択とsource固有設定 |
-| Signal Capture | Capture Length、Oversampling、usable IQ BW、Trigger |
-| Burst/Pattern Search | 同名のpost-capture search設定 |
-| Result Range / Evaluation Range | 同じ三段階range model |
-| Demod/Meas Filter | Demodulation、Equalizer、Measurement Filter |
-| Display Config | Signal Sourceをgridへ追加する画面 |
-| Window Config | Result Type、Transformation、Points/Symbol |
-| Run Continuous / Run Single | 同じrun stateとbutton semantics |
-| Refresh | captureを更新せず現在recordだけ再解析 |
-| Auto Level / Auto Scale | source capabilityに応じて同じ位置へ配置 |
-| Standard files | Measurement ProfileのLoad/Save |
-
-`Meas Config`はmain result workspace内の常設dockではなく、menuから開く独立したWindow Modal dialogとする。設定中は背後のplot、dock、menu操作を受け付けず、測定設定と結果window操作が同時進行して不整合になることを防ぐ。dialog内のRefresh/Apply後も、dialogを閉じるまではmain workspaceをmodal blockする。
-
-Session summary barにはmanual pp.19-20を参考に、少なくともRef Level、Capture Length、Profile/Modulation、Result Length、Center、Symbol Rate、TX Filter、Input、Burst、Pattern、Equalizer、Single状態を表示します。sourceがfileの場合など変更不能な項目は非表示にせず、値を表示したままdisabledとし、metadata由来であることを示します。
-
-右側の測定器風menuは現行SAの操作感を継承しつつ、R&Sに近い入口名へ整理します。
-
-- Frequency
-- Amplitude
-- Input / Frontend
-- Meas Config
-- Trigger
-- Sweep / Run
-- Trace
-- Marker
-- Display Config
-- Auto Set
-- Save / Recall
-
-独自機能は標準workflowへ混在させず、原則として`Extensions`、追加のResult Type、追加Source、追加Profileのいずれかへ登録します。R&S互換に近い基本画面を維持したまま機能を増やせるplugin pointを用意します。
+設定はWindow Modal dialogで編集し、設定変更だけではCapture / Analysisを開始しません。新規取得はSingle / Continuous、保持recordの再解析はRefresh Analysisで明示的に要求します。Display設定と測定条件、Plotのzoom範囲と測定範囲を分離します。
 
 ### 2.1 Measurement Channel / VSA Session
 
@@ -92,14 +50,13 @@ R&SはVSA applicationを開くと独立したmeasurement channelを作り、同�
 - demodulation、filter、equalizer設定
 - result rangeとevaluation range
 - analysis result snapshot
-- window layout
 - run state、status、warning
 
-初期段階は1 sessionを実装し、data contractを複数session対応にしておきます。後からtabまたはsession listを追加できる構造にします。
+これはsessionの概念的な責務です。UIの配置・復元は外枠とworkspaceが管理します（§10）。複数sessionを切り替えるtab / session listは拡張方針であり、現在のAnalyzer Modeによるworkspace切替とは別です。
 
 ### 2.2 Overviewの設定順序
 
-R&SのOverviewは信号処理順に重要設定を並べています（manual pp.158-161）。VSAの主設定画面も次の順序にします。
+R&SのOverviewは信号処理順に重要設定を並べています（manual pp.158-161）。VSAの解析条件も次の依存関係で整理します。
 
 1. Signal Description
 2. Input / Frontend
@@ -112,7 +69,7 @@ R&SのOverviewは信号処理順に重要設定を並べています（manual pp
 9. Display Configuration
 10. Analysis
 
-すべてを同時に平坦なmenuへ置かず、Overviewから各設定dialogへ遷移できるようにします。設定変更時は依存する下流stageだけをinvalid化して再計算します。
+これは解析上の依存関係を示す順序です。UIは右パネルから各設定dialogを直接開きます。条件の変更を次の取得・再解析に反映し、dialogを閉じるだけでは再計算を開始しません。
 
 ### 2.3 三段階の測定範囲
 
@@ -143,13 +100,13 @@ R&SのResult Rangeはcapture/burst/patternへのreference、alignment、offset�
 ```text
 IQSource
 ├─ PlutoLiveSource
-├─ ScpiInstrumentSource
+├─ ScpiInstrumentSource（将来構想、統合VSAの実機入力ではない）
 └─ FileIQSource
        ↓
 IQRecording / IQAcquisitionRecord
 ```
 
-共通source contractは概ね次を提供します。
+以下はsourceを拡張する際の概念的なcontractです。全sourceが同じ名前のメソッドを実装しているという意味ではありません。
 
 - `capabilities()`
 - `configure()`
@@ -164,7 +121,7 @@ IQRecording / IQAcquisitionRecord
 
 現行`PlutoReceiver`、`IQBlock`、`IQAcquisitionRecord`、Power Trigger、Single Snapshotを再利用します。高sample rateではContinuousの無欠落を保証しないため、source capabilityへcontinuous/snapshot制約を明示します。
 
-### 3.2 R&S等のSCPI instrument
+### 3.2 R&S等のSCPI instrument（将来構想）
 
 transportと機種driverを分離します。汎用SCPI adapterへ機種別のcommand set、binary block parser、scaling、trigger/capture capabilityをpluginします。instrument側で取得済みのIQも同じ`IQRecording`へ変換し、解析DSPはsource機種を条件分岐しません。
 
@@ -172,7 +129,7 @@ transportと機種driverを分離します。汎用SCPI adapterへ機種別のco
 
 R&SはI/Q file input時にcenter frequency、sample rate、measurement bandwidth等をfile metadataから固定します（manual pp.185-186）。本アプリもfile metadataを正本とし、欠落項目だけimport dialogで指定します。
 
-標準保存形式の第一候補はSigMFです。加えてraw `cf32/ci16`、NumPy、R&S `.iq.tar`等をimport adapterで扱います。元fileは改変せず、必要なら内部recordへ変換します。
+現行の [FileIQSource](../../../pluto_vsa/sources.py) はR&S IQ-TAR、NPY、NPZを形式別に読み、それ以外をraw complex IQとして扱います。元fileは改変しません。SigMFを標準形式とする案は将来構想であり、SigMFメタデータの専用読込は実装されていません。対応拡張子・保存内容は [ファイル操作仕様](../../spec/vsa/general/vsa-file-workflows.md) を参照してください。
 
 ## 4. Signal Description
 
@@ -189,7 +146,7 @@ R&SのSignal Description（manual pp.164-181）に合わせ、次を独立設定
 - frame/subframe structure（将来）
 - known data / PRBS（将来）
 
-最初の対応modulation familyはFSKとPSKです。FSKは周波数偏移、modulation index、Gaussian BT、連続位相を設定可能にし、PSKはabsolute/differential mappingとphase ambiguityを明示的に扱います。QAMは同じsymbol/reference/result contractへ将来追加します。
+現在のmodulation familyはFSK、PSK、16QAMです。FSKは周波数偏移、modulation index、Gaussian BT、連続位相を設定可能にし、PSKはabsolute/differential mappingとphase ambiguityを明示的に扱います。16QAMも同じsymbol/reference/result contractを使い、振幅を保持した同期・判定を行います。
 
 単一変調の`SignalDescription`に加え、複数のdescriptionと時間区間を束ねる`CompositeSignalDescription`を定義します。規格profileはpacket detector、segment boundary、各segmentのSignal Description、既知pattern、field decoderを提供します。
 
@@ -277,22 +234,15 @@ R&Sと同じく役割を分離します（manual pp.71-75、225-226）。
 ## 8. Trigger、Burst Search、Pattern Search
 
 実装済みのPluto acquisition I/Q Power Trigger、post-capture Burst Search、Pattern Search gateは
-[vsa-iq-power-trigger.md](vsa-iq-power-trigger.md)を参照。取得triggerはRun Single recordの位置を決め、Burst Searchは取得済みbuffer内の全power eventを列挙し、各active intervalの最初の有効patternをResult Range候補にする。両者は別contractとして維持する。
+[vsa-iq-power-trigger.md](vsa-iq-power-trigger.md)を参照。取得triggerはSingle / Continuousの各recordの位置を決め、Burst Searchは取得済みbuffer内の全power eventを列挙し、各active intervalの最初の有効patternをResult Range候補にする。両者は別contractとして維持する。
 
 これらを同じ機能として扱いません。
 
 ### Acquisition Trigger
 
-- Free Run
-- Power Trigger
-- pre/post-trigger offset
-- rising/falling slope
-- hysteresis
-- dropout time
-- holdoff
-- Auto / Normal / Single
+現行Pluto sourceはFree RunとI/Q Powerに対応します。I/Q PowerはLevel、Rising / Falling / Either、Hysteresis、符号付きTrigger Offsetを使い、固定長recordの位置を決めます。SingleとContinuousは同じ連続producerを利用し、recordごとにcursorを作ります。取得と再アームの寿命は [連続IQ取得設計](../acquisition/continuous-iq-acquisition.md) を参照してください。
 
-Power Triggerはcapture開始位置を決める前段機能です。Plutoではhost software trigger、対応instrumentではinstrument trigger capabilityを利用します。
+Drop-Out / Holdoffは取得後のBurst Searchに属します。外部hardware triggerやinstrument側trigger capabilityは将来拡張です。Continuousが実装されたことを理由に、検索設定を取得triggerへ移しません。
 
 ### Post-capture Search
 
@@ -305,7 +255,7 @@ R&SもI/Q correlation thresholdでpattern候補を検出し、その後symbol一
 
 ## 9. Result model
 
-R&SのEvaluation Data Source分類（manual pp.21-24）を採用します。
+R&SのEvaluation Data Source分類（manual pp.21-24）を参照した拡張モデルです。以下は設計上の分類・候補を含み、全項目が現在のDisplay設定で選べるという意味ではありません。
 
 - Capture Buffer
 - Measurement & Reference Signal
@@ -342,17 +292,17 @@ R&SはSignal Sourceを配置した後、windowごとにResult TypeとNormal/Spec
 
 IQ Powerを含む全result blockを同格のDock Widgetとして扱う。初期workspaceは3列×2行の均等gridとし、上段をIQ Power / Spectrum / Result Summary、下段をModulation / Symbol Plot / Symbol Tableとする。PSKではModulationにIQ軌跡、Symbol PlotにConstellationを表示する。FSKではModulationにInstantaneous Frequency、Symbol Plotに1 symbol期間の位相差分を表示する。Result Summaryは単一行labelではなく測定項目を縦に列挙する独立result windowとする。
 
-- gridへ追加
-- tab化
-- dragによる配置変更
-- detachして独立OS window化
-- close/duplicate
-- session全体のlayout保存・復元
-- window固有scale、unit、trace、marker
+統合VSAの現行動作は次のとおりです。
+
+- 既存Dockのdrag、tab化、別窓化に対応します。任意のwindow追加・close/duplicateは提供しません。
+- メインウィンドウの位置・サイズは再起動時に復元し、最小サイズは960×640です。
+- Dock配置・分割比率・フローティング状態はモード別に実行中だけ保存・復元します。再起動時は初期配置です。
+- 選択タブは永続保存しません。リサイズ時の明示的な再均等化も行いません。
+- 詳細と初期配分は [共通ウィンドウ仕様](../../spec/common/window-layout.md) を正本とします。
 
 解析はwindowごとにraw IQから再実行せず、`VSAAnalysisSnapshot`の共有resultを各viewが購読します。Display Points/Symbolは描画設定、Estimation Points/Symbolは解析設定として分離します。
 
-Predefined Display Configurationとして最低限次を用意します。
+以下のPredefined Display Configurationは拡張候補です。現在の選択可能なpreset一覧として案内しません。
 
 - Overview: Capture Power、Spectrum、Spectrogram、Vector I/Q
 - Typical PSK: Constellation、Symbol Table、EVM vs Symbol、Result Summary
@@ -361,7 +311,7 @@ Predefined Display Configurationとして最低限次を用意します。
 - FSK Analysis: Instantaneous Frequency、FSK Eye、Symbol/Bit Table、Frequency Error
 - Packet Overview: packet全体のPower/Frequency、segment境界、segment別summary、decoded fields
 
-## 11. Demodulation / compensation properties
+## 11. Demodulation / compensation properties（拡張方針）
 
 R&Sの設定（manual pp.217-224）を参照し、段階的に次を扱います。
 
@@ -383,7 +333,9 @@ R&Sの設定（manual pp.217-224）を参照し、段階的に次を扱います
 
 補正ONの値だけを出さず、可能な範囲で推定されたraw impairmentと、どの補正をEVMから除外したかをresult metadataへ残します。
 
-## 12. 実装段階
+## 12. 初期ロードマップの記録
+
+この節は導入時の段階分けです。下記のPhaseや当時の「未実装」を現在の進捗一覧として使いません。現在は別entry point、PlutoのSingle / Continuous取得、Burst / Pattern Search、16QAM、Bluetooth / DECT / ADS-B専用workspaceが存在します。SCPI sourceは将来構想です。補正・測定精度の個別状況は [同期設計](vsa-carrier-synchronization.md)、[Bluetooth解析補足](bluetooth/bluetooth_dedicated_analysis_pipeline_ja.md) と各テストを参照してください。
 
 ### Phase 0: 分離準備
 
@@ -449,13 +401,13 @@ Binary FSKでは設定でbitwise-complement patternも探索候補にできる�
 - R&Sから同じIQ dataと設定で得たResult Summary、symbol table、EVM traceと比較する。
 - 補正、filter、normalization、evaluation rangeを一致させずにEVM値だけを比較しない。
 
-## 14. 当面の対象外
+## 14. 対象範囲の限界
 
 - 全R&S standard presetの再現。
-- QAM/APSKと高度なmulti-carrier modulationの初期実装。
+- 16QAM以外のQAM全般、APSK、高度なmulti-carrier modulationの網羅的対応。
 - hardware external trigger。
 - R&S固有file/commandの全機種共通化。
 - multi-channel/MIMO。
 - RTSA overlap/POIとの統合。
 
-これらを後から追加できるcontractにはしますが、最初のFSK/PSK VSA完成を妨げないよう段階化します。
+これらは拡張可能な構造を保ちますが、実装済みの16QAMや専用packet解析まで対象外として扱いません。

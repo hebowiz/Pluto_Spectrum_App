@@ -1,6 +1,6 @@
 # VSA設計文書の役割と参照先
 
-設計文書には、採用した設計理由と初期構想・実装途中の記録が混在しています。ここでは主題ごとの担当文書を定めます。担当であることは、本文の全項目が現行仕様・実装済みであることを意味しません。確認できた違いは [文書・実装の照合記録](../../verification/vsa/README.md) を参照してください。
+主題ごとの担当文書を以下に示します。UIの操作経路、配置、入力source、16QAM、BluetoothのRF測定境界、連続取得について本文を現行実装へ合わせています。拡張案・初期ロードマップは該当節で区別し、全項目を実装済みとは扱いません。確認した根拠と改訂内容は [文書・実装の照合記録](../../verification/vsa/README.md) を参照してください。
 
 ## 参照する順序
 
@@ -14,11 +14,11 @@
 | 主題 | 担当文書 | 他の文書に重複して定義しない範囲・注意 |
 | --- | --- | --- |
 | VSA全体のsession・record・解析段階 | [vsa-architecture.md](vsa-architecture.md) | 共通概念と拡張方針。画面の最新メニュー、対応機能一覧、実装完了状況の正本にはしない |
-| 統合VSAの外枠・右操作パネルとworkspaceの分担、設定Widget所有権 | [VSA_UI.md](VSA_UI.md) | 共通パネルは§3、設定ダイアログとWidget所有権は§8。本文には旧ページ名・移行計画も残る |
+| 統合VSAの外枠・右操作パネルとworkspaceの分担、設定Widget所有権 | [VSA_UI.md](VSA_UI.md) | 共通パネルは§3、設定ダイアログとWidget所有権は§8。現行の操作経路を記述し、個別設定値はマニュアルへ委ねる |
 | General VSAのCFO・位相・ドリフト・タイミング補正 | [vsa-carrier-synchronization.md](vsa-carrier-synchronization.md) | 汎用同期の設計。Bluetooth規格別RF測定の参照信号・評価区間まで一般化しない |
 | Acquisition Trigger・Burst Search・Pattern Searchの区別 | [vsa-iq-power-trigger.md](vsa-iq-power-trigger.md) | 検出と検索の責務。RX producerの生存期間・再アーム方針は共通取得設計へ委ねる |
 | 専用解析モードの導入意図・RF解析とsemantic decodeの境界 | [VSA_Bluetooth_WiFi_Dedicated_Analyzer_Design_JA.md](VSA_Bluetooth_WiFi_Dedicated_Analyzer_Design_JA.md) | 初期提案と追記を含む構想資料。Wi-Fi案や初期実装中という表記を統合VSAの現在の対応表に使わない |
-| Bluetoothの汎用解析・表示処理の再利用 | [bluetooth_dedicated_analysis_pipeline_ja.md](bluetooth/bluetooth_dedicated_analysis_pipeline_ja.md) | FSK/PSK表示・複数packetの座標系などの補足。専用RF測定まで汎用EVMと同一とみなさない |
+| Bluetoothの汎用解析・表示処理と専用RF測定の境界 | [bluetooth_dedicated_analysis_pipeline_ja.md](bluetooth/bluetooth_dedicated_analysis_pipeline_ja.md) | FSK/PSK表示・複数packetの座標系と、EDR DEVM / HDT EVMの専用経路を区別 |
 | DECT PHY/RFの実装上の検討事項 | [DECT_PHY_RF_Tester_Implementation_Guide.md](dect/DECT_PHY_RF_Tester_Implementation_Guide.md) | 規格を実装視点で整理したプロジェクト資料。規格原文でも、記載する受信試験・HLM等の全実装を保証する一覧でもない |
 
 ## 別の担当領域へ委ねる事項
@@ -43,4 +43,4 @@
 - 初期構想の本文は、単に重複しているという理由で統合・削除しません。本文を改訂するときは、該当する [照合項目](../../verification/vsa/README.md) と参照先を同時に更新します。
 - 旧メニューの棚卸しやCodex指示書へ、恒久的な仕様の追記を積み重ねません。
 
-現行UIの詳細は複数の仕様・操作資料に分かれており、`VSA_UI.md` 全体をそのまま現行UI仕様とは扱えません。今後正式なUI仕様を整備する場合は、まず既存の担当文書と対象節を決め、同じ内容の仕様書を並立させないでください。
+UIの責務・操作経路は`VSA_UI.md`、要件は該当する`docs/spec/`、個々の設定値と操作例はユーザーマニュアルで管理します。今後の変更でもこの担当範囲に追記し、同じ内容の仕様書を並立させないでください。

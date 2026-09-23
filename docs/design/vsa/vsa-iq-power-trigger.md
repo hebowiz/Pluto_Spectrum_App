@@ -1,6 +1,6 @@
 # VSA Acquisition Trigger, Burst Search, and Pattern Search
 
-> Scope: this document owns the distinction between acquisition triggers, post-capture burst search, and pattern search. The Single-only/fresh-buffer descriptions below predate the shared continuous producer. Use [continuous acquisition](../acquisition/continuous-iq-acquisition.md) for producer/cursor lifetime, and the [document review](../../verification/vsa/README.md) for the confirmed differences. See the [design index](README.md) for document ownership.
+> Scope: this document owns the distinction between acquisition triggers, post-capture burst search, and pattern search. Single and Continuous use the shared continuous producer. Use [continuous acquisition](../acquisition/continuous-iq-acquisition.md) for producer/cursor lifetime, and the [document review](../../verification/vsa/README.md) for the confirmed differences. See the [design index](README.md) for document ownership.
 
 ## Purpose
 
@@ -17,11 +17,11 @@ from becoming pattern candidates, while Acquisition Trigger reduces unnecessary
 capture data before the first event.
 
 Burst Search and Pattern Search apply equally to Pluto captures and loaded I/Q
-files. Acquisition Trigger applies to Pluto `Run Single` only. The separation is
+files. Acquisition Trigger applies to Pluto Single and Continuous records. The separation is
 intentional: one triggered record can still contain multiple bursts, and every
 qualifying event must remain navigable.
 
-## Acquisition Trigger (Pluto Run Single)
+## Acquisition Trigger (Pluto Single / Continuous)
 
 The Trigger page offers `Free Run` and `I/Q Power`. I/Q Power uses calibrated
 display dBm as its input and converts it back to the common raw-IQ dBFS detector
@@ -35,17 +35,22 @@ Implemented controls:
 - Hysteresis in dB.
 - Signed Trigger Offset in symbols. A negative value retains pretrigger data;
   a positive value starts the returned record after the crossing.
-- Operator cancellation. While waiting, invoking `Run Single` again requests
-  cancellation, equivalent to aborting the highlighted R&S Run Single action.
+- Operator cancellation through the workspace's acquisition controls. The shared
+  panel follows each workspace's QAction/busy state; see the
+  [UI design](VSA_UI.md) for the common controls.
 
 The returned record always has the configured capture length. Trigger Offset
-does not change record length. The first Pluto buffer is acquired with the
-fresh-buffer path so samples queued by a previous acquisition are not reused.
+does not change record length. Free Run and I/Q Power use the same continuous
+producer. Single creates a `latest` cursor for samples arriving after the
+request; subsequent Continuous records can use a `newest` cursor starting at
+the most recent retained block. They do not replay every old block accumulated
+during analysis. See [continuous acquisition](../acquisition/continuous-iq-acquisition.md)
+for producer reuse, RF reconfiguration, cancellation, and rearming.
 
 This stage intentionally does not perform Burst Search or Pattern Search. A
 power crossing is not a protocol boundary and does not establish symbol timing.
-Drop-Out and Holdoff remain post-capture Burst Search controls; they become
-acquisition controls only when Continuous acquisition/rearming is implemented.
+Drop-Out and Holdoff remain post-capture Burst Search controls. Continuous
+acquisition/rearming does not move them into the acquisition stage.
 
 ## R&S-aligned post-capture behavior
 
@@ -165,9 +170,13 @@ trigger-event index. `eligible_match_count` is the number of trigger intervals
 that produced an eligible pattern, so existing Result Range navigation remains
 compatible.
 
-## Remaining acquisition work
+## Extension boundaries
 
-Continuous acquisition, trigger rearming, external hardware trigger, and
-acquisition-stage Drop-Out/Holdoff are not implemented.
-They must reuse the common stream/trigger contracts and must not replace the
-post-capture multi-event Burst Search.
+Continuous acquisition and trigger rearming are implemented through the shared
+stream contracts. External hardware trigger and acquisition-stage Drop-Out /
+Holdoff remain outside the current acquisition controls. Future extensions
+must preserve post-capture multi-event Burst Search as a separate operation.
+
+The [Pluto source tests](../../../tests/vsa/core/test_vsa_pluto_source.py)
+cover the shared acquisition path. This document does not claim that a host
+stream can guarantee lossless hardware capture at every sample rate.

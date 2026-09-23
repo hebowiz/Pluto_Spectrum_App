@@ -5,11 +5,11 @@
 作成日: 2026-08-29  
 対象: **Pluto VSA**  
 実装優先順: **Bluetooth / BLE → Wi-Fi**  
-ステータス: Bluetooth初期実装中
+文書の区分: 専用解析の設計方針と初期実装の経緯。Bluetoothは統合VSAへ実装済みで、現在のモードはGeneral VSA / Bluetooth / DECT / ADS-B 1090ESです。Wi-Fiの章は統合VSAへの拡張案です。§24〜32は導入時の記録を含み、現行のUIは [右側操作UI設計](VSA_UI.md)、RF測定経路は [Bluetooth解析補足](bluetooth/bluetooth_dedicated_analysis_pipeline_ja.md) を参照してください。
 
 ## 0. 結論
 
-Pluto VSA の現行 Generic VSA を置き換えるのではなく、その上に **Protocol-Specific Analyzer Mode** を追加する。
+Pluto VSA の現行 General VSA を置き換えるのではなく、その上に **Protocol-Specific Analyzer Mode** を追加する。
 
 専用解析モードは、1 回の IQ capture から以下をまとめて実施する。
 
@@ -79,16 +79,18 @@ RF / PHY analysis != Protocol semantic decode
 
 ### 2.1 Analyzer Mode
 
+以下はBluetooth / Wi-Fi導入時の構想図です。現在の登録モード一覧は冒頭および右側操作UI設計を参照します。
+
 VSA の上位モードとして以下を想定する。
 
 ```text
 VSA Mode
-├─ Generic VSA
+├─ General VSA
 ├─ Bluetooth Analyzer
 └─ Wi-Fi Analyzer
 ```
 
-Generic VSA は従来どおり、ユーザー指定の modulation / symbol rate を解析する汎用モードとして残す。
+General VSA は従来どおり、ユーザー指定の modulation / symbol rate を解析する汎用モードとして残す。
 
 Bluetooth / Wi-Fi mode は packet structure を理解し、同期・評価区間・decode を自動化する。
 
@@ -171,7 +173,7 @@ Decoded Fields
 
 ## 3. 共通 UI 案
 
-専用解析 mode 起動時は、**現行 Generic VSA の 6 分割 workspace をベースに画面レイアウトを専用 mode 向けへ切り替える**。
+専用解析 mode 起動時は、**現行 General VSA の 6 分割 workspace をベースに画面レイアウトを専用 mode 向けへ切り替える**。
 
 画面全体を別 window に置き換えるのではなく、既存の `3 列 × 2 行` の 6 sub-window 構成を維持し、各 sub-window の役割・タイトル・tab 構成を protocol / PHY に応じて切り替える。
 
@@ -191,7 +193,7 @@ Decoded Fields
 └──────────────────────┴──────────────────────┴──────────────────────┘
 ```
 
-Pane 1 / 2 は原則として Generic VSA と同じ **IQ Power / Spectrum** を維持する。
+Pane 1 / 2 は原則として General VSA と同じ **IQ Power / Spectrum** を維持する。
 
 Pane 3～6 は専用 mode に応じて内容を切り替える。
 
@@ -210,12 +212,12 @@ Pane 3～6 は専用 mode に応じて内容を切り替える。
 
 ### 3.2 mode 起動時の layout 切り替え
 
-Generic VSA から Bluetooth / Wi-Fi 専用 mode へ入った時点で、その mode 用 layout preset を適用する。
+初めて表示するworkspaceは各モードの初期配置を使います。以後の切替では、離れる前にメモリーへ保存したDock配置・分割比率・別窓状態を復元します。毎回layout presetへ戻す方式ではありません。以下のWi-Fi配置は将来案です。
 
 例:
 
 ```text
-Generic VSA
+General VSA
   IQ Power | Spectrum | Result Summary
   Mod      | Symbol   | Symbol Table
 
@@ -228,7 +230,7 @@ Wi-Fi Analyzer
   EVM/PHY  | Symbol   | Packet Analysis
 ```
 
-専用 mode から Generic VSA へ戻る場合は Generic VSA の layout preset を復元する。
+General VSAへ戻る場合も実行中に保存した配置を復元します。再起動時は初期配置で、選択タブも永続保存しません。詳細は [共通ウィンドウ仕様](../../spec/common/window-layout.md) に従います。
 
 各 mode で最後に選択していた tab を保持してよいが、初回起動時は代表的な tab を選択する。
 
@@ -313,7 +315,7 @@ Protocol logical field と waveform region は必ずしも 1:1 ではないた�
 
 ### 3.7 UI 実装方針
 
-- 6 pane の親 layout は Generic VSA と共有する。
+- 6 pane の親 layout は General VSA と共有する。
 - 各 pane の content は mode-specific widget / tab set として差し替える。
 - result 種別追加のたびに main window の分割数を増やさない。
 - plot / table は必要に応じ tab 内で遅延生成し、非表示 tab の再描画負荷を抑える。
@@ -533,7 +535,7 @@ Trailer
 
 上記 RF / modulation measurement は `Analysis Profile` にかかわらず実施する。RF / PHY Test では規格指定の評価区間と aggregation を適用し、General Packet では decode された packet structure から同等の評価区間を自動生成する。
 
-現行 Generic VSA の `CompositeSignalDescription` / segment analysis の考え方を再利用する。
+現行 General VSA の `CompositeSignalDescription` / segment analysis の考え方を再利用する。
 
 ---
 
@@ -761,11 +763,11 @@ Rule profile が持つもの:
 
 ---
 
-# Part B. Wi-Fi Analyzer
+# Part B. Wi-Fi Analyzer（統合VSAへの拡張案）
 
 ## 13. 目的
 
-Wi-Fi mode は Generic VSA の IQ Power / Spectrum を維持しつつ、packet-based PHY synchronization、modulation analysis、PHY decode、MAC decode を追加する。
+Wi-Fi mode は General VSA の IQ Power / Spectrum を維持しつつ、packet-based PHY synchronization、modulation analysis、PHY decode、MAC decode を追加する。
 
 対象順:
 
@@ -799,7 +801,7 @@ Payload Demodulation
           MAC Decode
 ```
 
-Wi-Fi では PHY header の decode 結果によって DATA の modulation / coding が決まるため、Generic VSA のように modulation をユーザーが固定指定する構造にはしない。
+Wi-Fi では PHY header の decode 結果によって DATA の modulation / coding が決まるため、General VSA のように modulation をユーザーが固定指定する構造にはしない。
 
 ---
 
@@ -1029,9 +1031,11 @@ DSSS / CCK 固有の modulation accuracy 指標については、実装前に IE
 
 # Part C. 実装構成案
 
-## 19. package 構成
+## 19. package 構成（初期提案）
 
-既存 `pluto_vsa` の Generic VSA core を維持し、protocol-specific layer を追加する。
+以下は当時の配置案です。実在する現在の専用解析は`pluto_vsa/protocol_modes/`にあり、共通SDRは`pluto_common/sdr/`にあります。このtreeを現行ファイル一覧として使いません。
+
+既存 `pluto_vsa` の General VSA core を維持し、protocol-specific layer を追加する。
 
 ```text
 pluto_rtsa/vsa/
@@ -1086,7 +1090,7 @@ VSA UI
 
 ---
 
-## 20. Generic VSA とのコード共有
+## 20. General VSA とのコード共有
 
 専用 mode で再利用する候補:
 
@@ -1110,7 +1114,7 @@ VSA UI
 - packet-specific metric aggregation
 - rule evaluation
 
-Generic VSA の `VSAAnalysisResult` を無理に巨大化せず、専用 mode result が Generic result を内包できる構造が望ましい。
+General VSA の `VSAAnalysisResult` を無理に巨大化せず、専用 mode result が Generic result を内包できる構造が望ましい。
 
 ---
 
@@ -1200,7 +1204,7 @@ Wi-Fi は Bluetooth framework の上位 result / UI / packet list / semantic ana
 
 ## 23. 最重要設計原則
 
-1. **Generic VSA と protocol-specific analysis を分離する**
+1. **General VSA と protocol-specific analysis を分離する**
 2. **RF / PHY analysis と semantic packet decode を分離する**
 3. **単一 packet と複数 packet 統計を別レイヤーにする**
 4. **規格値を DSP 実装に埋め込まない**
@@ -1217,7 +1221,7 @@ Wi-Fi は Bluetooth framework の上位 result / UI / packet list / semantic ana
 Bluetooth専用解析モードの最初のUI統合を実施した。
 
 - `Analysis Mode > Bluetooth Dedicated Analyzer` を追加
-- Generic VSAと同一トップレベルウィンドウ内でワークスペースを切り替える
+- General VSAと同一トップレベルウィンドウ内でワークスペースを切り替える
 - Pluto接続はトップレベルアプリが一つだけ所有し、Generic / Bluetooth / ADS-Bで共有する
 - 6等分レイアウトを採用
   - 左上: IQ Power
@@ -1230,9 +1234,9 @@ Bluetooth専用解析モードの最初のUI統合を実施した。
 - Packet AnalysisにDecode / Payload Hex / Packet List / Issues / Air Bitsタブを実装
 - BR/EDRとLE、各PHY、whitening、UAP/CLK6-1、LE Channel/CRC Initを指定可能
 - Semantic decodeにはVSA/VSG共通の`pluto_protocol`を使用
-- Generic VSAの新しい解析結果はsignalでBluetoothワークスペースへ公開する
+- General VSAの新しい解析結果はsignalでBluetoothワークスペースへ公開する
 
-初期MVPのGeneric VSA結果再利用に加え、Bluetooth画面からの直接IQ取得と専用解析を
+初期MVPのGeneral VSA結果再利用に加え、Bluetooth画面からの直接IQ取得と専用解析を
 実装した。Classic BR/EDRはaccess code同期後にBR/EDR PHYを自動評価し、LE 1M/2Mは
 Access Addressを使って同期、whitening解除、PDU長によるpacket切り出し、CRC検証まで
 行う。LE preambleはAccess Addressの先頭air bitから正しい極性を決め、復調bitを自動反転
@@ -1241,18 +1245,18 @@ multi-packet統計は引き続き次段階とする。
 
 ---
 
-## 25. Generic VSA準拠UI・複数パケット表示（2026-08-30）
+## 25. General VSA準拠UI・複数パケット表示（2026-08-30）
 
-Bluetooth専用解析画面は、解析方式だけを規格専用とし、操作体系と測定表示はGeneric VSAへ揃える。
+Bluetooth専用解析画面は、解析方式だけを規格専用とし、操作体系と測定表示はGeneral VSAへ揃える。
 
 - メインウィンドウ上部には解析設定ツールバーを置かない。
-- `Meas Config` はGeneric VSAと同じモーダル・階層型の操作とし、Bluetooth Analysis / Input / Signal Description / Display / Sweepのページを持つ。
+- 現在はGeneral VSAと同じ右操作パネルから設定ページを直接開く。Bluetooth固有設定はSignal Descriptionへ集約し、Input / Frontend、Signal Capture、Trigger、Displayを並べる。初期のConfig Top経由の操作は通常経路には使わない。
 - PHYから一意に決まる変調方式、Symbol Rate、TX Filter、Result Rangeは読み取り専用とする。
 - 測定開始・停止は `Sweep / Run` メニューおよびF6で行う。
 - 同一IQ内で検出したpacketはすべて解析し、Packet Listと左右矢印キーで選択する。
 - PlotのRect Zoom、3-button mouse、Reset/View All等は共通measurement chromeを使用する。
 
-BR + EDR PSKでは、IQ PowerをBR部からEDR部まで同一時間軸で表示し、SpectrumへFSKを黄色、PSKをシアンで重ねる。ModulationはFSK Instantaneous Frequency / PSK Vector、Symbol PlotはFSK / PSKをタブで切り替える。FSKはConstellation Frequency / Phase Difference、PSKはPhysical IQ / Differential IQを切替可能とし、Flat / Densityとsymbol-point表示もGeneric VSAへ揃える。
+BR + EDR PSKでは、IQ PowerをBR部からEDR部まで同一時間軸で表示し、SpectrumへFSKを黄色、PSKをシアンで重ねる。ModulationはFSK Instantaneous Frequency / PSK Vector、Symbol PlotはFSK / PSKをタブで切り替える。FSKはConstellation Frequency / Phase Difference、PSKはPhysical IQ / Differential IQを切替可能とし、Flat / Densityとsymbol-point表示もGeneral VSAへ揃える。
 
 共有decoder検証では生成2-DH1について、Header TYPEのMeaning=`2-DH1`、EDR Length=54 byte、CRC=Validを確認した。TYPEはraw nibbleだけでなく実際のpacket形式をMeaningへ表示する。
 
@@ -1260,7 +1264,7 @@ BR + EDR PSKでは、IQ PowerをBR部からEDR部まで同一時間軸で表示�
 
 ## 26. Bluetooth Triggerと解析停止条件（2026-08-30）
 
-Bluetooth専用解析モードの`Meas Config > Trigger`はGeneric VSAと同じ二段構成とする。
+Bluetooth専用解析モードの`Meas Config > Trigger`はGeneral VSAと同じ二段構成とする。
 
 - Acquisition Trigger: Free RunまたはI/Q Power、Level、Slope、Offset、Hysteresisを設定する。
 - Post-capture Burst Search: 取得済みIQ内の複数バーストを抽出し、各バースト直後から同期パターンを探索する。
@@ -1279,11 +1283,11 @@ I/Q Power acquisition triggerはPluto取得の開始位置を揃える機能で�
 
 ## 27. 測定プロット共通化とEDR PHY境界（2026-08-30）
 
-Bluetooth専用解析画面のプロット操作・配色・密度表示をGeneric VSAと同じ共有部品へ統合した。
+Bluetooth専用解析画面のプロット操作・配色・密度表示をGeneral VSAと同じ共有部品へ統合した。
 
 - 全プロットでRect Zoom、中央ボタンドラッグPan、Reset、View Allを共通化する。
-- IQ PowerのResult RangeはGeneric VSAと同じ青、Pattern Rangeは緑で表示する。
-- FSK Constellation FrequencyとPSK Symbol Plotは、Flat/DensityともGeneric VSAと同一の描画関数を使う。
+- IQ PowerのResult RangeはGeneral VSAと同じ青、Pattern Rangeは緑で表示する。
+- FSK Constellation FrequencyとPSK Symbol Plotは、Flat/DensityともGeneral VSAと同一の描画関数を使う。
 - SpectrumはFSKを黄色、PSKをシアンで重ね、凡例を表示する。
 - Packet Analysisの長いPayload Hexは32文字単位で折り返し、値・Meaning列をウィンドウ幅へ追従させる。
 
@@ -1317,28 +1321,23 @@ BRも同様に、TYPEが示すslot容量をResult Rangeとして採用しない�
 
 これにより、BR/EDRの双方でPost Idle、slotの未使用部分、後続packet、ユーザーが余裕を持って指定したResult Rangeを各プロットと測定値へ混入させない。表示側も再解析フィルタの端部ではなく、pattern同期とdecode済みLengthで確定したsymbol列と時刻を基準にする。
 
-FSK Constellation FrequencyはGeneric VSAと同じ横軸`-1.0..+1.0`へ固定し、横方向のPan/Zoomを無効にする。中心周波数の初期値は2440 MHzとする。
+FSK Constellation FrequencyはGeneral VSAと同じ横軸`-1.0..+1.0`へ固定し、横方向のPan/Zoomを無効にする。中心周波数の初期値は2440 MHzとする。
 
-Bluetooth専用モードのMeas ConfigはGeneric VSAと共通ファイルへ保存しない。Bluetooth専用のQSettings名前空間とschema/version付きJSONへ、Bluetooth Analysis、Input / Frontend、Trigger、Burst Search、Display設定を自動保存し、次回起動時に復元する。設定ダイアログのOK時にも保存し、アプリ終了時に最終状態を再保存する。
+Bluetooth専用の起動時QSettingsと、外部ファイルへのSave / Recallは別の経路です。現在の統合VSAはState > Save / Recallで共通version 2の`.vsaconfig.json`を使い、`analysis_mode = bluetooth`と専用設定を格納します。起動時のモード別設定保存を、共通ファイルに保存できないという意味で扱いません。Dock配置・選択タブは外部設定にも起動時設定にも保存しません。詳細は [ファイル操作仕様](../../spec/vsa/general/vsa-file-workflows.md) を参照してください。
 
 ---
 
-## 29. Generic VSA共通解析・表示パイプライン（2026-08-30）
+## 29. 汎用解析・表示処理と専用RF測定の境界
 
-Bluetooth専用モードは別の変調解析器を持たない。専用モード固有の責務は、Protocol / PHY / packet typeの判定、PHYから一意に決まるSignal Descriptionの設定、packet境界の決定、およびprotocol fieldのdecodeに限定する。境界が決まったFSK部とPSK部はGeneric VSAと同じ`VSASession` / pattern解析器へ入力する。
+Bluetooth専用モードは、Protocol / PHY / packet type、既知同期列、packet境界から解析条件を決め、汎用の`VSASession` / pattern解析 / 表示DSPを再利用します。専用モードの責務には規格別RF測定も含みます。「独自の測定処理を持たず、汎用EVMだけを表示する」という初期の説明は現在の構成には適用しません。
 
-次の処理はGeneric VSAと専用モードで共通モジュールを使用する。
+共通化するのはFSK/PSK/QAMの表示用処理、Physical / Differential constellation、Flat / Density、IQ Power上の範囲表示、Rect Zoom / Pan / Reset等の操作です。表示に使う汎用EVMやdiagnostic metadataと、規格別RF結果は区別します。
 
-- FSKのRaw / Measured表示、Gaussian measurement filter、復元symbol周波数
-- PSKのTX filter / measurement filter、symbol timing、carrier補正、振幅正規化、pi/4-DQPSKの表示基準
-- Physical / Differential constellation、EVM / Differential Symbol EVM / Bluetooth DEVM
-- Symbol PlotのFlat / Density表示、FSK周波数プロットの固定横軸
-- IQ Power / Modulation上のsymbol点、Result Range / Pattern Range表示
-- 軸、Rect Zoom、middle-button Pan、Reset / View All等のplot操作
+[Bluetooth model](../../../pluto_vsa/protocol_modes/bluetooth/model.py) はEDRでは`measure_edr_devm()`、HDTでは`build_hdt_evm_result()`を呼びます。専用RF測定が参照信号・評価区間・補正条件を管理し、summaryはその結果を集計・表示します。UI側で測定を再計算しないことと、測定値を汎用sessionから得ることは同じではありません。
 
-`Show Symbol Points`は時間軸trace上の同期symbol点だけをON/OFFする。Symbol Plotそのものを非表示にはしない。
+EDR 2M / 3Mのsymbol rateはいずれも1 MSym/sで、2 Mbit/s / 3 Mbit/sは1 symbolあたりのbit数で決まります。表示フィルタとpacket範囲にはこのsymbol rateを使います。`Show Symbol Points`は時間軸trace上の同期点を制御し、Symbol Plot全体を非表示にはしません。
 
-EDR 2M / 3Mのsymbol rateはいずれも1 MSym/sであり、2 Mbit/s / 3 Mbit/sは1 symbolあたりのbit数で決まる。専用モードのPSK範囲計算と表示フィルタもこのsymbol rateを使う。EDRのDEVMは専用UIで再計算せず、Generic VSA解析結果のmetadataを表示する。
+専用測定と表示の詳細・テストは [Bluetooth解析補足](bluetooth/bluetooth_dedicated_analysis_pipeline_ja.md) に集約します。RF / PHY TestとGeneral Packetというprofile間の処理共通化（§6.1）は、General VSAと専用RF測定が同じという意味ではありません。
 
 ---
 
@@ -1354,9 +1353,9 @@ EDR 2M / 3Mのsymbol rateはいずれも1 MSym/sであり、2 Mbit/s / 3 Mbit/s�
 
 ---
 
-## 31. Generic VSA 16QAM / HDT mapping初期実装（2026-09-01）
+## 31. General VSA 16QAM / HDT mapping初期実装（2026-09-01）
 
-Generic VSAのSignal Descriptionへ`16QAM`を追加した。表示内容はPSK系を基本とし、既存の6分割layoutを
+General VSAのSignal Descriptionへ`16QAM`を追加した。表示内容はPSK系を基本とし、既存の6分割layoutを
 そのまま使う。
 
 - IQ Power
@@ -1380,7 +1379,7 @@ Mappingには`Bluetooth HDT`を追加した。HDT6 / HDT7.5のreference constell
 `S_k / sqrt(10)`のunit-mean-power scaleを使う。GenericのNatural / Gray 16QAMも従来どおりunit-mean-power scaleを使い、
 Bluetooth HDT mappingとは明確に分離する。
 
-この段階ではGeneric VSAでの16QAM同期・constellation・symbol decode基盤までを対象とする。
+この段階ではGeneral VSAでの16QAM同期・constellation・symbol decode基盤までを対象とする。
 HDT Preamble / Control Header decode、packet segmentation、rate別RMS EVM evaluation region、規格limit判定は
 Bluetooth専用解析modeの後続実装とする。
 
