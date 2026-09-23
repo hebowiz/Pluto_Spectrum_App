@@ -12,7 +12,7 @@ from pluto_vsa.profiles.bluetooth_edr import generate_edr_dh1
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-dir", type=Path, default=Path("tests/fixtures"))
+    parser.add_argument("--output-dir", type=Path, default=Path("tests/data/fixtures/bluetooth/br-edr"))
     return parser
 
 

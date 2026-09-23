@@ -274,7 +274,7 @@ def test_stream_window_defers_incomplete_long_message() -> None:
 
 
 def test_saved_multi_packet_fixture_decodes_expected_frames() -> None:
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     recording = FileIQSource.load(path)
 
     result = ADSB1090Analyzer().analyze(recording)

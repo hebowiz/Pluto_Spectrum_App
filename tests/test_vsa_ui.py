@@ -1118,7 +1118,7 @@ def test_qam_physical_symbol_plot_stays_carrier_corrected_when_raw_trace_is_sele
 ) -> None:
     pg.mkQApp("VSA QAM physical carrier correction test")
     fixture = (
-        Path(__file__).with_name("fixtures")
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt"
         / "bluetooth_hdt7_5_prbs9_16msps.npz"
     )
     recording = FileIQSource.load(fixture)
@@ -1321,7 +1321,7 @@ def test_psk_constellation_uses_normalized_pattern_result_only(tmp_path) -> None
     )
     try:
         fixture = (
-            Path(__file__).with_name("fixtures")
+            Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr"
             / "bluetooth_2dh1_prbs9_16msps.npz"
         )
         with np.load(fixture, allow_pickle=False) as values:

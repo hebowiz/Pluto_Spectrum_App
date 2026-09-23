@@ -87,7 +87,7 @@ def test_generic_vsa_recovers_complete_br_dh1_symbol_stream() -> None:
 
 
 def test_checked_in_br_dh1_fixture_matches_generator() -> None:
-    path = Path(__file__).with_name("fixtures") / "bluetooth_dh1_prbs9_16msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_dh1_prbs9_16msps.npz"
     expected = generate_br_dh1(seed=11)
 
     with np.load(path, allow_pickle=False) as fixture:

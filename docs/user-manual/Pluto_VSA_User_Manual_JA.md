@@ -62,7 +62,7 @@ NPZ / IQ TARにはsample rate等の情報を格納できます。NPY / CF32 / BI
 
 ### 3.2 General VSAでFSKを測る
 
-図1は[保存済みBR受信IQ](../../tests/fixtures/bluetooth_br_prbs9_pluto_16msps.npz)を汎用FSKとして解析した例です。`Signal Description`でFSK、1 MSym/s、参照偏移160 kHz、Gaussian、BT=0.5を設定します。これはBluetooth適合判定用の設定ではなく、汎用表示の例です。
+図1は[保存済みBR受信IQ](../../tests/data/fixtures/bluetooth/br-edr/bluetooth_br_prbs9_pluto_16msps.npz)を汎用FSKとして解析した例です。`Signal Description`でFSK、1 MSym/s、参照偏移160 kHz、Gaussian、BT=0.5を設定します。これはBluetooth適合判定用の設定ではなく、汎用表示の例です。
 
 1. IQ Powerでバースト区間を見つけます。
 2. `Pattern Search`のLoad Patternで[図1用のパターン](examples/br-access-code.vsapattern.json)を読み、Pattern Search OnをONにします。LAP C6967Eの72-symbol Access Codeです。任意データ観測ではDetected Data系の同期も使用できます。
@@ -82,7 +82,7 @@ NPZ / IQ TARにはsample rate等の情報を格納できます。NPY / CF32 / BI
 
 図2の1〜4は電力、スペクトラム、結果、変調、5はPacket Analysis、6は操作パネルです。`N/A`は対象外、条件不足、未定義のLimitなどを表し、PASSを意味しません。赤いFAILがある場合も、まず復号・テストパターン・入力条件が正しいか確認します。
 
-図2は[保存済み2-DH1 IQ](../../tests/fixtures/RT_Packet_TX_2DH1.npz)をGeneral Packet、Bluetooth BR / EDR、PHY Autoで読み込んだ例です。4 packetを検出し、選択packetのHECはvalidです。RMS DEVMは約3.74%ですが、General PacketでのN/A表示を規格合格と読み替えません。
+図2は[保存済み2-DH1 IQ](../../tests/data/fixtures/bluetooth/br-edr/RT_Packet_TX_2DH1.npz)をGeneral Packet、Bluetooth BR / EDR、PHY Autoで読み込んだ例です。4 packetを検出し、選択packetのHECはvalidです。RMS DEVMは約3.74%ですが、General PacketでのN/A表示を規格合格と読み替えません。
 
 ### 3.4 DECTの変調と電力を確認する
 
@@ -90,7 +90,7 @@ NPZ / IQ TARにはsample rate等の情報を格納できます。NPY / CF32 / BI
 
 `Signal Description`でRegional Carrier PlanとRF Carrierを選び、IQをImportします。Packet Listから対象を選び、Direction、Packet Type、Case識別を確認します。これらを任意に指定する受信設定欄はなく、受信データから判定します。
 
-図3は[保存済みDECT IQ](../../tests/fixtures/DECT_PP_A5_OK.npz)をJP-DECT、F5 / 1902.528 MHzで解析した例です。検出結果はRFP P32Zです。ファイル名と検出結果を混同せず、N/A・INCOMPLETEを含む各項目の適用条件を確認します。
+図3は[保存済みDECT IQ](../../tests/data/fixtures/dect/DECT_PP_A5_OK.npz)をJP-DECT、F5 / 1902.528 MHzで解析した例です。検出結果はRFP P32Zです。ファイル名と検出結果を混同せず、N/A・INCOMPLETEを含む各項目の適用条件を確認します。
 
 `Display > GFSK Modulation Reference`をMeasured / Nominal等へ変えると、FM表示で差し引く基準が変わります。表示基準変更を送信機の周波数変化と解釈しないでください。現在パケットの判定と複数パケットの集計を分けて読みます。
 

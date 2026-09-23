@@ -14,7 +14,9 @@ from scipy.ndimage import gaussian_filter1d
 DEFAULT_OUTPUT = (
     Path(__file__).resolve().parents[1]
     / "tests"
+    / "data"
     / "fixtures"
+    / "general"
     / "rs_sample_gfsk_8msps.iq.tar"
 )
 

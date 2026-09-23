@@ -10,11 +10,11 @@
 
 | 図 | 入力・条件 | 読み方 |
 |---|---|---|
-| RTSA全体・設定画面 | `tests/fixtures/bluetooth_br_prbs9_pluto_16msps.npz`。保存済みPluto受信IQ、約16 MS/s・中心2441 MHz。Gain 0 dB、外部ATT 30 dBの収録情報を反映。RBW 100 kHz | 開発用スクリプトで受信部分を置換し、現在のFFT・表示処理へ投入。通常UIにIQ Importがあるという意味ではない。振幅はnominal換算であり新規校正ではない |
+| RTSA全体・設定画面 | `tests/data/fixtures/bluetooth/br-edr/bluetooth_br_prbs9_pluto_16msps.npz`。保存済みPluto受信IQ、約16 MS/s・中心2441 MHz。Gain 0 dB、外部ATT 30 dBの収録情報を反映。RBW 100 kHz | 開発用スクリプトで受信部分を置換し、現在のFFT・表示処理へ投入。通常UIにIQ Importがあるという意味ではない。振幅はnominal換算であり新規校正ではない |
 | General VSA全体・設定画面 | 同じBR受信IQ。FSK、1 MSym/s、参照偏移160 kHz、Gaussian BT=0.5。LAP C6967Eの72-symbol Access CodeでPattern Search、Result Length 256 | 汎用同期・変調表示の例。Bluetooth専用の適合判定と区別 |
-| Bluetooth全体・設定画面 | `tests/fixtures/RT_Packet_TX_2DH1.npz`。General Packet、Classic Auto。Import IQの経路で読込 | LO offsetメタデータから解析チャネルを再構成。EDR 2M / 2-DH1を4 packet検出。HEC valid。General PacketのRF判定N/AをPASSと読み替えない |
-| DECT全体・設定画面 | `tests/fixtures/DECT_PP_A5_OK.npz`。9.216 MS/s、JP-DECTの1902.528 MHz。Software DC removedの保存データ | ファイル名にPPを含むが、画面の検出結果はRFP P32Z。N/AやINCOMPLETEを含む例であり、ファイル名のOKは全RF項目の合格を意味しない |
-| ADS-B全体・設定画面 | `tests/fixtures/adsb1090_multi_8msps.npz`。生成IQ、8 MS/s | 4 messageのparity確認と表示を確認。画面のOS Timeは解析時の時刻であり、現在の実在航空機の受信記録ではない |
+| Bluetooth全体・設定画面 | `tests/data/fixtures/bluetooth/br-edr/RT_Packet_TX_2DH1.npz`。General Packet、Classic Auto。Import IQの経路で読込 | LO offsetメタデータから解析チャネルを再構成。EDR 2M / 2-DH1を4 packet検出。HEC valid。General PacketのRF判定N/AをPASSと読み替えない |
+| DECT全体・設定画面 | `tests/data/fixtures/dect/DECT_PP_A5_OK.npz`。9.216 MS/s、JP-DECTの1902.528 MHz。Software DC removedの保存データ | ファイル名にPPを含むが、画面の検出結果はRFP P32Z。N/AやINCOMPLETEを含む例であり、ファイル名のOKは全RF項目の合格を意味しない |
+| ADS-B全体・設定画面 | `tests/data/fixtures/adsb/adsb1090_multi_8msps.npz`。生成IQ、8 MS/s | 4 messageのparity確認と表示を確認。画面のOS Timeは解析時の時刻であり、現在の実在航空機の受信記録ではない |
 | VSG全体 | 組込みBluetooth BR/EDRプロジェクト。DH1、PRBS-9、whitening OFF、8 MS/s。Verify Packet実行 | 生成bit列のDecode結果と生成IQのPreview。RF出力の受信測定ではない |
 | VSG設定画面 | BR/EDR、LE、HDT、Wi-Fi、DECTの組込み初期プロジェクト | 各RF / TimingとFieldsを撮影。規格・PHYによって無効になる項目もそのまま掲載 |
 

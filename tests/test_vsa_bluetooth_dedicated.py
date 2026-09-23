@@ -620,7 +620,7 @@ def test_hdt_post_capture_trigger_gates_packets_without_changing_evm() -> None:
 
 def test_dedicated_hdt_decodes_real_hdt7_5_and_identifies_legacy_crc_init() -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "RT_HDT7_5.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt" / "RT_HDT7_5.npz"
     )
 
     result = analyze_bluetooth_hdt_recording(
@@ -692,7 +692,7 @@ def test_dedicated_hdt_decodes_real_hdt7_5_and_identifies_legacy_crc_init() -> N
 
 def test_dedicated_hdt_detects_packet_tx_lts_variant() -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "RT_Packet_TX_HDT7P5_temp.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt" / "RT_Packet_TX_HDT7P5_temp.npz"
     )
 
     results = analyze_bluetooth_hdt_recordings(
@@ -745,7 +745,7 @@ def test_real_classic_fixtures_preserve_sync_decode_and_symbol_products(
     expected_packet: str,
     expected_start: int,
 ) -> None:
-    recording = FileIQSource.load(Path(__file__).with_name("fixtures") / filename)
+    recording = FileIQSource.load(Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / filename)
     result = analyze_bluetooth_classic_recording(
         recording,
         profile=BluetoothAnalysisProfile.RF_PHY_TEST,
@@ -794,7 +794,7 @@ def test_edr_sig_devm_uses_reference_plus_50_physical_symbols_and_shared_centers
     whitening: bool,
     expected_packet: str,
 ) -> None:
-    recording = FileIQSource.load(Path(__file__).with_name("fixtures") / filename)
+    recording = FileIQSource.load(Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / filename)
     result = analyze_bluetooth_classic_recording(
         recording,
         profile=BluetoothAnalysisProfile.RF_PHY_TEST,
@@ -864,7 +864,7 @@ def test_edr_sig_devm_uses_reference_plus_50_physical_symbols_and_shared_centers
 
 @pytest.mark.parametrize("filename", ("LE1M_FSK_error_raw.npz", "LE1M_FSK_error.npz"))
 def test_real_le_rf_test_fixtures_preserve_sync_and_symbol_products(filename: str) -> None:
-    recording = FileIQSource.load(Path(__file__).with_name("fixtures") / filename)
+    recording = FileIQSource.load(Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "le" / filename)
     result = analyze_bluetooth_le_recording(
         recording,
         profile=BluetoothAnalysisProfile.RF_PHY_TEST,
@@ -896,7 +896,7 @@ def test_real_le_rf_test_fixtures_preserve_sync_and_symbol_products(filename: st
 
 def test_sync_is_independent_of_rf_measurement_profile_and_failure(monkeypatch) -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "bluetooth_br_prbs9_pluto_16msps.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_br_prbs9_pluto_16msps.npz"
     )
     options = {
         "lap": 0xC6967E,
@@ -932,7 +932,7 @@ def test_bluetooth_workspace_opens_iq_file_directly(
     tmp_path, monkeypatch
 ) -> None:
     pg.mkQApp("Bluetooth dedicated IQ file test")
-    iq_path = Path(__file__).with_name("fixtures") / "RT_HDT7_5.npz"
+    iq_path = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt" / "RT_HDT7_5.npz"
     preferences = QtCore.QSettings(
         str(tmp_path / "bluetooth-open-iq.ini"),
         QtCore.QSettings.Format.IniFormat,
@@ -2917,7 +2917,7 @@ def test_real_le_packet_end_uses_decoded_length_not_available_result_tail(
 ) -> None:
     pg.mkQApp("Bluetooth LE exact packet-end regression")
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "LE1M_packet_length.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "le" / "LE1M_packet_length.npz"
     )
     result = analyze_bluetooth_le_recording(
         recording,
@@ -2989,7 +2989,7 @@ def test_real_le_packet_end_uses_decoded_length_not_available_result_tail(
 )
 def test_real_3dh3_requires_edr_sync_before_br_fallback(fixture_name) -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / fixture_name
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / fixture_name
     )
     results = analyze_bluetooth_classic_recordings(
         recording,

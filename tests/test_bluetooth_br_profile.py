@@ -69,7 +69,7 @@ def test_shortened_inquiry_access_code_uses_known_symbols_for_tracking() -> None
 
 
 def test_pluto_smartphone_inquiry_capture_recovers_giac_without_errors() -> None:
-    fixture = Path(__file__).with_name("fixtures") / "bluetooth_giac_inquiry_pluto_4msps.npz"
+    fixture = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_giac_inquiry_pluto_4msps.npz"
     with np.load(fixture, allow_pickle=False) as capture:
         recording = IQRecording(
             capture["iq"],
@@ -96,7 +96,7 @@ def test_pluto_smartphone_inquiry_capture_recovers_giac_without_errors() -> None
 
 
 def test_pluto_fixed_br_capture_recovers_unwhitened_dh1_prbs9() -> None:
-    fixture = Path(__file__).with_name("fixtures") / "bluetooth_br_prbs9_pluto_16msps.npz"
+    fixture = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_br_prbs9_pluto_16msps.npz"
     with np.load(fixture, allow_pickle=False) as capture:
         wideband = IQRecording(
             capture["iq"],

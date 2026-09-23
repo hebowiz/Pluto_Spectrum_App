@@ -16,7 +16,7 @@ from pluto_vsa.protocol_modes.dect.analysis import _bit_means, _sync_packet
 from pluto_vsa.sources import FileIQSource
 
 
-FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURES = Path(__file__).parent / "data" / "fixtures" / "dect"
 
 
 def test_vectorized_bit_windows_match_original_boolean_selection() -> None:

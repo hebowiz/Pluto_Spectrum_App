@@ -149,7 +149,7 @@ def main() -> int:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("tests/fixtures/adsb1090_multi_8msps.npz"),
+        default=Path("tests/data/fixtures/adsb/adsb1090_multi_8msps.npz"),
     )
     args = parser.parse_args()
     recording = generate_fixture()

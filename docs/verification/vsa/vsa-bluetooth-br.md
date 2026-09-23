@@ -84,7 +84,7 @@ Bluetooth SIG Sample Dataとの一致:
 - 推定carrier位置: centerから+1.037494 MHz（約2461.037494 MHz）。
 - 推定GFSK frequency deviation: 164.778 kHz。
 - capture内のAccess Code開始: 2611 sample（0.652750 ms）。
-- 回帰fixture: `tests/fixtures/bluetooth_giac_inquiry_pluto_4msps.npz`。
+- 回帰fixture: `tests/data/fixtures/bluetooth/br-edr/bluetooth_giac_inquiry_pluto_4msps.npz`。
 
 これにより、少なくとも実電波のInquiry ID packetについて、burst捕捉、GIAC相関、
 symbol timing、CFO/deviation推定、68-bit同期word復元まで動作することを確認しました。
@@ -118,7 +118,7 @@ Code、Header、Payloadを解析しました。送信出力は0～10 dBmの範�
 - 54 air-bit Headerは全18 FEC tripletが一致し、FEC correction 0。
 - Whitening OFF候補でTYPE=4（DH1）、Payload length=27 bytes。
 - Payload body 216 bitはPRBS-9 phase 0と完全一致し、0 bit error。
-- 回帰fixture: `tests/fixtures/bluetooth_br_prbs9_pluto_16msps.npz`。
+- 回帰fixture: `tests/data/fixtures/bluetooth/br-edr/bluetooth_br_prbs9_pluto_16msps.npz`。
 
 一方、入力されたBD_ADDR `00006BC6967E`から期待するUAP `0x6B`ではHeader HECが
 一致しません。Whitening OFFのHeader bit列から逆算するとHEC初期値は`0x5D`相当です。
@@ -131,7 +131,7 @@ Payload復元の実機検証として有効ですが、標準準拠packetのHEC/
 
 実測fixtureとは別に、全fieldの期待値が既知でHEC/CRCも有効な最大長DH1を追加しました。
 
-- file: `tests/fixtures/bluetooth_dh1_prbs9_16msps.npz`
+- file: `tests/data/fixtures/bluetooth/br-edr/bluetooth_dh1_prbs9_16msps.npz`
 - Fs / center / capture: 16 MS/s / 2441 MHz / 3 ms
 - packet start/stop: sample 32000 / 37856（2.000 ms / 2.366 ms）
 - modulation: GFSK、1 MSym/s、BT 0.5、deviation 160 kHz

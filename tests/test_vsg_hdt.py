@@ -78,7 +78,7 @@ def test_hdt_project_json_round_trip() -> None:
 
 def test_checked_in_hdt7_5_fixture_matches_generator_and_loads_in_vsa() -> None:
     path = (
-        Path(__file__).with_name("fixtures")
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt"
         / "bluetooth_hdt7_5_prbs9_16msps.npz"
     )
     project = _project(HDTRate.HDT7_5, payload_length=255)

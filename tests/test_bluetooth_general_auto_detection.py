@@ -216,7 +216,7 @@ def test_general_classic_auto_detects_edr_with_unknown_identity(
 
 def test_general_classic_detects_real_2dhx_with_explicit_phy() -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "2-DHx.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "2-DHx.npz"
     )
 
     result = analyze_bluetooth_classic_recordings(
@@ -244,7 +244,7 @@ def test_general_classic_detects_real_2dhx_with_explicit_phy() -> None:
 
 def test_general_classic_rejects_wrong_explicit_edr_phy_quick_path() -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "2-DHx.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "2-DHx.npz"
     )
 
     with pytest.raises(RuntimeError):
@@ -262,7 +262,7 @@ def test_general_classic_rejects_wrong_explicit_edr_phy_quick_path() -> None:
 
 def test_general_classic_restores_offset_lo_and_matches_real_ldac_capture() -> None:
     raw_recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "LDAC.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "LDAC.npz"
     )
     recording = extract_requested_analysis_channel(raw_recording)
 
@@ -346,7 +346,7 @@ def test_general_le_auto_detects_rf_test_access_address_not_its_complement() -> 
 
 def test_general_le_uses_observed_preamble_for_real_advertising_packet() -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "Adv_test.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "le" / "Adv_test.npz"
     )
 
     result = analyze_bluetooth_le_recordings(
@@ -373,7 +373,7 @@ def test_general_le_uses_observed_preamble_for_real_advertising_packet() -> None
 
 def test_general_le_refines_each_real_advertising_packet_to_its_pdu_length() -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "Adv_test0.npz"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "le" / "Adv_test0.npz"
     )
 
     results = analyze_bluetooth_le_recordings(

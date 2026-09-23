@@ -147,7 +147,7 @@ def _save_annotated(
 
 def _capture_rtsa(app: QtWidgets.QApplication, settings_path: str) -> None:
     config = SpectrumConfig()
-    recording = FileIQSource.load(ROOT / "tests/fixtures/bluetooth_br_prbs9_pluto_16msps.npz")
+    recording = FileIQSource.load(ROOT / "tests/data/fixtures/bluetooth/br-edr/bluetooth_br_prbs9_pluto_16msps.npz")
     config.center_freq_hz = int(recording.center_frequency_hz)
     config.display_span_hz = int(recording.sample_rate_hz * (1 - 2 * config.guard_ratio))
     config.rx_gain_db = 0
@@ -226,7 +226,7 @@ def _capture_vsa(app: QtWidgets.QApplication, settings_path: str) -> None:
     generic.pattern_name_edit.setText("BR access code C6967E")
     generic._set_pattern_symbols(tuple(int(bit) for bit in access_code_bits(0xC6967E)))
     generic.result_length_spin.setValue(256)
-    recording = FileIQSource.load(ROOT / "tests/fixtures/bluetooth_br_prbs9_pluto_16msps.npz")
+    recording = FileIQSource.load(ROOT / "tests/data/fixtures/bluetooth/br-edr/bluetooth_br_prbs9_pluto_16msps.npz")
     generic.load_recording(recording, SignalDescription(modulation=ModulationKind.FSK, symbol_rate_hz=1e6, frequency_deviation_hz=160e3, tx_filter="Gaussian", filter_parameter=0.5))
     _settle(app, generic)
     if generic.session.result is None:
@@ -250,7 +250,7 @@ def _capture_vsa(app: QtWidgets.QApplication, settings_path: str) -> None:
     app.processEvents()
     bluetooth = window.bluetooth_workspace
     bluetooth.profile_combo.setCurrentIndex(bluetooth.profile_combo.findText("General Packet"))
-    with patch.object(QtWidgets.QFileDialog, "getOpenFileName", return_value=(str(ROOT / "tests/fixtures/RT_Packet_TX_2DH1.npz"), "")):
+    with patch.object(QtWidgets.QFileDialog, "getOpenFileName", return_value=(str(ROOT / "tests/data/fixtures/bluetooth/br-edr/RT_Packet_TX_2DH1.npz"), "")):
         bluetooth._open_iq()
     _settle(app, bluetooth)
     if bluetooth._result is None:
@@ -272,7 +272,7 @@ def _capture_vsa(app: QtWidgets.QApplication, settings_path: str) -> None:
     dect = window.dect_workspace
     dect.plan_combo.setCurrentIndex(dect.plan_combo.findData("j_dect"))
     dect.carrier_combo.setCurrentIndex(dect.carrier_combo.findData(1902528000.0))
-    dect.load_recording(FileIQSource.load(ROOT / "tests/fixtures/DECT_PP_A5_OK.npz"))
+    dect.load_recording(FileIQSource.load(ROOT / "tests/data/fixtures/dect/DECT_PP_A5_OK.npz"))
     _settle(app, dect)
     if dect._result is None:
         raise RuntimeError("DECT screenshot has no analysis result")
@@ -280,7 +280,7 @@ def _capture_vsa(app: QtWidgets.QApplication, settings_path: str) -> None:
     _config_images(app, "dect", dect)
     window.set_analysis_mode("adsb1090")
     adsb = window.adsb1090_workspace
-    adsb.analyze_recording(FileIQSource.load(ROOT / "tests/fixtures/adsb1090_multi_8msps.npz"))
+    adsb.analyze_recording(FileIQSource.load(ROOT / "tests/data/fixtures/adsb/adsb1090_multi_8msps.npz"))
     _settle(app, adsb)
     _save_annotated(window, "pluto-vsa-adsb-overview.png", [])
     _config_images(app, "adsb", adsb)

@@ -256,7 +256,7 @@ radius is proportional to `r[k] * r[k-1]`, and its phase error is
 `epsilon[k] - epsilon[k-1]`. This mathematically broadens clusters relative to
 the absolute symbol markers drawn over the Vector I/Q trajectory.
 
-Direct analysis of `tests/fixtures/bt_6DH1_capture.iq.tar` at 16 MS/s, 2 MSym/s,
+Direct analysis of `tests/data/fixtures/bluetooth/br-edr/bt_6DH1_capture.iq.tar` at 16 MS/s, 2 MSym/s,
 8DPSK, RRC alpha 0.4 and Bluetooth EDR mapping measured:
 
 - physical absolute decision points: 3.11% radial RMS, 1.92 degree phase RMS,

@@ -106,7 +106,7 @@ def test_adsb_user_settings_are_restored_from_dedicated_preferences(tmp_path) ->
 
 def test_adsb_single_position_frame_uses_receiver_for_local_cpr() -> None:
     pg.mkQApp("ADS-B Local CPR UI test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     recording = FileIQSource.load(path)
     window = ADSB1090Window()
     try:
@@ -145,7 +145,7 @@ def test_adsb_single_position_frame_uses_receiver_for_local_cpr() -> None:
 
 def test_adsb_user_preamble_snr_threshold_is_forwarded_to_analysis() -> None:
     pg.mkQApp("ADS-B SNR setting test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     recording = FileIQSource.load(path)
     window = ADSB1090Window()
     observed: list[float] = []
@@ -172,7 +172,7 @@ def test_adsb_user_preamble_snr_threshold_is_forwarded_to_analysis() -> None:
 
 def test_adsb_workspace_displays_saved_multi_packet_fixture() -> None:
     pg.mkQApp("ADS-B fixture workspace test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     window = ADSB1090Window(FileIQSource.load(path))
     try:
         assert window.export_iq_action.isEnabled()
@@ -201,7 +201,7 @@ def test_adsb_workspace_displays_saved_multi_packet_fixture() -> None:
 
 def test_adsb_aircraft_summary_aggregates_messages_by_confirmed_icao() -> None:
     pg.mkQApp("ADS-B aircraft aggregation test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     window = ADSB1090Window(FileIQSource.load(path))
     try:
         row = window._aircraft_row_by_icao["40621D"]
@@ -236,7 +236,7 @@ def test_adsb_aircraft_summary_aggregates_messages_by_confirmed_icao() -> None:
 
 def test_adsb_iq_power_display_has_a_finite_dbm_floor() -> None:
     pg.mkQApp("ADS-B IQ power floor test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     recording = FileIQSource.load(path)
     iq = recording.iq.copy()
     iq[-100:] = 0.0
@@ -254,7 +254,7 @@ def test_adsb_iq_power_display_has_a_finite_dbm_floor() -> None:
 def test_adsb_aircraft_displays_cached_adsbdb_route() -> None:
     pg.mkQApp("ADS-B route display test")
     recording = FileIQSource.load(
-        Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+        Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     )
     route = FlightRoute(
         callsign="KLM1023",
@@ -296,7 +296,7 @@ def test_adsb_aircraft_displays_cached_adsbdb_route() -> None:
 
 def test_adsb_packet_list_exports_versioned_json_lines(tmp_path, monkeypatch) -> None:
     pg.mkQApp("ADS-B packet export test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     output = tmp_path / "packets.jsonl"
     monkeypatch.setattr(
         QtWidgets.QFileDialog,
@@ -321,7 +321,7 @@ def test_adsb_packet_list_exports_versioned_json_lines(tmp_path, monkeypatch) ->
 
 def test_adsb_workspace_appends_history_with_elapsed_and_os_time() -> None:
     pg.mkQApp("ADS-B continuous history test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     recording = FileIQSource.load(path)
     window = ADSB1090Window()
     try:
@@ -351,7 +351,7 @@ def test_adsb_workspace_appends_history_with_elapsed_and_os_time() -> None:
 def test_adsb_continuous_history_preserves_user_selected_packet() -> None:
     pg.mkQApp("ADS-B continuous selection test")
     recording = FileIQSource.load(
-        Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+        Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     )
     window = ADSB1090Window()
     try:
@@ -369,7 +369,7 @@ def test_adsb_continuous_history_preserves_user_selected_packet() -> None:
 
 def test_adsb_plots_share_vsa_interaction_and_ppm_soft_decisions() -> None:
     pg.mkQApp("ADS-B plot interaction test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     window = ADSB1090Window(FileIQSource.load(path))
     try:
         assert isinstance(window.power_plot.getViewBox(), FixedInteractionViewBox)
@@ -391,7 +391,7 @@ def test_adsb_plots_share_vsa_interaction_and_ppm_soft_decisions() -> None:
 
 
 def test_adsb_continuous_capture_preserves_buffer_after_first_block() -> None:
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     recording = FileIQSource.load(path)
 
     class _Source:
@@ -421,7 +421,7 @@ def test_adsb_continuous_capture_preserves_buffer_after_first_block() -> None:
 def test_adsb_stream_dsp_runs_outside_gui_thread() -> None:
     pg.mkQApp("ADS-B stream DSP thread test")
     recording = FileIQSource.load(
-        Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+        Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     )
     processor = _ADSBStreamProcessor(
         PlutoCaptureSettings(
@@ -467,7 +467,7 @@ def test_adsb_stream_dsp_runs_outside_gui_thread() -> None:
 def test_adsb_window_continuous_scan_uses_background_dsp_pipeline() -> None:
     pg.mkQApp("ADS-B background pipeline integration test")
     recording = FileIQSource.load(
-        Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+        Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     )
 
     class _Source:
@@ -522,7 +522,7 @@ def test_adsb_window_continuous_scan_uses_background_dsp_pipeline() -> None:
 
 def test_adsb_stream_detects_packets_across_internal_block_boundaries() -> None:
     pg.mkQApp("ADS-B stream overlap test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     recording = FileIQSource.load(path)
     window = ADSB1090Window()
     try:
@@ -554,7 +554,7 @@ def test_adsb_stream_detects_packets_across_internal_block_boundaries() -> None:
 def test_adsb_stream_does_not_repaint_without_a_detected_packet() -> None:
     pg.mkQApp("ADS-B quiet stream test")
     recording = FileIQSource.load(
-        Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+        Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     )
     noise = replace(
         recording,
@@ -577,7 +577,7 @@ def test_adsb_stream_does_not_repaint_without_a_detected_packet() -> None:
 def test_adsb_single_waits_for_packet_then_keeps_configured_post_time() -> None:
     pg.mkQApp("ADS-B single post-trigger test")
     recording = FileIQSource.load(
-        Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+        Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     )
     window = ADSB1090Window()
     try:
@@ -604,7 +604,7 @@ def test_adsb_single_waits_for_packet_then_keeps_configured_post_time() -> None:
 
 def test_adsb_shutdown_disconnects_packet_selection_callback() -> None:
     pg.mkQApp("ADS-B shutdown lifecycle test")
-    path = Path(__file__).parent / "fixtures" / "adsb1090_multi_8msps.npz"
+    path = Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz"
     window = ADSB1090Window(FileIQSource.load(path))
     calls: list[object] = []
     window._show_message_plot = calls.append

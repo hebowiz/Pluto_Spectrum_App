@@ -176,7 +176,7 @@ Plotは位相単位円へ正規化する。既知データがないため絶対P
 表示し、blind resultをpattern matchとして扱わない。絶対IQ EVMも誤解を避けて報告せず、
 decision-directed differential EVMを使用する。
 
-回帰fixture `tests/fixtures/bt_mHDT4_capture.iq.tar`（R&S取得、8DPSK 2 Msym/s）は、
+回帰fixture `tests/data/fixtures/bluetooth/hdt/bt_mHDT4_capture.iq.tar`（R&S取得、8DPSK 2 Msym/s）は、
 Power Trigger後の先頭約246 symbolsがFSKで、その後に約448 symbolsの8DPSKが続く。
 segment分離前はFSKにCFO推定を引かれて+16.4 kHzだったが、分離後は+9.23 kHzとなり、
 比較画像のR&S結果+8.821 kHzに近づく。選択PSK区間のdecision-directed differential

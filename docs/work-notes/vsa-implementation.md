@@ -317,7 +317,7 @@ Rohde & Schwarzの公式[iq-tar File Format Specification](https://scdn.rohde-sc
 
 #### R&S Capture Buffer振幅との比較調査（2026-08-22）
 
-`tests/fixtures/bt_2dh1_capture_2.iq.tar`（8 MS/s、4577 samples、ScalingFactor
+`tests/data/fixtures/bluetooth/br-edr/bt_2dh1_capture_2.iq.tar`（8 MS/s、4577 samples、ScalingFactor
 1 V）を用いて、R&S `Mag(Capture Buffer)`とPluto VSA `IQ Power`の差を調査した。
 XMLのR&S固有UserDataはMeasurement Bandwidth 6.4 MHz、Ref Level +20 dBm、
 mechanical attenuation 40 dBを記録している。attenuationは取得器内部の校正条件であり、
@@ -355,7 +355,7 @@ Measured Magnitude表示として扱う。
 
 安全性と誤読防止のため、tarをfilesystemへextractせず、parameter XMLの個数、`DataFilename`、regular file属性、path traversal、XML DTD/entity、binary byte数を検証する。現在のR&S/Windows出力に合わせてmulti-byte binaryはlittle-endianとして読む。公式仕様はbyte orderを明記していないため、異なるendianのproducerが必要になった場合は明示的な選択肢を追加する。
 
-手動確認用fixtureは`tests/fixtures/rs_sample_gfsk_8msps.iq.tar`。中心周波数2441 MHz、sample rate 8 MS/s、symbol rate 1 Msym/s、deviation 250 kHz、BT 0.5のdeterministic GFSKで、先頭16 symbolsは`1010...`、以降240 symbolsはPRBS9とする。`tools/generate_rs_iqtar_fixture.py`で同一内容を再生成できる。
+手動確認用fixtureは`tests/data/fixtures/general/rs_sample_gfsk_8msps.iq.tar`。中心周波数2441 MHz、sample rate 8 MS/s、symbol rate 1 Msym/s、deviation 250 kHz、BT 0.5のdeterministic GFSKで、先頭16 symbolsは`1010...`、以降240 symbolsはPRBS9とする。`tools/generate_rs_iqtar_fixture.py`で同一内容を再生成できる。
 
 Analysis BandwidthのFIR適用後は、FSKの交互patternに対して複数のsymbol timing phaseがほぼ同じ正規化相関になる場合がある。正規化相関は振幅を捨てるため、transition付近の小さなtone separationを誤って選び得る。timing recoveryでは最大相関との差が1 percentage point以内の候補を比較し、既知patternへfitしたfrequency separation（eye opening）が最大相関候補より20%以上広い場合に限り、その候補を選ぶ。小さなpulse-shape非対称では従来の最大相関時刻を維持し、channel filterでeyeが明確に閉じた場合だけsymbol centerへ補正する。
 

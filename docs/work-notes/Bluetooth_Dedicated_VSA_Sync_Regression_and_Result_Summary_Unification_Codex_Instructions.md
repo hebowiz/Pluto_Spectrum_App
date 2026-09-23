@@ -54,13 +54,13 @@ HDT / Bluetooth Classic BR/EDR / LE 1M/2M のDedicated VSAについて、Result 
 最低限、以下の実IQ fixtureでBefore/Afterを確認する。
 
 ```text
-tests/fixtures/DH1_test.npz
-tests/fixtures/bluetooth_br_prbs9_pluto_16msps.npz
-tests/fixtures/bluetooth_2dh1_prbs9_16msps.npz
-tests/fixtures/bluetooth_3dh1_prbs9_16msps.npz
-tests/fixtures/PLUTO_VSG_SMCV100B_2DH1.npz
-tests/fixtures/LE1M_FSK_error_raw.npz
-tests/fixtures/LE1M_FSK_error.npz
+tests/data/fixtures/bluetooth/br-edr/DH1_test.npz
+tests/data/fixtures/bluetooth/br-edr/bluetooth_br_prbs9_pluto_16msps.npz
+tests/data/fixtures/bluetooth/br-edr/bluetooth_2dh1_prbs9_16msps.npz
+tests/data/fixtures/bluetooth/br-edr/bluetooth_3dh1_prbs9_16msps.npz
+tests/data/fixtures/bluetooth/br-edr/PLUTO_VSG_SMCV100B_2DH1.npz
+tests/data/fixtures/bluetooth/le/LE1M_FSK_error_raw.npz
+tests/data/fixtures/bluetooth/le/LE1M_FSK_error.npz
 ```
 
 各fixtureについて以下を記録する。

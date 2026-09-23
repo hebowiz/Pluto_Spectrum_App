@@ -29,8 +29,8 @@
 
 | file | modulation | payload body | PSK symbols |
 |---|---|---:|---:|
-| `tests/fixtures/bluetooth_2dh1_prbs9_16msps.npz` | pi/4-DQPSK | 54 bytes (`0x36`) | 245 |
-| `tests/fixtures/bluetooth_3dh1_prbs9_16msps.npz` | 8DPSK | 83 bytes (`0x53`) | 245 |
+| `tests/data/fixtures/bluetooth/br-edr/bluetooth_2dh1_prbs9_16msps.npz` | pi/4-DQPSK | 54 bytes (`0x36`) | 245 |
+| `tests/data/fixtures/bluetooth/br-edr/bluetooth_3dh1_prbs9_16msps.npz` | 8DPSK | 83 bytes (`0x53`) | 245 |
 
 共通条件:
 

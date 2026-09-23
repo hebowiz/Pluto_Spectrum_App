@@ -168,7 +168,7 @@ def test_load_iq_tar_rejects_out_of_range_channel(tmp_path: Path) -> None:
 
 
 def test_committed_rs_iq_tar_sample_is_loadable() -> None:
-    path = Path(__file__).with_name("fixtures") / "rs_sample_gfsk_8msps.iq.tar"
+    path = Path(__file__).parent / "data" / "fixtures" / "general" / "rs_sample_gfsk_8msps.iq.tar"
 
     recording = FileIQSource.load(path)
 
@@ -182,7 +182,7 @@ def test_committed_rs_iq_tar_sample_is_loadable() -> None:
 
 def test_mhdt4_pattern_failure_falls_back_to_detected_data_psk_sync() -> None:
     recording = FileIQSource.load(
-        Path(__file__).with_name("fixtures") / "bt_mHDT4_capture.iq.tar"
+        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt" / "bt_mHDT4_capture.iq.tar"
     )
     session = VSASession(
         recording=recording,
@@ -284,7 +284,7 @@ def test_mhdt4_pattern_failure_falls_back_to_detected_data_psk_sync() -> None:
 
 
 def test_analysis_bandwidth_preserves_gfsk_symbol_timing() -> None:
-    path = Path(__file__).with_name("fixtures") / "rs_sample_gfsk_8msps.iq.tar"
+    path = Path(__file__).parent / "data" / "fixtures" / "general" / "rs_sample_gfsk_8msps.iq.tar"
     recording = FileIQSource.load(path)
     expected = np.concatenate(
         (np.array([1, 0] * 8, dtype=np.uint8), _prbs9_bits(240))
@@ -323,7 +323,7 @@ def test_analysis_bandwidth_preserves_gfsk_symbol_timing() -> None:
 
 
 def test_analysis_bandwidth_preserves_gfsk_phase_difference_plot() -> None:
-    path = Path(__file__).with_name("fixtures") / "rs_sample_gfsk_8msps.iq.tar"
+    path = Path(__file__).parent / "data" / "fixtures" / "general" / "rs_sample_gfsk_8msps.iq.tar"
     recording = FileIQSource.load(path)
     expected = np.concatenate(
         (np.array([1, 0] * 8, dtype=np.uint8), _prbs9_bits(240))
