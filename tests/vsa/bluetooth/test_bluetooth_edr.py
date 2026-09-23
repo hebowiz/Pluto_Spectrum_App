@@ -180,7 +180,7 @@ def test_psk_carrier_is_centered_before_matched_filter(packet_name):
     ),
 )
 def test_checked_in_edr_fixture_matches_generator(filename, packet_name):
-    path = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / filename
+    path = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "br-edr" / filename
     expected = generate_edr_dh1(
         packet_name,
         seed=21 if packet_name == "2-DH1" else 31,
@@ -197,7 +197,7 @@ def test_checked_in_edr_fixture_matches_generator(filename, packet_name):
 
 def test_high_rate_edr_iqtar_reports_three_distinct_evm_definitions():
     recording = FileIQSource.load(
-        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bt_6DH1_capture.iq.tar"
+        Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "br-edr" / "bt_6DH1_capture.iq.tar"
     )
     signal = SignalDescription(
         modulation=ModulationKind.DPSK8,

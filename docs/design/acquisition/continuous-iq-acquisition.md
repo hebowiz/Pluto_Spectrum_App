@@ -100,8 +100,8 @@ Pluto local RAMへの有限capture後に転送する方式、またはより高�
 
 ## 検証
 
-- `tests/test_continuous_acquisition.py`: 同一plan再アーム、plan変更、再設定、finite producer終了後の再始動。
-- `tests/test_vsa_pluto_source.py`: VSA Free Run/Power Trigger、block跨ぎ、再利用、キャンセル。
-- `tests/test_hsta_analysis_queue.py`: HSTAのcursor consumerと解析queue。
+- `tests/common/test_continuous_acquisition.py`: 同一plan再アーム、plan変更、再設定、finite producer終了後の再始動。
+- `tests/vsa/core/test_vsa_pluto_source.py`: VSA Free Run/Power Trigger、block跨ぎ、再利用、キャンセル。
+- `tests/rtsa/test_hsta_analysis_queue.py`: HSTAのcursor consumerと解析queue。
 
 実機では、既知数の短いパケット列を入力し、VSAの取得窓内にある完全パケット数、先頭・末尾欠け、stream overrun、受信sample総数をHSTAと比較する。

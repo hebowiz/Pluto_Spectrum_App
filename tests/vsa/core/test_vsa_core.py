@@ -294,7 +294,7 @@ def test_capture_power_marks_exact_zero_samples_invalid_for_display_range() -> N
 
 def test_rs_iq_tar_capture_power_matches_50_ohm_voltage_conversion() -> None:
     recording = FileIQSource.load(
-        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bt_2dh1_capture_2.iq.tar"
+        Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "br-edr" / "bt_2dh1_capture_2.iq.tar"
     )
     signal = SignalDescription(ModulationKind.FSK, symbol_rate_hz=1_000_000.0)
     session = VSASession(recording=recording, signal=signal)
@@ -367,7 +367,7 @@ def test_npz_file_source_round_trip_preserves_capture_metadata(tmp_path) -> None
 
 
 def test_pluto_fixture_sidecar_restores_source_plane_power() -> None:
-    path = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_br_prbs9_pluto_16msps.npz"
+    path = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_br_prbs9_pluto_16msps.npz"
     recording = FileIQSource.load(path)
     peak_dbm = float(
         np.max(

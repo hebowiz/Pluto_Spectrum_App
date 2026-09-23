@@ -482,8 +482,8 @@ diagnostic and is not used as the displayed measurement EVM.
 
 ## Tests
 
-`tests/test_vsa_persistence.py` covers versioned JSON round trips and schema
-rejection. `tests/test_vsa_ui.py` covers the editable pattern table, Config
+`tests/vsa/core/test_vsa_persistence.py` covers versioned JSON round trips and schema
+rejection. `tests/vsa/core/test_vsa_ui.py` covers the editable pattern table, Config
 control round trip, automatic Config-only startup restore, empty-session and
 corrupt-preference fallback, separate folder preferences, matched-symbol
 highlighting, PSK IQ trajectory/constellation placement, and FSK

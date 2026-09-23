@@ -191,7 +191,7 @@ def test_detected_data_qam_recovers_carrier_without_losing_amplitude() -> None:
 
 
 def test_detected_data_hdt_qam_fixture_is_not_truncated_by_psk_interval() -> None:
-    path = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt" / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    path = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "hdt" / "bluetooth_hdt7_5_prbs9_16msps.npz"
     recording = FileIQSource.load(path)
     signal = SignalDescription(
         modulation=ModulationKind.QAM16,
@@ -215,7 +215,7 @@ def test_detected_data_hdt_qam_fixture_is_not_truncated_by_psk_interval() -> Non
 
 
 def test_known_hdt_qam_pattern_uses_the_published_symbol_sample_times() -> None:
-    path = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt" / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    path = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "hdt" / "bluetooth_hdt7_5_prbs9_16msps.npz"
     recording = FileIQSource.load(path)
     signal = SignalDescription(
         modulation=ModulationKind.QAM16,
@@ -267,7 +267,7 @@ def test_known_hdt_qam_pattern_uses_the_published_symbol_sample_times() -> None:
 
 
 def test_known_hdt_qam_pattern_refines_carrier_over_the_result_range() -> None:
-    path = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt" / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    path = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "hdt" / "bluetooth_hdt7_5_prbs9_16msps.npz"
     recording = FileIQSource.load(path)
     carrier_offset_hz = 100_000.0
     sample_index = np.arange(recording.sample_count, dtype=np.float64)
@@ -338,7 +338,7 @@ def test_known_hdt_qam_pattern_refines_carrier_over_the_result_range() -> None:
 def test_known_hdt_qam_pattern_refines_fractional_symbol_timing(
     delay_samples: float,
 ) -> None:
-    path = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "hdt" / "bluetooth_hdt7_5_prbs9_16msps.npz"
+    path = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "hdt" / "bluetooth_hdt7_5_prbs9_16msps.npz"
     recording = FileIQSource.load(path)
     delayed_iq = fractional_shift(
         recording.iq.real,
@@ -1470,7 +1470,7 @@ def test_packet_snapshots_reuse_preprocessing_and_preserve_analysis(monkeypatch)
 
 
 def test_generic_pattern_session_finds_real_pluto_br_capture():
-    fixture = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_br_prbs9_pluto_16msps.npz"
+    fixture = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_br_prbs9_pluto_16msps.npz"
     with np.load(fixture, allow_pickle=False) as capture:
         recording = IQRecording(
             capture["iq"],
@@ -1516,7 +1516,7 @@ def test_generic_pattern_session_finds_real_pluto_br_capture():
 
 def test_real_pluto_fsk_fractional_timing_is_stable_across_analysis_bandwidth():
     fixture = (
-        Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr"
+        Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "br-edr"
         / "bluetooth_br_prbs9_pluto_16msps.npz"
     )
     recording = FileIQSource.load(fixture)
@@ -1563,7 +1563,7 @@ def test_real_pluto_fsk_fractional_timing_is_stable_across_analysis_bandwidth():
 
 
 def test_le1m_phase_discontinuity_does_not_reverse_symbol_frequency():
-    fixture = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "le" / "LE1M_FSK_error.npz"
+    fixture = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "le" / "LE1M_FSK_error.npz"
     recording = FileIQSource.load(fixture)
     access = np.asarray(
         [
@@ -1594,7 +1594,7 @@ def test_le1m_phase_discontinuity_does_not_reverse_symbol_frequency():
 
 
 def test_real_pluto_cfo_stays_anchored_to_known_pattern():
-    fixture = Path(__file__).parent / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_br_prbs9_pluto_16msps.npz"
+    fixture = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "bluetooth" / "br-edr" / "bluetooth_br_prbs9_pluto_16msps.npz"
     recording = FileIQSource.load(fixture)
     access = access_code_bits(0xC6967E)
     session = VSASession(

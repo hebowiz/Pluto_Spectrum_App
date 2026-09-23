@@ -25,7 +25,7 @@ and resizable, but Qt no longer continuously animates their layout transitions.
 
 ### Verification
 
-`tests/test_vsa_ui.py` verifies the common plot policy and disabled dock
+`tests/vsa/core/test_vsa_ui.py` verifies the common plot policy and disabled dock
 animation. Real Windows drag smoothness still requires visual verification on
 the target PC because the offscreen Qt test backend cannot exercise the desktop
 compositor.
@@ -63,6 +63,6 @@ the visible trace without rendering the complete oversampled waveform.
 
 ### Verification
 
-`tests/test_vsa_ui.py` verifies that more than 2,000 symbol points are retained,
+`tests/vsa/core/test_vsa_ui.py` verifies that more than 2,000 symbol points are retained,
 required time-plot coordinates survive peak decimation, and both waveform
 samples bracketing each required symbol time survive IQ-trajectory decimation.

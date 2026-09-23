@@ -163,10 +163,10 @@ python -m pytest -q
 - `pluto_rtsa/sdr/pluto_receiver.py`: SDRの単一所有者、連続Producer、同期取得、epoch発行
 - `pluto_rtsa/ui/main_window.py`: RealTime latest consumer、HighSpeed TA loss-aware consumer
 - `pluto_rtsa/modes/sweep_controller.py`: Sweep同期IQBlock consumer
-- `tests/test_iq_stream.py`: 純粋ストリームテスト
-- `tests/test_iq_window.py`: window分割、tail carry、不連続テスト
-- `tests/test_pluto_receiver_stream.py`: Fake Pluto統合テスト
-- `tests/test_hsta_analysis_queue.py`: HighSpeed TA FIFO backpressureとstale result分離
+- `tests/common/test_iq_stream.py`: 純粋ストリームテスト
+- `tests/common/test_iq_window.py`: window分割、tail carry、不連続テスト
+- `tests/common/test_pluto_receiver_stream.py`: Fake Pluto統合テスト
+- `tests/rtsa/test_hsta_analysis_queue.py`: HighSpeed TA FIFO backpressureとstale result分離
 
 ### 現時点で保証できること
 

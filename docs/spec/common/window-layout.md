@@ -71,7 +71,7 @@ VSAの取得・解析、VSGの準備・送信を停止してから終了する�
 
 ## 検証
 
-`tests/test_window_layout.py`で以下を確認する。
+`tests/common/test_window_layout.py`で以下を確認する。
 
 - 3アプリのgeometry保存・復元、表示後の960×640への縮小。
 - 不正なgeometry設定からの起動。

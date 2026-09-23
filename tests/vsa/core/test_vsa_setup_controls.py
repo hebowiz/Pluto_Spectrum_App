@@ -229,7 +229,7 @@ def test_dect_burst_search_disabled_is_identical_and_threshold_is_applied():
 
 
 def test_adsb_burst_search_uses_calibrated_capture_coordinates():
-    recording = FileIQSource.load(Path(__file__).parent / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz")
+    recording = FileIQSource.load(Path(__file__).resolve().parents[2] / "data" / "fixtures" / "adsb" / "adsb1090_multi_8msps.npz")
     baseline = ADSB1090Analyzer().analyze(recording, ADSB1090Settings(minimum_preamble_snr_db=5))
     peak = 20 * np.log10(np.max(np.abs(recording.iq)) / recording.full_scale) + recording.dbfs_to_dbm_offset_db
     gated = ADSB1090Analyzer().analyze(recording, ADSB1090Settings(

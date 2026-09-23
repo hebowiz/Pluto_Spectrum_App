@@ -380,7 +380,7 @@ Plutoのacquisition I/Q Power Triggerは別途実装済みであり、本機能�
 VSA unit test:
 
 ```powershell
-python -m pytest tests/test_vsa_core.py -q
+python -m pytest tests/vsa/core/test_vsa_core.py -q
 ```
 
 検証済み項目:
