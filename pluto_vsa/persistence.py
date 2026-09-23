@@ -11,7 +11,7 @@ PATTERN_SCHEMA = "pluto-vsa-pattern"
 CONFIG_SCHEMA = "pluto-vsa-meas-config"
 FORMAT_VERSION = 1
 MODE_CONFIG_FORMAT_VERSION = 2
-ANALYSIS_MODES = frozenset({"generic", "bluetooth", "dect", "adsb1090"})
+ANALYSIS_MODES = frozenset({"generic", "bluetooth", "dect", "wifi", "adsb1090"})
 PATTERN_FORMATS = ("Binary", "Decimal", "Hexadecimal")
 
 

@@ -42,6 +42,17 @@ def packet_settings_tabs(
     return tabs
 
 
+def packet_field_sections(
+    sections: Iterable[tuple[str, Iterable[tuple[str, QtWidgets.QWidget]]]],
+) -> QtWidgets.QToolBox:
+    """Protocol-specific field groups inside the common Fields tab."""
+    toolbox = QtWidgets.QToolBox()
+    for title, rows in sections:
+        toolbox.addItem(scroll_form(rows), title)
+    toolbox.setMinimumHeight(330)
+    return toolbox
+
+
 class SymbolTimeControl(QtWidgets.QWidget):
     """Keep a symbol-domain editor and its time equivalent side by side."""
 

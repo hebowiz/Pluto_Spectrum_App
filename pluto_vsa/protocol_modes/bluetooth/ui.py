@@ -463,6 +463,9 @@ class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
         self.open_config_action.triggered.connect(self._show_meas_config)
 
         menu = self.menuBar().addMenu("Analysis Mode")
+        menu.addAction("Wi-Fi Dedicated Analyzer...").triggered.connect(
+            lambda: self.analysis_mode_requested.emit("wifi")
+        )
         generic = menu.addAction("General FSK / PSK VSA...")
         generic.triggered.connect(lambda: self.analysis_mode_requested.emit("generic"))
         current = menu.addAction("Bluetooth Dedicated Analyzer")

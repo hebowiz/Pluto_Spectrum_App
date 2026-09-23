@@ -295,6 +295,9 @@ class DectAnalyzerWindow(QtWidgets.QMainWindow):
         self.open_config_action.triggered.connect(self._show_config)
 
         mode_menu = self.menuBar().addMenu("Analysis Mode")
+        mode_menu.addAction("Wi-Fi Dedicated Analyzer...").triggered.connect(
+            lambda: self.analysis_mode_requested.emit("wifi")
+        )
         mode_menu.addAction("General FSK / PSK VSA...").triggered.connect(
             lambda: self.analysis_mode_requested.emit("generic")
         )

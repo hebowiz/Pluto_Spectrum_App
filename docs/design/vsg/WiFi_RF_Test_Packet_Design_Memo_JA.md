@@ -1,5 +1,9 @@
 # Wi-Fi RF パケット／変調波形設計メモ
 
+現行のNon-HT生成・IQ Verify・FCS・UI・ERP周期の要件は [Wi-Fi Non-HT仕様](../../spec/vsg/wifi-non-ht.md)、
+IEEE照合と実装結果は [検証記録](../../verification/vsg/wifi-non-ht-review.md) を参照してください。
+以下はHT / DSSS-CCKを含む設計案です。全方式の実装済み一覧には使いません。
+
 対象: **IEEE 802.11 Non-HT OFDM (802.11a / 802.11g) / DSSS・CCK (802.11b) / HT-Mixed (802.11n)**  
 作成日: 2026-08-29  
 目的: Pluto VSG で Wi-Fi として成立する複素 IQ 波形を生成し、実機 Wi-Fi 受信機・Wireshark・将来の Pluto VSA / Validator で検証できるようにするための実装メモ。  

@@ -2,11 +2,15 @@
 
 文書版: 1.0 レビュー版（2026-09-23）
 
-対象: General VSA / Bluetooth / DECT / ADS-B 1090ES
+対象: General VSA / Bluetooth / DECT / Wi-Fi / ADS-B 1090ES
 
 アプリ仕様の確認基準: `b43f7e6`
 
 ## 1. 本資料の範囲
+
+Wi-Fi追補: Non-HTのSTF検出、LTF同期、CFO、channel等化、pilot補正、独立復号とEVMの定義は
+[Wi-Fi現行仕様](../spec/vsa/wifi/non-ht-analyzer.md)と[方式・検証報告](../verification/vsa/wifi/non-ht-review.md)を参照してください。
+Wi-Fiでは時間IQをPSK軌跡として扱わず、FFT後のsubcarrierを測定します。
 
 本資料は現在の実装がIQから何を計算し、画面へどう出すかを説明します。操作は[VSAユーザーマニュアル](Pluto_VSA_User_Manual_JA.md)を参照してください。規格原文の代替や、全測定項目の適合認証を宣言する資料ではありません。規格に対応する計算処理と、実際に判定できる入力条件を分けて記述します。
 

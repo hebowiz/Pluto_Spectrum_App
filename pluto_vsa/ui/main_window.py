@@ -895,6 +895,9 @@ class VSAWindow(QtWidgets.QMainWindow):
         self.meas_config_menu.addAction(save_config_action)
 
         mode_menu = self.menuBar().addMenu("Analysis Mode")
+        mode_menu.addAction("Wi-Fi Dedicated Analyzer...").triggered.connect(
+            lambda: self.analysis_mode_requested.emit("wifi")
+        )
         generic_action = mode_menu.addAction("General FSK / PSK VSA")
         generic_action.setCheckable(True)
         generic_action.setChecked(True)

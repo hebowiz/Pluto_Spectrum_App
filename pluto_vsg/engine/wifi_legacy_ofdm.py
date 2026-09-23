@@ -155,7 +155,7 @@ def _encode_symbol(input_bits: np.ndarray, rate: LegacyRate) -> np.ndarray:
 class WiFiLegacyOFDMWaveformEngine:
     """Generate a standards-structured Non-HT OFDM PPDU and packet schedule."""
 
-    def generate(self, project: WaveformProject) -> GenerationResult:
+    def generate(self, project: WaveformProject, *, diagnostics: bool = False) -> GenerationResult:
         issues = validate_project(project)
         if issues:
             raise ValueError("Invalid waveform project: " + "; ".join(f"{i.path}: {i.message}" for i in issues))
@@ -207,8 +207,9 @@ class WiFiLegacyOFDMWaveformEngine:
             ppdu = ppdu / peak
         samples_per_ofdm = 80 * oversample
         period_count = round(float(settings.packet_period_us) * 1e-6 * expected_sample_rate)
-        if period_count < ppdu.size:
-            raise ValueError(f"Packet period is shorter than PPDU duration ({ppdu.size / expected_sample_rate * 1e6:.1f} us)")
+        extension_count = round(6e-6 * expected_sample_rate)
+        if period_count < ppdu.size + extension_count:
+            raise ValueError(f"ERP packet period must be at least PPDU + 6 us ({ppdu.size / expected_sample_rate * 1e6 + 6:.1f} us)")
         single = np.pad(ppdu, (0, period_count - ppdu.size))
         iq = np.tile(single, int(project.repeat_count)).astype(np.complex64)
         field_sizes = (("L-STF", 160 * oversample), ("L-LTF", 160 * oversample), ("L-SIG", 80 * oversample), ("DATA", 80 * oversample * n_sym))
@@ -246,12 +247,19 @@ class WiFiLegacyOFDMWaveformEngine:
                 "n_bpsc": rate.n_bpsc, "n_cbps": rate.n_cbps, "n_dbps": rate.n_dbps,
                 "coding_rate": rate.coding_rate, "modulation": rate.modulation,
                 "n_sym": n_sym, "n_pad": n_pad, "l_sig_bits": l_sig_bits,
-                "scrambled_data_bits": scrambled, "interleaved_bits_per_symbol": tuple(interleaved_symbols),
+                **({"uncoded_data_bits": data_bits, "scrambled_data_bits": scrambled,
+                    "bcc_bits": bcc_encode(scrambled), "punctured_bits": coded,
+                    "interleaved_bits_per_symbol": tuple(interleaved_symbols)} if diagnostics else {}),
                 "sample_ranges": sample_ranges, "packet_ranges_samples": tuple(packet_ranges),
                 "active_ranges_samples": tuple(packet_ranges),
                 "packet_sample_count": ppdu.size, "period_sample_count": period_count,
                 "period_symbols": period_count / samples_per_ofdm, "samples_per_symbol": samples_per_ofdm,
                 "symbol_rate_hz": 250_000.0, "ppdu_duration_us": ppdu.size / expected_sample_rate * 1e6,
+                "signal_extension_us": 6.0,
+                "minimum_packet_period_us": ppdu.size / expected_sample_rate * 1e6 + 6.0,
+                "configured_packet_period_us": settings.packet_period_us,
+                "beacon_timestamp_mode": "Static", "sequence_number_mode": "Static",
+                "symbol_boundary_processing": "Rectangular CP; no optional overlap window",
                 **iq_level_metadata(level_metrics),
             },
         )

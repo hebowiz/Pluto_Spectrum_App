@@ -66,6 +66,18 @@ def bluetooth_tree_item(field, *, stream="Packet", bit_offset=0):
     return item
 
 
+def wifi_tree_item(field):
+    """Bit ranges describe separate logical streams, never IQ sample spans."""
+    stream = ("L-SIG logical" if field.field_id.startswith("wifi.lsig") else
+              "DATA logical" if field.field_id.startswith("wifi.data") else
+              "PHY" if field.field_id.startswith("wifi.phy") else "PSDU logical")
+    item = bluetooth_tree_item(field, stream=stream)
+    item.takeChildren()
+    for child in field.children:
+        item.addChild(wifi_tree_item(child))
+    return item
+
+
 def dect_tree_item(field, bits, p0_internal_bit=0):
     stop = min(field.stop_bit, bits.size)
     value = "" if field.value is None else str(field.value)
@@ -119,6 +131,8 @@ class PacketDecodeTabs(QtWidgets.QTabWidget):
         for field in packet.root_fields:
             if dect:
                 item = dect_tree_item(field, packet.raw_bits if dect_bits is None else dect_bits, p0_internal_bit)
+            elif packet.protocol_id.startswith("wifi."):
+                item = wifi_tree_item(field)
             else:
                 stream = {"training": "Training symbols", "control_header": "Control Header", "payload": "PDU+Payload"}.get(field.field_id, "Packet") if packet.protocol_id == "bluetooth.hdt" else "Packet"
                 bit_offset = field.start_bit if packet.protocol_id == "bluetooth.hdt" and field.field_id == "payload" else 0

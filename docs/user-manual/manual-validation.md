@@ -4,7 +4,13 @@
 
 対象: RTSA・VSA・VSGユーザーマニュアルとVSA解析補足のMarkdownレビュー版
 
+Wi-Fi Non-HT改訂ではVSGのRF / Timing・Fields画像を現在のdialogへ差し替え、生成Beacon IQを独立復調したVerify画面を追加しました。他の画像の条件は以下の記録を維持します。Wi-Fi画像も実RF送信・外部receiver受信の証拠ではありません。
+
 ## 1. 図版の入力と再現条件
+
+Wi-Fi VSAの追加画像は24/54 Mbps・40 MS/sの生成Beacon 2個に、35 kHz CFO、初期位相、短いmultipath、AWGNを合成したものです。
+`tools.generate_user_manual_screenshots._capture_wifi`で現在のUIへ投入し撮影しました。PSDU/FCSは両packetとも復元されています。
+実Pluto受信ではなく、powerは未校正の合成入力です。Frontendの設定欄は次回取得用で、画像中の生成IQの取得条件とは区別します。
 
 画像は現在のQtウィジェットを実際に起動して撮影しています。測定値や波形を画像へ書き足していません。全体画面の赤枠と番号だけを操作説明用に重ねています。
 

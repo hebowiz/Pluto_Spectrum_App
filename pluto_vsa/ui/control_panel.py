@@ -260,6 +260,7 @@ class VSAControlPanel(QtWidgets.QFrame):
             ("General VSA", "generic"),
             ("Bluetooth", "bluetooth"),
             ("DECT", "dect"),
+            ("Wi-Fi", "wifi"),
             ("ADS-B 1090ES", "adsb1090"),
         )
         for label, mode_id in modes:

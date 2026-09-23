@@ -23,7 +23,7 @@ Pluto VSGはBluetooth BR/EDR、LE、HDT、Wi-Fi、DECTのpacketからIQ波形を
 | 3 Inspector | 規格、sample rate、payload、periodなど生成条件。下の編集ボタンから設定へ進める |
 | 4 Generated IQ Preview | I/Q、電力包絡、瞬時周波数、Spectrum、Constellation |
 | 5 右操作パネル | Calibration/RF、Mod、Continuous、Power、Frequency、Packet Settings、Project、File、Device |
-| Packet Decode | Verify PacketのDecode / Payload Hex / Issues。生成bit列を検証した結果 |
+| Packet Decode | Verify PacketのDecode / Payload Hex / Issues。Wi-Fiは生成IQを復調、それ以外は生成bit列を解析 |
 
 位置・サイズを再起動後も復元し、最小サイズは960×640です。5つのDockを移動・別窓化できます。内部配置・分割比率・選択タブは再起動時に初期化します。リサイズでは再均等化しません。
 
@@ -43,7 +43,7 @@ Pluto VSGはBluetooth BR/EDR、LE、HDT、Wi-Fi、DECTのpacketからIQ波形を
 
 ![図3 Bluetooth BR/EDRのFields。HeaderとPayload Headerは別の領域](../images/user-manual/pluto-vsg-classic-settings-1.png)
 
-Verify Packetは生成bit列をdecodeします。アナログRF出力品質、受信同期、EVMを検証する操作ではありません。変調品質を評価する場合はExportしたIQをVSAで解析するか、実機で送受信して測定します。
+Verify PacketはBluetooth / DECTでは生成bit列をdecodeし、Wi-Fi Non-HTでは生成済みIQの最初のpacketを独立復調してL-SIG・PSDU・FCSを検証します。アナログRF出力品質や実機相互接続を検証する操作ではありません。変調品質を評価する場合はExportしたIQをVSAで解析するか、実機で送受信して測定します。
 
 ### 3.2 VSAとのファイル連携
 
@@ -197,7 +197,9 @@ HDTのpayload長・Samples/Symbol・ramp・periodは第5章と同じ考え方で
 
 現行版は20 MHzのNon-HT OFDMです。HT/VHT/HE等の波形生成として使用しないでください。
 
-![図6 Wi-FiのFields。PSDUとBeacon用情報をsourceに応じて使い分ける](../images/user-manual/pluto-vsg-wifi-settings-1.png)
+![Wi-FiのRF / Timing。PPDU長・6 usの無送信時間・周期を確認する](../images/user-manual/pluto-vsg-wifi-settings-0.png)
+
+![図6 Wi-FiのFields。グループを切り替えてBeaconの固定値とIEを編集する](../images/user-manual/pluto-vsg-wifi-settings-1.png)
 
 | 項目 | 個別説明 |
 |---|---|
@@ -206,20 +208,44 @@ HDTのpayload長・Samples/Symbol・ramp・periodは第5章と同じ考え方で
 | Data Rate / Modulation | 6/9/12/18/24/36/48/54 Mbps。変調・符号化率が連動 |
 | Sample Rate | 20 MS/sまたは2倍oversamplingの40 MS/s |
 | Pattern / PRBS Length [byte] | Pattern/PRBS sourceのPSDU長 |
-| Packet Period | packet繰返し間隔。生成されるpacket時間以上に設定 |
-| Ramp | Wi-Fi生成経路のramp条件の確認表示 |
-| Calculated PHY values | OFDM symbol数等の計算結果 |
+| Channel / Frequency Offset | Channel 1〜13と、その中心からのRF周波数offset。Generated RF Frequencyで合計値を確認 |
+| Packet Period | L-STF開始間隔。active PPDU長 + ERP Signal Extension 6 µs以上が必要 |
+| Repeat Count | 同じIQ packetと無送信時間を繰り返す回数 |
+| Envelope | 共通rampは無効。OFDM内部はCP付きsymbolの連結。任意のoverlap windowは未適用 |
+| Derived timing | PSDU長、modulation/coding、N_BPSC/N_CBPS/N_DBPS、N_SYM/N_PAD、PPDU Duration、Duty Cycle、Signal Extension、Minimum/Configured Packet Period |
 | Project Name | 識別名 |
 | Scrambler Seed | Auto / Fixed。scrambler初期状態の決定方法 |
 | Fixed Seed | Fixed選択時の初期値 |
 | Frame Source | Raw PSDU / Pattern / PRBS-9 / Beacon |
-| Raw PSDU [hex] | 任意PSDU byte列。入力がPHY全体のIQではない点に注意 |
+| Raw input meaning | including FCSは入力byteを保持。without FCSはMAC frameの末尾へAuto / Manual FCSを付加 |
+| Raw bytes [hex] | 選択した意味に従うoctet列。PHY preambleやL-SIGを含むIQではない |
 | Pattern [hex] | PSDUを作る繰返しbyte pattern |
 | SSID | Beaconのネットワーク名 |
 | BSSID | Beaconの識別アドレス |
-| Sequence Number | MAC sequence番号 |
-| Beacon Interval | Beaconに記録するinterval値。送信packet periodとは区別 |
-| FCS | FCS付加の選択 |
+| Frame Control / Duration / ID | MAC headerの16-bit値。DefaultはBeacon / Duration 0 |
+| Destination / Source | 宛先はDefault broadcast。Source空欄はBSSIDと同じ |
+| Sequence / Fragment Number | 12-bit sequenceと4-bit fragment。cyclic replay中のsequenceはstatic |
+| Timestamp | 64-bit µs値。staticであり繰り返しごとには更新しない |
+| Beacon Interval | Beaconが通知するTU値。1 TU=1024 µs。RFタブのUse Beacon intervalボタンで周期へコピー |
+| Capability Information | Default 0x0401：ESS、short slot、open。手動編集時はIEや運用条件との整合を確認 |
+| Supported Rates | 500 kbit/s単位のoctetをhex入力。MSBはbasic rate。1〜8 octet |
+| DS Parameter Set | AutoはRF Channelに追従。ManualではIEに通知するChannelを別指定 |
+| TIM body | DTIM count / period、bitmap control、partial virtual bitmapをhex入力 |
+| ERP Information | ERP IEの1 octet値。Default 0 |
+| FCS mode / Manual FCS | AutoはCRC-32を計算。Manualは送信順4 octet。Raw including FCSには二重付加しない |
+
+FieldsはSource / payload、Beacon MAC header、Beacon fixed fields / IEs、FCSのグループを切り替えます。
+L-SIG LENGTH・parityは最終PSDUからAuto生成します。Pattern / PRBS-9は指定長の合成PSDUであり、MAC headerやFCSを自動追加しません。
+
+Beaconの操作例：New Wi-Fi PacketでChannel 6 / 6 Mbps / SSID `Pluto_Test_AP`を生成し、
+Verify PacketでL-SIG Parity Valid、PSDU Complete、FCS Validを確認します。
+SSID・BSSID・DS Channel・Beacon IntervalはDecode treeで確認できます。エラーはIssuesへ表示します。
+画面上のbit範囲は論理packetの位置であり、SSID等がIQ上の連続時間区間に対応する意味ではありません。
+
+![Wi-Fi Beaconの生成IQから復調したVerify結果。実RF送信は行っていない](../images/user-manual/pluto-vsg-wifi-verify.png)
+
+DefaultのBeacon Intervalは100 TU、Packet Periodは102.4 msです。Timestamp / Sequenceはstaticであり、
+通常APのassociation、ACK、CSMA/CA動作は行いません。実receiverでの確認は [実機手順](../verification/vsg/wifi-non-ht-hardware.md) に従って別途実施します。
 
 ## 10. DECTの個別設定
 
@@ -306,7 +332,7 @@ TX RF Bandwidthはsample rateを元にハードウェア範囲内へ設定され
 | 右クリック Reset | そのプロットを波形に基づく既定範囲へ戻す |
 | Packet Settings | 現規格のRF / TimingとFieldsを編集 |
 | Received Packet Fields | VSA等から受け取ったpacket field情報を確認する経路 |
-| Verify Packet | 生成bit列の構造・検査情報をdecode。IQ復調ではない |
+| Verify Packet | Wi-Fiは生成IQからL-SIG・PSDU・FCSを検証。Bluetooth / DECTは生成bit列をdecode |
 | Project > New | 規格を選んで新しいprojectを作成 |
 | Project > Open | `.pvsg.json`を読込 |
 | Project > Save | 保存先を選んでprojectを保存。既存projectでも保存先を確認 |

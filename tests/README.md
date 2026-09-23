@@ -4,7 +4,7 @@
 - `rtsa/`: RTSA、Sweep、HSTA、スペクトラム処理。
 - `calibration/`: 校正。
 - `vsa/core/`: General VSA、パターン、表示、保存、セッション、UI。
-- `vsa/bluetooth/`、`vsa/dect/`、`vsa/adsb/`: 各プロトコルの解析・専用VSA。
+- `vsa/bluetooth/`、`vsa/dect/`、`vsa/wifi/`、`vsa/adsb/`: 各プロトコルの解析・専用VSA。
 - `vsg/`: 波形生成、パケット構成、送信、VSG UI。
 - [data/](data/README.md): IQ fixture、設定・出力・プロジェクト保存例。
 

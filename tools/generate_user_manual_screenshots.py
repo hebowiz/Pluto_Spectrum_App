@@ -323,12 +323,67 @@ def _capture_vsg(app: QtWidgets.QApplication, settings_path: str) -> None:
         dialog.show()
         for index in range(dialog.tabs.count()):
             dialog.tabs.setCurrentIndex(index)
+            if name == "wifi" and index == 1:
+                dialog.field_pages.setCurrentIndex(2)
             _settle(app)
             _save_annotated(dialog, f"pluto-vsg-{name}-settings-{index}.png", [])
             _inventory(f"vsg/{name}/{dialog.tabs.tabText(index)}", dialog.tabs.widget(index))
         dialog.close()
+    window.project = wifi_project()
+    window._refresh_project_view()
+    window.generate_waveform()
+    window._verify_packet()
+    window.resize(1800, 1150)
+    window.workspace.resizeDocks([window.packet_decode_dock], [850], QtCore.Qt.Orientation.Horizontal)
+    window.workspace.resizeDocks([window.inspector_dock, window.packet_decode_dock], [180, 750], QtCore.Qt.Orientation.Vertical)
+    tree = window.packet_decode.decode_tree
+    tree.expandToDepth(4)
+    tree.topLevelItem(1).child(0).setExpanded(False)  # Show PHY, Beacon IEs and FCS together.
+    _settle(app)
+    _save_annotated(window, "pluto-vsg-wifi-verify.png", [])
     window.close()
     window.deleteLater()
+
+
+def _capture_wifi(app: QtWidgets.QApplication, settings_path: str) -> None:
+    """Synthetic RF impairments: documentation examples, not hardware evidence."""
+    from pluto_vsg.engine.wifi_legacy_ofdm import WiFiLegacyOFDMWaveformEngine
+    from pluto_vsg.model import WiFiSettings
+    from pluto_vsg.profiles.wifi import wifi_project
+    from pluto_vsa.model import IQRecording
+    import numpy as np
+    source = _OfflinePlutoSource()
+    window = PlutoAnalysisWindow(pluto_source=source, preferences=QtCore.QSettings(settings_path,QtCore.QSettings.Format.IniFormat))
+    try:
+        window.resize(1800,1050)
+        window.show()
+        window.set_analysis_mode("wifi")
+        workspace = window.wifi_workspace
+        engine = WiFiLegacyOFDMWaveformEngine()
+        first = engine.generate(wifi_project(WiFiSettings(legacy_rate_mbps=24,packet_period_us=400)))
+        second = engine.generate(wifi_project(WiFiSettings(legacy_rate_mbps=54,packet_period_us=400)))
+        x = np.r_[np.zeros(1000),first.iq,second.iq,np.zeros(1000)]
+        x = np.convolve(x,[1,0,.12+.08j])[:len(x)]
+        x = .1*x*np.exp(1j*(.4+2*np.pi*35000*np.arange(len(x))/40e6))
+        rng = np.random.default_rng(81)
+        x += .00025*(rng.normal(size=len(x))+1j*rng.normal(size=len(x)))
+        workspace.analyze_recording(IQRecording(x,40e6,2437e6,source="synthetic Wi-Fi manual example"))
+        assert workspace._result.counts["fcs_valid"] == 2
+        workspace.packet_table.selectRow(1)
+        workspace.modulation_tabs.setCurrentIndex(1)
+        workspace.symbol_tabs.setCurrentIndex(1)
+        _settle(app)
+        _save_annotated(window,"pluto-vsa-wifi-overview.png",[])
+        dialog = workspace._meas_config_dialog
+        dialog.resize(900,850)
+        dialog.show_page(dialog.page_names.index("Input / Frontend"))
+        dialog.show()
+        _settle(app)
+        _save_annotated(dialog,"pluto-vsa-wifi-frontend.png",[])
+        dialog.close()
+    finally:
+        window.close()
+        window.deleteLater()
 
 
 def main() -> int:
@@ -343,6 +398,7 @@ def main() -> int:
         _capture_rtsa(app, str(Path(temp_dir) / "rtsa.ini"))
         _capture_vsa(app, str(Path(temp_dir) / "vsa.ini"))
         _capture_vsg(app, str(Path(temp_dir) / "vsg.ini"))
+        _capture_wifi(app, str(Path(temp_dir) / "wifi.ini"))
     inventory_path = ROOT / "tmp/manual-ui-inventory.json"
     inventory_path.parent.mkdir(parents=True, exist_ok=True)
     inventory_path.write_text(json.dumps(INVENTORY, ensure_ascii=False, indent=2), encoding="utf-8")

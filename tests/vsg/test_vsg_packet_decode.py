@@ -97,14 +97,20 @@ def test_vsg_layout_fonts_and_control_names():
         window.close()
 
 
-def test_vsg_unsupported_packet_decode_is_disabled():
-    pg.mkQApp("VSG unsupported Packet Decode")
+def test_vsg_wifi_packet_decode_uses_iq_and_shared_tabs():
+    pg.mkQApp("VSG Wi-Fi Packet Decode")
     window = PlutoVSGWindow(wifi_project())
     try:
-        assert not window.verify_packet_button.isEnabled()
-        assert "not available" in window.verify_packet_button.toolTip()
+        assert window.verify_packet_button.isEnabled()
+        assert "generated IQ" in window.verify_packet_button.toolTip()
+        assert window.result.packet_bits is None
+        window.verify_packet_button.click()
+        assert window._verified_packet.protocol_id == "wifi.non_ht"
+        assert window._verified_packet.integrity.crc_valid is True
+        assert window.packet_decode.payload_text.toPlainText() != "Payload field was not decoded"
+        assert "IQ demodulation" in window.statusBar().currentMessage()
         window._verify_packet()
-        assert window.packet_decode.decode_tree.topLevelItemCount() == 0
+        assert window.packet_decode.decode_tree.topLevelItemCount() == 2
     finally:
         window.close()
 

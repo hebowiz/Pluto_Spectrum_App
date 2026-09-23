@@ -33,6 +33,13 @@
 | Signal Description | [PNG](../images/user-manual/pluto-vsa-general-signal-description.png) |
 | Trigger | [PNG](../images/user-manual/pluto-vsa-general-trigger.png) |
 
+## Wi-Fi VSA
+
+| Screen | Image |
+| --- | --- |
+| Overview | [PNG](../images/user-manual/pluto-vsa-wifi-overview.png) |
+| Input / Frontend | [PNG](../images/user-manual/pluto-vsa-wifi-frontend.png) |
+
 ## Bluetooth VSA
 
 | Screen | Image |
@@ -80,3 +87,4 @@
 | Overview | [PNG](../images/user-manual/pluto-vsg-overview.png) |
 | Wi-Fi / RF / Timing | [PNG](../images/user-manual/pluto-vsg-wifi-settings-0.png) |
 | Wi-Fi / Fields | [PNG](../images/user-manual/pluto-vsg-wifi-settings-1.png) |
+| Wi-Fi / IQ Verify | [PNG](../images/user-manual/pluto-vsg-wifi-verify.png) |

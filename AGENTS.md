@@ -16,6 +16,9 @@
 - Do not treat work-notes or archive documents as the current specification.
 - Do not modify external reference material; record project interpretations in `docs/`.
 - When implementation behavior intentionally changes, update the relevant current specification.
+- Edit user manuals only when the user explicitly requests manual work for the current task. Feature changes, bug fixes, and general documentation maintenance do not implicitly authorize manual updates; earlier manual requests are not standing authorization for later tasks.
+- This manual rule covers `docs/user-manual/` (including the VSA analysis supplement and manual indexes/validation notes), `docs/images/user-manual/`, and generated manual PDFs. Do not regenerate manual screenshots or PDFs as a side effect of implementation work.
+- Continue maintaining relevant specifications and verification records under their existing rules. If implementation changes leave manuals out of date, briefly note the pending manual update in the handoff without editing manual files or blocking implementation.
 - Keep permanent design decisions out of temporary Codex instruction files.
 - Read only documentation relevant to the task, not the entire document tree.
 - Follow the directory-specific rules in `references/AGENTS.md`, `docs/AGENTS.md`, and `tests/AGENTS.md`.

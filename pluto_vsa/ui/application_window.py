@@ -17,6 +17,7 @@ from pluto_vsa.pluto_source import PlutoLiveSource
 from pluto_vsa.session import VSASession
 from pluto_vsa.protocol_modes.bluetooth import BluetoothAnalyzerWindow
 from pluto_vsa.protocol_modes.dect import DectAnalyzerWindow
+from pluto_vsa.protocol_modes.wifi.ui import WiFiAnalyzerWindow
 from pluto_vsa.persistence import load_mode_meas_config, save_mode_meas_config
 from pluto_vsa.ui.control_panel import (
     PanelCommand,
@@ -67,10 +68,12 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             pluto_source=self._pluto_source,
             preferences=self._preferences,
         )
+        self.wifi_workspace = WiFiAnalyzerWindow(pluto_source=self._pluto_source, preferences=self._preferences)
         for workspace in (
             self.generic_workspace,
             self.bluetooth_workspace,
             self.dect_workspace,
+            self.wifi_workspace,
             self.adsb1090_workspace,
         ):
             workspace.setWindowFlags(QtCore.Qt.WindowType.Widget)
@@ -178,7 +181,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
                 command("Reset", lambda: self._reset_workspace("bluetooth", workspace), workspace.clear_measurement_history_action),
                 files,
             )
-        if mode == "dect":
+        if mode in {"dect", "wifi"}:
             setup = tuple(
                 command(label, lambda page=page: workspace.open_config_page(page))
                 for label, page in (
@@ -192,16 +195,17 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             files = (
                 command("Import IQ", workspace._open_iq, workspace.open_iq_action),
                 command("Export IQ", workspace._export_iq_recording, workspace.export_iq_action),
-                command("Export VSG Project", workspace._export_vsg_project, workspace.export_vsg_action),
             )
+            if mode == "dect":
+                files += (command("Export VSG Project", workspace._export_vsg_project, workspace.export_vsg_action),)
             return WorkspacePanelSpec(
                 mode,
-                "DECT",
+                "Wi-Fi" if mode == "wifi" else "DECT",
                 setup,
                 command("Single", workspace._toggle_capture, workspace.run_action),
                 command("Continuous", workspace._toggle_continuous_capture, workspace.run_continuous_action),
                 command("Refresh Analysis", workspace.refresh, workspace.refresh_analysis_action),
-                command("Reset", lambda: self._reset_workspace("dect", workspace), workspace.clear_measurement_history_action),
+                command("Reset", lambda: self._reset_workspace(mode, workspace), workspace.clear_measurement_history_action),
                 files,
             )
         setup = (
@@ -239,6 +243,9 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
     def _reset_workspace(self, mode: str, workspace) -> None:
         """Clear all acquired products while retaining mode settings/device."""
         if self._busy_reason() is not None:
+            return
+        if mode == "wifi":
+            workspace.reset()
             return
         if mode == "generic":
             workspace._reset_all_packet_statistics()
@@ -303,7 +310,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         dect = self.dect_workspace.shutdown_busy_reason()
         if dect is not None:
             return dect
-        return None
+        return self.wifi_workspace.shutdown_busy_reason()
 
     @QtCore.Slot(str)
     def set_analysis_mode(self, mode: str) -> None:
@@ -311,6 +318,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             "generic": self.generic_workspace,
             "bluetooth": self.bluetooth_workspace,
             "dect": self.dect_workspace,
+            "wifi": self.wifi_workspace,
             "adsb1090": self.adsb1090_workspace,
         }.get(str(mode))
         if target is None:
@@ -348,6 +356,8 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
 
     def _active_mode(self) -> str:
         current = self._stack.currentWidget()
+        if current is self.wifi_workspace:
+            return "wifi"
         if current is self.bluetooth_workspace:
             return "bluetooth"
         if current is self.dect_workspace:
@@ -367,6 +377,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             "generic": self.generic_workspace,
             "bluetooth": self.bluetooth_workspace,
             "dect": self.dect_workspace,
+            "wifi": self.wifi_workspace,
             "adsb1090": self.adsb1090_workspace,
         }[mode]
         if mode == "dect":
@@ -378,6 +389,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             "generic": self.generic_workspace,
             "bluetooth": self.bluetooth_workspace,
             "dect": self.dect_workspace,
+            "wifi": self.wifi_workspace,
             "adsb1090": self.adsb1090_workspace,
         }[mode]
         if mode == "dect":
@@ -558,6 +570,8 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self.setWindowTitle(
                 f"Pluto VSA - DECT Dedicated Analyzer [RX: {identity}]"
             )
+        elif target is self.wifi_workspace:
+            self.setWindowTitle(f"Pluto VSA - Wi-Fi Dedicated Analyzer [RX: {identity}]")
         else:
             self.setWindowTitle(f"Pluto VSA - ADS-B 1090ES [RX: {identity}]")
 
@@ -567,6 +581,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         self.adsb1090_workspace.set_pluto_target(target)
         self.bluetooth_workspace.set_pluto_target(target)
         self.dect_workspace.set_pluto_target(target)
+        self.wifi_workspace.set_pluto_target(target)
         current = self._stack.currentWidget()
         if current is not None:
             self._update_window_title(current)
@@ -576,6 +591,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
         self.generic_workspace.request_shutdown()
         self.bluetooth_workspace.request_shutdown()
         self.dect_workspace.request_shutdown()
+        self.wifi_workspace.request_shutdown()
         self.adsb1090_workspace.request_shutdown()
         busy = self._busy_reason()
         if busy is not None:
@@ -587,6 +603,7 @@ class PlutoAnalysisWindow(QtWidgets.QMainWindow):
             self.adsb1090_workspace.finalize_shutdown()
             self.bluetooth_workspace.finalize_shutdown()
             self.dect_workspace.finalize_shutdown()
+            self.wifi_workspace.finalize_shutdown()
             self.generic_workspace.finalize_shutdown()
             self._pluto_source.close()
             save_window_geometry(self, self._preferences)

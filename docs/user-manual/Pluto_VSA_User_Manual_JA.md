@@ -2,9 +2,9 @@
 
 文書版: 2.0 レビュー版（2026-09-23）
 
-対象: General VSA / Bluetooth / DECT / ADS-B 1090ES
+対象: General VSA / Bluetooth / DECT / Wi-Fi / ADS-B 1090ES
 
-アプリ仕様の確認基準: `b43f7e6`
+アプリ仕様の確認基準: `b43f7e6`を基準に、Wi-Fi Dedicated Analyzerの操作を追補。
 
 ## 1. 本書の使い方
 
@@ -99,6 +99,22 @@ NPZ / IQ TARにはsample rate等の情報を格納できます。NPY / CF32 / BI
 ![図4 ADS-B 1090ES。生成IQファイルを使った解析・表示例](../images/user-manual/pluto-vsa-adsb-overview.png)
 
 ADS-B 1090ESを選び、Import IQまたはSingleで解析します。Packet Listのメッセージを選択し、DF、ICAO、CRC/Parity、PPM波形を確認します。`Signal Description > Local CPR Reference`から受信局位置を設定します。位置表示には必要なCPRデータ・参照位置が揃う必要があり、各パケットから必ず緯度経度が得られるわけではありません。
+
+### 3.6 Wi-Fi Non-HT OFDMを解析する
+
+![Wi-Fiの6ペイン。24/54 Mbpsの生成IQへ雑音・CFO・マルチパスを加え、2番目のpacketを選択した例。実RF測定ではない](../images/user-manual/pluto-vsa-wifi-overview.png)
+
+1. `Analyzer Mode > Wi-Fi`を選び、FileのImport IQで20/40 MS/sのNon-HT録音を開きます。
+2. Packet Analysisの`Packet List`で対象packetを選びます。RateはL-SIGから自動検出されます。
+3. DecodeでL-SIG Parity、DATA Complete、PSDU Complete、FCSを個別に確認します。欠落や異常はIssuesに表示します。
+4. Symbol Plotの`L-SIG - BPSK`／`DATA - ...`で等化後のコンスタレーションを確認します。他モードと同じFlat（点）／Density（密度）表示を選べます。
+5. Modulationは横軸OFDM symbol、縦軸subcarrier、色がEVMです。DATA EVM、Channel Magnitude/Phaseも内部tabで切り替えます。
+6. RF取得ではDeviceを指定し、40 MS/s、十分なRF bandwidth（標準30 MHz）、対象中心周波数でSingleを実行します。
+7. Continuousは有限取得と解析を反復します。Stopで停止後、Refresh Analysisで保持IQを再解析できます。
+
+100 TU間隔のBeaconでは標準10 msのcaptureにpacketが入らない場合があります。150 ms程度へ広げるか、IQ Power triggerを使用してください。
+20 MS/sは保存IQに対応しますが、Plutoライブ取得では既存の有効帯域制約により40 MS/sを使用します。
+Bit Rangeは復号後のlogical bit座標です。MAC fieldと連続するIQ sample区間を対応付ける表示ではありません。
 
 ## 4. Input / Frontendの各項目
 
@@ -310,6 +326,33 @@ identity入力はProtocol/Profileに応じて非表示・無効になります�
 | Longitude | 経度、degree。東経を正、西経を負 |
 | Select on Map | 地図から参照位置を選択 |
 | Clear | 参照位置を解除 |
+
+### 8.4 Wi-Fi
+
+![Wi-Fi Input / Frontend。表示面と解析帯域を個別に設定する](../images/user-manual/pluto-vsa-wifi-frontend.png)
+
+| 設定 | 説明 |
+| --- | --- |
+| PHY / Bandwidth / Rate | Non-HT OFDM / 20 MHz / L-SIGからAuto。変調の事前指定は不要 |
+| Channel / Nominal Center | 2.4 GHz Channel 1〜13。選択すると次回受信中心周波数を変更 |
+| Center Frequency | キャプチャの受信中心。保存IQの解析では録音の周波数情報を使用 |
+| RF Bandwidth / Match Sample Rate | 受信器analog bandwidth。Sample Rate一致を選んだ場合も既存hardware範囲内で検証 |
+| LO Offset | experimental offset LO。共通のAnalysis Channel・有効帯域・DC回避条件を満たす組合せのみ |
+| Internal Gain / External ATT / External Gain | 共通の入力電力補正。録音の補正・校正情報を測定値へ反映 |
+| Enable Analysis Channel / Center / Bandwidth | 共通DDC/LPFで解析対象帯域を選択。新条件の反映はRefresh Analysisまたは次回取得 |
+| Apply Analysis Bandwidth to Power / Spectrum | 個別に元capture面かanalysis-channel面を表示。Powerの選択はSummaryのpacket/peak powerにも適用 |
+| Sample Rate | 20/40 MS/s。ライブ受信は40 MS/sを推奨・有効帯域で検証 |
+| Capture Length | 有限取得時間。Continuousもこの単位の取得を反復 |
+| Swap I/Q | 共通取得設定。IQの入れ替えが必要な入力条件に使用 |
+| Trigger | Free Run / I/Q Power、Level、Slope、Offset、Hysteresis。packet検出自体はL-STFを使用 |
+| Symbol Plot Trace | 等化後の測定点をFlat（点）／Density（密度）表示。他モードと共通の描画方法 |
+| Density Spread | None / Medium / Maximum。密度表示の広がり。解析結果には影響しない |
+| Show synchronization diagnostics | STF metric、LTF correlation、coarse/fine CFOをSummaryへ追加 |
+
+EVM RMS/Peakは等化・pilot位相補正後の48 data subcarrierを測定し、L-SIGとDATAを分けます。
+RFのLimitは推測で設定せずInfo表示です。Symbol Clock Errorは未実装のためNot Availableと表示します。
+Power CalibrationがUncalibrated referenceの場合、表示dBmを実機校正済みの絶対電力として扱わないでください。
+実RFの検出・EVM・powerを確認する手順は[Wi-Fi手動受入](../verification/vsa/wifi/non-ht-hardware.md)にあります。
 
 ## 9. Display・プロット・パケット選択
 

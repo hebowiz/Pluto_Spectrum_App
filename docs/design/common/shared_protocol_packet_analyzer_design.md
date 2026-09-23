@@ -3,7 +3,11 @@
 作成日: 2026-08-29  
 対象: **Pluto VSG / Pluto VSA 共通の packet semantic analyzer**  
 初期対象: **Bluetooth BR / EDR / LE**  
-将来対象: Wi-Fi、ADS-B、その他 bit-oriented protocol
+現在の追加対象: Wi-Fi Non-HT（`wifi.non_ht`）。将来対象: ADS-B、その他 bit-oriented protocol
+
+Wi-Fiは独立したIQ ValidatorからPSDUを復調した後に共通MAC解析・結果モデルへ接続します。
+VSGのWi-Fi Verifyは生成bit列の直接decodeではありません。現在の境界と対応は
+[Wi-Fi Non-HT仕様](../../spec/vsg/wifi-non-ht.md) を参照。以下の初期設計でWi-Fiを将来とする記述は導入前の構想です。
 
 > 本資料は、復調または生成済みの packet bit 列から protocol field を抽出し、raw bit/value だけでなく「その値が何を意味するか」まで共通形式で解釈するための設計案です。Ellisys の packet view に近い役割を想定しますが、現時点では VSG / VSA の具体的な画面レイアウトへ組み込まず、**解析 core と UI-independent result model を先に定義する**ことを目的とします。
 

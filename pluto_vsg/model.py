@@ -351,6 +351,20 @@ class WiFiSettings:
     fcs_auto: bool = True
     oversample_factor: int = 2
     packet_period_us: float = 102_400.0
+    raw_includes_fcs: bool = True
+    manual_fcs_hex: str = "00000000"
+    frame_control: int = 0x0080
+    duration_id: int = 0
+    destination_address: str = "FF:FF:FF:FF:FF:FF"
+    source_address: str = ""  # Empty means use BSSID, including old projects.
+    fragment_number: int = 0
+    timestamp: int = 0  # Static TSF for cyclic waveform replay.
+    capability_information: int = 0x0401  # ESS, short slot, open BSS.
+    supported_rates_hex: str = "8C129824B048606C"
+    ds_channel_auto: bool = True
+    ds_channel: int = 6
+    tim_hex: str = "00010000"
+    erp_information: int = 0
 
 
 @dataclass(frozen=True)
@@ -410,6 +424,9 @@ def waveform_timing_samples(project: WaveformProject) -> tuple[int, int, int, in
     pre_idle = int(getattr(settings, "pre_idle_symbols", 0)) * sps
     post_idle = int(getattr(settings, "post_idle_symbols", 0)) * sps
     minimum_period = pre_idle + active_stop - active_start
+    if project.wifi is not None:
+        # ERP signal extension is silent spacing, not a DATA OFDM symbol.
+        minimum_period += round(6e-6 * project.sample_rate_hz)
     if project.period_symbols is None:
         period = minimum_period + post_idle
     else:
@@ -827,6 +844,8 @@ def validate_project(project: WaveformProject) -> tuple[ValidationIssue, ...]:
             issues.append(ValidationIssue("wifi.bssid", "BSSID must use XX:XX:XX:XX:XX:XX notation."))
         if float(wifi_settings.packet_period_us) <= 0.0:
             issues.append(ValidationIssue("wifi.packet_period_us", "Packet period must be positive."))
+        from pluto_vsg.wifi.validation import validate_wifi_settings
+        issues.extend(ValidationIssue("wifi." + key, text) for key, text in validate_wifi_settings(wifi_settings))
     dect_settings = project.dect
     if dect_settings is not None:
         from pluto_protocol.dect.carriers import carrier_by_identity

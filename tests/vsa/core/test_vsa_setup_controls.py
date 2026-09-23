@@ -70,7 +70,7 @@ def test_adsb_moved_toolbar_controls_are_visible_and_editable(shell):
     dialog.hide()
 
 
-@pytest.mark.parametrize("mode", ["generic", "bluetooth", "dect", "adsb1090"])
+@pytest.mark.parametrize("mode", ["generic", "bluetooth", "dect", "wifi", "adsb1090"])
 @pytest.mark.parametrize("finish", ["accept", "reject", "close", "escape"])
 def test_config_edits_are_isolated_until_ok(shell, mode, finish, monkeypatch):
     from pluto_vsa.ui.config_transaction import collect_settings

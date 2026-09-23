@@ -39,7 +39,8 @@ from pluto_vsa.ui.measurement_chrome import (
     make_measurement_dock,
 )
 from pluto_vsa.ui.packet_decode import PacketDecodeTabs, apply_analysis_font
-from pluto_vsg.protocol import analyze_generation_result
+from pluto_vsg.protocol import analyze_generation_result, supports_packet_verification, is_wifi_iq
+from pluto_vsg.ui.wifi_settings import WiFiSettingsDialog as _WiFiSettingsDialog
 from pluto_vsg.backends import (
     PlutoOutputBackend,
     PlutoPlaybackMode,
@@ -80,7 +81,6 @@ from pluto_vsg.model import (
     validate_project,
     WiFiPSDUSource,
     WiFiScramblerSeedMode,
-    WiFiSettings,
 )
 from pluto_vsg.persistence import (
     load_project,
@@ -134,7 +134,6 @@ from pluto_vsg.ui.packet_settings import (
     bluetooth_le_carriers,
     carrier_selector,
     packet_settings_tabs,
-    wifi_24ghz_carriers,
 )
 
 
@@ -233,141 +232,6 @@ class _RFStateButton(QtWidgets.QPushButton):
         # paint a false blue ON state while the click handler decides whether
         # calibration is required. Programmatic setChecked() remains available.
         return
-
-
-class _WiFiSettingsDialog(QtWidgets.QDialog):
-    """Dedicated Non-HT OFDM packet, RF and Beacon editor."""
-
-    def __init__(self, project: WaveformProject, parent: QtWidgets.QWidget) -> None:
-        super().__init__(parent)
-        if project.wifi is None:
-            raise ValueError("Wi-Fi settings are required")
-        self._project = project
-        settings = project.wifi
-        self.setWindowTitle("Wi-Fi Packet / Waveform Settings")
-        self.name_edit = QtWidgets.QLineEdit(project.name)
-        self.rate_combo = QtWidgets.QComboBox()
-        for rate in (6, 9, 12, 18, 24, 36, 48, 54):
-            self.rate_combo.addItem(f"{rate} Mbps", rate)
-        self.rate_combo.setCurrentIndex(self.rate_combo.findData(settings.legacy_rate_mbps))
-        self.sample_rate_combo = QtWidgets.QComboBox()
-        self.sample_rate_combo.addItem("20 MS/s (native)", 1)
-        self.sample_rate_combo.addItem("40 MS/s (2x oversampled)", 2)
-        self.sample_rate_combo.setCurrentIndex(self.sample_rate_combo.findData(settings.oversample_factor))
-        self.seed_mode_combo = QtWidgets.QComboBox()
-        for mode in WiFiScramblerSeedMode:
-            self.seed_mode_combo.addItem(mode.value, mode)
-        self.seed_mode_combo.setCurrentIndex(self.seed_mode_combo.findData(WiFiScramblerSeedMode(settings.scrambler_seed_mode)))
-        self.seed_spin = DeferredSpinBox(); self.seed_spin.setRange(1, 127); self.seed_spin.setValue(settings.scrambler_seed)
-        self.seed_spin.setDisplayIntegerBase(16); self.seed_spin.setPrefix("0x")
-        nominal_wifi_hz = (2407 + 5 * int(settings.channel)) * 1e6
-        self.channel_combo = carrier_selector(
-            wifi_24ghz_carriers(), nominal_wifi_hz
-        )
-        self.frequency_offset_spin = DeferredDoubleSpinBox()
-        self.frequency_offset_spin.setRange(-3000.0, 3000.0)
-        self.frequency_offset_spin.setDecimals(3)
-        self.frequency_offset_spin.setSuffix(" kHz")
-        self.frequency_offset_spin.setValue(
-            (project.center_frequency_hz - nominal_wifi_hz) / 1e3
-        )
-        self.center_label = QtWidgets.QLabel()
-        self.source_combo = QtWidgets.QComboBox()
-        for source in WiFiPSDUSource:
-            self.source_combo.addItem(source.value, source)
-        self.source_combo.setCurrentIndex(self.source_combo.findData(WiFiPSDUSource(settings.psdu_source)))
-        self.raw_hex_edit = QtWidgets.QPlainTextEdit(settings.raw_psdu_hex); self.raw_hex_edit.setMaximumHeight(100)
-        self.length_spin = DeferredSpinBox(); self.length_spin.setRange(1, 4095); self.length_spin.setValue(settings.payload_length_bytes)
-        self.pattern_edit = QtWidgets.QLineEdit(settings.payload_pattern_hex)
-        self.period_spin = DeferredDoubleSpinBox(); self.period_spin.setRange(1.0, 10_000_000.0); self.period_spin.setDecimals(1); self.period_spin.setValue(settings.packet_period_us); self.period_spin.setSuffix(" us")
-        self.ssid_edit = QtWidgets.QLineEdit(settings.ssid)
-        self.bssid_edit = QtWidgets.QLineEdit(settings.bssid)
-        self.sequence_spin = DeferredSpinBox(); self.sequence_spin.setRange(0, 4095); self.sequence_spin.setValue(settings.sequence_number)
-        self.beacon_interval_spin = DeferredSpinBox(); self.beacon_interval_spin.setRange(1, 65535); self.beacon_interval_spin.setValue(settings.beacon_interval_tu); self.beacon_interval_spin.setSuffix(" TU")
-        self.fcs_check = QtWidgets.QCheckBox("Append IEEE 802.11 FCS automatically"); self.fcs_check.setChecked(settings.fcs_auto)
-        self.derived_label = QtWidgets.QLabel(); self.derived_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-
-        self.tabs = packet_settings_tabs(
-            (
-                ("Format", QtWidgets.QLabel("Non-HT OFDM (802.11a/g)")),
-                ("Bandwidth", QtWidgets.QLabel("20 MHz")),
-                ("Data Rate / Modulation", self.rate_combo),
-                ("Sample Rate", self.sample_rate_combo),
-                ("Pattern / PRBS Length [byte]", self.length_spin),
-                ("Packet Period", self.period_spin),
-                ("Ramp", QtWidgets.QLabel("Disabled (automatic OFDM packet boundary)")),
-                ("Calculated PHY values", self.derived_label),
-            ),
-            (
-                ("Project Name", self.name_edit),
-                ("Scrambler Seed", self.seed_mode_combo),
-                ("Fixed Seed", self.seed_spin),
-                ("Frame Source", self.source_combo),
-                ("Raw PSDU [hex]", self.raw_hex_edit),
-                ("Pattern [hex]", self.pattern_edit),
-                ("SSID", self.ssid_edit),
-                ("BSSID", self.bssid_edit),
-                ("Sequence Number", self.sequence_spin),
-                ("Beacon Interval", self.beacon_interval_spin),
-                ("FCS", self.fcs_check),
-            ),
-        )
-        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok).setText("Apply and Generate")
-        buttons.accepted.connect(self._accept_settings); buttons.rejected.connect(self.reject)
-        layout = QtWidgets.QVBoxLayout(self); layout.addWidget(self.tabs); layout.addWidget(buttons)
-        for signal in (self.rate_combo.currentIndexChanged, self.sample_rate_combo.currentIndexChanged, self.seed_mode_combo.currentIndexChanged, self.channel_combo.currentIndexChanged, self.frequency_offset_spin.valueChanged, self.source_combo.currentIndexChanged, self.length_spin.valueChanged, self.period_spin.valueChanged, self.beacon_interval_spin.valueChanged):
-            signal.connect(self._refresh)
-        self.raw_hex_edit.textChanged.connect(self._refresh); self.ssid_edit.textChanged.connect(self._refresh); self.bssid_edit.textChanged.connect(self._refresh)
-        self.resize(860, 760); self._refresh()
-
-    def _settings(self) -> WiFiSettings:
-        nominal_hz = float(self.channel_combo.currentData())
-        channel = int(round((nominal_hz / 1e6 - 2407.0) / 5.0))
-        return replace(self._project.wifi, legacy_rate_mbps=int(self.rate_combo.currentData()), oversample_factor=int(self.sample_rate_combo.currentData()), scrambler_seed_mode=WiFiScramblerSeedMode(self.seed_mode_combo.currentData()), scrambler_seed=self.seed_spin.value(), psdu_source=WiFiPSDUSource(self.source_combo.currentData()), raw_psdu_hex=self.raw_hex_edit.toPlainText(), payload_length_bytes=self.length_spin.value(), payload_pattern_hex=self.pattern_edit.text(), channel=channel, ssid=self.ssid_edit.text(), bssid=self.bssid_edit.text(), sequence_number=self.sequence_spin.value(), beacon_interval_tu=self.beacon_interval_spin.value(), fcs_auto=self.fcs_check.isChecked(), packet_period_us=self.period_spin.value())
-
-    def _refresh(self, _value=None) -> None:
-        nominal_hz = float(self.channel_combo.currentData())
-        actual_hz = nominal_hz + self.frequency_offset_spin.value() * 1e3
-        self.center_label.setText(
-            f"{actual_hz / 1e6:.6f} MHz = {nominal_hz / 1e6:.3f} MHz "
-            f"{self.frequency_offset_spin.value():+.3f} kHz"
-        )
-        source = WiFiPSDUSource(self.source_combo.currentData())
-        self.raw_hex_edit.setEnabled(source == WiFiPSDUSource.RAW_HEX)
-        self.length_spin.setEnabled(source in {WiFiPSDUSource.PATTERN, WiFiPSDUSource.PRBS9})
-        self.pattern_edit.setEnabled(source == WiFiPSDUSource.PATTERN)
-        for widget in (self.ssid_edit, self.bssid_edit, self.sequence_spin, self.beacon_interval_spin, self.fcs_check): widget.setEnabled(source == WiFiPSDUSource.BEACON)
-        self.seed_spin.setEnabled(WiFiScramblerSeedMode(self.seed_mode_combo.currentData()) == WiFiScramblerSeedMode.FIXED)
-        try:
-            candidate = wifi_project(self._settings())
-            from pluto_vsg.wifi.common import LEGACY_RATES
-            from pluto_vsg.wifi.mac import build_psdu
-            rate = LEGACY_RATES[int(candidate.wifi.legacy_rate_mbps)]; length = len(build_psdu(candidate.wifi))
-            n_sym = int(np.ceil((16 + 8 * length + 6) / rate.n_dbps)); n_pad = n_sym * rate.n_dbps - (16 + 8 * length + 6); duration = 20 + 4 * n_sym
-            duty = 100 * duration / self.period_spin.value()
-            self.derived_label.setText(f"PSDU: {length} byte\nModulation: {rate.modulation}\nCoding Rate: {rate.coding_rate}\nN_BPSC / N_CBPS / N_DBPS: {rate.n_bpsc} / {rate.n_cbps} / {rate.n_dbps}\nN_SYM / N_PAD: {n_sym} / {n_pad}\nPPDU Duration: {duration} us\nDuty Cycle: {duty:.3f} %")
-        except ValueError as error:
-            self.derived_label.setText(str(error))
-
-    def _accept_settings(self) -> None:
-        if not ensure_valid_numeric_inputs(self, title="Invalid Wi-Fi Setting"):
-            return
-        try:
-            settings = self._settings(); candidate = wifi_project(settings)
-            candidate = replace(
-                candidate,
-                center_frequency_hz=(
-                    float(self.channel_combo.currentData())
-                    + self.frequency_offset_spin.value() * 1e3
-                ),
-            )
-            candidate = replace(candidate, name=self.name_edit.text().strip(), repeat_count=self._project.repeat_count)
-            issues = validate_project(candidate)
-            if issues: raise ValueError("\n".join(issue.message for issue in issues))
-        except ValueError as error:
-            QtWidgets.QMessageBox.warning(self, "Wi-Fi Settings", str(error)); return
-        self.project = candidate; self.accept()
 
 
 class _BluetoothLESettingsDialog(QtWidgets.QDialog):
@@ -3192,8 +3056,10 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self.verify_packet_button.setEnabled(False)
             QtWidgets.QMessageBox.warning(self, "Waveform Generation", str(error))
             return
-        self.verify_packet_button.setEnabled(self.result.packet_bits is not None)
+        self.verify_packet_button.setEnabled(supports_packet_verification(self.result))
         self.verify_packet_button.setToolTip(
+            "Demodulate the first Non-HT packet from generated IQ and check L-SIG, PSDU and FCS. RF interoperability requires hardware testing."
+            if is_wifi_iq(self.result) else
             "Decode generated transmitted bits using the shared VSA packet decoder. "
             "This does not demodulate IQ or verify RF performance."
             if self.result.packet_bits is not None else
@@ -3247,7 +3113,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             self._update_vsg_control_labels()
 
     def _verify_packet(self) -> None:
-        if self.result is None or self.result.packet_bits is None:
+        if not supports_packet_verification(self.result):
             return
         self.packet_decode.clear_packet()
         self._verified_packet = None
@@ -3258,11 +3124,13 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
             return
         self._verified_packet = packet
         self.packet_decode.render_packet(
-            packet, p0_internal_bit=int(self.result.packet_bits.context.get("p0_internal_bit", 0)),
+            packet, p0_internal_bit=int(self.result.packet_bits.context.get("p0_internal_bit", 0)) if self.result.packet_bits else 0,
         )
         self.statusBar().showMessage(
             f"Packet decoded: {packet.protocol_name} / {packet.packet_type or packet.phy_name or '--'} "
-            f"({len(packet.issues)} issue(s)); generated bits, not IQ demodulation"
+            f"({len(packet.issues)} issue(s)); "
+            + ("generated IQ demodulation (first packet)" if is_wifi_iq(self.result)
+               else "generated bits, not IQ demodulation")
         )
 
     def _power_limits_dbm(self) -> tuple[float, float]:
@@ -4104,7 +3972,7 @@ class PlutoVSGWindow(QtWidgets.QMainWindow):
         if hasattr(self, "rf_button"):
             self.edit_settings_button.setEnabled(not active)
             self.verify_packet_button.setEnabled(
-                not preparing and self.result is not None and self.result.packet_bits is not None
+                not preparing and supports_packet_verification(self.result)
             )
             self.rf_button.setEnabled(not preparing)
             self.mod_button.setEnabled(not active)

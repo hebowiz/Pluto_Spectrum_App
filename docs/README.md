@@ -17,8 +17,8 @@ Pluto RTSA / VSA / VSG自身の仕様・設計・検証・操作資料を管理�
 - 共通: [連続IQ取得](design/acquisition/continuous-iq-acquisition.md)、[IQストリーム](design/acquisition/iq-streaming.md)、[デバイス所有権](spec/common/pluto-device-ownership.md)、[終了処理](spec/common/graceful-application-shutdown.md)。
 - RTSA: [Realtime SA](spec/rtsa/realtime-sa.md)、[Wideband RTSA](spec/rtsa/wideband-rt-sa.md)、[Sweep SA](spec/rtsa/sweep-sa.md)、[HSTA](spec/rtsa/high-speed-ta.md)、[校正](spec/rtsa/calibration.md)、[RBW監査](verification/rtsa/rbw-processing.md)。
 - General VSA: [設計文書の役割と参照先](design/vsa/README.md)、[文書・実装の照合](verification/vsa/README.md)、[構成](design/vsa/vsa-architecture.md)、[搬送波同期](design/vsa/vsa-carrier-synchronization.md)、[ファイル操作](spec/vsa/general/vsa-file-workflows.md)、[デバイス・表示状態](spec/vsa/general/vsa-device-and-display-state.md)。
-- 専用VSA: [Bluetooth解析フロー](design/vsa/bluetooth/bluetooth_dedicated_analysis_pipeline_ja.md)、[DECT実装ガイド](design/vsa/dect/DECT_PHY_RF_Tester_Implementation_Guide.md)、[ADS-B仕様](spec/vsa/adsb/adsb1090.md)。
-- VSG: [波形生成設計](design/vsg/iq_waveform_generator_design_spec.md)、[RFレベルとRMS](design/vsg/Pluto_VSG_RF_Level_RMS_Design.md)、[連続送信](design/vsg/pluto-vsg-continuous-transmission.md)、[フィールド階層](design/vsg/pluto_vsg_field_hierarchy.md)。
+- 専用VSA: [Bluetooth解析フロー](design/vsa/bluetooth/bluetooth_dedicated_analysis_pipeline_ja.md)、[DECT実装ガイド](design/vsa/dect/DECT_PHY_RF_Tester_Implementation_Guide.md)、[Wi-Fi仕様](spec/vsa/wifi/non-ht-analyzer.md)、[Wi-Fi検証](verification/vsa/wifi/non-ht-review.md)、[ADS-B仕様](spec/vsa/adsb/adsb1090.md)。
+- VSG: [波形生成設計](design/vsg/iq_waveform_generator_design_spec.md)、[RFレベルとRMS](design/vsg/Pluto_VSG_RF_Level_RMS_Design.md)、[連続送信](design/vsg/pluto-vsg-continuous-transmission.md)、[フィールド階層](design/vsg/pluto_vsg_field_hierarchy.md)、[Wi-Fi Non-HT仕様](spec/vsg/wifi-non-ht.md)、[Wi-Fi検証](verification/vsg/wifi-non-ht-review.md)。
 
 ## 分類上の注意
 

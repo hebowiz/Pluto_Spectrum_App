@@ -144,7 +144,7 @@ def test_vsa_restores_per_mode_docks_only_during_current_session(app, preference
         reopened.close()
 
 
-@pytest.mark.parametrize("mode", ["generic", "bluetooth", "dect", "adsb1090"])
+@pytest.mark.parametrize("mode", ["generic", "bluetooth", "dect", "wifi", "adsb1090"])
 def test_vsa_resizing_and_returning_to_mode_does_not_equalize(app, preferences, monkeypatch, mode):
     window = make_window("vsa", preferences)
     try:
@@ -152,7 +152,7 @@ def test_vsa_resizing_and_returning_to_mode_does_not_equalize(app, preferences, 
         window.set_analysis_mode(mode)
         app.processEvents()
         workspace = window._active_workspace()
-        equalize = "_equalize_docks" if mode in ("bluetooth", "dect") else "_equalize_result_docks"
+        equalize = "_equalize_docks" if mode in ("bluetooth", "dect", "wifi") else "_equalize_result_docks"
         callback = MagicMock()
         monkeypatch.setattr(workspace, equalize, callback)
         window.resize(window.width() + 100, window.height() + 80)
@@ -166,7 +166,7 @@ def test_vsa_resizing_and_returning_to_mode_does_not_equalize(app, preferences, 
         window.close()
 
 
-@pytest.mark.parametrize("mode", ["generic", "bluetooth", "dect", "adsb1090"])
+@pytest.mark.parametrize("mode", ["generic", "bluetooth", "dect", "wifi", "adsb1090"])
 def test_vsa_mode_switch_restores_user_split_sizes(app, preferences, mode):
     window = make_window("vsa", preferences)
     try:
