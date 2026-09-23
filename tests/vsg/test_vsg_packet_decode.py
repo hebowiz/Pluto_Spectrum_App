@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pyqtgraph as pg
 import pytest
-from pyqtgraph.Qt import QtWidgets
+from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_vsg.model import BluetoothPacketKind, BluetoothLEPhy
 from pluto_vsg.profiles import (
@@ -89,7 +89,10 @@ def test_vsg_layout_fonts_and_control_names():
         decode_panel = window.packet_decode.parentWidget()
         assert inspector_panel.width() == decode_panel.width()
         assert inspector_panel.parentWidget() is decode_panel.parentWidget()
-        assert window.verify_packet_button.y() < window.instrument_settings_button.y()
+        # The buttons belong to different groups, so compare window coordinates.
+        verify_position = window.verify_packet_button.mapTo(window, QtCore.QPoint())
+        device_position = window.instrument_settings_button.mapTo(window, QtCore.QPoint())
+        assert verify_position.y() < device_position.y()
     finally:
         window.close()
 

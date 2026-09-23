@@ -332,7 +332,9 @@ def test_hdt_payload_evm_uses_fixed_reencoded_reference() -> None:
 
 
 def test_hdt_payload_evm_holds_final_terminating_symbols_separately() -> None:
-    recording, generated = _hdt_recording(payload_length=0)
+    # Format-0 requires at least one payload byte; the final two symbols
+    # must still be retained separately from the payload EVM measurement.
+    recording, generated = _hdt_recording(payload_length=1)
     baseline = _hdt_result(recording)
     iq = np.array(recording.iq, copy=True)
     stop = int(generated.metadata["data_stop_sample"])
