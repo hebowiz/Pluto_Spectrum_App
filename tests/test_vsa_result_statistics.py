@@ -1,4 +1,4 @@
-from pluto_sa.vsa.result_statistics import ResultSummaryAccumulator
+from pluto_vsa.result_statistics import ResultSummaryAccumulator
 
 
 def test_all_packet_statistics_use_measurement_appropriate_averages() -> None:

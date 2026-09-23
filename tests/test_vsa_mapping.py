@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.mapping import (
+from pluto_vsa.mapping import (
     BLUETOOTH_EDR_MAPPING,
     BLUETOOTH_HDT_MAPPING,
     GRAY_MAPPING,
@@ -10,7 +10,7 @@ from pluto_sa.vsa.mapping import (
     psk_constellation,
     reverse_symbol_bits,
 )
-from pluto_sa.vsa.model import ModulationKind, SignalDescription
+from pluto_vsa.model import ModulationKind, SignalDescription
 
 
 def test_rs_gray_phase_indices_match_generic_dpsk_tables():

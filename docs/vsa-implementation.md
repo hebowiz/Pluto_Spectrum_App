@@ -15,7 +15,7 @@ CFO、carrier phase、linear driftの計算式とsample単位補正は[vsa-carri
 起動方法:
 
 ```powershell
-python -m pluto_sa.vsa.main
+python -m pluto_vsa.main
 ```
 
 起動時はPlutoへ接続せず、前回終了時のMeas Configだけを復元した`No capture`状態で
@@ -43,7 +43,7 @@ IQ dataとrecording metadataはstartup documentへ含めない。
 
 ### IQRecording
 
-`pluto_sa/vsa/model.py`にsource-independentなimmutable IQ recordを追加しました。IQ、sample rate、center frequency、usable bandwidth、full scale、source、sample index、trigger位置、gap理由、metadataを保持します。
+`pluto_rtsa/vsa/model.py`にsource-independentなimmutable IQ recordを追加しました。IQ、sample rate、center frequency、usable bandwidth、full scale、source、sample index、trigger位置、gap理由、metadataを保持します。
 
 `recording_from_acquisition()`により、既存HighSpeed TA/Power Triggerの`IQAcquisitionRecord`をVSA recordへ変換できます。Pluto固有型を解析DSPへ渡さない境界です。
 
@@ -83,7 +83,7 @@ Meas Configは縦並びのaccordionではなく、`Config Top Menu`にカテゴ�
 
 ### Pattern Search / Result Range / Demodulation
 
-2026-08-03に一般VSA用の既知パターン解析を追加した。Bluetooth Access Code専用処理とは別の`pluto_sa/vsa/pattern.py`で、任意のFSK/BPSK/QPSK/pi/4-DQPSK/8DPSK symbol列を検索し、patternを基準に指定範囲をsymbol単位で復調する。
+2026-08-03に一般VSA用の既知パターン解析を追加した。Bluetooth Access Code専用処理とは別の`pluto_rtsa/vsa/pattern.py`で、任意のFSK/BPSK/QPSK/pi/4-DQPSK/8DPSK symbol列を検索し、patternを基準に指定範囲をsymbol単位で復調する。
 
 設定責務はmanual pp.164-170、208-224に従い、次のように分離した。
 
@@ -164,7 +164,7 @@ Modulation  | Symbol Plot | Symbol Table
 - IQ Powerも他resultと同様に移動、float、close、再表示できる。
 - Result SummaryはSymbol Tableから分離し、`Parameter`、`Current`、`All Packets`の3列へ項目を縦方向に並べる。`Current`は現在フォーカス中のResult Range、`All Packets`は直近のContinuous開始からStopまでに解析した全packetの統計とする。
 - Result SummaryとSymbol Tableのdata cell背景は交互色を使わず、単一色で統一する。
-- Result Summary項目は`pluto_sa/vsa/result_summary.py`の安定した内部ID、表示名、Common/PSK/FSK/Diagnostics分類、対応modulation family、実装状態、既定表示を唯一の定義元とする。Result Summary右クリックの階層check menuと`Meas Config > Result Summary`のcheck treeは同じ選択setを共有する。`Show All`、`Measurement Results Only`、`Diagnostics Only`、`Restore Defaults`を備え、選択IDは手動Configと終了時Configへ保存する。旧Configのsection欠落時は既定へ戻し、未知の将来IDは無視する。R&S項目の未実装分は`Not implemented`として表示するが選択不可とし、同期用`Sync EVM RMS`/`Frequency Fit RMS`を正式な`EVM RMS`/`Frequency Error RMS`と混同しない。
+- Result Summary項目は`pluto_rtsa/vsa/result_summary.py`の安定した内部ID、表示名、Common/PSK/FSK/Diagnostics分類、対応modulation family、実装状態、既定表示を唯一の定義元とする。Result Summary右クリックの階層check menuと`Meas Config > Result Summary`のcheck treeは同じ選択setを共有する。`Show All`、`Measurement Results Only`、`Diagnostics Only`、`Restore Defaults`を備え、選択IDは手動Configと終了時Configへ保存する。旧Configのsection欠落時は既定へ戻し、未知の将来IDは無視する。R&S項目の未実装分は`Not implemented`として表示するが選択不可とし、同期用`Sync EVM RMS`/`Frequency Fit RMS`を正式な`EVM RMS`/`Frequency Error RMS`と混同しない。
 - 既定表示はCommonのModulation/Power/Carrier Frequency Error、PSKのEVM RMS/Symbol Rate Error、FSKのFrequency Error RMS/FSK Meas Deviation/FSK Deviation Error/Carrier Frequency Drift、DiagnosticsのPattern Symbols Correct/IQ Correlation/Selected Result/Result Symbols/Pattern Errorとする。PowerはResult Range解析dataのdBmをlinear powerへ戻して平均する。FSK Deviation Errorは`measured-reference`をHz、Carrier Frequency DriftはHz/Symで表示する。Frequency Error RMSは現行FSK frequency-model residualをmeasured deviationで正規化した開発値であり、規格適合値ではない。
 - `All Packets`は数値を`average [minimum … maximum] (N=count)`で表示する。Powerのaverageはlinear powerで重み付き平均してdBmへ戻し、EVM/DEVM/Frequency Error RMS系は二乗平均平方根、その他は算術平均とする。packetごとのResult Symbol数をweightに使い、category値は値別件数を表示する。統計はCapture IQやpacket sessionを保持せずincremental accumulatorだけを保持し、Continuous開始時または`Reset All Packets Statistics`でclearする。
 - Generic VSAの`Run Continuous`は`Capture -> capture内の全eligible pattern候補を逐次解析 -> GUI/統計を1回更新 -> 次Capture`のbackpressure方式とする。未解析Capture queueは持たないため、DSPが実時間に追いつかない場合は測定更新周期が遅くなるがmemoryは増加しない。Continuous中は測定設定と手動Refreshをlockし、Stop後も実行中のDSP 1件は完了させて結果を確定してから停止する。
@@ -210,7 +210,7 @@ symbol rate、FSK deviation、TX filter、BT/Alpha相当parameter、mapping名�
 5. instantaneous frequency生成。
 6. manual symbol rateとtiming offsetからsymbol center生成。
 
-Analysis channel処理は`pluto_sa/vsa/channel.py`にsource/modulation非依存で実装済みです。
+Analysis channel処理は`pluto_rtsa/vsa/channel.py`にsource/modulation非依存で実装済みです。
 出力sample rateはAnalysis Bandwidthの約4倍を目安に、input rateの整数分周から選びます。
 filter未選択時は元recordingをそのまま解析します。
 
@@ -273,7 +273,7 @@ Pluto Run Singleはreceiver/USB contextをsource lifetime中再利用する。20
 
 初期設定はsymbol rate 1 Msym/s、capture oversampling 8 samples/symbol、source sample rate 8 MS/s、RF bandwidth 8 MHz、capture length 3 ms、record length 24,000 samples、nominal usable I/Q bandwidth 6.4 MHz。Capture Lengthはmsまたはsymbolsで指定し、実sample countへ変換する。Plutoからread backした実sample rateとRF bandwidthをrecord metadataの正本とする。
 
-振幅補正はSA/VSAで別実装にしない。`pluto_sa.config.input_frontend.InputPowerCorrection`を共通contractとし、次式を`SpectrumConfig.input_correction_db`とVSA live captureの両方で使う。
+振幅補正はSA/VSAで別実装にしない。`pluto_common.config.input_frontend.InputPowerCorrection`を共通contractとし、次式を`SpectrumConfig.input_correction_db`とVSA live captureの両方で使う。
 
 ```text
 input_correction_db = external_attenuation_db

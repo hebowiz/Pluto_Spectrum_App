@@ -10,7 +10,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pluto_sa.vsa.protocol_modes.dect.generator import generate_dect_packet
+from pluto_vsa.protocol_modes.dect.generator import generate_dect_packet
 
 
 def build_parser() -> argparse.ArgumentParser:

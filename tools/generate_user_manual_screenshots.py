@@ -16,10 +16,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.signal.spectrum_processor import SpectrumProcessor
-from pluto_sa.ui.session_window import SessionRealtimeSpectrumWindow
-from pluto_sa.vsa.ui.application_window import PlutoAnalysisWindow
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_rtsa.signal.spectrum_processor import SpectrumProcessor
+from pluto_rtsa.ui.session_window import SessionRealtimeSpectrumWindow
+from pluto_vsa.ui.application_window import PlutoAnalysisWindow
 from pluto_vsg.ui.main_window import PlutoVSGWindow
 
 

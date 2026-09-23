@@ -8,7 +8,7 @@
 
 対象の主な実装：
 
-- `pluto_sa/vsa/protocol_modes/bluetooth/model.py`
+- `pluto_rtsa/vsa/protocol_modes/bluetooth/model.py`
   - `_hdt_training_matches()`
   - `analyze_bluetooth_hdt_recording()`
   - `_hdt_qpsk_constellation()`
@@ -652,7 +652,7 @@ HDT EVM計算を`analyze_bluetooth_hdt_recording()`から分離する。
 例：
 
 ```text
-pluto_sa/vsa/protocol_modes/bluetooth/hdt_measurement.py
+pluto_rtsa/vsa/protocol_modes/bluetooth/hdt_measurement.py
 ```
 
 を新設。

@@ -13,12 +13,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pyqtgraph as pg
 
-from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.modes.analyzer_mode import AnalyzerMode
-from pluto_sa.modes.sweep_controller import SweepController
-from pluto_sa.sdr.pluto_receiver import PlutoReceiver
-from pluto_sa.signal.spectrum_processor import SpectrumProcessor
-from pluto_sa.ui.main_window import (
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_common.config.analyzer_mode import AnalyzerMode
+from pluto_rtsa.modes.sweep_controller import SweepController
+from pluto_common.sdr.pluto_receiver import PlutoReceiver
+from pluto_rtsa.signal.spectrum_processor import SpectrumProcessor
+from pluto_rtsa.ui.main_window import (
     RealtimeSpectrumWindow,
     resolve_wideband_chunk_capture_span_hz,
 )

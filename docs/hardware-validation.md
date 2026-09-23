@@ -34,7 +34,7 @@ RNDISを明示的に使う例は次のとおりです。
 
 ```powershell
 $env:PLUTO_SDR_URI = 'ip:pluto.local'
-python -m pluto_sa.main
+python -m pluto_rtsa.main
 ```
 
 ## 短時間RXスループット

@@ -6,12 +6,12 @@ import pyqtgraph as pg
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from pluto_sa.vsa.ui.application_window import PlutoAnalysisWindow
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.protocol_modes.dect import analyze_dect_recording, generate_dect_packet
-from pluto_sa.vsa.pattern import IQPowerTriggerSettings
-from pluto_sa.standards.adsb1090 import ADSB1090Analyzer, ADSB1090Settings
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.ui.application_window import PlutoAnalysisWindow
+from pluto_vsa.model import IQRecording
+from pluto_vsa.protocol_modes.dect import analyze_dect_recording, generate_dect_packet
+from pluto_vsa.pattern import IQPowerTriggerSettings
+from pluto_vsa.standards.adsb1090 import ADSB1090Analyzer, ADSB1090Settings
+from pluto_vsa.sources import FileIQSource
 from pathlib import Path
 
 
@@ -73,7 +73,7 @@ def test_adsb_moved_toolbar_controls_are_visible_and_editable(shell):
 @pytest.mark.parametrize("mode", ["generic", "bluetooth", "dect", "adsb1090"])
 @pytest.mark.parametrize("finish", ["accept", "reject", "close", "escape"])
 def test_config_edits_are_isolated_until_ok(shell, mode, finish, monkeypatch):
-    from pluto_sa.vsa.ui.config_transaction import collect_settings
+    from pluto_vsa.ui.config_transaction import collect_settings
     from pyqtgraph.Qt import QtGui
 
     shell.set_analysis_mode(mode)

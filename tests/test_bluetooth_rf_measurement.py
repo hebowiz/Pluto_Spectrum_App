@@ -5,12 +5,12 @@ import pytest
 from scipy.signal import freqz
 
 from pluto_protocol.bluetooth.hdt import HDTRate, map_hdt_symbols
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.protocol_modes.bluetooth.model import (
+from pluto_vsa.model import IQRecording
+from pluto_vsa.protocol_modes.bluetooth.model import (
     BluetoothAnalysisProfile,
     analyze_bluetooth_hdt_recording,
 )
-from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
+from pluto_vsa.protocol_modes.bluetooth.rf_measurement import (
     BluetoothRFMeasurementFilterProfile,
     BluetoothFMMeasurementTrace,
     BluetoothRFTestAccumulator,

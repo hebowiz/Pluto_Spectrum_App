@@ -7,9 +7,9 @@ import pytest
 
 import numpy as np
 
-from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.sdr import pluto_receiver as receiver_module
-from pluto_sa.sdr.pluto_receiver import PlutoReceiver
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_common.sdr import pluto_receiver as receiver_module
+from pluto_common.sdr.pluto_receiver import PlutoReceiver
 
 
 class FakePluto:

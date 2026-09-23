@@ -1,6 +1,6 @@
 import pyqtgraph as pg
 
-from pluto_sa.standards.adsb1090.leaflet_map import (
+from pluto_vsa.standards.adsb1090.leaflet_map import (
     LeafletAircraftMap,
     _LEAFLET_HTML,
 )

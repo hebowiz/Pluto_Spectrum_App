@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import pluto_sa.main as main_module
+import pluto_rtsa.main as main_module
 
 
 class _FakeSettings:

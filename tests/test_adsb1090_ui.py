@@ -12,13 +12,13 @@ import numpy as np
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from pluto_sa.standards.adsb1090.model import ADSB1090Settings
-from pluto_sa.standards.adsb1090.route import (
+from pluto_vsa.standards.adsb1090.model import ADSB1090Settings
+from pluto_vsa.standards.adsb1090.route import (
     ADSBDBRouteClient,
     FlightRoute,
     RouteAirport,
 )
-from pluto_sa.standards.adsb1090.ui import (
+from pluto_vsa.standards.adsb1090.ui import (
     ADSB1090Window,
     _ADSBPacketEntry,
     _ADSBCaptureBatch,
@@ -26,9 +26,9 @@ from pluto_sa.standards.adsb1090.ui import (
     _ADSBStreamAnalysisThread,
     _ADSBStreamProcessor,
 )
-from pluto_sa.vsa.pluto_source import CaptureCancelledError, PlutoCaptureSettings
-from pluto_sa.vsa.sources import FileIQSource
-from pluto_sa.vsa.ui.measurement_chrome import FixedInteractionViewBox
+from pluto_vsa.pluto_source import CaptureCancelledError, PlutoCaptureSettings
+from pluto_vsa.sources import FileIQSource
+from pluto_vsa.ui.measurement_chrome import FixedInteractionViewBox
 
 
 @pytest.fixture(autouse=True)

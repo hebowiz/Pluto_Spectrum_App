@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.channel import extract_analysis_channel
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.profiles.bluetooth_br import (
+from pluto_vsa.channel import extract_analysis_channel
+from pluto_vsa.model import IQRecording
+from pluto_vsa.profiles.bluetooth_br import (
     BLUETOOTH_GIAC_SYNC_WORD_HEX,
     BluetoothBRProfile,
     access_code_bits,

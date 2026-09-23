@@ -23,12 +23,12 @@
 主な現行コード：
 
 ```text
-pluto_sa/vsa/protocol_modes/bluetooth/model.py
-pluto_sa/vsa/demod/gfsk.py
-pluto_sa/vsa/pattern.py
-pluto_sa/vsa/profiles/bluetooth_br.py
-pluto_sa/vsa/profiles/bluetooth_edr.py
-pluto_sa/vsa/protocol.py
+pluto_rtsa/vsa/protocol_modes/bluetooth/model.py
+pluto_rtsa/vsa/demod/gfsk.py
+pluto_rtsa/vsa/pattern.py
+pluto_rtsa/vsa/profiles/bluetooth_br.py
+pluto_rtsa/vsa/profiles/bluetooth_edr.py
+pluto_rtsa/vsa/protocol.py
 ```
 
 関連テスト：
@@ -140,7 +140,7 @@ SIG Measurement path
 
 ## 5.1 現行GFSK demodulator
 
-`pluto_sa/vsa/demod/gfsk.py`は、既知bit列と実測instantaneous frequencyから、
+`pluto_rtsa/vsa/demod/gfsk.py`は、既知bit列と実測instantaneous frequencyから、
 
 - deviation
 - CFO
@@ -302,7 +302,7 @@ FM demodulator帯域についても、RFPHY Test SuiteのLower Tester要件を�
 新規module例：
 
 ```text
-pluto_sa/vsa/protocol_modes/bluetooth/rf_measurement_filter.py
+pluto_rtsa/vsa/protocol_modes/bluetooth/rf_measurement_filter.py
 ```
 
 API例：
@@ -706,7 +706,7 @@ selected_header_bit_indices: np.ndarray
 新規module例：
 
 ```text
-pluto_sa/vsa/protocol_modes/bluetooth/edr_rf_measurement.py
+pluto_rtsa/vsa/protocol_modes/bluetooth/edr_rf_measurement.py
 ```
 
 データモデル：
@@ -1281,7 +1281,7 @@ max / min output power
 # 31. 推奨module構成
 
 ```text
-pluto_sa/vsa/protocol_modes/bluetooth/
+pluto_rtsa/vsa/protocol_modes/bluetooth/
     model.py
     ui.py
 
@@ -1303,7 +1303,7 @@ pluto_sa/vsa/protocol_modes/bluetooth/
 Generic GFSK decoderは、
 
 ```text
-pluto_sa/vsa/demod/gfsk.py
+pluto_rtsa/vsa/demod/gfsk.py
 ```
 
 に残す。

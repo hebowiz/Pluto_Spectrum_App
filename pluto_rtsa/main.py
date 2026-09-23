@@ -1,0 +1,141 @@
+"""Application entry point."""
+
+from __future__ import annotations
+
+import os
+
+import iio
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtWidgets
+
+from pluto_common import discover_pluto_devices
+from pluto_rtsa.config.session_state import (
+    RTSA_APPLICATION,
+    RTSA_DEVICE_KEY,
+    RTSA_ORGANIZATION,
+)
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_rtsa.modes.sweep_controller import SweepController
+from pluto_common.sdr.pluto_receiver import PlutoReceiver
+from pluto_rtsa.signal.spectrum_processor import SpectrumProcessor
+from pluto_rtsa.signal.fft_filterbank import resolve_automatic_rtsa_fft_design
+from pluto_rtsa.ui.session_window import SessionRealtimeSpectrumWindow
+
+
+def _choose_pluto_target(
+    parent=None,
+    *,
+    force_prompt: bool = False,
+) -> tuple[bool, str | None]:
+    """Choose a physical receiver, reusing the previous choice when possible."""
+
+    environment_target = os.environ.get("PLUTO_SDR_URI", "").strip()
+    if environment_target and not force_prompt:
+        return True, environment_target
+    try:
+        devices = discover_pluto_devices(iio.scan_contexts())
+    except Exception:
+        devices = ()
+    if not devices:
+        if force_prompt:
+            QtWidgets.QMessageBox.warning(
+                parent,
+                "Select ADALM-Pluto Receiver",
+                "No ADALM-Pluto receiver was found.",
+            )
+            return False, None
+        return True, None
+
+    settings = QtCore.QSettings(RTSA_ORGANIZATION, RTSA_APPLICATION)
+    saved = str(settings.value(RTSA_DEVICE_KEY, "")).strip()
+    if saved and not force_prompt:
+        saved_key = saved.casefold()
+        for device in devices:
+            if device.selector.casefold() == saved_key:
+                return True, device.selector
+
+    if len(devices) == 1 and not force_prompt:
+        selector = devices[0].selector
+        settings.setValue(RTSA_DEVICE_KEY, selector)
+        settings.sync()
+        return True, selector
+
+    labels = [device.label for device in devices]
+    selected_index = 0
+    if saved:
+        saved_key = saved.casefold()
+        selected_index = next(
+            (
+                index
+                for index, device in enumerate(devices)
+                if device.selector.casefold() == saved_key
+            ),
+            0,
+        )
+    label, accepted = QtWidgets.QInputDialog.getItem(
+        parent,
+        "Select ADALM-Pluto Receiver",
+        "Select the ADALM-Pluto receiver used by RTSA:",
+        labels,
+        selected_index,
+        False,
+    )
+    if not accepted:
+        return False, None
+    index = labels.index(label)
+    selector = devices[index].selector
+    settings.setValue(RTSA_DEVICE_KEY, selector)
+    settings.sync()
+    return True, selector
+
+
+def build_app_components(sdr_uri: str | None = None) -> tuple[
+    SpectrumConfig,
+    PlutoReceiver,
+    SpectrumProcessor,
+    SweepController,
+    SessionRealtimeSpectrumWindow,
+]:
+    config = SpectrumConfig(sdr_uri=sdr_uri)
+    if config.rbw_hz is not None and config.realtime_fft_parameter_mode == "Auto":
+        automatic_fft = resolve_automatic_rtsa_fft_design(
+            sample_rate_hz=float(config.sample_rate_hz),
+            rbw_hz=float(config.rbw_hz),
+            guard_ratio=float(config.guard_ratio),
+            minimum_display_bins=int(config.realtime_min_display_bins),
+        )
+        config.fft_size = int(automatic_fft.fft_size)
+    receiver = PlutoReceiver(config, owner_application="Pluto RTSA")
+    processor = SpectrumProcessor(config)
+    sweep_controller = SweepController(config, receiver)
+    window = SessionRealtimeSpectrumWindow(
+        config,
+        receiver,
+        processor,
+        sweep_controller,
+        calibration_offset_db=config.calibration_offset_db,
+    )
+    return config, receiver, processor, sweep_controller, window
+
+
+def main() -> int:
+    app = pg.mkQApp("PlutoSDR Real-Time Spectrum Prototype")
+    accepted, sdr_uri = _choose_pluto_target()
+    if not accepted:
+        return 0
+    try:
+        _, _, _, _, window = build_app_components(sdr_uri=sdr_uri)
+        window.start_initial_acquisition()
+    except Exception as error:
+        QtWidgets.QMessageBox.critical(
+            None,
+            "ADALM-Pluto Connection Error",
+            f"Could not open the selected receiver.\n\n{error}",
+        )
+        return 1
+    window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

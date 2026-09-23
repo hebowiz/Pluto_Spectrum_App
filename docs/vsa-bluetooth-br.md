@@ -24,7 +24,7 @@
 
 ## 2. 実装済みDSP
 
-`pluto_sa/vsa/demod/gfsk.py`:
+`pluto_rtsa/vsa/demod/gfsk.py`:
 
 1. 任意source sample rateから8 samples/symbolへpolyphase resampling。
 2. IQ位相差からinstantaneous frequencyを計算。
@@ -38,7 +38,7 @@ coarse drift値は復調補正用であり、Bluetooth RF conformance measuremen
 
 ## 3. Bluetooth profile
 
-`pluto_sa/vsa/profiles/bluetooth_br.py`:
+`pluto_rtsa/vsa/profiles/bluetooth_br.py`:
 
 - 任意24-bit LAPから68/72-bit Access Codeを生成。
 - GIAC LAP `0x9E8B33`をpreset。

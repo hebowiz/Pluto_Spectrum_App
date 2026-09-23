@@ -11,9 +11,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pluto_sa.standards.adsb1090 import ADSB1090Analyzer
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.standards.adsb1090 import ADSB1090Analyzer
+from pluto_vsa.model import IQRecording
+from pluto_vsa.sources import FileIQSource
 
 
 MESSAGES = (

@@ -51,7 +51,7 @@ f_meas(t) = B * f_ref(t - tau) + f0 + fd * t + noise
 
 ## 現行実装
 
-対象は`pluto_sa/vsa/demod/gfsk.py`である。
+対象は`pluto_rtsa/vsa/demod/gfsk.py`である。
 
 1. IQを8 samples/symbolへresampleする。
 2. 隣接IQのphase differenceからinstantaneous frequencyを生成する。

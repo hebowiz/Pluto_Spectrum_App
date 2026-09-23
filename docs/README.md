@@ -38,10 +38,10 @@
 
 ## 起動構成
 
-起動点は `pluto_sa/main.py` です。
+起動点は `pluto_rtsa/main.py` です。
 
 ```powershell
-python -m pluto_sa.main
+python -m pluto_rtsa.main
 ```
 
 Windowsではリポジトリ直下のBATをダブルクリックして各アプリを起動できる。いずれも
@@ -49,8 +49,8 @@ Windowsではリポジトリ直下のBATをダブルクリックして各アプ�
 
 | BAT | アプリ | Python entry point |
 |---|---|---|
-| `Pluto_RTSA.bat` | RTSA / Spectrum Analyzer | `python -m pluto_sa.main` |
-| `Pluto_VSA.bat` | Generic VSA / ADS-B切替 | `python -m pluto_sa.vsa.main` |
+| `Pluto_RTSA.bat` | RTSA / Spectrum Analyzer | `python -m pluto_rtsa.main` |
+| `Pluto_VSA.bat` | Generic VSA / ADS-B切替 | `python -m pluto_vsa.main` |
 | `Pluto_VSG.bat` | IQ Waveform Generator / Pluto TX | `python -m pluto_vsg` |
 
 `.venv`が存在しない場合、またはアプリが非zero codeで終了した場合は、原因を確認できるよう

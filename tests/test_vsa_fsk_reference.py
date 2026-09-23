@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.demod.fsk_reference import (
+from pluto_vsa.demod.fsk_reference import (
     apply_gaussian_frequency_filter,
     fsk_reference_frequency_levels,
 )

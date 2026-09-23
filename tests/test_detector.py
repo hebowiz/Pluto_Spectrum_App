@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pluto_sa.signal.detector import apply_detector
+from pluto_rtsa.signal.detector import apply_detector
 
 
 def test_rms_detector_averages_linear_power() -> None:

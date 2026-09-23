@@ -30,12 +30,12 @@ from pluto_common.numeric_input import (
 )
 from pluto_common.runtime_paths import diagnostic_log_path
 
-from pluto_sa.vsa.profiles.bluetooth_br import header_error_check
-from pluto_sa.vsa.ui.measurement_chrome import (
+from pluto_vsa.profiles.bluetooth_br import header_error_check
+from pluto_vsa.ui.measurement_chrome import (
     install_measurement_plot_menu,
     make_measurement_plot,
 )
-from pluto_sa.vsa.ui.packet_decode import PacketDecodeTabs, apply_analysis_font
+from pluto_vsa.ui.packet_decode import PacketDecodeTabs, apply_analysis_font
 from pluto_vsg.protocol import analyze_generation_result
 from pluto_vsg.backends import (
     PlutoOutputBackend,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pluto_sa.sdr.iq_stream import IQStreamBuffer
+from pluto_common.sdr.iq_stream import IQStreamBuffer
 
 
 def make_iq(start: int, count: int) -> np.ndarray:

@@ -12,9 +12,9 @@ from pluto_protocol.dect.rf_modulation import (
     identify_rf_pattern,
     maximum_dsv,
 )
-from pluto_sa.vsa.protocol_modes.dect.analysis import _measurement_mask
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.protocol_modes.dect.analysis import analyze_dect_recording
+from pluto_vsa.protocol_modes.dect.analysis import _measurement_mask
+from pluto_vsa.model import IQRecording
+from pluto_vsa.protocol_modes.dect.analysis import analyze_dect_recording
 from pluto_vsg.engine.dect import DectWaveformEngine
 from pluto_vsg.model import DectBFieldSource, DectPacketType
 from pluto_vsg.profiles.dect import dect_fields, dect_project

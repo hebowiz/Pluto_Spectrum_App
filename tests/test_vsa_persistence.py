@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from pluto_sa.vsa.persistence import (
+from pluto_vsa.persistence import (
     load_mode_meas_config,
     load_meas_config,
     load_pattern,

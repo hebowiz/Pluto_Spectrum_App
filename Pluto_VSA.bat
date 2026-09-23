@@ -15,7 +15,7 @@ if not "%RUNTIME_EXIT%"=="0" (
 
 pushd "%PROJECT_DIR%"
 
-"%PYTHON_EXE%" -m pluto_sa.vsa.main
+"%PYTHON_EXE%" -m pluto_vsa
 set "EXIT_CODE=%ERRORLEVEL%"
 
 popd

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pluto_sa.vsa.profiles.bluetooth_edr import generate_edr_dh1
+from pluto_vsa.profiles.bluetooth_edr import generate_edr_dh1
 
 
 def build_parser() -> argparse.ArgumentParser:

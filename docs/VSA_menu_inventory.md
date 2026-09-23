@@ -367,12 +367,12 @@ Protocol固有の自動設定と、メニュー配置だけの不統一は分け
 
 ## 11. 確認元コード
 
-- `pluto_sa/vsa/ui/application_window.py`: 現共通シェルのボタン登録、各modeのpanel spec、System操作。
-- `pluto_sa/vsa/ui/control_panel.py`: 共通メニュー階層、SWEEP CONTROL、Analyzer Mode。
-- `pluto_sa/vsa/ui/main_window.py`: Generic設定ページと操作。
-- `pluto_sa/vsa/result_summary.py`: Generic Result Summary項目と実装状態。
-- `pluto_sa/vsa/protocol_modes/bluetooth/ui.py`: BT設定、Profile / Protocolによる条件付き表示。
-- `pluto_sa/vsa/protocol_modes/dect/ui.py`: DECT設定と旧Debug export action。
-- `pluto_sa/vsa/protocol_modes/dect/analysis.py`、`modulation.py`: DECT表示referenceの定義。
-- `pluto_sa/standards/adsb1090/ui.py`: ADS-B Analysis / Receiver Location / Display設定。
-- `pluto_sa/vsa/ui/measurement_chrome.py`: Power / Spectrumの適用初期値とDensity Spread。
+- `pluto_rtsa/vsa/ui/application_window.py`: 現共通シェルのボタン登録、各modeのpanel spec、System操作。
+- `pluto_rtsa/vsa/ui/control_panel.py`: 共通メニュー階層、SWEEP CONTROL、Analyzer Mode。
+- `pluto_rtsa/vsa/ui/main_window.py`: Generic設定ページと操作。
+- `pluto_rtsa/vsa/result_summary.py`: Generic Result Summary項目と実装状態。
+- `pluto_rtsa/vsa/protocol_modes/bluetooth/ui.py`: BT設定、Profile / Protocolによる条件付き表示。
+- `pluto_rtsa/vsa/protocol_modes/dect/ui.py`: DECT設定と旧Debug export action。
+- `pluto_rtsa/vsa/protocol_modes/dect/analysis.py`、`modulation.py`: DECT表示referenceの定義。
+- `pluto_rtsa/standards/adsb1090/ui.py`: ADS-B Analysis / Receiver Location / Display設定。
+- `pluto_rtsa/vsa/ui/measurement_chrome.py`: Power / Spectrumの適用初期値とDensity Spread。

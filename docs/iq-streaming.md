@@ -154,15 +154,15 @@ python -m pytest -q
 
 ## 現在の実装構成
 
-- `pluto_sa/sdr/iq_stream.py`: ハードウェア非依存のブロック、cursor、リング、統計
-- `pluto_sa/sdr/iq_window.py`: block境界をまたぐ厳密sample数window assembler
-- `pluto_sa/sdr/trigger.py`: Trigger設定/eventとpre/post-trigger取得recordの共通contract
-- `pluto_sa/sdr/trigger_detector.py`: sample-domain Power Level Trigger状態機械
-- `pluto_sa/sdr/trigger_recorder.py`: circular prestore/poststoreとrecord生成
-- `pluto_sa/sdr/trigger_acquisition.py`: arm/detect/forced timeout/rearmを統括する共通controller
-- `pluto_sa/sdr/pluto_receiver.py`: SDRの単一所有者、連続Producer、同期取得、epoch発行
-- `pluto_sa/ui/main_window.py`: RealTime latest consumer、HighSpeed TA loss-aware consumer
-- `pluto_sa/modes/sweep_controller.py`: Sweep同期IQBlock consumer
+- `pluto_rtsa/sdr/iq_stream.py`: ハードウェア非依存のブロック、cursor、リング、統計
+- `pluto_rtsa/sdr/iq_window.py`: block境界をまたぐ厳密sample数window assembler
+- `pluto_rtsa/sdr/trigger.py`: Trigger設定/eventとpre/post-trigger取得recordの共通contract
+- `pluto_rtsa/sdr/trigger_detector.py`: sample-domain Power Level Trigger状態機械
+- `pluto_rtsa/sdr/trigger_recorder.py`: circular prestore/poststoreとrecord生成
+- `pluto_rtsa/sdr/trigger_acquisition.py`: arm/detect/forced timeout/rearmを統括する共通controller
+- `pluto_rtsa/sdr/pluto_receiver.py`: SDRの単一所有者、連続Producer、同期取得、epoch発行
+- `pluto_rtsa/ui/main_window.py`: RealTime latest consumer、HighSpeed TA loss-aware consumer
+- `pluto_rtsa/modes/sweep_controller.py`: Sweep同期IQBlock consumer
 - `tests/test_iq_stream.py`: 純粋ストリームテスト
 - `tests/test_iq_window.py`: window分割、tail carry、不連続テスト
 - `tests/test_pluto_receiver_stream.py`: Fake Pluto統合テスト

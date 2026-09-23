@@ -56,10 +56,10 @@ Packet Region + PHY Classification
   - 802.11a/g Non-HT OFDM、802.11b DSSS/CCK、将来 HT の PHY / packet 生成資料
 - `docs/shared_protocol_packet_analyzer_design.md`
   - VSG / VSA 共通 semantic packet analyzer
-- `pluto_sa/vsa/model.py`
+- `pluto_rtsa/vsa/model.py`
   - `IQRecording`、`VSAAnalysisResult`、`CompositeVSAAnalysisResult` 等
-- `pluto_sa/vsa/profiles/bluetooth_br.py`
-- `pluto_sa/vsa/profiles/bluetooth_edr.py`
+- `pluto_rtsa/vsa/profiles/bluetooth_br.py`
+- `pluto_rtsa/vsa/profiles/bluetooth_edr.py`
 
 重要な設計方針として、`Shared Protocol Packet Analyzer` は **packet detection、同期、復調、EVM 計算を担当しない**。
 
@@ -1029,10 +1029,10 @@ DSSS / CCK 固有の modulation accuracy 指標については、実装前に IE
 
 ## 19. package 構成
 
-既存 `pluto_sa.vsa` の Generic VSA core を維持し、protocol-specific layer を追加する。
+既存 `pluto_vsa` の Generic VSA core を維持し、protocol-specific layer を追加する。
 
 ```text
-pluto_sa/vsa/
+pluto_rtsa/vsa/
 ├─ model.py
 ├─ analysis.py
 ├─ demod/

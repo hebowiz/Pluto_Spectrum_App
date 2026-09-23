@@ -27,9 +27,9 @@ HDT / Bluetooth Classic BR/EDR / LE 1M/2M のDedicated VSAについて、Result 
 
 直近のSIG RF measurement追加では、主に以下が追加・変更されている。
 
-- `pluto_sa/vsa/protocol_modes/bluetooth/model.py`
-- `pluto_sa/vsa/protocol_modes/bluetooth/rf_measurement/*`
-- `pluto_sa/vsa/protocol_modes/bluetooth/ui.py`
+- `pluto_rtsa/vsa/protocol_modes/bluetooth/model.py`
+- `pluto_rtsa/vsa/protocol_modes/bluetooth/rf_measurement/*`
+- `pluto_rtsa/vsa/protocol_modes/bluetooth/ui.py`
 
 一方、既存のGeneric GFSK demodulator / Pattern Analyzer本体はこの変更の中心ではない。
 

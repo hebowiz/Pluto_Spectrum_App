@@ -16,7 +16,7 @@ from pluto_vsg.profiles import (
     dect_project, dect_fields,
 )
 from pluto_protocol.bluetooth.hdt import HDTRate, HDT_RF_TEST_PCA, HDT_RF_TEST_CRC32_INIT
-from pluto_sa.vsa.profiles.bluetooth_br import recover_lap_from_access_code_bits
+from pluto_vsa.profiles.bluetooth_br import recover_lap_from_access_code_bits
 
 
 def text(bits):

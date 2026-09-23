@@ -160,8 +160,8 @@ def test_manual_field_editor_auto_and_cancel():
 
 @pytest.mark.parametrize("kind", (BluetoothPacketKind.DH1, BluetoothPacketKind.DH1_2, BluetoothPacketKind.DH1_3))
 def test_actual_classic_vsa_packet_exports(kind):
-    from pluto_sa.vsa.model import IQRecording
-    from pluto_sa.vsa.protocol_modes.bluetooth.model import analyze_bluetooth_classic_recording, BluetoothAnalysisProfile
+    from pluto_vsa.model import IQRecording
+    from pluto_vsa.protocol_modes.bluetooth.model import analyze_bluetooth_classic_recording, BluetoothAnalysisProfile
     base = bluetooth_br_edr_project()
     settings = replace(base.bluetooth_br, packet_kind=kind,
                        payload_length_bytes=16 if kind == BluetoothPacketKind.DH1_3 else 17)
@@ -179,8 +179,8 @@ def test_actual_classic_vsa_packet_exports(kind):
 
 
 def test_actual_le_vsa_packet_exports():
-    from pluto_sa.vsa.model import IQRecording
-    from pluto_sa.vsa.protocol_modes.bluetooth.model import analyze_bluetooth_le_recording, BluetoothAnalysisProfile
+    from pluto_vsa.model import IQRecording
+    from pluto_vsa.protocol_modes.bluetooth.model import analyze_bluetooth_le_recording, BluetoothAnalysisProfile
     generated = BluetoothLEWaveformEngine().generate(bluetooth_le_project())
     result = analyze_bluetooth_le_recording(
         IQRecording(generated.iq, generated.sample_rate_hz, 2440e6),
@@ -193,8 +193,8 @@ def test_actual_le_vsa_packet_exports():
 
 
 def test_actual_dect_vsa_packet_exports():
-    from pluto_sa.vsa.model import IQRecording
-    from pluto_sa.vsa.protocol_modes.dect import analyze_dect_recording
+    from pluto_vsa.model import IQRecording
+    from pluto_vsa.protocol_modes.dect import analyze_dect_recording
     original = dect_project()
     generated = DectWaveformEngine().generate(original)
     result = analyze_dect_recording(
@@ -205,8 +205,8 @@ def test_actual_dect_vsa_packet_exports():
 
 
 def test_actual_hdt_vsa_packet_exports():
-    from pluto_sa.vsa.model import IQRecording
-    from pluto_sa.vsa.protocol_modes.bluetooth.model import analyze_bluetooth_hdt_recording, BluetoothAnalysisProfile
+    from pluto_vsa.model import IQRecording
+    from pluto_vsa.protocol_modes.bluetooth.model import analyze_bluetooth_hdt_recording, BluetoothAnalysisProfile
     generated = BluetoothHDTWaveformEngine().generate(bluetooth_hdt_project())
     result = analyze_bluetooth_hdt_recording(
         IQRecording(generated.iq, generated.sample_rate_hz, 2440e6),
@@ -225,7 +225,7 @@ def test_capture_rf_settings_are_not_invented_as_transmitter_settings():
 
 
 def test_vsa_file_export_and_structure_based_enablement(tmp_path, monkeypatch):
-    from pluto_sa.vsa.ui.packet_export import export_packet_project, update_export_action
+    from pluto_vsa.ui.packet_export import export_packet_project, update_export_action
     from pyqtgraph.Qt import QtGui
     pg.mkQApp()
     parent = QtWidgets.QMainWindow()

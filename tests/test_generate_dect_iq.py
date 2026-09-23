@@ -1,7 +1,7 @@
 import numpy as np
 
-from pluto_sa.vsa.protocol_modes.dect import analyze_dect_recording
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.protocol_modes.dect import analyze_dect_recording
+from pluto_vsa.sources import FileIQSource
 from tools.generate_dect_iq import main
 
 

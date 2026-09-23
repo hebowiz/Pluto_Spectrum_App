@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pluto_sa.sdr.trigger import (
+from pluto_common.sdr.trigger import (
     AcquisitionMetadata,
     IQAcquisitionRecord,
     TriggerConfig,

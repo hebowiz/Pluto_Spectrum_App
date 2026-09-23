@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np
 import pyqtgraph as pg
 
-from pluto_sa.vsa.ui.measurement_chrome import PersistentPlotRanges
+from pluto_vsa.ui.measurement_chrome import PersistentPlotRanges
 
 
 def test_persistent_plot_range_tracks_packet_relative_x_and_reset() -> None:

@@ -8,11 +8,11 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_protocol.dect import DECT_CARRIER_PLANS
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.protocol_modes.dect.carriers import (
+from pluto_vsa.model import IQRecording
+from pluto_vsa.protocol_modes.dect.carriers import (
     DECT_CARRIER_PLANS as VSA_DECT_CARRIER_PLANS,
 )
-from pluto_sa.vsa.protocol_modes.dect import analyze_dect_recording
+from pluto_vsa.protocol_modes.dect import analyze_dect_recording
 from pluto_vsg.engine import DectWaveformEngine
 from pluto_vsg.engine.dect import _natural_preamble_extension
 from pluto_vsg.model import (

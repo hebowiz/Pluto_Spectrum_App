@@ -1,0 +1,421 @@
+"""Generated, file, and shared-acquisition IQ sources for the VSA."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from pluto_common.sdr.trigger import IQAcquisitionRecord
+from pluto_vsa.iqtar import load_iq_tar
+from pluto_vsa.demod.fsk_reference import fsk_reference_frequency_levels
+from pluto_vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_vsa.mapping import NATURAL_MAPPING, psk_constellation
+
+
+_FIFTY_OHM_VOLTAGE_TO_DBM = 10.0 * np.log10(1000.0 / 50.0)
+
+
+@dataclass(frozen=True)
+class IQSourceCapabilities:
+    finite_capture: bool
+    continuous_stream: bool
+    hardware_trigger: bool
+    writable_frontend: bool
+
+
+class GeneratedIQSource:
+    """Deterministic waveform source for tests and the first offline UI."""
+
+    capabilities = IQSourceCapabilities(
+        finite_capture=True,
+        continuous_stream=False,
+        hardware_trigger=False,
+        writable_frontend=False,
+    )
+
+    @staticmethod
+    def fsk(
+        *,
+        symbol_count: int = 256,
+        symbol_rate_hz: float = 1_000_000.0,
+        samples_per_symbol: int = 8,
+        frequency_deviation_hz: float = 250_000.0,
+        gaussian_bt: float | None = 0.5,
+        seed: int = 1,
+    ) -> tuple[IQRecording, SignalDescription]:
+        if int(symbol_count) <= 0:
+            raise ValueError("symbol_count must be positive")
+        if int(samples_per_symbol) < 2:
+            raise ValueError("samples_per_symbol must be at least 2")
+        if float(frequency_deviation_hz) <= 0.0:
+            raise ValueError("frequency_deviation_hz must be positive")
+        rng = np.random.default_rng(int(seed))
+        symbols = rng.integers(0, 2, size=int(symbol_count), dtype=np.uint8)
+        levels = fsk_reference_frequency_levels(
+            symbols,
+            samples_per_symbol=int(samples_per_symbol),
+            transmit_gaussian_bt=gaussian_bt,
+        )
+        modulation = ModulationKind.FSK
+        tx_filter = "None"
+        if gaussian_bt is not None:
+            if float(gaussian_bt) <= 0.0:
+                raise ValueError("gaussian_bt must be positive")
+            tx_filter = "Gaussian"
+        sample_rate_hz = float(symbol_rate_hz) * int(samples_per_symbol)
+        instantaneous_frequency = float(frequency_deviation_hz) * levels
+        phase = 2.0 * np.pi * np.cumsum(instantaneous_frequency) / sample_rate_hz
+        iq = np.exp(1j * phase).astype(np.complex64)
+        recording = IQRecording(
+            iq=iq,
+            sample_rate_hz=sample_rate_hz,
+            usable_bandwidth_hz=0.8 * sample_rate_hz,
+            source="Generated FSK",
+            amplitude_calibrated=True,
+            metadata={
+                "generated_symbols": symbols,
+                "seed": int(seed),
+                "dc_removal_recommended": False,
+            },
+        )
+        signal = SignalDescription(
+            modulation=modulation,
+            symbol_rate_hz=float(symbol_rate_hz),
+            frequency_deviation_hz=float(frequency_deviation_hz),
+            tx_filter=tx_filter,
+            filter_parameter=gaussian_bt,
+            name="Generated FSK",
+        )
+        return recording, signal
+
+    @staticmethod
+    def psk(
+        *,
+        modulation: ModulationKind = ModulationKind.QPSK,
+        symbol_count: int = 256,
+        symbol_rate_hz: float = 1_000_000.0,
+        samples_per_symbol: int = 8,
+        seed: int = 1,
+    ) -> tuple[IQRecording, SignalDescription]:
+        if not modulation.family.uses_iq_constellation:
+            raise ValueError("modulation must use an IQ constellation")
+        if int(symbol_count) <= 0:
+            raise ValueError("symbol_count must be positive")
+        if int(samples_per_symbol) < 2:
+            raise ValueError("samples_per_symbol must be at least 2")
+        rng = np.random.default_rng(int(seed))
+        symbols = rng.integers(0, modulation.order, size=int(symbol_count), dtype=np.int16)
+        alphabet = psk_constellation(modulation, NATURAL_MAPPING)
+        if modulation.differential:
+            waveform_symbols = np.cumprod(alphabet[symbols])
+        else:
+            waveform_symbols = alphabet[symbols]
+        iq = np.repeat(waveform_symbols, int(samples_per_symbol)).astype(np.complex64)
+        sample_rate_hz = float(symbol_rate_hz) * int(samples_per_symbol)
+        recording = IQRecording(
+            iq=iq,
+            sample_rate_hz=sample_rate_hz,
+            usable_bandwidth_hz=0.8 * sample_rate_hz,
+            source="Generated PSK",
+            amplitude_calibrated=True,
+            metadata={
+                "generated_symbols": symbols,
+                "seed": int(seed),
+                "dc_removal_recommended": False,
+            },
+        )
+        signal = SignalDescription(
+            modulation=modulation,
+            symbol_rate_hz=float(symbol_rate_hz),
+            tx_filter="None",
+            name="Generated PSK",
+        )
+        return recording, signal
+
+
+class FileIQSource:
+    """Load R&S iq-tar, NumPy, or raw complex IQ without modifying the source."""
+
+    capabilities = IQSourceCapabilities(
+        finite_capture=True,
+        continuous_stream=False,
+        hardware_trigger=False,
+        writable_frontend=False,
+    )
+
+    @staticmethod
+    def load(
+        path: str | Path,
+        *,
+        sample_rate_hz: float | None = None,
+        center_frequency_hz: float = 0.0,
+        raw_dtype: str = "complex64",
+        channel_index: int = 0,
+    ) -> IQRecording:
+        resolved = Path(path)
+        suffix = resolved.suffix.lower()
+        metadata: dict[str, object] = {"path": str(resolved.resolve())}
+        usable_bandwidth_hz: float | None = None
+        full_scale = 1.0
+        full_scale_present = False
+        if resolved.name.lower().endswith(".iq.tar"):
+            decoded = load_iq_tar(resolved, channel_index=channel_index)
+            iq = decoded.iq
+            sample_rate_hz = decoded.sample_rate_hz
+            if center_frequency_hz == 0.0:
+                center_frequency_hz = decoded.center_frequency_hz
+            usable_bandwidth_hz = decoded.sample_rate_hz
+            # R&S iq-tar stores the complex-envelope voltage at the RF input.
+            # Treat |I+jQ| as RMS voltage into the instrument's 50-ohm input,
+            # matching the Capture Buffer magnitude display in dBm.
+            calibration_offset_db = float(_FIFTY_OHM_VOLTAGE_TO_DBM)
+            frequency_dependent_offset_db = 0.0
+            input_correction_db = 0.0
+            amplitude_calibrated = True
+            metadata.update(decoded.metadata)
+            metadata.update(
+                {
+                    "amplitude_reference": "RMS voltage into 50 ohm",
+                    "power_impedance_ohm": 50.0,
+                    "dc_removal_recommended": False,
+                }
+            )
+        elif suffix == ".npy":
+            iq = np.load(resolved, allow_pickle=False)
+        elif suffix == ".npz":
+            with np.load(resolved, allow_pickle=False) as container:
+                key = "iq" if "iq" in container.files else container.files[0]
+                iq = np.array(container[key], copy=True)
+                if sample_rate_hz is None and "sample_rate_hz" in container.files:
+                    sample_rate_hz = float(np.asarray(container["sample_rate_hz"]).item())
+                if center_frequency_hz == 0.0 and "center_frequency_hz" in container.files:
+                    center_frequency_hz = float(np.asarray(container["center_frequency_hz"]).item())
+                if "usable_bandwidth_hz" in container.files:
+                    usable_bandwidth_hz = float(
+                        np.asarray(container["usable_bandwidth_hz"]).item()
+                    )
+                if "full_scale" in container.files:
+                    full_scale = float(np.asarray(container["full_scale"]).item())
+                    full_scale_present = True
+                calibration_offset_db = (
+                    float(np.asarray(container["calibration_offset_db"]).item())
+                    if "calibration_offset_db" in container.files
+                    else 0.0
+                )
+                frequency_dependent_offset_db = (
+                    float(np.asarray(container["frequency_dependent_offset_db"]).item())
+                    if "frequency_dependent_offset_db" in container.files
+                    else 0.0
+                )
+                input_correction_db = (
+                    float(np.asarray(container["input_correction_db"]).item())
+                    if "input_correction_db" in container.files
+                    else 0.0
+                )
+                amplitude_calibrated = (
+                    bool(np.asarray(container["amplitude_calibrated"]).item())
+                    if "amplitude_calibrated" in container.files
+                    else False
+                )
+                for metadata_key in (
+                    "dc_removal_recommended",
+                    "software_dc_removal_applied",
+                    "software_dc_estimator",
+                    "software_dc_offset_real",
+                    "software_dc_offset_imag",
+                    "requested_center_frequency_hz",
+                    "hardware_lo_frequency_hz",
+                    "lo_offset_hz",
+                    "experimental_lo_offset",
+                    "requested_analysis_bandwidth_hz",
+                ):
+                    if metadata_key in container.files:
+                        metadata_value = np.asarray(container[metadata_key]).item()
+                        if (
+                            metadata_key == "requested_analysis_bandwidth_hz"
+                            and not np.isfinite(metadata_value)
+                        ):
+                            continue
+                        if (
+                            metadata_key
+                            in {
+                                "software_dc_offset_real",
+                                "software_dc_offset_imag",
+                            }
+                            and not np.isfinite(metadata_value)
+                        ):
+                            continue
+                        if (
+                            metadata_key == "software_dc_estimator"
+                            and not str(metadata_value)
+                        ):
+                            continue
+                        metadata[metadata_key] = metadata_value
+                metadata["container_key"] = key
+        else:
+            dtype = np.dtype(raw_dtype)
+            if dtype.kind != "c":
+                raise ValueError("raw_dtype must be a complex NumPy dtype")
+            iq = np.fromfile(resolved, dtype=dtype)
+            calibration_offset_db = 0.0
+            frequency_dependent_offset_db = 0.0
+            input_correction_db = 0.0
+            amplitude_calibrated = False
+        if suffix == ".npy":
+            calibration_offset_db = 0.0
+            frequency_dependent_offset_db = 0.0
+            input_correction_db = 0.0
+            amplitude_calibrated = False
+        sidecar = resolved.with_suffix(resolved.suffix + ".json")
+        if suffix == ".npz" and sidecar.is_file():
+            sidecar_values = json.loads(sidecar.read_text(encoding="utf-8"))
+            full_scale = float(sidecar_values.get("full_scale", full_scale))
+            full_scale_present = "full_scale" in sidecar_values or full_scale_present
+            calibration_offset_db = float(
+                sidecar_values.get("calibration_offset_db", calibration_offset_db)
+            )
+            frequency_dependent_offset_db = float(
+                sidecar_values.get(
+                    "frequency_dependent_offset_db", frequency_dependent_offset_db
+                )
+            )
+            input_correction_db = float(
+                sidecar_values.get("input_correction_db", input_correction_db)
+            )
+            amplitude_calibrated = bool(
+                sidecar_values.get("amplitude_calibrated", amplitude_calibrated)
+            )
+            metadata["amplitude_metadata_sidecar"] = str(sidecar.resolve())
+            if "amplitude_reference" in sidecar_values:
+                metadata["amplitude_reference"] = str(
+                    sidecar_values["amplitude_reference"]
+                )
+        if (
+            suffix == ".npz"
+            and not full_scale_present
+            and full_scale == 1.0
+            and float(np.max(np.abs(iq), initial=0.0)) > 2.0
+        ):
+            # Legacy Pluto captures were stored in raw AD936x sample units but
+            # old NPZ files omitted full_scale and the nominal -62 dB frontend
+            # conversion. Preserve their useful dBm display without claiming
+            # that the capture is calibrated.
+            full_scale = 2048.0
+            if calibration_offset_db == 0.0 and not amplitude_calibrated:
+                calibration_offset_db = -62.0
+                metadata["nominal_pluto_amplitude_inferred"] = True
+                metadata["dc_removal_recommended"] = True
+        if sample_rate_hz is None:
+            raise ValueError("sample_rate_hz is required when the file has no metadata")
+        return IQRecording(
+            iq=iq,
+            sample_rate_hz=float(sample_rate_hz),
+            center_frequency_hz=float(center_frequency_hz),
+            usable_bandwidth_hz=(
+                0.8 * float(sample_rate_hz)
+                if usable_bandwidth_hz is None
+                else usable_bandwidth_hz
+            ),
+            source=(
+                f"R&S iq-tar: {resolved.name}"
+                if resolved.name.lower().endswith(".iq.tar")
+                else f"File: {resolved.name}"
+            ),
+            full_scale=full_scale,
+            calibration_offset_db=calibration_offset_db,
+            frequency_dependent_offset_db=frequency_dependent_offset_db,
+            input_correction_db=input_correction_db,
+            amplitude_calibrated=amplitude_calibrated,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def save_npz(path: str | Path, recording: IQRecording) -> None:
+        np.savez(
+            Path(path),
+            iq=recording.iq,
+            sample_rate_hz=np.float64(recording.sample_rate_hz),
+            center_frequency_hz=np.float64(recording.center_frequency_hz),
+            usable_bandwidth_hz=np.float64(
+                recording.sample_rate_hz
+                if recording.usable_bandwidth_hz is None
+                else recording.usable_bandwidth_hz
+            ),
+            full_scale=np.float64(recording.full_scale),
+            calibration_offset_db=np.float64(recording.calibration_offset_db),
+            frequency_dependent_offset_db=np.float64(
+                recording.frequency_dependent_offset_db
+            ),
+            input_correction_db=np.float64(recording.input_correction_db),
+            amplitude_calibrated=np.bool_(recording.amplitude_calibrated),
+            dc_removal_recommended=np.bool_(
+                recording.metadata.get("dc_removal_recommended", False)
+            ),
+            software_dc_removal_applied=np.bool_(
+                recording.metadata.get("software_dc_removal_applied", False)
+            ),
+            software_dc_estimator=np.str_(
+                recording.metadata.get("software_dc_estimator", "")
+            ),
+            software_dc_offset_real=np.float64(
+                recording.metadata.get("software_dc_offset_real", np.nan)
+            ),
+            software_dc_offset_imag=np.float64(
+                recording.metadata.get("software_dc_offset_imag", np.nan)
+            ),
+            requested_center_frequency_hz=np.float64(
+                recording.metadata.get(
+                    "requested_center_frequency_hz", recording.center_frequency_hz
+                )
+            ),
+            hardware_lo_frequency_hz=np.float64(
+                recording.metadata.get(
+                    "hardware_lo_frequency_hz", recording.center_frequency_hz
+                )
+            ),
+            lo_offset_hz=np.float64(recording.metadata.get("lo_offset_hz", 0.0)),
+            experimental_lo_offset=np.bool_(
+                recording.metadata.get("experimental_lo_offset", False)
+            ),
+            requested_analysis_bandwidth_hz=np.float64(
+                np.nan
+                if recording.metadata.get("requested_analysis_bandwidth_hz") is None
+                else recording.metadata["requested_analysis_bandwidth_hz"]
+            ),
+        )
+
+
+def recording_from_acquisition(
+    record: IQAcquisitionRecord,
+    *,
+    calibration_offset_db: float = 0.0,
+    frequency_dependent_offset_db: float = 0.0,
+    input_correction_db: float = 0.0,
+    amplitude_calibrated: bool = False,
+) -> IQRecording:
+    """Adapt the common Pluto trigger record without coupling DSP to Pluto."""
+    return IQRecording(
+        iq=record.iq,
+        sample_rate_hz=record.metadata.sample_rate_hz,
+        center_frequency_hz=record.metadata.center_freq_hz,
+        usable_bandwidth_hz=record.metadata.rf_bandwidth_hz,
+        source=record.metadata.source,
+        full_scale=record.metadata.iq_full_scale,
+        calibration_offset_db=float(calibration_offset_db),
+        frequency_dependent_offset_db=float(frequency_dependent_offset_db),
+        input_correction_db=float(input_correction_db),
+        amplitude_calibrated=bool(amplitude_calibrated),
+        start_sample_index=record.start_sample_index,
+        trigger_sample_index=record.trigger_sample_index,
+        discontinuity_reason=record.discontinuity_reason,
+        metadata={
+            "stream_id": record.stream_id,
+            "gain_db": record.metadata.gain_db,
+            "trigger_kind": record.trigger.kind.value,
+            "trigger_forced": record.trigger.forced,
+            "dc_removal_recommended": True,
+        },
+    )

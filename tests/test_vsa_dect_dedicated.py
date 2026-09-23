@@ -8,19 +8,19 @@ import pyqtgraph as pg
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from pluto_sa.vsa.protocol_modes.dect import (
+from pluto_vsa.protocol_modes.dect import (
     DectModulationReference,
     DectAnalyzerWindow,
     analyze_dect_recording,
     generate_dect_packet,
 )
-from pluto_sa.vsa.protocol_modes.dect.ui import (
+from pluto_vsa.protocol_modes.dect.ui import (
     _DectModulationObservation,
     _DectPowerTimeObservation,
 )
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.session import VSASession
-from pluto_sa.vsa.ui.display_processing import fit_binary_fsk_display_drift
+from pluto_vsa.model import IQRecording
+from pluto_vsa.session import VSASession
+from pluto_vsa.ui.display_processing import fit_binary_fsk_display_drift
 
 
 class _Source:

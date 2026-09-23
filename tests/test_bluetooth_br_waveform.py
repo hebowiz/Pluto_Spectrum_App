@@ -3,21 +3,21 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.model import ModulationKind, SignalDescription
-from pluto_sa.vsa.pattern import (
+from pluto_vsa.model import ModulationKind, SignalDescription
+from pluto_vsa.pattern import (
     KnownPattern,
     PatternAnalyzer,
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeSettings,
 )
-from pluto_sa.vsa.profiles.bluetooth_br import (
+from pluto_vsa.profiles.bluetooth_br import (
     BluetoothBRProfile,
     access_code_bits,
     decode_dh1_payload,
     prbs9_period,
 )
-from pluto_sa.vsa.profiles.bluetooth_br_waveform import generate_br_dh1
+from pluto_vsa.profiles.bluetooth_br_waveform import generate_br_dh1
 
 
 def test_generated_br_dh1_has_valid_header_payload_and_crc() -> None:

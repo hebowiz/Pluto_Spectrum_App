@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from pluto_sa.sdr.iq_stream import IQStreamBuffer
-from pluto_sa.sdr.iq_window import (
+from pluto_common.sdr.iq_stream import IQStreamBuffer
+from pluto_common.sdr.iq_window import (
     IQWindowAssembler,
     resolve_fft_aligned_window_samples,
     resolve_time_window_samples,

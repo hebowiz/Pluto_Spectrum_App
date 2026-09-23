@@ -4,8 +4,8 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from pluto_common.control_panel import CONTROL_BUTTON_HEIGHT
-from pluto_sa.modes.analyzer_mode import AnalyzerMode
-from pluto_sa.ui.main_window import RealtimeSpectrumWindow, SWEEP_STATE_RUNNING
+from pluto_common.config.analyzer_mode import AnalyzerMode
+from pluto_rtsa.ui.main_window import RealtimeSpectrumWindow, SWEEP_STATE_RUNNING
 
 
 def test_rtsa_arrow_control_uses_native_expanding_tool_button():

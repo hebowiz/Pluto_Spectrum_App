@@ -3,13 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.modes.analyzer_mode import AnalyzerMode
-from pluto_sa.signal.realtime_fft import (
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_common.config.analyzer_mode import AnalyzerMode
+from pluto_rtsa.signal.realtime_fft import (
     RealtimeFFTAccumulator,
     build_realtime_fft_plan,
 )
-from pluto_sa.signal.spectrum_processor import SpectrumProcessor
+from pluto_rtsa.signal.spectrum_processor import SpectrumProcessor
 
 
 def _processor(fft_size: int = 64) -> SpectrumProcessor:

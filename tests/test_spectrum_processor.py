@@ -5,16 +5,16 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.modes.analyzer_mode import AnalyzerMode
-from pluto_sa.signal.fft_filterbank import (
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_common.config.analyzer_mode import AnalyzerMode
+from pluto_rtsa.signal.fft_filterbank import (
     design_gaussian_fft_filterbank,
     required_gaussian_fft_size,
     resolve_automatic_rtsa_fft_design,
 )
-from pluto_sa.signal.measurement_filter import design_iq_rbw_filter
-from pluto_sa.signal.spectrum_processor import SpectrumProcessor
-from pluto_sa.ui.main_window import (
+from pluto_rtsa.signal.measurement_filter import design_iq_rbw_filter
+from pluto_rtsa.signal.spectrum_processor import SpectrumProcessor
+from pluto_rtsa.ui.main_window import (
     MAX_REALTIME_FFT_SIZE,
     RealtimeSpectrumWindow,
     make_waterfall_lookup_table,

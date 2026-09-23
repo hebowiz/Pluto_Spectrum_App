@@ -4,11 +4,11 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-from pluto_sa.standards.adsb1090 import (
+from pluto_vsa.standards.adsb1090 import (
     ADSB1090Analyzer,
     ADSB1090Settings,
 )
-from pluto_sa.standards.adsb1090.decoder import (
+from pluto_vsa.standards.adsb1090.decoder import (
     classify_mode_s_parity,
     decode_adsb_fields,
     decode_global_airborne_cpr,
@@ -16,8 +16,8 @@ from pluto_sa.standards.adsb1090.decoder import (
     decode_mode_s_header_fields,
     mode_s_crc_remainder,
 )
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.model import IQRecording
+from pluto_vsa.sources import FileIQSource
 
 
 KNOWN_DF17 = "8D40621D58C382D690C8AC2863A7"

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pluto_sa.modes.sweep_controller import SweepController
+from pluto_rtsa.modes.sweep_controller import SweepController
 
 
 def _controller(*, detector: str = "RMS") -> SweepController:

@@ -6,7 +6,7 @@ from pluto_protocol import (
     PacketDecodeInput, PacketSourceInfo, analyze_packet, packet_table_rows,
 )
 from pluto_protocol.bluetooth.common import decode_acl_header
-from pluto_sa.vsa.protocol import analyze_demodulated_packet_bits
+from pluto_vsa.protocol import analyze_demodulated_packet_bits
 from pluto_vsg.engine import BluetoothBRWaveformEngine, BluetoothLEWaveformEngine
 from pluto_vsg.model import BluetoothLEPhy, BluetoothPacketKind
 from pluto_vsg.profiles import (

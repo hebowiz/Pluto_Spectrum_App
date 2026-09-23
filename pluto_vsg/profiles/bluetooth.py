@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from pluto_sa.vsa.profiles.bluetooth_br import header_error_check
+from pluto_vsa.profiles.bluetooth_br import header_error_check
 from pluto_vsg.model import (
     BluetoothBRSettings,
     BluetoothPacketKind,

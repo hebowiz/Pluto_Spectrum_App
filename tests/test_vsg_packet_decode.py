@@ -13,7 +13,7 @@ from pluto_vsg.profiles import (
     bluetooth_hdt_project, dect_project, wifi_project,
 )
 from pluto_vsg.ui.main_window import PlutoVSGWindow
-from pluto_sa.vsa.ui.packet_decode import PacketDecodeTabs
+from pluto_vsa.ui.packet_decode import PacketDecodeTabs
 
 
 def edr_project(kind):
@@ -108,8 +108,8 @@ def test_vsg_unsupported_packet_decode_is_disabled():
 
 def test_vsa_and_vsg_use_the_same_packet_content_widgets(tmp_path):
     from pyqtgraph.Qt import QtCore
-    from pluto_sa.vsa.protocol_modes.bluetooth.ui import BluetoothAnalyzerWindow
-    from pluto_sa.vsa.protocol_modes.dect.ui import DectAnalyzerWindow
+    from pluto_vsa.protocol_modes.bluetooth.ui import BluetoothAnalyzerWindow
+    from pluto_vsa.protocol_modes.dect.ui import DectAnalyzerWindow
 
     pg.mkQApp("Shared packet content views")
     prefs = QtCore.QSettings(str(tmp_path / "shared.ini"), QtCore.QSettings.Format.IniFormat)

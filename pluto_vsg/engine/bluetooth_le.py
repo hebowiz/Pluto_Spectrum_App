@@ -9,7 +9,7 @@ import numpy as np
 from pluto_protocol.model import GeneratedPacketBits
 from pluto_vsg.packet_fields import packet_field_bits
 from pluto_protocol.bluetooth.common import prbs15_period
-from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
+from pluto_vsa.profiles.bluetooth_br import prbs9_period
 from pluto_vsg.engine.base import FieldBoundary, GenerationResult
 from pluto_vsg.engine.bluetooth_br import (
     _append_field_boundaries,

@@ -2,7 +2,7 @@ import io
 import json
 import urllib.error
 
-from pluto_sa.standards.adsb1090.route import (
+from pluto_vsa.standards.adsb1090.route import (
     ADSBDBRouteClient,
     parse_adsbdb_route,
 )

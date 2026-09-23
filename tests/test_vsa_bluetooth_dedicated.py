@@ -11,9 +11,9 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from pluto_protocol.bluetooth.hdt import HDTRate, hdt_definition
 from pluto_protocol.model import PacketIssue
-from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSAAnalysisResult
-from pluto_sa.vsa.pattern import IQPowerTriggerSettings, MeasurementFilterMode
-from pluto_sa.vsa.protocol_modes.bluetooth.model import (
+from pluto_vsa.model import IQRecording, ModulationKind, SignalDescription, VSAAnalysisResult
+from pluto_vsa.pattern import IQPowerTriggerSettings, MeasurementFilterMode
+from pluto_vsa.protocol_modes.bluetooth.model import (
     BluetoothAnalysisProfile,
     analyze_bluetooth_classic_recording,
     analyze_bluetooth_classic_recordings,
@@ -23,23 +23,23 @@ from pluto_sa.vsa.protocol_modes.bluetooth.model import (
     analyze_bluetooth_le_recordings,
     analyze_bluetooth_session,
 )
-import pluto_sa.vsa.protocol_modes.bluetooth.model as bluetooth_model
-from pluto_sa.vsa.profiles.bluetooth_br import access_code_bits
-from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
+import pluto_vsa.protocol_modes.bluetooth.model as bluetooth_model
+from pluto_vsa.profiles.bluetooth_br import access_code_bits
+from pluto_vsa.protocol_modes.bluetooth.rf_measurement import (
     BluetoothFMMeasurementTrace,
     BluetoothRFMeasurementFilterProfile,
     BluetoothRFTestAccumulator,
 )
-import pluto_sa.vsa.protocol_modes.bluetooth.ui as bluetooth_ui
-from pluto_sa.vsa.protocol_modes.bluetooth.ui import BluetoothAnalyzerWindow, format_air_bits, infer_le_channel
-from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
-from pluto_sa.vsa.session import VSASession
-from pluto_sa.vsa.sources import FileIQSource
-from pluto_sa.vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
-from pluto_sa.vsa.ui.display_processing import (
+import pluto_vsa.protocol_modes.bluetooth.ui as bluetooth_ui
+from pluto_vsa.protocol_modes.bluetooth.ui import BluetoothAnalyzerWindow, format_air_bits, infer_le_channel
+from pluto_common.sdr.trigger import TriggerKind, TriggerSlope
+from pluto_vsa.session import VSASession
+from pluto_vsa.sources import FileIQSource
+from pluto_vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
+from pluto_vsa.ui.display_processing import (
     physical_constellation_display_symbols,
 )
-from pluto_sa.vsa.ui.measurement_chrome import (
+from pluto_vsa.ui.measurement_chrome import (
     CenteredDedicatedTableDelegate,
     DEDICATED_TABLE_GRID_COLOR,
     SymbolDensitySpread,

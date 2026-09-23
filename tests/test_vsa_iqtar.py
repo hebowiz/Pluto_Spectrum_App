@@ -7,8 +7,8 @@ import tarfile
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.model import ModulationKind, SignalDescription
-from pluto_sa.vsa.pattern import (
+from pluto_vsa.model import ModulationKind, SignalDescription
+from pluto_vsa.pattern import (
     DemodulationSettings,
     IQPowerTriggerSettings,
     KnownPattern,
@@ -17,8 +17,8 @@ from pluto_sa.vsa.pattern import (
     ResultRangeSettings,
     SynchronizationSource,
 )
-from pluto_sa.vsa.session import VSASession
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.session import VSASession
+from pluto_vsa.sources import FileIQSource
 
 
 def _write_iq_tar(

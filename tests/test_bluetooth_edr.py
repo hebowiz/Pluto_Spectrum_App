@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.model import ModulationKind, SignalDescription
-from pluto_sa.vsa.mapping import reverse_symbol_bits
-from pluto_sa.vsa.pattern import (
+from pluto_vsa.model import ModulationKind, SignalDescription
+from pluto_vsa.mapping import reverse_symbol_bits
+from pluto_vsa.pattern import (
     DemodulationSettings,
     KnownPattern,
     MatchSelectionPolicy,
@@ -14,9 +14,9 @@ from pluto_sa.vsa.pattern import (
     PatternSearchSettings,
     ResultRangeSettings,
 )
-from pluto_sa.vsa.profiles.bluetooth_br import decode_header_air_bits, prbs9_period
-from pluto_sa.vsa.profiles.bluetooth_edr import generate_edr_dh1
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.profiles.bluetooth_br import decode_header_air_bits, prbs9_period
+from pluto_vsa.profiles.bluetooth_edr import generate_edr_dh1
+from pluto_vsa.sources import FileIQSource
 
 
 @pytest.mark.parametrize(

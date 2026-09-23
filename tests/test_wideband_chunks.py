@@ -5,10 +5,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.modes.analyzer_mode import AnalyzerMode
-from pluto_sa.signal.spectrum_processor import SpectrumProcessor
-from pluto_sa.ui.main_window import (
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_common.config.analyzer_mode import AnalyzerMode
+from pluto_rtsa.signal.spectrum_processor import SpectrumProcessor
+from pluto_rtsa.ui.main_window import (
     RealtimeSpectrumWindow,
     WidebandRuntimeState,
     plan_wideband_chunks,

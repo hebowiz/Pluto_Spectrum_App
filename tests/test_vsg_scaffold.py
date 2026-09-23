@@ -9,28 +9,28 @@ import numpy as np
 import pytest
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from pluto_sa.vsa.iqtar import load_iq_tar
-from pluto_sa.vsa.profiles.bluetooth_br import (
+from pluto_vsa.iqtar import load_iq_tar
+from pluto_vsa.profiles.bluetooth_br import (
     BluetoothBRProfile,
     access_code_bits,
     decode_dh1_payload,
     payload_crc_bytes,
 )
-from pluto_sa.vsa.profiles.bluetooth_edr import generate_edr_dh1
-from pluto_sa.vsa.mapping import (
+from pluto_vsa.profiles.bluetooth_edr import generate_edr_dh1
+from pluto_vsa.mapping import (
     BLUETOOTH_EDR_MAPPING,
     phase_indices_to_logical_symbols,
     reverse_symbol_bits,
 )
-from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
-from pluto_sa.vsa.pattern import (
+from pluto_vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_vsa.pattern import (
     KnownPattern,
     PatternAnalyzer,
     PatternSearchMode,
     PatternSearchSettings,
     ResultRangeSettings,
 )
-from pluto_sa.vsa.ui.measurement_chrome import FixedInteractionViewBox
+from pluto_vsa.ui.measurement_chrome import FixedInteractionViewBox
 from pluto_vsg.backends import (
     PlutoOutputBackend,
     PlutoPlaybackMode,

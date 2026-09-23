@@ -1,16 +1,16 @@
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.analysis import VSAAnalyzer, recording_spectrum_trace
-from pluto_sa.vsa.channel import (
+from pluto_vsa.analysis import VSAAnalyzer, recording_spectrum_trace
+from pluto_vsa.channel import (
     AnalysisDisplayRecordings,
     extract_analysis_channel,
     extract_requested_analysis_channel,
     validate_analysis_channel_capture,
 )
-from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription, VSASettings
-from pluto_sa.vsa.session import VSASession
-from pluto_sa.vsa.profiles.bluetooth_br import (
+from pluto_vsa.model import IQRecording, ModulationKind, SignalDescription, VSASettings
+from pluto_vsa.session import VSASession
+from pluto_vsa.profiles.bluetooth_br import (
     BluetoothBRProfile,
     access_code_bits,
     giac_access_code_bits,

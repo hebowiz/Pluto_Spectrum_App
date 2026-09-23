@@ -5,15 +5,15 @@ from pathlib import Path
 
 from pluto_protocol import PacketDecodeInput, analyze_packet
 from pluto_protocol.dect import dect_p_range
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.protocol_modes.dect import (
+from pluto_vsa.model import IQRecording
+from pluto_vsa.protocol_modes.dect import (
     DECT_CARRIER_PLANS,
     DectModulationReference,
     analyze_dect_recording,
     generate_dect_packet,
 )
-from pluto_sa.vsa.protocol_modes.dect.analysis import _bit_means, _sync_packet
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.protocol_modes.dect.analysis import _bit_means, _sync_packet
+from pluto_vsa.sources import FileIQSource
 
 
 FIXTURES = Path(__file__).parent / "fixtures"

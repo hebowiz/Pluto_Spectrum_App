@@ -1,4 +1,4 @@
-from pluto_sa.config.session_state import (
+from pluto_rtsa.config.session_state import (
     RTSA_SESSION_KEY,
     RTSASessionState,
     apply_config_values,
@@ -12,13 +12,13 @@ from pluto_sa.config.session_state import (
     save_session_state,
     save_session_state_file,
 )
-from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.modes.analyzer_mode import AnalyzerMode
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_common.config.analyzer_mode import AnalyzerMode
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 from pluto_common.control_panel import ControlPanelNavigator
-import pluto_sa.main as main_module
-import pluto_sa.ui.session_window as session_window_module
+import pluto_rtsa.main as main_module
+import pluto_rtsa.ui.session_window as session_window_module
 
 
 class FakeSettings:
@@ -407,7 +407,7 @@ def test_config_control_sync_updates_all_config_backed_selection_groups():
     for method_name in method_names:
         setattr(window, method_name, lambda name=method_name: events.append(name))
 
-    from pluto_sa.ui.main_window import RealtimeSpectrumWindow
+    from pluto_rtsa.ui.main_window import RealtimeSpectrumWindow
 
     RealtimeSpectrumWindow._sync_config_backed_controls(window)
 

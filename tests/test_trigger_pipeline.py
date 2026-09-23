@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pluto_sa.sdr.iq_stream import IQStreamBuffer
-from pluto_sa.sdr.trigger import (
+from pluto_common.sdr.iq_stream import IQStreamBuffer
+from pluto_common.sdr.trigger import (
     AcquisitionMetadata,
     TriggerConfig,
     TriggerEvent,
@@ -12,8 +12,8 @@ from pluto_sa.sdr.trigger import (
     TriggerRearmMode,
     TriggerSlope,
 )
-from pluto_sa.sdr.trigger_detector import PowerLevelTriggerDetector
-from pluto_sa.sdr.trigger_recorder import TriggeredIQRecorder
+from pluto_common.sdr.trigger_detector import PowerLevelTriggerDetector
+from pluto_common.sdr.trigger_recorder import TriggeredIQRecorder
 
 
 def iq_at_dbfs(values_dbfs: list[float]) -> np.ndarray:

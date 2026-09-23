@@ -5,14 +5,14 @@ import numpy as np
 import pytest
 from scipy.ndimage import shift as fractional_shift
 
-import pluto_sa.vsa.session as session_module
-from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
-from pluto_sa.vsa.mapping import (
+import pluto_vsa.session as session_module
+from pluto_vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_vsa.mapping import (
     BLUETOOTH_HDT_MAPPING,
     psk_constellation,
     reverse_symbol_bits,
 )
-from pluto_sa.vsa.pattern import (
+from pluto_vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
     IQPowerTriggerSettings,
@@ -32,15 +32,15 @@ from pluto_sa.vsa.pattern import (
     _fit_differential_psk_phase_model,
     _root_raised_cosine_taps,
 )
-from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
-from pluto_sa.vsa.session import VSASession
-from pluto_sa.vsa.profiles.bluetooth_br import access_code_bits
-from pluto_sa.vsa.profiles.bluetooth_br import (
+from pluto_vsa.sources import FileIQSource, GeneratedIQSource
+from pluto_vsa.session import VSASession
+from pluto_vsa.profiles.bluetooth_br import access_code_bits
+from pluto_vsa.profiles.bluetooth_br import (
     build_packet_bits,
     giac_access_code_bits,
     modulate_packet_bits,
 )
-from pluto_sa.vsa.demod.gfsk import (
+from pluto_vsa.demod.gfsk import (
     demodulate_gfsk,
     fsk_reference_frequency_levels,
 )

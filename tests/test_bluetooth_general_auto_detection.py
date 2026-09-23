@@ -4,14 +4,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.sources import FileIQSource
-from pluto_sa.vsa.channel import extract_requested_analysis_channel
-from pluto_sa.vsa.profiles.bluetooth_br import (
+from pluto_vsa.model import IQRecording
+from pluto_vsa.sources import FileIQSource
+from pluto_vsa.channel import extract_requested_analysis_channel
+from pluto_vsa.profiles.bluetooth_br import (
     access_code_bits,
     recover_lap_from_access_code_bits,
 )
-from pluto_sa.vsa.protocol_modes.bluetooth.model import (
+from pluto_vsa.protocol_modes.bluetooth.model import (
     BluetoothAnalysisProfile,
     analyze_bluetooth_classic_recordings,
     analyze_bluetooth_hdt_recordings,

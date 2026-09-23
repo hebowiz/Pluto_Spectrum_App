@@ -3,8 +3,8 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.protocol_modes.dect.power_time import (
+from pluto_vsa.model import IQRecording
+from pluto_vsa.protocol_modes.dect.power_time import (
     _complex_measurement_receiver,
     build_dect_power_measurement_paths,
     measure_dect_ntp,

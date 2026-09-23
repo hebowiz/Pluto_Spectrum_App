@@ -9,13 +9,13 @@ import pyqtgraph as pg
 import pytest
 from pyqtgraph.Qt import QtWidgets
 
-from pluto_sa.vsa.profiles.bluetooth_br import (
+from pluto_vsa.profiles.bluetooth_br import (
     fec13_encode,
     header_error_check,
     payload_crc_bytes,
     whitening_sequence,
 )
-from pluto_sa.vsa.profiles.bluetooth_edr import (
+from pluto_vsa.profiles.bluetooth_edr import (
     EDR_SYNC_BITS_2MBPS,
     EDR_SYNC_BITS_3MBPS,
 )

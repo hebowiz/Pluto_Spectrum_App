@@ -1,6 +1,6 @@
 import pytest
 
-from pluto_sa.vsa.result_summary import (
+from pluto_vsa.result_summary import (
     DEFAULT_RESULT_SUMMARY_IDS,
     RESULT_SUMMARY_BY_ID,
     RESULT_SUMMARY_ITEMS,

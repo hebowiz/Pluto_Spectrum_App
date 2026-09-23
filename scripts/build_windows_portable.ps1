@@ -76,13 +76,13 @@ if (-not (Test-Path -LiteralPath $driverManualPath)) {
 $applications = @(
     @{
         Name = "Pluto_RTSA"
-        Entry = "packaging\entrypoints\pluto_rtsa.py"
+        Entry = "packaging\entrypoints\pluto_rtsa_entry.py"
         Manual = "output\pdf\Pluto_RTSA_User_Manual_JA.pdf"
         Hidden = @()
     },
     @{
         Name = "Pluto_VSA"
-        Entry = "packaging\entrypoints\pluto_vsa.py"
+        Entry = "packaging\entrypoints\pluto_vsa_entry.py"
         Manual = "output\pdf\Pluto_VSA_User_Manual_JA.pdf"
         Hidden = @(
         "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebChannel"

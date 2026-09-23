@@ -6,9 +6,9 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pytest
-import pluto_sa.ui.main_window as main_window_module
+import pluto_rtsa.ui.main_window as main_window_module
 
-from pluto_sa.ui.main_window import (
+from pluto_rtsa.ui.main_window import (
     HIGH_SPEED_TA_CAPTURE_BLOCK_SAMPLES,
     HIGH_SPEED_TA_SNAPSHOT_MAX_SAMPLES,
     HighSpeedTAAnalysisJob,

@@ -1,0 +1,3062 @@
+"""Bluetooth dedicated-analysis workspace embedded in Pluto VSA."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass, replace
+import json
+from pathlib import Path
+
+import numpy as np
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
+from pluto_common.numeric_input import DeferredDoubleSpinBox, DeferredSpinBox
+from pluto_common.sdr.trigger import TriggerKind, TriggerSlope
+from pluto_vsa.model import IQRecording, ModulationFamily
+from pluto_vsa.analysis import capture_power_traces, recording_spectrum_trace
+from pluto_vsa.channel import (
+    AnalysisDisplayRecordings,
+    extract_requested_analysis_channel,
+    validate_analysis_channel_capture,
+)
+from pluto_vsa.pluto_source import PlutoCaptureSettings, PlutoLiveSource
+from pluto_vsa.session import VSASession
+from pluto_vsa.sources import FileIQSource
+from pluto_vsa.pattern import IQPowerTriggerSettings, MeasurementFilterMode
+from pluto_vsa.ui.display_processing import (
+    FSKDisplayData,
+    build_fsk_display_data,
+    normalized_psk_display,
+    prepare_fsk_display_frequency,
+    prepare_psk_display_waveform,
+)
+from pluto_vsa.ui.capture_thread import PlutoSingleCaptureThread
+from pluto_vsa.ui.measurement_chrome import (
+    DedicatedSummaryTable,
+    IQ_PLANE_LIMIT,
+    FREQUENCY_CONSTELLATION_X_LIMIT,
+    PersistentPlotRanges,
+    SymbolDensitySpread,
+    add_fsk_symbol_plot_menu,
+    add_result_range_overlay,
+    add_symbol_density_menu,
+    apply_dedicated_table_style,
+    configure_iq_power_plot,
+    dedicated_status_color,
+    install_measurement_plot_menu,
+    limit_iq_power_display_dbm,
+    make_analysis_bandwidth_display_controls,
+    make_measurement_dock,
+    make_measurement_plot,
+    plot_complex_symbol_distribution,
+    plot_frequency_symbol_distribution,
+    plot_trace_symbol_points,
+    plot_unit_circle,
+    set_iq_plane_range,
+    set_iq_power_default_y_range,
+    set_frequency_constellation_x_lock,
+    trace_bounds,
+    view_all_traces,
+)
+from pluto_vsa.ui.measurement_config_dialog import HierarchicalMeasConfigDialog
+from pluto_vsa.ui.iq_export import export_iq_recording
+from pluto_vsa.ui.packet_export import export_packet_project, update_export_action
+from pluto_vsa.ui.packet_decode import (
+    PacketDecodeTabs, bluetooth_tree_item, field_bit_range, payload_field,
+)
+
+from .model import (
+    BluetoothAnalysisProfile,
+    BluetoothDedicatedResult,
+    analyze_bluetooth_classic_recordings,
+    analyze_bluetooth_hdt_recordings,
+    analyze_bluetooth_le_recordings,
+    analyze_bluetooth_session,
+)
+from .rf_measurement import BluetoothFMMeasurementTrace, HDTEVMResult, HDTPlotData
+
+
+_TRACE = "#ffff00"
+_STARTUP_CONFIG_KEY = "bluetooth_dedicated/startup_meas_config"
+_STARTUP_CONFIG_SCHEMA = "pluto-vsa-bluetooth-dedicated-config"
+_STARTUP_CONFIG_VERSION = 1
+_FREQUENCY_CONSTELLATION_X_LIMIT = FREQUENCY_CONSTELLATION_X_LIMIT
+
+
+@dataclass(frozen=True)
+class _EDRDiagnosticPlotData:
+    time_ms: np.ndarray
+    measured_phase_pi: np.ndarray
+    reference_phase_pi: np.ndarray
+    phase_error_pi: np.ndarray
+    devm_percent: np.ndarray
+
+
+def _edr_diagnostic_plot_data(
+    result: BluetoothDedicatedResult,
+    *,
+    sample_rate_hz: float,
+) -> _EDRDiagnosticPlotData | None:
+    """Build time-based plots from the exact block inputs used by DEVM."""
+
+    measurement = next(
+        (
+            item
+            for item in result.metadata.get("rf_measurements", ())
+            if getattr(item, "test_case_id", "") == "bluetooth.edr"
+        ),
+        None,
+    )
+    if measurement is None or sample_rate_hz <= 0.0:
+        return None
+    centers = np.asarray(
+        measurement.arrays.get("block_physical_symbol_center_samples", ()),
+        dtype=np.float64,
+    )
+    received = np.asarray(
+        measurement.arrays.get("block_corrected_received_symbols", ()),
+        dtype=np.complex128,
+    )
+    reference = np.asarray(
+        measurement.arrays.get("block_reference_symbols", ()),
+        dtype=np.complex128,
+    )
+    devm = np.asarray(
+        measurement.arrays.get("symbol_devm", ()), dtype=np.float64
+    )
+    if (
+        centers.ndim != 2
+        or received.ndim != 2
+        or reference.ndim != 2
+        or centers.shape[1] < 2
+    ):
+        return None
+    block_count = min(centers.shape[0], received.shape[0], reference.shape[0])
+    symbol_count = min(
+        centers.shape[1] - 1,
+        received.shape[1] - 1,
+        reference.shape[1] - 1,
+    )
+    if block_count <= 0 or symbol_count <= 0:
+        return None
+    devm_count = min(devm.size, block_count * symbol_count)
+    if devm_count <= 0:
+        return None
+    block_count = min(block_count, devm_count // symbol_count)
+    centers = centers[:block_count, : symbol_count + 1]
+    received = received[:block_count, : symbol_count + 1]
+    reference = reference[:block_count, : symbol_count + 1]
+    devm = devm[: block_count * symbol_count].reshape(block_count, symbol_count)
+    recording_offset = float(result.metadata.get("recording_sample_offset", 0))
+    time_blocks_ms = (
+        (centers[:, 1:] + recording_offset) / float(sample_rate_hz) * 1e3
+    )
+    measured_phase_pi = np.angle(
+        received[:, 1:] * np.conj(received[:, :-1])
+    ) / np.pi
+    reference_phase_pi = np.angle(
+        reference[:, 1:] * np.conj(reference[:, :-1])
+    ) / np.pi
+    phase_error_pi = np.angle(
+        (
+            received[:, 1:]
+            * np.conj(received[:, :-1])
+            * np.conj(reference[:, 1:] * np.conj(reference[:, :-1]))
+        )
+    ) / np.pi
+
+    # NaN separates independently optimized 50-symbol blocks so the display
+    # does not invent a connecting segment across a block boundary.
+    gap = np.full((block_count, 1), np.nan, dtype=np.float64)
+    return _EDRDiagnosticPlotData(
+        time_ms=np.concatenate((time_blocks_ms, gap), axis=1).reshape(-1),
+        measured_phase_pi=np.concatenate(
+            (measured_phase_pi, gap), axis=1
+        ).reshape(-1),
+        reference_phase_pi=np.concatenate(
+            (reference_phase_pi, gap), axis=1
+        ).reshape(-1),
+        phase_error_pi=np.concatenate((phase_error_pi, gap), axis=1).reshape(-1),
+        devm_percent=np.concatenate((100.0 * devm, gap), axis=1).reshape(-1),
+    )
+
+
+def _hdt_modulation_name(name: str) -> str:
+    """Return the modulation label shared by HDT plot tabs and legends."""
+
+    return "QPSK" if name.strip().lower() == "pi/4-qpsk" else name.strip()
+
+
+def _hdt_pi4_qpsk_display_symbols(symbols: np.ndarray) -> np.ndarray:
+    """Collapse alternating pi/4-QPSK symbol sets onto the four I/Q axes.
+
+    The unit-magnitude, symbol-index-dependent rotation is display-only.  If
+    it is applied to both measured and reference symbols, their RMS EVM is
+    unchanged.
+    """
+
+    values = np.asarray(symbols, dtype=np.complex128)
+    axis = np.arange(values.size, dtype=np.float64)
+    return values * np.exp(-1j * (axis + 1.0) * np.pi / 4.0)
+
+
+def format_air_bits(bits: np.ndarray, group: int = 8) -> str:
+    values = np.asarray(bits, dtype=np.uint8)
+    binary = " ".join(
+        "".join(str(int(value)) for value in values[start : start + group])
+        for start in range(0, values.size, group)
+    )
+    octets = np.packbits(np.pad(values, (0, (-values.size) % 8)), bitorder="little")
+    hexadecimal = " ".join(f"{int(value):02X}" for value in octets)
+    return f"Air bits (first transmitted bit at left)\n{binary}\n\nOctets (LSB-first)\n{hexadecimal}"
+
+
+
+
+
+def infer_le_channel(center_frequency_hz: float) -> int:
+    mhz = int(round(center_frequency_hz / 1e6))
+    if mhz in {2402, 2426, 2480}:
+        return {2402: 37, 2426: 38, 2480: 39}[mhz]
+    if 2404 <= mhz <= 2424 and mhz % 2 == 0:
+        return (mhz - 2404) // 2
+    if 2428 <= mhz <= 2478 and mhz % 2 == 0:
+        return 11 + (mhz - 2428) // 2
+    return 37
+
+
+
+
+
+class _SummaryTable(DedicatedSummaryTable):
+    pass
+
+
+class _BluetoothClassicAnalysisThread(QtCore.QThread):
+    analysis_ready = QtCore.Signal(object)
+    analysis_failed = QtCore.Signal(str)
+
+    def __init__(self, recording: IQRecording, options: dict[str, object], parent=None) -> None:
+        super().__init__(parent)
+        self._recording = recording
+        self._options = dict(options)
+
+    def run(self) -> None:
+        try:
+            results = analyze_bluetooth_classic_recordings(
+                self._recording,
+                cancelled=self.isInterruptionRequested,
+                **self._options,
+            )
+            if not self.isInterruptionRequested():
+                self.analysis_ready.emit(results)
+        except Exception as error:
+            self.analysis_failed.emit(str(error))
+
+
+class _BluetoothLEAnalysisThread(QtCore.QThread):
+    analysis_ready = QtCore.Signal(object)
+    analysis_failed = QtCore.Signal(str)
+
+    def __init__(self, recording: IQRecording, options: dict[str, object], parent=None) -> None:
+        super().__init__(parent)
+        self._recording = recording
+        self._options = dict(options)
+
+    def run(self) -> None:
+        try:
+            results = analyze_bluetooth_le_recordings(
+                self._recording,
+                cancelled=self.isInterruptionRequested,
+                **self._options,
+            )
+            if not self.isInterruptionRequested():
+                self.analysis_ready.emit(results)
+        except Exception as error:
+            self.analysis_failed.emit(str(error))
+
+
+class _BluetoothHDTAnalysisThread(QtCore.QThread):
+    analysis_ready = QtCore.Signal(object)
+    analysis_failed = QtCore.Signal(str)
+
+    def __init__(self, recording: IQRecording, options: dict[str, object], parent=None) -> None:
+        super().__init__(parent)
+        self._recording = recording
+        self._options = dict(options)
+
+    def run(self) -> None:
+        try:
+            results = analyze_bluetooth_hdt_recordings(
+                self._recording,
+                cancelled=self.isInterruptionRequested,
+                **self._options,
+            )
+            if not self.isInterruptionRequested():
+                self.analysis_ready.emit(results)
+        except Exception as error:
+            self.analysis_failed.emit(str(error))
+
+
+class BluetoothAnalyzerWindow(QtWidgets.QMainWindow):
+    """Six-pane Bluetooth analyzer using capture or reusable Generic VSA IQ."""
+
+    analysis_mode_requested = QtCore.Signal(str)
+    application_close_requested = QtCore.Signal()
+    shutdown_ready = QtCore.Signal()
+
+    def __init__(
+        self,
+        pluto_source: PlutoLiveSource | None = None,
+        preferences: QtCore.QSettings | None = None,
+    ) -> None:
+        super().__init__()
+        self._pluto_source = pluto_source or PlutoLiveSource()
+        # Dedicated analysis intentionally owns a separate configuration
+        # namespace from Generic VSA.
+        self._preferences = preferences or QtCore.QSettings(
+            "PlutoSA", "PlutoVSA-Bluetooth"
+        )
+        self._owns_pluto_source = pluto_source is None
+        self._pluto_target = ""
+        self._capture_thread: PlutoSingleCaptureThread | None = None
+        self._analysis_thread: (
+            _BluetoothClassicAnalysisThread
+            | _BluetoothLEAnalysisThread
+            | _BluetoothHDTAnalysisThread
+            | None
+        ) = None
+        self._continuous_run_requested = False
+        self._continuous_capture_settings: PlutoCaptureSettings | None = None
+        self._continuous_capture_count = 0
+        self._continuous_retry_delay_ms = 0
+        self._active_capture_continuous = False
+        self._active_analysis_continuous = False
+        self._shutdown_requested = False
+        self._session: VSASession | None = None
+        self._capture_recording: IQRecording | None = None
+        self._recording: IQRecording | None = None
+        self._result: BluetoothDedicatedResult | None = None
+        self._results: tuple[BluetoothDedicatedResult, ...] = ()
+        self._selected_result_index = 0
+        self._show_symbol_points = True
+        self._symbol_density = False
+        self._symbol_density_spread = SymbolDensitySpread.MAXIMUM
+        self._fsk_symbol_plot_mode = "Constellation Frequency"
+        self._psk_symbol_plot_mode = "Physical IQ"
+        self._analysis_plot_ranges: dict[
+            str, tuple[list[float], list[float]]
+        ] = {}
+        self._plot_context_actions: dict[
+            str, dict[str, QtGui.QAction]
+        ] = {}
+        self.setDockOptions(
+            QtWidgets.QMainWindow.DockOption.AllowNestedDocks
+            | QtWidgets.QMainWindow.DockOption.AllowTabbedDocks
+        )
+        self._build_menu()
+        self._build_controls()
+        # Trigger controls affect capture/analysis even before the user opens
+        # Meas Config, so construct their shared dialog eagerly.
+        self._build_meas_config_dialog()
+        self._build_results()
+        self._configure_plot_context_menus()
+        self._default_meas_config = deepcopy(self._meas_config_values())
+        restored = self._restore_startup_meas_config()
+        self.statusBar().showMessage(
+            "Ready - Bluetooth configuration restored"
+            if restored
+            else "Ready - capture IQ or reuse the current Generic VSA recording"
+        )
+
+    def _build_menu(self) -> None:
+        file_menu = self.menuBar().addMenu("File")
+        self.open_iq_action = file_menu.addAction("Open IQ...")
+        self.open_iq_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
+        self.open_iq_action.triggered.connect(self._open_iq)
+        self.export_iq_action = file_menu.addAction("Export IQ Recording...")
+        self.export_iq_action.setEnabled(False)
+        self.export_iq_action.triggered.connect(self._export_iq_recording)
+        self.export_vsg_action = file_menu.addAction("Export VSG Project...")
+        update_export_action(self.export_vsg_action, None)
+        self.export_vsg_action.triggered.connect(self._export_vsg_project)
+        file_menu.addSeparator()
+        close_action = file_menu.addAction("Close")
+        close_action.triggered.connect(self.application_close_requested.emit)
+        run_menu = self.menuBar().addMenu("Sweep / Run")
+        self.run_action = run_menu.addAction("Run Single")
+        self.run_action.setShortcut(QtGui.QKeySequence("F6"))
+        self.run_action.triggered.connect(self._toggle_capture)
+        self.run_continuous_action = run_menu.addAction("Run Continuous")
+        self.run_continuous_action.setShortcut(QtGui.QKeySequence("F7"))
+        self.run_continuous_action.triggered.connect(
+            self._toggle_continuous_capture
+        )
+        self.refresh_analysis_action = run_menu.addAction("Refresh Analysis")
+        self.refresh_analysis_action.setShortcut(QtGui.QKeySequence("F5"))
+        self.refresh_analysis_action.setEnabled(False)
+        self.refresh_analysis_action.triggered.connect(self.refresh)
+        run_menu.addSeparator()
+        previous_action = run_menu.addAction("Previous Packet")
+        previous_action.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Left))
+        previous_action.triggered.connect(lambda: self._select_result(-1))
+        next_action = run_menu.addAction("Next Packet")
+        next_action.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Right))
+        next_action.triggered.connect(lambda: self._select_result(1))
+        run_menu.addSeparator()
+        self.clear_measurement_history_action = run_menu.addAction(
+            "Clear Measurement History"
+        )
+        self.clear_measurement_history_action.triggered.connect(
+            self._reset_measurement_statistics
+        )
+
+        display_menu = self.menuBar().addMenu("Display")
+        self.symbols_action = display_menu.addAction("Show Symbol Points")
+        self.symbols_action.setCheckable(True)
+        self.symbols_action.setChecked(True)
+        self.symbols_action.setShortcut(QtGui.QKeySequence("S"))
+        self.symbols_action.toggled.connect(self._set_show_symbol_points)
+        (
+            self.density_action,
+            self.density_spread_group,
+            self.density_spread_actions,
+        ) = add_symbol_density_menu(
+            display_menu,
+            self,
+            enabled=self._symbol_density,
+            spread=self._symbol_density_spread,
+            on_enabled=self._set_symbol_density,
+            on_spread=self._set_symbol_density_spread,
+        )
+        (
+            self.fsk_frequency_action,
+            self.fsk_phase_action,
+            self.fsk_plot_group,
+        ) = add_fsk_symbol_plot_menu(
+            display_menu,
+            self,
+            mode=self._fsk_symbol_plot_mode,
+            on_mode=self._set_fsk_symbol_plot_mode,
+        )
+        psk_plot_menu = display_menu.addMenu("PSK Symbol Plot")
+        psk_plot_group = QtGui.QActionGroup(self)
+        psk_plot_group.setExclusive(True)
+        self.psk_physical_action = psk_plot_menu.addAction("Physical IQ")
+        self.psk_differential_action = psk_plot_menu.addAction("Differential IQ")
+        for action in (self.psk_physical_action, self.psk_differential_action):
+            action.setCheckable(True)
+            psk_plot_group.addAction(action)
+        self.psk_physical_action.setChecked(True)
+        self.psk_physical_action.triggered.connect(
+            lambda: self._set_psk_symbol_plot_mode("Physical IQ")
+        )
+        self.psk_differential_action.triggered.connect(
+            lambda: self._set_psk_symbol_plot_mode("Differential IQ")
+        )
+
+        config_menu = self.menuBar().addMenu("Meas Config")
+        self.open_config_action = config_menu.addAction("Open Meas Config...")
+        self.open_config_action.setShortcut(QtGui.QKeySequence("Ctrl+M"))
+        self.open_config_action.triggered.connect(self._show_meas_config)
+
+        menu = self.menuBar().addMenu("Analysis Mode")
+        generic = menu.addAction("Generic FSK / PSK VSA...")
+        generic.triggered.connect(lambda: self.analysis_mode_requested.emit("generic"))
+        current = menu.addAction("Bluetooth Dedicated Analyzer")
+        current.setCheckable(True)
+        current.setChecked(True)
+        current.setEnabled(False)
+        dect = menu.addAction("DECT Dedicated Analyzer...")
+        dect.triggered.connect(lambda: self.analysis_mode_requested.emit("dect"))
+        adsb = menu.addAction("ADS-B 1090ES...")
+        adsb.triggered.connect(lambda: self.analysis_mode_requested.emit("adsb1090"))
+
+    def _build_controls(self) -> None:
+        # These widgets live exclusively in the modal Meas Config dialog.
+        # Registering them with a hidden QToolBar first creates QWidgetActions
+        # which continue to control their visibility even after a layout
+        # reparents them.  That left only the form labels visible in Config.
+        self.profile_combo = QtWidgets.QComboBox()
+        self.profile_combo.addItem("RF / PHY Test", BluetoothAnalysisProfile.RF_PHY_TEST)
+        self.profile_combo.addItem("General Packet", BluetoothAnalysisProfile.GENERAL_PACKET)
+        self.protocol_combo = QtWidgets.QComboBox()
+        self.protocol_combo.addItem("Bluetooth BR / EDR", "bluetooth.br_edr")
+        self.protocol_combo.addItem("Bluetooth LE", "bluetooth.le")
+        self.protocol_combo.addItem("Bluetooth HDT", "bluetooth.hdt")
+        self.phy_combo = QtWidgets.QComboBox()
+        self.edr_rf_test_packet_combo = QtWidgets.QComboBox()
+        self.edr_rf_test_packet_combo.addItem("Not configured", None)
+        for packet_name in (
+            "2-DH1", "2-EV3", "2-DH3", "2-EV5", "2-DH5",
+            "3-DH1", "3-EV3", "3-DH3", "3-EV5", "3-DH5",
+        ):
+            self.edr_rf_test_packet_combo.addItem(packet_name, packet_name)
+        self.edr_rf_test_packet_combo.setToolTip(
+            "Formal EDR DEVM uses this known RF Test packet to build the ideal "
+            "reference independently of received symbol decisions."
+        )
+        self.lap_edit = QtWidgets.QLineEdit("C6967E")
+        self.lap_edit.setMaximumWidth(72)
+        self.uap_edit = QtWidgets.QLineEdit("6B")
+        self.uap_edit.setMaximumWidth(50)
+        self.clock_spin = DeferredSpinBox()
+        self.clock_spin.setRange(0, 63)
+        self.clock_spin.setValue(0x2B)
+        self.channel_spin = DeferredSpinBox()
+        self.channel_spin.setRange(0, 39)
+        self.channel_spin.setValue(37)
+        self.access_address_edit = QtWidgets.QLineEdit("8E89BED6")
+        self.access_address_edit.setMaximumWidth(82)
+        self.crc_init_edit = QtWidgets.QLineEdit("555555")
+        self.crc_init_edit.setMaximumWidth(72)
+        self.whitening_check = QtWidgets.QCheckBox("Whitening")
+        self.refresh_button = QtWidgets.QPushButton("Refresh Result")
+        self.context_label = QtWidgets.QLabel()
+        self.capture_button = QtWidgets.QPushButton("Single Capture")
+        self.continuous_capture_button = QtWidgets.QPushButton(
+            "Continuous Capture"
+        )
+        self.center_spin = DeferredDoubleSpinBox()
+        self.center_spin.setRange(70.0, 6000.0)
+        self.center_spin.setDecimals(6)
+        self.center_spin.setValue(2440.0)
+        self.capture_length_spin = DeferredDoubleSpinBox()
+        self.capture_length_spin.setRange(0.1, 1000.0)
+        self.capture_length_spin.setValue(10.0)
+        self.oversampling_combo = QtWidgets.QComboBox()
+        for value in (4, 8, 16, 32):
+            self.oversampling_combo.addItem(f"{value} S/sym", value)
+        self.oversampling_combo.setCurrentIndex(1)
+        self.rf_bandwidth_spin = DeferredDoubleSpinBox()
+        self.rf_bandwidth_spin.setRange(0.2, 56.0)
+        self.rf_bandwidth_spin.setValue(8.0)
+        self.channel_filter_check = QtWidgets.QCheckBox("Enable Analysis Channel")
+        self.analysis_bandwidth_spin = DeferredDoubleSpinBox()
+        self.analysis_bandwidth_spin.setRange(0.000001, 100.0)
+        self.analysis_bandwidth_spin.setDecimals(6)
+        self.analysis_bandwidth_spin.setValue(1.5)
+        self.analysis_bandwidth_spin.setSuffix(" MHz")
+        (
+            self.analysis_power_display_check,
+            self.analysis_spectrum_display_check,
+        ) = make_analysis_bandwidth_display_controls()
+        self.lo_offset_check = QtWidgets.QCheckBox("Enable")
+        self.lo_offset_check.setToolTip(
+            "Tune the Pluto LO away from the selected Bluetooth channel. "
+            "Requires the Analysis Channel filter."
+        )
+        self.lo_offset_spin = DeferredDoubleSpinBox()
+        self.lo_offset_spin.setRange(-50.0, 50.0)
+        self.lo_offset_spin.setDecimals(6)
+        self.lo_offset_spin.setValue(1.5)
+        self.lo_offset_spin.setSuffix(" MHz")
+        self.resolved_lo_label = QtWidgets.QLabel()
+        self.internal_gain_spin = DeferredDoubleSpinBox()
+        self.internal_gain_spin.setRange(0.0, 70.0)
+        self.internal_gain_spin.setValue(30.0)
+        self.external_att_spin = DeferredDoubleSpinBox()
+        self.external_att_spin.setRange(-100.0, 100.0)
+        self.external_att_spin.setValue(30.0)
+        self.device_label = QtWidgets.QLabel("Pluto: Auto")
+        self.protocol_combo.currentIndexChanged.connect(self._protocol_changed)
+        self.profile_combo.currentIndexChanged.connect(self._profile_changed)
+        self.phy_combo.currentIndexChanged.connect(self._phy_changed)
+        self.refresh_button.clicked.connect(self.refresh)
+        self.capture_button.clicked.connect(self._toggle_capture)
+        self.continuous_capture_button.clicked.connect(
+            self._toggle_continuous_capture
+        )
+        self.center_spin.valueChanged.connect(self._sync_analysis_channel_controls)
+        self.channel_filter_check.toggled.connect(
+            self._sync_analysis_channel_controls
+        )
+        self.lo_offset_check.toggled.connect(self._sync_analysis_channel_controls)
+        self.lo_offset_spin.valueChanged.connect(self._sync_analysis_channel_controls)
+        self.analysis_power_display_check.toggled.connect(
+            self._display_source_changed
+        )
+        self.analysis_spectrum_display_check.toggled.connect(
+            self._display_source_changed
+        )
+        self._sync_analysis_channel_controls()
+        self._protocol_changed()
+
+    def _sync_analysis_channel_controls(self, _value: object = None) -> None:
+        filter_enabled = self.channel_filter_check.isChecked()
+        if self.sender() is self.lo_offset_check and self.lo_offset_check.isChecked():
+            self.channel_filter_check.setChecked(True)
+            filter_enabled = True
+        elif not filter_enabled and self.lo_offset_check.isChecked():
+            self.lo_offset_check.setChecked(False)
+        self.analysis_bandwidth_spin.setEnabled(filter_enabled)
+        self.analysis_power_display_check.setEnabled(filter_enabled)
+        self.analysis_spectrum_display_check.setEnabled(filter_enabled)
+        offset_enabled = self.lo_offset_check.isChecked()
+        self.lo_offset_spin.setEnabled(offset_enabled)
+        offset_mhz = self.lo_offset_spin.value() if offset_enabled else 0.0
+        self.resolved_lo_label.setText(
+            f"{self.center_spin.value() + offset_mhz:.6f} MHz"
+            + (" (offset on)" if offset_enabled else " (offset off)")
+        )
+
+    @QtCore.Slot(bool)
+    def _display_source_changed(self, _enabled: bool) -> None:
+        if self._result is not None:
+            self._render(self._result)
+
+    def _build_trigger_page(self) -> QtWidgets.QWidget:
+        from pluto_vsa.ui.setup_controls import build_trigger_page
+        return build_trigger_page(self, burst=True)
+
+    def _build_meas_config_dialog(self) -> None:
+        if hasattr(self, "_meas_config_dialog"):
+            return
+        pages: list[tuple[str, QtWidgets.QWidget]] = []
+
+        def add_page(title: str, page: QtWidgets.QWidget, row: int, column: int) -> None:
+            del row, column
+            pages.append((title, page))
+
+        bt_page = QtWidgets.QWidget()
+        bt_form = QtWidgets.QFormLayout(bt_page)
+        for label, widget in (
+            ("Profile", self.profile_combo), ("Protocol", self.protocol_combo),
+            ("PHY", self.phy_combo), ("LAP", self.lap_edit), ("UAP", self.uap_edit),
+            ("CLK6-1", self.clock_spin), ("Access Address", self.access_address_edit),
+            ("LE Channel", self.channel_spin), ("CRC Init", self.crc_init_edit),
+            ("Expected EDR RF Test Packet", self.edr_rf_test_packet_combo),
+            ("Whitening", self.whitening_check),
+        ):
+            bt_form.addRow(label, widget)
+        self._bluetooth_config_form = bt_form
+        self._sync_packet_identity_controls()
+
+        from pluto_vsa.ui.setup_controls import ReceiverSetupControls, standardize_frontend, display_form
+        self._common_setup = ReceiverSetupControls(
+            self, rate=lambda: self._capture_symbol_rate_hz() * int(self.oversampling_combo.currentData()),
+            symbol_rate=self._capture_symbol_rate_hz, bandwidth=self.rf_bandwidth_spin,
+            gain=self.internal_gain_spin, attenuation=self.external_att_spin,
+            duration=self.capture_length_spin, oversampling=self.oversampling_combo,
+        )
+        self.protocol_combo.currentIndexChanged.connect(self._common_setup.refresh)
+        self.phy_combo.currentIndexChanged.connect(self._common_setup.refresh)
+        input_page = QtWidgets.QWidget()
+        input_form = QtWidgets.QFormLayout(input_page)
+        for label, widget in (
+            ("Center Frequency", self.center_spin),
+            ("Analysis Channel", self.channel_filter_check),
+            ("Analysis Bandwidth", self.analysis_bandwidth_spin),
+            (
+                "Apply Analysis Bandwidth to Power",
+                self.analysis_power_display_check,
+            ),
+            (
+                "Apply Analysis Bandwidth to Spectrum",
+                self.analysis_spectrum_display_check,
+            ),
+            ("LO Offset", self.lo_offset_check),
+            ("Offset Frequency", self.lo_offset_spin),
+            ("Resolved LO", self.resolved_lo_label),
+        ):
+            input_form.addRow(label, widget)
+        self.center_spin.setSuffix(" MHz")
+        self._common_setup.bandwidth_rows(input_form)
+        self._common_setup.power_rows(input_form)
+        standardize_frontend(input_form)
+
+        display_page = QtWidgets.QWidget()
+        display_layout = QtWidgets.QVBoxLayout(display_page)
+        self.config_show_symbols = QtWidgets.QCheckBox("Show Symbol Points")
+        self.config_show_symbols.setChecked(self._show_symbol_points)
+        self.config_show_symbols.toggled.connect(self._set_show_symbol_points)
+        self.config_density = QtWidgets.QCheckBox("Symbol Plot Density")
+        self.config_density.setChecked(self._symbol_density)
+        self.config_density.toggled.connect(self._set_symbol_density)
+        display_layout.addWidget(self.config_show_symbols)
+        display_layout.addWidget(self.config_density)
+        self.config_density_spread = QtWidgets.QComboBox()
+        self.config_density_spread.addItems(
+            tuple(spread.value for spread in SymbolDensitySpread)
+        )
+        self.config_density_spread.setCurrentText(self._symbol_density_spread.value)
+        self.config_density_spread.currentTextChanged.connect(
+            self._set_symbol_density_spread
+        )
+        display_layout.addWidget(QtWidgets.QLabel("Density Spread (all modulations)"))
+        display_layout.addWidget(self.config_density_spread)
+        self.config_fsk_mode = QtWidgets.QComboBox()
+        self.config_fsk_mode.addItems(("Constellation Frequency", "Phase Difference"))
+        self.config_fsk_mode.setCurrentText(self._fsk_symbol_plot_mode)
+        self.config_fsk_mode.currentTextChanged.connect(self._set_fsk_symbol_plot_mode)
+        self.config_psk_mode = QtWidgets.QComboBox()
+        self.config_psk_mode.addItems(("Physical IQ", "Differential IQ"))
+        self.config_psk_mode.setCurrentText(self._psk_symbol_plot_mode)
+        self.config_psk_mode.currentTextChanged.connect(self._set_psk_symbol_plot_mode)
+        display_layout.addWidget(QtWidgets.QLabel("FSK Symbol Plot"))
+        display_layout.addWidget(self.config_fsk_mode)
+        display_layout.addWidget(QtWidgets.QLabel("PSK Symbol Plot"))
+        display_layout.addWidget(self.config_psk_mode)
+        display_layout.addStretch(1)
+
+        run_page = QtWidgets.QWidget()
+        run_layout = QtWidgets.QVBoxLayout(run_page)
+        run_layout.addWidget(self.capture_button)
+        run_layout.addWidget(self.continuous_capture_button)
+        run_layout.addWidget(self.refresh_button)
+        run_layout.addStretch(1)
+        add_page("Signal Description", bt_page, 0, 0)
+        add_page("Input / Frontend", input_page, 0, 1)
+        add_page("Signal Capture", self._common_setup.capture_page(), 1, 0)
+        add_page("Trigger", self._build_trigger_page(), 2, 0)
+        display_form(display_page, self, psk=True)
+        add_page("Display", display_page, 1, 1)
+        add_page("Sweep / Run", run_page, 2, 1)
+
+        dialog = HierarchicalMeasConfigDialog(
+            self,
+            pages,
+            window_title="Bluetooth Meas Config",
+            size=(820, 620),
+            standard_buttons=(
+                QtWidgets.QDialogButtonBox.StandardButton.Ok
+                | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            ),
+        )
+        dialog.accepted.connect(self._save_startup_meas_config)
+        self._meas_config_dialog = dialog
+        self._config_stack = dialog.stack
+        self._config_top_buttons = dialog.top_buttons
+        self._config_back_button = dialog.back_button
+        self._update_derived_config()
+
+    @QtCore.Slot()
+    def _show_meas_config(self) -> None:
+        if not hasattr(self, "_meas_config_dialog"):
+            self._build_meas_config_dialog()
+        for control, value in (
+            (self.config_show_symbols, self._show_symbol_points),
+            (self.config_density, self._symbol_density),
+        ):
+            control.blockSignals(True)
+            control.setChecked(value)
+            control.blockSignals(False)
+        for control, value in (
+            (self.config_fsk_mode, self._fsk_symbol_plot_mode),
+            (self.config_psk_mode, self._psk_symbol_plot_mode),
+            (self.config_density_spread, self._symbol_density_spread.value),
+        ):
+            control.blockSignals(True)
+            control.setCurrentText(value)
+            control.blockSignals(False)
+        self._update_derived_config()
+        self._meas_config_dialog.open_top()
+
+    def open_config_page(self, name: str) -> None:
+        self._common_setup.refresh()
+        if name in {"Display", "Display Config"}:
+            name = "Display"
+            for control, value in (
+                (self.config_show_symbols, self._show_symbol_points),
+                (self.config_density, self._symbol_density),
+            ):
+                blocker = QtCore.QSignalBlocker(control)
+                control.setChecked(value)
+                del blocker
+            for control, value in (
+                (self.config_fsk_mode, self._fsk_symbol_plot_mode),
+                (self.config_psk_mode, self._psk_symbol_plot_mode),
+                (self.config_density_spread, self._symbol_density_spread.value),
+            ):
+                blocker = QtCore.QSignalBlocker(control)
+                control.setCurrentText(value)
+                del blocker
+        self._update_derived_config()
+        self._meas_config_dialog.open_page(name)
+
+    @QtCore.Slot()
+    def _update_derived_config(self) -> None:
+        if not hasattr(self, "derived_modulation"):
+            return
+        phy = self.phy_combo.currentText()
+        if phy == "LE 2M":
+            values = ("GFSK", "2.000 MSym/s", "Gaussian")
+        elif phy.startswith("LE"):
+            values = ("GFSK", "1.000 MSym/s", "Gaussian")
+        elif self.protocol_combo.currentData() == "bluetooth.hdt":
+            values = (
+                "Auto: pi/4-QPSK + 8PSK / 16QAM",
+                "2.000 MSym/s",
+                "Root Raised Cosine",
+            )
+        else:
+            values = ("Auto: GFSK / DPSK", "PHY-derived", "PHY-defined")
+        self.derived_modulation.setText(values[0])
+        self.derived_symbol_rate.setText(values[1])
+        self.derived_tx_filter.setText(values[2])
+        self.derived_result_range.setText("Automatic packet extent")
+
+    @QtCore.Slot(bool)
+    def _set_show_symbol_points(self, enabled: bool) -> None:
+        self._show_symbol_points = bool(enabled)
+        self.symbols_action.blockSignals(True)
+        self.symbols_action.setChecked(self._show_symbol_points)
+        self.symbols_action.blockSignals(False)
+        if hasattr(self, "config_show_symbols"):
+            self.config_show_symbols.blockSignals(True)
+            self.config_show_symbols.setChecked(self._show_symbol_points)
+            self.config_show_symbols.blockSignals(False)
+        if self._result is not None:
+            self._render(self._result)
+
+    @QtCore.Slot(bool)
+    def _set_symbol_density(self, enabled: bool) -> None:
+        self._symbol_density = bool(enabled)
+        self.density_action.blockSignals(True)
+        self.density_action.setChecked(self._symbol_density)
+        self.density_action.blockSignals(False)
+        if hasattr(self, "config_density"):
+            self.config_density.blockSignals(True)
+            self.config_density.setChecked(self._symbol_density)
+            self.config_density.blockSignals(False)
+        if self._result is not None:
+            self._render(self._result)
+
+    @QtCore.Slot(str)
+    def _set_symbol_density_spread(
+        self, spread: SymbolDensitySpread | str
+    ) -> None:
+        try:
+            resolved = SymbolDensitySpread(spread)
+        except ValueError:
+            return
+        self._symbol_density_spread = resolved
+        if hasattr(self, "density_spread_actions"):
+            self.density_spread_actions[resolved].setChecked(True)
+        if hasattr(self, "config_density_spread"):
+            self.config_density_spread.blockSignals(True)
+            self.config_density_spread.setCurrentText(resolved.value)
+            self.config_density_spread.blockSignals(False)
+        if self._result is not None:
+            self._render(self._result)
+
+    @QtCore.Slot(str)
+    def _set_fsk_symbol_plot_mode(self, mode: str) -> None:
+        if mode not in {"Constellation Frequency", "Phase Difference"}:
+            return
+        self._fsk_symbol_plot_mode = mode
+        if hasattr(self, "fsk_frequency_action"):
+            self.fsk_frequency_action.setChecked(mode == "Constellation Frequency")
+            self.fsk_phase_action.setChecked(mode == "Phase Difference")
+        if hasattr(self, "config_fsk_mode"):
+            self.config_fsk_mode.blockSignals(True)
+            self.config_fsk_mode.setCurrentText(mode)
+            self.config_fsk_mode.blockSignals(False)
+        if hasattr(self, "fsk_symbol_plot"):
+            self._set_frequency_constellation_x_lock(
+                mode == "Constellation Frequency"
+            )
+        if self._result is not None:
+            self._render(self._result)
+
+    def _set_frequency_constellation_x_lock(self, locked: bool) -> None:
+        """Keep Constellation Frequency's display-only X axis immutable."""
+        set_frequency_constellation_x_lock(self.fsk_symbol_plot, locked)
+
+    @QtCore.Slot(str)
+    def _set_psk_symbol_plot_mode(self, mode: str) -> None:
+        if mode not in {"Physical IQ", "Differential IQ"}:
+            return
+        self._psk_symbol_plot_mode = mode
+        if hasattr(self, "psk_physical_action"):
+            self.psk_physical_action.setChecked(mode == "Physical IQ")
+            self.psk_differential_action.setChecked(mode == "Differential IQ")
+        if hasattr(self, "config_psk_mode"):
+            self.config_psk_mode.blockSignals(True)
+            self.config_psk_mode.setCurrentText(mode)
+            self.config_psk_mode.blockSignals(False)
+        if self._result is not None:
+            self._render(self._result)
+
+    @QtCore.Slot()
+    def _reset_plot_scales(self) -> None:
+        for name, plot in self._plot_widgets():
+            self._reset_plot_scale(name, plot)
+
+    def _plot_widgets(self) -> tuple[tuple[str, pg.PlotWidget], ...]:
+        return (
+            ("iq_power", self.power_plot),
+            ("spectrum", self.spectrum_plot),
+            ("fsk_modulation", self.fsk_modulation_plot),
+            ("psk_modulation", self.psk_modulation_plot),
+            ("psk_phase_difference", self.psk_phase_difference_plot),
+            ("psk_devm", self.psk_devm_plot),
+            ("fsk_symbol", self.fsk_symbol_plot),
+            ("psk_symbol", self.psk_symbol_plot),
+        )
+
+    def _configure_plot_context_menus(self) -> None:
+        """Use the same fixed interaction and scale menu as Generic VSA."""
+
+        self._plot_context_actions.clear()
+        for name, plot in self._plot_widgets():
+            actions = install_measurement_plot_menu(
+                plot,
+                reset=lambda plot_name=name, target=plot: self._reset_plot_scale(
+                    plot_name, target
+                ),
+                view_all=lambda target=plot: self._view_all_plot(target),
+            )
+            if actions:
+                actions["reset"].setToolTip(
+                    "Restore this plot's default scale"
+                )
+                self._plot_context_actions[name] = actions
+        self._persistent_plot_ranges = PersistentPlotRanges(self._plot_widgets())
+
+    def _view_all_plot(self, plot: pg.PlotWidget) -> None:
+        bounds = trace_bounds(plot)
+        if bounds is None:
+            return
+        x_min, x_max, y_min, y_max = bounds
+        if (
+            plot is self.fsk_symbol_plot
+            and self._fsk_symbol_plot_mode == "Constellation Frequency"
+        ):
+            y_padding = max(1.0, 0.05 * max(y_max - y_min, 1.0))
+            plot.setYRange(y_min - y_padding, y_max + y_padding, padding=0.0)
+            self._set_frequency_constellation_x_lock(True)
+            return
+        if plot.getViewBox().state.get("aspectLocked", False) is not False:
+            limit = max(
+                IQ_PLANE_LIMIT,
+                1.05 * max(abs(x_min), abs(x_max), abs(y_min), abs(y_max)),
+            )
+            plot.setRange(
+                xRange=[-limit, limit],
+                yRange=[-limit, limit],
+                padding=0.0,
+            )
+            return
+        view_all_traces(plot)
+
+    def _reset_plot_scale(self, name: str, plot: pg.PlotWidget) -> None:
+        self._persistent_plot_ranges.reset(name)
+        if name == "fsk_symbol" and self._fsk_symbol_plot_mode == "Constellation Frequency":
+            self._set_frequency_constellation_x_lock(True)
+
+    def _capture_analysis_plot_ranges(self) -> None:
+        self._persistent_plot_ranges.capture_current_defaults()
+        self._analysis_plot_ranges = self._persistent_plot_ranges.current_defaults()
+
+    def _dock(self, title: str, widget: QtWidgets.QWidget) -> QtWidgets.QDockWidget:
+        return make_measurement_dock(title, widget, self, object_prefix="vsa-bluetooth", closable=False)
+
+    def _build_results(self) -> None:
+        self.power_plot = make_measurement_plot("IQ Power (dBm)", "Time (ms)")
+        configure_iq_power_plot(self.power_plot)
+        self.power_dock = self._dock("IQ Power", self.power_plot)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.power_dock)
+        self.spectrum_plot = make_measurement_plot("Magnitude (dBm)", "Frequency (MHz)")
+        self.spectrum_legend = self.spectrum_plot.addLegend(offset=(10, 10))
+        self.spectrum_dock = self._dock("Spectrum", self.spectrum_plot)
+        self.splitDockWidget(self.power_dock, self.spectrum_dock, QtCore.Qt.Orientation.Horizontal)
+
+        self.summary_table = _SummaryTable()
+        self.summary_dock = self._dock("Result Summary", self.summary_table)
+        self.splitDockWidget(self.spectrum_dock, self.summary_dock, QtCore.Qt.Orientation.Horizontal)
+
+        self.modulation_tabs = QtWidgets.QTabWidget()
+        self.fsk_modulation_plot = make_measurement_plot("Frequency (kHz)", "Time (ms)")
+        self.psk_modulation_plot = make_measurement_plot("Q", "I")
+        self.psk_phase_difference_plot = make_measurement_plot(
+            "Phase Difference (rad/pi)", "Time (ms)"
+        )
+        self.psk_phase_difference_plot.addLegend(offset=(10, 10))
+        self.psk_devm_plot = make_measurement_plot("DEVM (%)", "Time (ms)")
+        self.modulation_tabs.addTab(self.fsk_modulation_plot, "FSK - Instantaneous Frequency")
+        self.modulation_tabs.addTab(self.psk_modulation_plot, "PSK - Vector")
+        self.modulation_tabs.addTab(
+            self.psk_phase_difference_plot, "PSK - Phase Difference"
+        )
+        self.modulation_tabs.addTab(self.psk_devm_plot, "PSK - DEVM")
+        self.modulation_tabs.setTabVisible(2, False)
+        self.modulation_tabs.setTabVisible(3, False)
+        self.modulation_plot = self.fsk_modulation_plot
+        self.modulation_dock = self._dock("Modulation", self.modulation_tabs)
+        self.splitDockWidget(self.power_dock, self.modulation_dock, QtCore.Qt.Orientation.Vertical)
+        self.symbol_tabs = QtWidgets.QTabWidget()
+        self.fsk_symbol_plot = make_measurement_plot("Frequency (kHz)", "Symbol Index")
+        self.psk_symbol_plot = make_measurement_plot("Q", "I")
+        self.symbol_tabs.addTab(self.fsk_symbol_plot, "FSK")
+        self.symbol_tabs.addTab(self.psk_symbol_plot, "PSK")
+        self.symbol_plot = self.fsk_symbol_plot
+        self.symbol_dock = self._dock("Symbol Plot", self.symbol_tabs)
+        self.splitDockWidget(self.spectrum_dock, self.symbol_dock, QtCore.Qt.Orientation.Vertical)
+
+        self.packet_tabs = PacketDecodeTabs()
+        self.decode_tree = self.packet_tabs.decode_tree
+        self.payload_text = self.packet_tabs.payload_text
+        self.issues_table = self.packet_tabs.issues_table
+        self.packet_table = QtWidgets.QTableWidget(0, 5)
+        self.packet_table.setHorizontalHeaderLabels(("#", "PHY", "Type", "Integrity", "Bits"))
+        apply_dedicated_table_style(self.packet_table)
+        self.packet_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.packet_table.cellClicked.connect(self._packet_row_clicked)
+        self.air_bits_text = QtWidgets.QPlainTextEdit(readOnly=True)
+        self.packet_tabs.insertTab(2, self.packet_table, "Packet List")
+        self.packet_tabs.addTab(self.air_bits_text, "Air Bits")
+        self.packet_dock = self._dock("Packet Analysis", self.packet_tabs)
+        self.splitDockWidget(self.summary_dock, self.packet_dock, QtCore.Qt.Orientation.Vertical)
+        QtCore.QTimer.singleShot(0, self._equalize_docks)
+
+    def _equalize_docks(self) -> None:
+        self.resizeDocks([self.power_dock, self.spectrum_dock, self.summary_dock], [500] * 3, QtCore.Qt.Orientation.Horizontal)
+        self.resizeDocks([self.modulation_dock, self.symbol_dock, self.packet_dock], [500] * 3, QtCore.Qt.Orientation.Horizontal)
+        for upper, lower in ((self.power_dock, self.modulation_dock), (self.spectrum_dock, self.symbol_dock), (self.summary_dock, self.packet_dock)):
+            self.resizeDocks([upper, lower], [450, 450], QtCore.Qt.Orientation.Vertical)
+
+    @QtCore.Slot()
+    def _protocol_changed(self) -> None:
+        protocol = self.protocol_combo.currentData()
+        is_le = protocol == "bluetooth.le"
+        is_hdt = protocol == "bluetooth.hdt"
+        self.phy_combo.blockSignals(True)
+        self.phy_combo.clear()
+        if is_le:
+            self.phy_combo.addItem("LE 1M", "LE 1M")
+            self.phy_combo.addItem("LE 2M", "LE 2M")
+        elif is_hdt:
+            self.phy_combo.addItem(
+                "Auto (HDT2 / HDT3 / HDT4 / HDT6 / HDT7.5)", "auto"
+            )
+        else:
+            self.phy_combo.addItem("Auto (BR / EDR 2M / EDR 3M)", "auto")
+            self.phy_combo.addItem("BR", "BR")
+            self.phy_combo.addItem("EDR 2M", "EDR 2M")
+            self.phy_combo.addItem("EDR 3M", "EDR 3M")
+        self.phy_combo.blockSignals(False)
+        self._update_identity_context_label()
+        for widget in (self.access_address_edit, self.channel_spin, self.crc_init_edit):
+            widget.setVisible(is_le)
+        for widget in (self.lap_edit, self.uap_edit, self.clock_spin):
+            widget.setVisible(not is_le and not is_hdt)
+        self._sync_le_profile_controls()
+        self._sync_packet_identity_controls()
+        self._update_derived_config()
+
+    @QtCore.Slot()
+    def _profile_changed(self) -> None:
+        self._update_identity_context_label()
+        self._sync_le_profile_controls()
+        self._sync_packet_identity_controls()
+        self._update_derived_config()
+
+    @QtCore.Slot()
+    def _phy_changed(self) -> None:
+        self._sync_le_profile_controls()
+        self._update_derived_config()
+
+    def _set_packet_config_field_visible(
+        self, widget: QtWidgets.QWidget, visible: bool
+    ) -> None:
+        widget.setVisible(visible)
+        form = getattr(self, "_bluetooth_config_form", None)
+        if form is not None:
+            label = form.labelForField(widget)
+            if label is not None:
+                label.setVisible(visible)
+
+    def _sync_packet_identity_controls(self) -> None:
+        """Show manual identity fields only where the selected profile uses them."""
+
+        general = (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.GENERAL_PACKET
+        )
+        protocol = self.protocol_combo.currentData()
+        classic_rf_test = not general and protocol == "bluetooth.br_edr"
+        le_rf_test = not general and protocol == "bluetooth.le"
+        for widget in (self.lap_edit, self.uap_edit, self.clock_spin):
+            self._set_packet_config_field_visible(widget, classic_rf_test)
+        for widget in (
+            self.access_address_edit,
+            self.channel_spin,
+            self.crc_init_edit,
+        ):
+            self._set_packet_config_field_visible(widget, le_rf_test)
+        self._set_packet_config_field_visible(
+            self.edr_rf_test_packet_combo, classic_rf_test
+        )
+        self._set_packet_config_field_visible(
+            self.whitening_check, classic_rf_test or le_rf_test
+        )
+
+    def _update_identity_context_label(self) -> None:
+        protocol = self.protocol_combo.currentData()
+        general = (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.GENERAL_PACKET
+        )
+        if protocol == "bluetooth.hdt":
+            text = "HDT identity is acquired from the packet training sequence:"
+        elif protocol == "bluetooth.le":
+            text = (
+                "Access Address is auto-detected; PHY and RF channel constrain the search:"
+                if general
+                else "Access Address / Channel / CRC Init:"
+            )
+        else:
+            text = (
+                "LAP / UAP / CLK6-1 are auto-detected; PHY can constrain the search:"
+                if general
+                else "LAP / UAP / CLK6-1:"
+            )
+        self.context_label.setText(text)
+
+    def _sync_le_profile_controls(self) -> None:
+        classic_rf_test = (
+            self.protocol_combo.currentData() == "bluetooth.br_edr"
+            and self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.RF_PHY_TEST
+        )
+        self.edr_rf_test_packet_combo.setEnabled(
+            classic_rf_test and self.phy_combo.currentData() != "BR"
+        )
+        if self.protocol_combo.currentData() != "bluetooth.le":
+            for widget in (
+                self.access_address_edit,
+                self.crc_init_edit,
+                self.whitening_check,
+            ):
+                widget.setEnabled(True)
+            return
+        rf_test = (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.RF_PHY_TEST
+        )
+        if rf_test:
+            self.access_address_edit.setText("71764129")
+            self.crc_init_edit.setText("555555")
+            self.whitening_check.setChecked(False)
+        for widget in (
+            self.access_address_edit,
+            self.crc_init_edit,
+            self.whitening_check,
+        ):
+            widget.setEnabled(not rf_test)
+
+    def set_session(self, session: VSASession) -> None:
+        self.stage_session(session)
+        self.refresh()
+
+    def stage_session(self, session: VSASession) -> None:
+        """Remember a Generic VSA result without repainting a hidden workspace."""
+        self._session = session
+        self._capture_recording = session.recording
+        self._recording = session.recording
+        self.export_iq_action.setEnabled(self._recording is not None)
+        self.refresh_analysis_action.setEnabled(self._recording is not None)
+        if session.recording is not None and self.protocol_combo.currentData() == "bluetooth.le":
+            channel = infer_le_channel(session.recording.center_frequency_hz)
+            previous = self.channel_spin.blockSignals(True)
+            self.channel_spin.setValue(channel)
+            self.channel_spin.blockSignals(previous)
+
+    def _last_directory(self, file_kind: str) -> str:
+        stored = self._preferences.value(f"directories/{file_kind}", "", type=str)
+        return stored if stored and Path(stored).is_dir() else str(Path.cwd())
+
+    def _remember_directory(self, file_kind: str, path: str | Path) -> None:
+        self._preferences.setValue(
+            f"directories/{file_kind}", str(Path(path).resolve().parent)
+        )
+        self._preferences.sync()
+
+    @QtCore.Slot()
+    def _open_iq(self) -> None:
+        if self.shutdown_busy_reason() is not None:
+            self.statusBar().showMessage(
+                "Stop the active Bluetooth capture or analysis before opening IQ"
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open IQ Recording",
+            self._last_directory("iq"),
+            "IQ recordings (*.iq.tar *.npz *.npy *.cf32 *.bin);;All files (*)",
+        )
+        if not path:
+            return
+        self._remember_directory("iq", path)
+        try:
+            try:
+                capture_recording = FileIQSource.load(path)
+            except ValueError as error:
+                if "sample_rate_hz is required" not in str(error):
+                    raise
+                symbol_rate_hz = (
+                    2_000_000.0
+                    if self.protocol_combo.currentData() == "bluetooth.hdt"
+                    or (
+                        self.protocol_combo.currentData() == "bluetooth.le"
+                        and self.phy_combo.currentText() == "LE 2M"
+                    )
+                    else 1_000_000.0
+                )
+                sample_rate_hz, accepted = QtWidgets.QInputDialog.getDouble(
+                    self,
+                    "IQ Sample Rate",
+                    "Sample Rate (Hz)",
+                    symbol_rate_hz * int(self.oversampling_combo.currentData()),
+                    1.0,
+                    100_000_000.0,
+                    0,
+                )
+                if not accepted:
+                    return
+                capture_recording = FileIQSource.load(
+                    path,
+                    sample_rate_hz=sample_rate_hz,
+                    center_frequency_hz=self.center_spin.value() * 1e6,
+                )
+            if capture_recording.center_frequency_hz <= 0.0:
+                capture_recording = replace(
+                    capture_recording,
+                    center_frequency_hz=self.center_spin.value() * 1e6,
+                )
+            # Recreate the same DDC/channel-filter plane used by live capture.
+            # An Offset-LO NPZ otherwise analyzes the hardware-LO plane and
+            # can leave the packet outside the fine synchronizer's CFO range.
+            recording = extract_requested_analysis_channel(capture_recording)
+            self.load_recording(
+                recording,
+                capture_recording=capture_recording,
+            )
+        except Exception as error:
+            QtWidgets.QMessageBox.critical(self, "IQ Import Error", str(error))
+
+    @QtCore.Slot()
+    def _export_vsg_project(self) -> None:
+        export_packet_project(self, None if self._result is None else self._result.packet)
+
+    def _export_iq_recording(self) -> None:
+        export_iq_recording(
+            self,
+            self._capture_recording or self._recording,
+            self._preferences,
+        )
+
+    def load_recording(
+        self,
+        recording: IQRecording,
+        *,
+        capture_recording: IQRecording | None = None,
+    ) -> None:
+        """Load one file/capture recording and start dedicated analysis."""
+
+        self._capture_recording = capture_recording or recording
+        self._recording = recording
+        self.export_iq_action.setEnabled(True)
+        self.refresh_analysis_action.setEnabled(True)
+        self._session = None
+        self.center_spin.setValue(recording.center_frequency_hz / 1e6)
+        if self.protocol_combo.currentData() == "bluetooth.le":
+            previous = self.channel_spin.blockSignals(True)
+            self.channel_spin.setValue(infer_le_channel(recording.center_frequency_hz))
+            self.channel_spin.blockSignals(previous)
+        self.statusBar().showMessage(f"IQ loaded - {recording.source}")
+        self.refresh()
+
+    def _context(self) -> dict[str, object]:
+        if self.protocol_combo.currentData() == "bluetooth.le":
+            try:
+                crc_init = int(self.crc_init_edit.text().strip(), 16)
+            except ValueError:
+                crc_init = 0x555555
+            return {
+                "whitening_channel_index": self.channel_spin.value(),
+                "crc_init": crc_init,
+                "crc_enabled": True,
+                "whitening_enabled": self.whitening_check.isChecked(),
+            }
+        try:
+            uap = int(self.uap_edit.text().strip(), 16)
+        except ValueError:
+            uap = 0
+        return {"uap": uap & 0xFF, "clock_6_1": self.clock_spin.value(), "whitening_enabled": self.whitening_check.isChecked()}
+
+    def _meas_config_values(self) -> dict[str, object]:
+        """Return the Bluetooth workspace state without Generic VSA state."""
+
+        return {
+            "common_setup": self._common_setup.values(),
+            "profile": str(self.profile_combo.currentData()),
+            "protocol": str(self.protocol_combo.currentData()),
+            "phy": self.phy_combo.currentData(),
+            "expected_edr_rf_test_packet": self.edr_rf_test_packet_combo.currentData(),
+            "lap": self.lap_edit.text().strip(),
+            "uap": self.uap_edit.text().strip(),
+            "clock_6_1": self.clock_spin.value(),
+            "le_channel": self.channel_spin.value(),
+            "access_address": self.access_address_edit.text().strip(),
+            "crc_init": self.crc_init_edit.text().strip(),
+            "whitening": self.whitening_check.isChecked(),
+            "center_mhz": self.center_spin.value(),
+            "capture_ms": self.capture_length_spin.value(),
+            "samples_per_symbol": int(self.oversampling_combo.currentData()),
+            "rf_bandwidth_mhz": self.rf_bandwidth_spin.value(),
+            "analysis_channel_enabled": self.channel_filter_check.isChecked(),
+            "analysis_bandwidth_mhz": self.analysis_bandwidth_spin.value(),
+            "apply_analysis_bandwidth_to_power": (
+                self.analysis_power_display_check.isChecked()
+            ),
+            "apply_analysis_bandwidth_to_spectrum": (
+                self.analysis_spectrum_display_check.isChecked()
+            ),
+            "lo_offset_enabled": self.lo_offset_check.isChecked(),
+            "lo_offset_mhz": self.lo_offset_spin.value(),
+            "internal_gain_db": self.internal_gain_spin.value(),
+            "external_att_db": self.external_att_spin.value(),
+            "acquisition_trigger_source": str(
+                self.acquisition_trigger_source_combo.currentData()
+            ),
+            "acquisition_trigger_level_dbm": self.acquisition_trigger_level_spin.value(),
+            "acquisition_trigger_slope": str(
+                self.acquisition_trigger_slope_combo.currentData()
+            ),
+            "acquisition_trigger_offset_symbols": self.acquisition_trigger_offset_spin.value(),
+            "acquisition_trigger_hysteresis_db": self.acquisition_trigger_hysteresis_spin.value(),
+            "burst_search": self.iq_power_trigger_check.isChecked(),
+            "burst_level_dbm": self.iq_power_trigger_level_spin.value(),
+            "burst_hysteresis_db": self.iq_power_trigger_hysteresis_spin.value(),
+            "burst_average_symbols": self.iq_power_trigger_average_spin.value(),
+            "burst_dropout_symbols": self.iq_power_trigger_dropout_spin.value(),
+            "burst_holdoff_symbols": self.iq_power_trigger_holdoff_spin.value(),
+            "burst_offset_symbols": self.iq_power_trigger_offset_spin.value(),
+            "burst_limit_result": self.iq_power_trigger_limit_result_check.isChecked(),
+            "show_symbol_points": self._show_symbol_points,
+            "symbol_density": self._symbol_density,
+            "symbol_density_spread": self._symbol_density_spread.value,
+            "fsk_symbol_plot": self._fsk_symbol_plot_mode,
+            "psk_symbol_plot": self._psk_symbol_plot_mode,
+        }
+
+    @staticmethod
+    def _set_combo_data(combo: QtWidgets.QComboBox, value: object) -> None:
+        index = combo.findData(value)
+        if index < 0:
+            index = combo.findData(str(value))
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def _apply_meas_config_values(self, values: dict[str, object]) -> None:
+        self._set_combo_data(self.profile_combo, values.get("profile", "rf_phy_test"))
+        self._set_combo_data(self.protocol_combo, values.get("protocol", "bluetooth.br_edr"))
+        self._protocol_changed()
+        phy = str(values.get("phy", self.phy_combo.currentData()))
+        phy_index = self.phy_combo.findData(phy)
+        if phy_index < 0:
+            phy_index = self.phy_combo.findText(phy)
+        if phy_index >= 0:
+            self.phy_combo.setCurrentIndex(phy_index)
+        self._set_combo_data(
+            self.edr_rf_test_packet_combo,
+            values.get("expected_edr_rf_test_packet", None),
+        )
+
+        text_controls = (
+            (self.lap_edit, "lap"),
+            (self.uap_edit, "uap"),
+            (self.access_address_edit, "access_address"),
+            (self.crc_init_edit, "crc_init"),
+        )
+        for control, key in text_controls:
+            if key in values:
+                control.setText(str(values[key]))
+
+        numeric_controls = (
+            (self.clock_spin, "clock_6_1"),
+            (self.channel_spin, "le_channel"),
+            (self.center_spin, "center_mhz"),
+            (self.capture_length_spin, "capture_ms"),
+            (self.rf_bandwidth_spin, "rf_bandwidth_mhz"),
+            (self.analysis_bandwidth_spin, "analysis_bandwidth_mhz"),
+            (self.lo_offset_spin, "lo_offset_mhz"),
+            (self.internal_gain_spin, "internal_gain_db"),
+            (self.external_att_spin, "external_att_db"),
+            (self.acquisition_trigger_level_spin, "acquisition_trigger_level_dbm"),
+            (self.acquisition_trigger_offset_spin, "acquisition_trigger_offset_symbols"),
+            (self.acquisition_trigger_hysteresis_spin, "acquisition_trigger_hysteresis_db"),
+            (self.iq_power_trigger_level_spin, "burst_level_dbm"),
+            (self.iq_power_trigger_hysteresis_spin, "burst_hysteresis_db"),
+            (self.iq_power_trigger_average_spin, "burst_average_symbols"),
+            (self.iq_power_trigger_dropout_spin, "burst_dropout_symbols"),
+            (self.iq_power_trigger_holdoff_spin, "burst_holdoff_symbols"),
+            (self.iq_power_trigger_offset_spin, "burst_offset_symbols"),
+        )
+        for control, key in numeric_controls:
+            if key in values:
+                control.setValue(float(values[key]))
+
+        self._set_combo_data(
+            self.oversampling_combo, values.get("samples_per_symbol", 8)
+        )
+        self._set_combo_data(
+            self.acquisition_trigger_source_combo,
+            values.get("acquisition_trigger_source", TriggerKind.FREE_RUN.value),
+        )
+        self._set_combo_data(
+            self.acquisition_trigger_slope_combo,
+            values.get("acquisition_trigger_slope", TriggerSlope.RISING.value),
+        )
+        self.whitening_check.setChecked(bool(values.get("whitening", False)))
+        self.iq_power_trigger_check.setChecked(bool(values.get("burst_search", True)))
+        self.iq_power_trigger_limit_result_check.setChecked(
+            bool(values.get("burst_limit_result", True))
+        )
+        self.channel_filter_check.setChecked(
+            bool(values.get("analysis_channel_enabled", False))
+        )
+        self.analysis_power_display_check.setChecked(
+            bool(values.get("apply_analysis_bandwidth_to_power", True))
+        )
+        self.analysis_spectrum_display_check.setChecked(
+            bool(values.get("apply_analysis_bandwidth_to_spectrum", False))
+        )
+        self.lo_offset_check.setChecked(bool(values.get("lo_offset_enabled", False)))
+        self._set_show_symbol_points(bool(values.get("show_symbol_points", True)))
+        self._set_symbol_density(bool(values.get("symbol_density", False)))
+        self._set_symbol_density_spread(
+            str(
+                values.get(
+                    "symbol_density_spread",
+                    SymbolDensitySpread.MAXIMUM.value,
+                )
+            )
+        )
+        self._set_fsk_symbol_plot_mode(
+            str(values.get("fsk_symbol_plot", "Constellation Frequency"))
+        )
+        self._set_psk_symbol_plot_mode(
+            str(values.get("psk_symbol_plot", "Physical IQ"))
+        )
+        self._sync_le_profile_controls()
+        self._sync_acquisition_trigger_controls()
+        self._sync_analysis_channel_controls()
+        self._update_derived_config()
+        self._common_setup.apply(values.get("common_setup", {}))
+
+    def _save_startup_meas_config(self) -> None:
+        payload = {
+            "schema": _STARTUP_CONFIG_SCHEMA,
+            "version": _STARTUP_CONFIG_VERSION,
+            "settings": self._meas_config_values(),
+        }
+        self._preferences.setValue(
+            _STARTUP_CONFIG_KEY,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        )
+        self._preferences.sync()
+
+    def _restore_startup_meas_config(self) -> bool:
+        raw = self._preferences.value(_STARTUP_CONFIG_KEY, "", type=str)
+        if not raw:
+            return False
+        try:
+            payload = json.loads(raw)
+            if (
+                payload.get("schema") != _STARTUP_CONFIG_SCHEMA
+                or int(payload.get("version", 0)) != _STARTUP_CONFIG_VERSION
+                or not isinstance(payload.get("settings"), dict)
+            ):
+                return False
+            self._apply_meas_config_values(payload["settings"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return True
+
+    def set_pluto_target(self, target: str | None) -> None:
+        self._pluto_target = str(target or "")
+        self.device_label.setText(f"Pluto: {self._pluto_target or 'Auto'}")
+
+    def _sync_acquisition_trigger_controls(self, _value: object = None) -> None:
+        enabled = (
+            self.acquisition_trigger_source_combo.currentData()
+            == TriggerKind.POWER_LEVEL.value
+        )
+        for control in (
+            self.acquisition_trigger_level_spin,
+            self.acquisition_trigger_slope_combo,
+            self.acquisition_trigger_offset_spin,
+            self.acquisition_trigger_hysteresis_spin,
+        ):
+            control.setEnabled(enabled)
+
+    def _iq_power_trigger_settings(self) -> IQPowerTriggerSettings:
+        return IQPowerTriggerSettings(
+            enabled=self.iq_power_trigger_check.isChecked(),
+            level_dbm=self.iq_power_trigger_level_spin.value(),
+            hysteresis_db=self.iq_power_trigger_hysteresis_spin.value(),
+            envelope_average_symbols=self.iq_power_trigger_average_spin.value(),
+            dropout_symbols=self.iq_power_trigger_dropout_spin.value(),
+            holdoff_symbols=self.iq_power_trigger_holdoff_spin.value(),
+            search_start_offset_symbols=self.iq_power_trigger_offset_spin.value(),
+            limit_result_to_active_interval=(
+                self.iq_power_trigger_limit_result_check.isChecked()
+            ),
+        )
+
+    def _capture_symbol_rate_hz(self) -> float:
+        if self.protocol_combo.currentData() == "bluetooth.hdt":
+            return 2_000_000.0
+        return 2_000_000.0 if self.phy_combo.currentText() == "LE 2M" else 1_000_000.0
+
+    def _capture_settings(self) -> PlutoCaptureSettings:
+        symbol_rate_hz = (
+            2_000_000.0
+            if (
+                self.protocol_combo.currentData() == "bluetooth.hdt"
+                or (
+                    self.protocol_combo.currentData() == "bluetooth.le"
+                    and self.phy_combo.currentText() == "LE 2M"
+                )
+            )
+            else 1_000_000.0
+        )
+        self._common_setup.refresh()
+        return PlutoCaptureSettings(
+            center_frequency_hz=self.center_spin.value() * 1e6,
+            symbol_rate_hz=symbol_rate_hz,
+            samples_per_symbol=int(self.oversampling_combo.currentData()),
+            capture_length_s=self.capture_length_spin.value() * 1e-3,
+            swap_iq=self._common_setup.swap_iq.isChecked(),
+            rf_bandwidth_hz=self.rf_bandwidth_spin.value() * 1e6,
+            lo_offset_hz=(
+                self.lo_offset_spin.value() * 1e6
+                if self.lo_offset_check.isChecked()
+                else 0.0
+            ),
+            analysis_bandwidth_hz=(
+                self.analysis_bandwidth_spin.value() * 1e6
+                if self.channel_filter_check.isChecked()
+                else None
+            ),
+            sdr_uri=self._pluto_target or None,
+            power_correction=self._common_setup.power_correction(),
+            trigger_source=TriggerKind(
+                self.acquisition_trigger_source_combo.currentData()
+            ),
+            trigger_level_dbm=self.acquisition_trigger_level_spin.value(),
+            trigger_slope=TriggerSlope(
+                self.acquisition_trigger_slope_combo.currentData()
+            ),
+            trigger_offset_s=(
+                self.acquisition_trigger_offset_spin.value() / symbol_rate_hz
+            ),
+            trigger_hysteresis_db=self.acquisition_trigger_hysteresis_spin.value(),
+        )
+
+    @QtCore.Slot()
+    def _toggle_capture(self) -> None:
+        if self._continuous_run_requested:
+            return
+        if self._analysis_thread is not None and self._analysis_thread.isRunning():
+            self._analysis_thread.requestInterruption()
+            self.capture_button.setEnabled(False)
+            self.run_action.setEnabled(False)
+            self.statusBar().showMessage("Stopping Bluetooth analysis...")
+            return
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            self._capture_thread.cancel()
+            self.capture_button.setEnabled(False)
+            self.statusBar().showMessage("Stopping Bluetooth IQ capture...")
+            return
+        settings = self._capture_settings()
+        try:
+            validate_analysis_channel_capture(
+                sample_rate_hz=settings.requested_sample_rate_hz,
+                usable_bandwidth_hz=settings.nominal_usable_bandwidth_hz,
+                lo_offset_hz=settings.lo_offset_hz,
+                analysis_bandwidth_hz=settings.analysis_bandwidth_hz,
+            )
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Bluetooth Capture", str(error))
+            return
+        self._start_capture(settings, continuous=False)
+
+    @QtCore.Slot()
+    def _toggle_continuous_capture(self) -> None:
+        if self._continuous_run_requested:
+            self._continuous_run_requested = False
+            capture = self._capture_thread
+            if capture is not None and capture.isRunning():
+                capture.cancel()
+            self.run_continuous_action.setEnabled(False)
+            self.continuous_capture_button.setEnabled(False)
+            self.statusBar().showMessage(
+                "Stopping Bluetooth Continuous after the active operation..."
+            )
+            if capture is None and self._analysis_thread is None:
+                self._finish_continuous_capture()
+            return
+        if self._capture_thread is not None or self._analysis_thread is not None:
+            self.statusBar().showMessage(
+                "Wait for the current Bluetooth capture/analysis"
+            )
+            return
+        settings = self._capture_settings()
+        try:
+            validate_analysis_channel_capture(
+                sample_rate_hz=settings.requested_sample_rate_hz,
+                usable_bandwidth_hz=settings.nominal_usable_bandwidth_hz,
+                lo_offset_hz=settings.lo_offset_hz,
+                analysis_bandwidth_hz=settings.analysis_bandwidth_hz,
+            )
+        except ValueError as error:
+            QtWidgets.QMessageBox.critical(self, "Bluetooth Capture", str(error))
+            return
+        self._continuous_run_requested = True
+        self._continuous_capture_settings = settings
+        self._continuous_capture_count = 0
+        self._continuous_retry_delay_ms = 0
+        self.run_action.setEnabled(False)
+        self.capture_button.setEnabled(False)
+        self.run_continuous_action.setText("Stop Continuous")
+        self.continuous_capture_button.setText("Stop Continuous")
+        self.open_config_action.setEnabled(False)
+        self._meas_config_dialog.setEnabled(False)
+        self._start_capture(settings, continuous=True)
+
+    def _start_capture(
+        self,
+        settings: PlutoCaptureSettings,
+        *,
+        continuous: bool,
+    ) -> None:
+        self._active_capture_continuous = bool(continuous)
+        if settings.trigger_source is TriggerKind.POWER_LEVEL:
+            armed_message = (
+                "Waiting for Bluetooth I/Q Power trigger - "
+                f"{settings.trigger_slope.value}, "
+                f"{settings.trigger_level_dbm:.2f} dBm"
+            )
+        else:
+            armed_message = (
+                "Bluetooth capture armed - "
+                f"{settings.requested_sample_rate_hz / 1e6:.3f} MS/s"
+            )
+        thread = PlutoSingleCaptureThread(
+            self._pluto_source,
+            settings,
+            armed_message,
+            self,
+            prefer_buffered=continuous,
+        )
+        thread.capture_armed.connect(self.statusBar().showMessage)
+        thread.capture_ready.connect(self._capture_ready)
+        thread.capture_failed.connect(self._capture_failed)
+        thread.capture_cancelled.connect(lambda: self.statusBar().showMessage("Bluetooth IQ capture cancelled"))
+        thread.finished.connect(self._capture_stopped)
+        thread.finished.connect(thread.deleteLater)
+        self._capture_thread = thread
+        self.capture_button.setText("Stop Capture")
+        if not continuous:
+            self.run_action.setText("Stop")
+        self.statusBar().showMessage("Preparing Pluto for Bluetooth IQ capture...")
+        thread.start()
+
+    def _start_next_continuous_capture(self) -> None:
+        if not self._continuous_run_requested or self._shutdown_requested:
+            self._finish_continuous_capture()
+            return
+        if self._capture_thread is not None or self._analysis_thread is not None:
+            QtCore.QTimer.singleShot(10, self._start_next_continuous_capture)
+            return
+        settings = self._continuous_capture_settings
+        if settings is None:
+            self._finish_continuous_capture()
+            return
+        self._start_capture(settings, continuous=True)
+
+    def _finish_continuous_capture(self) -> None:
+        self._continuous_run_requested = False
+        self._continuous_capture_settings = None
+        self._active_capture_continuous = False
+        stop_stream = getattr(self._pluto_source, "stop_stream", None)
+        if callable(stop_stream):
+            stop_stream()
+        self.run_action.setText("Run Single")
+        self.capture_button.setText("Single Capture")
+        self.run_continuous_action.setText("Run Continuous")
+        self.continuous_capture_button.setText("Continuous Capture")
+        self.run_continuous_action.setEnabled(True)
+        self.continuous_capture_button.setEnabled(True)
+        self.run_action.setEnabled(True)
+        self.capture_button.setEnabled(True)
+        self.open_config_action.setEnabled(True)
+        self._meas_config_dialog.setEnabled(True)
+        self.statusBar().showMessage(
+            "Bluetooth Continuous stopped - "
+            f"{self._continuous_capture_count} capture(s)"
+        )
+        if self._shutdown_requested and self.shutdown_busy_reason() is None:
+            self.shutdown_ready.emit()
+
+    @QtCore.Slot(object)
+    def _capture_ready(self, recording: object) -> None:
+        if not isinstance(recording, IQRecording):
+            self._capture_failed("capture returned an invalid IQ recording")
+            return
+        capture_recording = recording
+        try:
+            recording = extract_requested_analysis_channel(capture_recording)
+        except ValueError as error:
+            self._capture_failed(str(error))
+            return
+        self._continuous_retry_delay_ms = 0
+        if self._active_capture_continuous:
+            self._continuous_capture_count += 1
+        self.load_recording(recording, capture_recording=capture_recording)
+
+    @QtCore.Slot(str)
+    def _capture_failed(self, message: str) -> None:
+        if self._continuous_run_requested:
+            self._continuous_retry_delay_ms = 250
+        self.statusBar().showMessage(
+            f"Bluetooth capture failed: {message}"
+            + (" - retrying Continuous" if self._continuous_run_requested else "")
+        )
+        if not self._shutdown_requested and not self._continuous_run_requested:
+            QtWidgets.QMessageBox.critical(self, "Bluetooth Capture", message)
+
+    @QtCore.Slot()
+    def _capture_stopped(self) -> None:
+        self._capture_thread = None
+        self._active_capture_continuous = False
+        if self._continuous_capture_settings is not None:
+            if self._continuous_run_requested and self._analysis_thread is None:
+                QtCore.QTimer.singleShot(
+                    self._continuous_retry_delay_ms,
+                    self._start_next_continuous_capture,
+                )
+            elif not self._continuous_run_requested and self._analysis_thread is None:
+                self._finish_continuous_capture()
+            return
+        stop_stream = getattr(self._pluto_source, "stop_stream", None)
+        if callable(stop_stream):
+            stop_stream()
+        if self._analysis_thread is None or not self._analysis_thread.isRunning():
+            self.capture_button.setText("Single Capture")
+            self.run_action.setText("Run Single")
+        self.capture_button.setEnabled(True)
+        if self._shutdown_requested and self.shutdown_busy_reason() is None:
+            self.shutdown_ready.emit()
+
+    def _classic_options(self) -> dict[str, object]:
+        if (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.GENERAL_PACKET
+        ):
+            return {
+                "profile": BluetoothAnalysisProfile.GENERAL_PACKET,
+                # General acquisition recovers these values.  Neutral values
+                # are passed only to keep the shared analyzer API stable.
+                "lap": None,
+                "uap": None,
+                "clock_6_1": None,
+                "whitening_enabled": True,
+                "expected_edr_rf_test_packet": None,
+                "phy_search": self.phy_combo.currentData(),
+                "result_length": max(
+                    256, int(self.capture_length_spin.value() * 1000.0)
+                ),
+                "iq_power_trigger": self._iq_power_trigger_settings(),
+            }
+        try:
+            lap = int(self.lap_edit.text().strip(), 16)
+            uap = int(self.uap_edit.text().strip(), 16)
+        except ValueError as error:
+            raise ValueError("LAP and UAP must be hexadecimal values") from error
+        phy_search = self.phy_combo.currentData()
+        expected_packet = (
+            self.edr_rf_test_packet_combo.currentData()
+            if self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.RF_PHY_TEST
+            and phy_search != "BR"
+            else None
+        )
+        if (
+            expected_packet is not None
+            and phy_search in {"EDR 2M", "EDR 3M"}
+            and not str(expected_packet).startswith(
+                "2-" if phy_search == "EDR 2M" else "3-"
+            )
+        ):
+            raise ValueError(
+                f"{expected_packet} does not match the selected {phy_search} PHY"
+            )
+        return {
+            "profile": self.profile_combo.currentData(),
+            "lap": lap,
+            "uap": uap,
+            "clock_6_1": self.clock_spin.value(),
+            "whitening_enabled": self.whitening_check.isChecked(),
+            "expected_edr_rf_test_packet": expected_packet,
+            "phy_search": phy_search,
+            "result_length": max(256, int(self.capture_length_spin.value() * 1000.0)),
+            "iq_power_trigger": self._iq_power_trigger_settings(),
+        }
+
+    def _le_options(self) -> dict[str, object]:
+        if (
+            self.profile_combo.currentData()
+            == BluetoothAnalysisProfile.GENERAL_PACKET
+        ):
+            return {
+                "profile": BluetoothAnalysisProfile.GENERAL_PACKET,
+                "phy": self.phy_combo.currentText(),
+                # AA and CRCInit are recovered/selected by auto acquisition.
+                # LE whitening is mandatory; its channel follows RF center.
+                "access_address": None,
+                "channel_index": infer_le_channel(
+                    self.center_spin.value() * 1e6
+                ),
+                "crc_init": 0x555555,
+                "whitening_enabled": True,
+                "result_length": max(
+                    256, int(self.capture_length_spin.value() * 2000.0)
+                ),
+                "iq_power_trigger": self._iq_power_trigger_settings(),
+            }
+        try:
+            access_address = int(self.access_address_edit.text().strip(), 16)
+            crc_init = int(self.crc_init_edit.text().strip(), 16)
+        except ValueError as error:
+            raise ValueError("Access Address and CRC Init must be hexadecimal values") from error
+        return {
+            "profile": self.profile_combo.currentData(),
+            "phy": self.phy_combo.currentText(),
+            "access_address": access_address,
+            "channel_index": self.channel_spin.value(),
+            "crc_init": crc_init,
+            "whitening_enabled": self.whitening_check.isChecked(),
+            "result_length": max(256, int(self.capture_length_spin.value() * 2000.0)),
+            "iq_power_trigger": self._iq_power_trigger_settings(),
+        }
+
+    def _hdt_options(self) -> dict[str, object]:
+        return {"profile": self.profile_combo.currentData(), "iq_power_trigger": self._iq_power_trigger_settings()}
+
+    @QtCore.Slot()
+    def refresh(self) -> None:
+        if self._recording is None:
+            self.statusBar().showMessage("Capture IQ in Bluetooth mode or load it in Generic VSA first")
+            return
+        if self._analysis_thread is not None and self._analysis_thread.isRunning():
+            self.statusBar().showMessage("Bluetooth analysis is already running")
+            return
+        self._active_analysis_continuous = self._active_capture_continuous
+        if self.protocol_combo.currentData() == "bluetooth.br_edr":
+            try:
+                options = self._classic_options()
+            except ValueError as error:
+                self.statusBar().showMessage(str(error))
+                return
+            thread = _BluetoothClassicAnalysisThread(self._recording, options, self)
+            thread.analysis_ready.connect(self._classic_analysis_ready)
+            thread.analysis_failed.connect(self._classic_analysis_failed)
+            thread.finished.connect(self._analysis_stopped)
+            thread.finished.connect(thread.deleteLater)
+            self._analysis_thread = thread
+            self.capture_button.setText("Stop Analysis")
+            self.run_action.setText("Stop")
+            self.statusBar().showMessage("Analyzing Classic header and detecting BR / EDR PHY...")
+            thread.start()
+            return
+        if self.protocol_combo.currentData() == "bluetooth.hdt":
+            thread = _BluetoothHDTAnalysisThread(
+                self._recording, self._hdt_options(), self
+            )
+            thread.analysis_ready.connect(self._classic_analysis_ready)
+            thread.analysis_failed.connect(self._classic_analysis_failed)
+            thread.finished.connect(self._analysis_stopped)
+            thread.finished.connect(thread.deleteLater)
+            self._analysis_thread = thread
+            self.capture_button.setText("Stop Analysis")
+            self.run_action.setText("Stop")
+            self.statusBar().showMessage(
+                "Synchronizing HDT and decoding Rate Indicator / Payload Length..."
+            )
+            thread.start()
+            return
+        try:
+            options = self._le_options()
+        except ValueError as error:
+            self.statusBar().showMessage(str(error))
+            return
+        thread = _BluetoothLEAnalysisThread(self._recording, options, self)
+        thread.analysis_ready.connect(self._classic_analysis_ready)
+        thread.analysis_failed.connect(self._classic_analysis_failed)
+        thread.finished.connect(self._analysis_stopped)
+        thread.finished.connect(thread.deleteLater)
+        self._analysis_thread = thread
+        self.capture_button.setText("Stop Analysis")
+        self.run_action.setText("Stop")
+        self.statusBar().showMessage(f"Synchronizing and analyzing {self.phy_combo.currentText()} packet...")
+        thread.start()
+
+    @QtCore.Slot(object)
+    def _classic_analysis_ready(self, result: object) -> None:
+        if isinstance(result, BluetoothDedicatedResult):
+            results = (result,)
+        elif isinstance(result, tuple) and result and all(
+            isinstance(item, BluetoothDedicatedResult) for item in result
+        ):
+            results = result
+        else:
+            self._classic_analysis_failed("invalid Bluetooth analysis result")
+            return
+        self._results = results
+        self._selected_result_index = 0
+        result = results[0]
+        self._result = result
+        if self._active_analysis_continuous:
+            self._continuous_retry_delay_ms = 0
+        session = result.metadata.get("analysis_session")
+        if isinstance(session, VSASession):
+            self._session = session
+        self._render(result)
+        aggregate_status = result.metadata.get("hdt_rms_evm_aggregate_status")
+        aggregate_suffix = (
+            f" - {aggregate_status}" if aggregate_status is not None else ""
+        )
+        self.statusBar().showMessage(
+            f"Bluetooth analysis complete - {result.packet.phy_name} / "
+            f"{result.packet.packet_type or 'packet'} - {len(results)} packet(s)"
+            f"{aggregate_suffix}"
+        )
+
+    @QtCore.Slot(int)
+    def _select_result(self, step: int) -> None:
+        if not self._results:
+            return
+        target = self._selected_result_index + int(step)
+        if not 0 <= target < len(self._results):
+            return
+        self._selected_result_index = target
+        selected = self._results[target]
+        sessions: list[VSASession] = []
+        for key in ("br_analysis_session", "analysis_session"):
+            candidate = selected.metadata.get(key)
+            if isinstance(candidate, VSASession) and all(
+                candidate is not current for current in sessions
+            ):
+                sessions.append(candidate)
+        for session in sessions:
+            session.generate_display_products()
+        primary = selected.metadata.get("analysis_session")
+        if isinstance(primary, VSASession):
+            display_result = (
+                primary.carrier_corrected_pattern_range_result
+                or primary.pattern_range_result
+                or primary.result
+            )
+            if display_result is not None and display_result is not selected.vsa_result:
+                selected = replace(selected, vsa_result=display_result)
+                mutable_results = list(self._results)
+                mutable_results[target] = selected
+                self._results = tuple(mutable_results)
+        self._result = selected
+        session = self._result.metadata.get("analysis_session")
+        if isinstance(session, VSASession):
+            self._session = session
+        self._render(self._result)
+        aggregate_status = self._result.metadata.get(
+            "hdt_rms_evm_aggregate_status"
+        )
+        aggregate_suffix = (
+            f" - {aggregate_status}" if aggregate_status is not None else ""
+        )
+        self.statusBar().showMessage(
+            f"Selected Bluetooth packet {target + 1}/{len(self._results)}"
+            f"{aggregate_suffix}"
+        )
+
+    @QtCore.Slot(str)
+    def _classic_analysis_failed(self, message: str) -> None:
+        if self._continuous_run_requested:
+            self._continuous_retry_delay_ms = 250
+        self.statusBar().showMessage(
+            f"Bluetooth analysis failed: {message}"
+            + (" - retrying Continuous" if self._continuous_run_requested else "")
+        )
+
+    @QtCore.Slot()
+    def _analysis_stopped(self) -> None:
+        self._analysis_thread = None
+        self._active_analysis_continuous = False
+        if self._continuous_capture_settings is not None:
+            if self._continuous_run_requested:
+                QtCore.QTimer.singleShot(
+                    self._continuous_retry_delay_ms,
+                    self._start_next_continuous_capture,
+                )
+            else:
+                self._finish_continuous_capture()
+            return
+        self.capture_button.setEnabled(True)
+        self.run_action.setEnabled(True)
+        self.capture_button.setText("Single Capture")
+        self.run_action.setText("Run Single")
+        if self._shutdown_requested and self.shutdown_busy_reason() is None:
+            self.shutdown_ready.emit()
+
+    def shutdown_busy_reason(self) -> str | None:
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            return "Bluetooth IQ capture is running"
+        if self._analysis_thread is not None and self._analysis_thread.isRunning():
+            return "Bluetooth analysis is running"
+        return None
+
+    def request_shutdown(self) -> None:
+        self._shutdown_requested = True
+        self._continuous_run_requested = False
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            self._capture_thread.cancel()
+        if self._analysis_thread is not None and self._analysis_thread.isRunning():
+            self._analysis_thread.requestInterruption()
+
+    def finalize_shutdown(self) -> None:
+        self._save_startup_meas_config()
+        if self._owns_pluto_source:
+            self._pluto_source.close()
+
+    def _render(self, result: BluetoothDedicatedResult) -> None:
+        modulation_tab_index = self.modulation_tabs.currentIndex()
+        symbol_tab_index = self.symbol_tabs.currentIndex()
+        vsa = result.vsa_result
+        recording = self._recording
+        if recording is None:
+            return
+        self._persistent_plot_ranges.prepare_for_update()
+        display_recordings = AnalysisDisplayRecordings(
+            capture=self._capture_recording or recording,
+            analysis=recording,
+        )
+        session = result.metadata.get("analysis_session")
+        br_session = result.metadata.get("br_analysis_session")
+        recording_sample_offset = int(
+            result.metadata.get("recording_sample_offset", 0)
+        )
+        analysis_sample_offset = int(
+            result.metadata.get("analysis_sample_offset", recording_sample_offset)
+        )
+        is_hdt = result.packet.protocol_id == "bluetooth.hdt"
+        hdt_plot_data = result.metadata.get("hdt_plot_data")
+        if not isinstance(hdt_plot_data, HDTPlotData):
+            hdt_plot_data = None
+        hdt_evm = (
+            hdt_plot_data.evm
+            if hdt_plot_data is not None
+            else result.metadata.get("hdt_evm_result")
+        )
+        if not isinstance(hdt_evm, HDTEVMResult):
+            hdt_evm = None
+        is_psk = (
+            isinstance(session, VSASession)
+            and session.signal is not None
+            and session.signal.modulation.family.uses_iq_constellation
+        )
+        if is_hdt:
+            payload_modulation = str(
+                next(
+                    (
+                        item.display
+                        for item in result.metrics
+                        if item.metric_id == "payload_modulation"
+                    ),
+                    "Payload",
+                )
+            )
+            payload_name = _hdt_modulation_name(payload_modulation)
+            payload_is_qpsk = payload_name == "QPSK"
+            self.modulation_tabs.setTabText(0, "QPSK Header")
+            self.modulation_tabs.setTabText(1, f"{payload_name} Payload")
+            self.symbol_tabs.setTabText(0, "QPSK Header")
+            self.symbol_tabs.setTabText(1, f"{payload_name} Payload")
+        else:
+            payload_name = "Payload"
+            payload_is_qpsk = False
+            self.modulation_tabs.setTabText(0, "FSK - Instantaneous Frequency")
+            self.modulation_tabs.setTabText(1, "PSK - Vector")
+            self.symbol_tabs.setTabText(0, "FSK")
+            self.symbol_tabs.setTabText(1, "PSK")
+        self.power_plot.clear()
+        apply_analysis_to_power = (
+            self.channel_filter_check.isChecked()
+            and self.analysis_power_display_check.isChecked()
+        )
+        power_recording = display_recordings.power(apply_analysis_to_power)
+        power_time_s, _power_dbfs, power_dbm = capture_power_traces(
+            power_recording
+        )
+        power_time_offset_s = 0.0
+        self.power_plot.plot(
+            (power_time_s + power_time_offset_s) * 1e3,
+            limit_iq_power_display_dbm(power_dbm),
+            pen=_TRACE,
+        )
+        displayed_power_dbm = limit_iq_power_display_dbm(power_dbm)
+        finite_power_dbm = displayed_power_dbm[np.isfinite(displayed_power_dbm)]
+        if finite_power_dbm.size:
+            power_min = float(np.min(finite_power_dbm))
+            power_max = float(np.max(finite_power_dbm))
+            power_padding = max(1.0, 0.05 * max(power_max - power_min, 1.0))
+            self.power_plot.setYRange(
+                power_min - power_padding,
+                power_max + power_padding,
+                padding=0.0,
+            )
+            set_iq_power_default_y_range(
+                self.power_plot,
+                finite_power_dbm,
+                upper_dbm=power_max + power_padding,
+            )
+        selected_ranges: list[tuple[float, float]] = []
+        power_symbol_times_ms: list[np.ndarray] = []
+        if is_hdt and hdt_plot_data is not None:
+            packet_start_sample, packet_stop_sample = (
+                hdt_plot_data.packet_sample_range
+            )
+            result_start_sample, result_stop_sample = (
+                hdt_plot_data.payload_evm_sample_range
+            )
+            training_start_sample, training_stop_sample = (
+                hdt_plot_data.training_sample_range
+            )
+            selected_ranges.append(
+                (
+                    packet_start_sample / recording.sample_rate_hz * 1e3,
+                    packet_stop_sample / recording.sample_rate_hz * 1e3,
+                )
+            )
+            add_result_range_overlay(
+                self.power_plot,
+                result_start_ms=(
+                    result_start_sample / recording.sample_rate_hz * 1e3
+                ),
+                result_stop_ms=(
+                    result_stop_sample / recording.sample_rate_hz * 1e3
+                ),
+                pattern_start_ms=(
+                    training_start_sample / recording.sample_rate_hz * 1e3
+                ),
+                pattern_stop_ms=(
+                    training_stop_sample / recording.sample_rate_hz * 1e3
+                ),
+                label="Packet Start",
+            )
+            packet_end_line = pg.InfiniteLine(
+                pos=packet_stop_sample / recording.sample_rate_hz * 1e3,
+                angle=90,
+                movable=False,
+                pen=pg.mkPen(95, 100, 108, 150),
+                label="Packet End",
+                labelOpts={"position": 0.92, "color": (115, 120, 128)},
+            )
+            self.power_plot.addItem(packet_end_line)
+            if hdt_evm is not None:
+                power_symbol_times_ms.append(
+                    np.concatenate(
+                        (
+                            hdt_evm.header_symbol_sample_positions,
+                            hdt_evm.payload_symbol_sample_positions,
+                        )
+                    )
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
+        analyses: list[VSASession] = []
+        for candidate in (() if is_hdt else (br_session, session)):
+            if isinstance(candidate, VSASession) and all(
+                candidate is not existing for existing in analyses
+            ):
+                analyses.append(candidate)
+        for analysis in analyses:
+            if not isinstance(analysis, VSASession) or analysis.pattern_result is None:
+                continue
+            pattern = analysis.pattern_result
+            offset = (
+                analysis_sample_offset
+                if analysis is session
+                else recording_sample_offset
+            )
+            if (
+                result.packet.protocol_id == "bluetooth.le"
+                and analysis is session
+            ):
+                start_ms = (
+                    float(result.metadata["packet_start_sample"])
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
+                stop_ms = (
+                    float(result.metadata["packet_stop_sample"])
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
+            else:
+                start_ms = (
+                    (offset + pattern.result_start_sample)
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
+                stop_ms = (
+                    (offset + pattern.result_stop_sample)
+                    / recording.sample_rate_hz
+                    * 1e3
+                )
+            selected_ranges.append((start_ms, stop_ms))
+            pattern_start_ms = (
+                offset + pattern.pattern_start_sample
+            ) / recording.sample_rate_hz * 1e3
+            pattern_stop_ms = (
+                offset / recording.sample_rate_hz + pattern.pattern_stop_time_s
+            ) * 1e3
+            add_result_range_overlay(
+                self.power_plot,
+                result_start_ms=start_ms,
+                result_stop_ms=stop_ms,
+                pattern_start_ms=pattern_start_ms,
+                pattern_stop_ms=pattern_stop_ms,
+            )
+            symbol_time_s = np.asarray(pattern.symbol_time_s, dtype=np.float64)
+            if result.packet.protocol_id == "bluetooth.le" and analysis is session:
+                symbol_time_s = symbol_time_s[
+                    : int(result.metadata.get("packet_symbol_count", symbol_time_s.size))
+                ]
+            if analysis is session and is_psk and not is_hdt:
+                devm_centers = np.asarray(
+                    result.metadata.get("edr_devm_symbol_center_samples", ()),
+                    dtype=np.float64,
+                )
+                if devm_centers.size and symbol_time_s.size:
+                    symbol_time_s = np.array(symbol_time_s, copy=True)
+                    coordinate_count = min(
+                        symbol_time_s.size, devm_centers.size
+                    )
+                    symbol_time_s[:coordinate_count] = (
+                        devm_centers[:coordinate_count] - offset
+                    ) / recording.sample_rate_hz
+                reference_center = result.metadata.get(
+                    "edr_reference_symbol_center_sample"
+                )
+                if reference_center is not None:
+                    symbol_time_s = np.concatenate(
+                        (
+                            np.asarray(
+                                [
+                                    (
+                                        float(reference_center) - offset
+                                    )
+                                    / recording.sample_rate_hz
+                                ]
+                            ),
+                            symbol_time_s,
+                        )
+                    )
+            if symbol_time_s.size:
+                power_symbol_times_ms.append(
+                    (symbol_time_s + offset / recording.sample_rate_hz) * 1e3
+                )
+        if not is_hdt:
+            packet_stop_value = result.metadata.get(
+                "physical_packet_stop_sample",
+                result.metadata.get("packet_stop_sample"),
+            )
+            if packet_stop_value is not None:
+                packet_stop_ms = (
+                    float(packet_stop_value) / recording.sample_rate_hz * 1e3
+                )
+                self.power_plot.addItem(
+                    pg.InfiniteLine(
+                        pos=packet_stop_ms,
+                        angle=90,
+                        movable=False,
+                        pen=pg.mkPen(95, 100, 108, 150, width=1),
+                        label="Packet End",
+                        labelOpts={
+                            "position": 0.92,
+                            "color": (115, 120, 128),
+                        },
+                    )
+                )
+                # Keep the physical packet boundary visible even when a
+                # conformance Result Range intentionally stops earlier.
+                selected_ranges.append((packet_stop_ms, packet_stop_ms))
+        if self._show_symbol_points and power_symbol_times_ms:
+            marker_time_ms = np.concatenate(power_symbol_times_ms)
+            power_time_ms = (power_time_s + power_time_offset_s) * 1e3
+            count = min(power_time_ms.size, power_dbm.size)
+            if count:
+                valid = (
+                    (marker_time_ms >= power_time_ms[0])
+                    & (marker_time_ms <= power_time_ms[count - 1])
+                )
+                marker_time_ms = marker_time_ms[valid]
+                plot_trace_symbol_points(
+                    self.power_plot,
+                    marker_time_ms,
+                    np.interp(
+                        marker_time_ms,
+                        power_time_ms[:count],
+                        power_dbm[:count],
+                    ),
+                )
+        if selected_ranges:
+            start_ms = min(value[0] for value in selected_ranges)
+            stop_ms = max(value[1] for value in selected_ranges)
+            margin = max((stop_ms - start_ms) * 0.10, 1e-6)
+            self.power_plot.setXRange(start_ms - margin, stop_ms + margin, padding=0.0)
+        self.spectrum_plot.clear()
+        br_vsa = None
+        if isinstance(br_session, VSASession):
+            br_vsa = br_session.carrier_corrected_pattern_range_result or br_session.pattern_range_result
+        apply_analysis_to_spectrum = (
+            self.channel_filter_check.isChecked()
+            and self.analysis_spectrum_display_check.isChecked()
+        )
+        spectrum_recording = display_recordings.spectrum(
+            apply_analysis_to_spectrum
+        )
+
+        def plot_spectrum_range(
+            start_sample: int,
+            stop_sample: int,
+            *,
+            sample_rate_hz: float,
+            pen: str,
+            name: str,
+        ) -> None:
+            frequency_hz, spectrum_dbm = recording_spectrum_trace(
+                spectrum_recording,
+                start_time_s=float(start_sample) / float(sample_rate_hz),
+                stop_time_s=float(stop_sample) / float(sample_rate_hz),
+            )
+            self.spectrum_plot.plot(
+                frequency_hz / 1e6,
+                spectrum_dbm,
+                pen=pen,
+                name=name,
+            )
+
+        if not self.channel_filter_check.isChecked():
+            if br_vsa is not None:
+                self.spectrum_plot.plot(
+                    (br_vsa.spectrum_frequency_hz + recording.center_frequency_hz)
+                    / 1e6,
+                    br_vsa.spectrum_dbm,
+                    pen=_TRACE,
+                    name="FSK",
+                )
+            if is_hdt:
+                header_frequency_hz = np.asarray(
+                    result.metadata.get("hdt_header_spectrum_frequency_hz", ()),
+                    dtype=np.float64,
+                )
+                header_spectrum_dbm = np.asarray(
+                    result.metadata.get("hdt_header_spectrum_dbm", ()),
+                    dtype=np.float64,
+                )
+                if header_frequency_hz.size and header_spectrum_dbm.size:
+                    self.spectrum_plot.plot(
+                        header_frequency_hz / 1e6,
+                        header_spectrum_dbm,
+                        pen=_TRACE,
+                        name="QPSK Header",
+                    )
+                payload_frequency_hz = np.asarray(
+                    result.metadata.get("hdt_payload_spectrum_frequency_hz", ()),
+                    dtype=np.float64,
+                )
+                payload_spectrum_dbm = np.asarray(
+                    result.metadata.get("hdt_payload_spectrum_dbm", ()),
+                    dtype=np.float64,
+                )
+                if payload_frequency_hz.size and payload_spectrum_dbm.size:
+                    self.spectrum_plot.plot(
+                        payload_frequency_hz / 1e6,
+                        payload_spectrum_dbm,
+                        pen="#00ffff",
+                        name=f"{payload_name} Payload",
+                    )
+            elif is_psk or br_vsa is None:
+                self.spectrum_plot.plot(
+                    (vsa.spectrum_frequency_hz + recording.center_frequency_hz)
+                    / 1e6,
+                    vsa.spectrum_dbm,
+                    pen="#00ffff" if is_psk else _TRACE,
+                    name="PSK" if is_psk else "FSK",
+                )
+        elif is_hdt:
+            header_range = result.metadata.get("hdt_header_spectrum_sample_range")
+            payload_range = result.metadata.get("hdt_payload_spectrum_sample_range")
+            if isinstance(header_range, (tuple, list)) and len(header_range) == 2:
+                plot_spectrum_range(
+                    int(header_range[0]), int(header_range[1]),
+                    sample_rate_hz=recording.sample_rate_hz,
+                    pen=_TRACE, name="QPSK Header",
+                )
+            if isinstance(payload_range, (tuple, list)) and len(payload_range) == 2:
+                plot_spectrum_range(
+                    int(payload_range[0]), int(payload_range[1]),
+                    sample_rate_hz=recording.sample_rate_hz,
+                    pen="#00ffff", name=f"{payload_name} Payload",
+                )
+        else:
+            if isinstance(br_session, VSASession) and br_session.pattern_result is not None:
+                br_pattern = br_session.pattern_result
+                plot_spectrum_range(
+                    recording_sample_offset + int(br_pattern.result_start_sample),
+                    recording_sample_offset + int(br_pattern.result_stop_sample),
+                    sample_rate_hz=recording.sample_rate_hz,
+                    pen=_TRACE, name="FSK",
+                )
+            if isinstance(session, VSASession) and session.pattern_result is not None and (
+                is_psk or br_session is None
+            ):
+                pattern = session.pattern_result
+                plot_spectrum_range(
+                    analysis_sample_offset + int(pattern.result_start_sample),
+                    analysis_sample_offset + int(pattern.result_stop_sample),
+                    sample_rate_hz=recording.sample_rate_hz,
+                    pen="#00ffff" if is_psk else _TRACE,
+                    name="PSK" if is_psk else "FSK",
+                )
+
+        self.fsk_modulation_plot.clear()
+        self.psk_modulation_plot.clear()
+        self.psk_phase_difference_plot.clear()
+        self.psk_devm_plot.clear()
+        self.fsk_symbol_plot.clear()
+        self.psk_symbol_plot.clear()
+        self._configure_fsk_modulation_plot(iq_plane=is_hdt)
+        fsk_session = br_session if is_psk else session
+        fsk_vsa = br_vsa if is_psk and br_vsa is not None else vsa
+        fsk_pattern = (
+            fsk_session.pattern_result
+            if isinstance(fsk_session, VSASession)
+            else None
+        )
+        fsk_display_result = (
+            fsk_session.result
+            if isinstance(fsk_session, VSASession)
+            else None
+        )
+        fsk_signal = (
+            fsk_session.signal
+            if isinstance(fsk_session, VSASession)
+            else None
+        )
+        fsk_display_data: FSKDisplayData | None = None
+        if fsk_display_result is not None and fsk_signal is not None:
+            fsk_analysis_rate_hz = float(
+                fsk_display_result.metadata.get(
+                    "analysis_sample_rate_hz",
+                    fsk_session.recording.sample_rate_hz,
+                )
+            )
+            display_start_time_s = (
+                fsk_pattern.result_start_time_s
+                if fsk_pattern is not None
+                else None
+            )
+            display_stop_time_s = (
+                fsk_pattern.result_stop_time_s
+                if fsk_pattern is not None
+                else None
+            )
+            if (
+                result.packet.protocol_id == "bluetooth.le"
+                and fsk_session is session
+            ):
+                display_start_time_s = (
+                    float(result.metadata["packet_start_sample"])
+                    - recording_sample_offset
+                ) / recording.sample_rate_hz
+                display_stop_time_s = (
+                    float(result.metadata["packet_stop_sample"])
+                    - recording_sample_offset
+                ) / recording.sample_rate_hz
+            measurement_trace = result.metadata.get("fsk_measurement_trace")
+            if isinstance(measurement_trace, BluetoothFMMeasurementTrace):
+                trace_time_s = measurement_trace.time_s
+                trace_frequency_hz = measurement_trace.frequency_hz
+                if display_start_time_s is not None and display_stop_time_s is not None:
+                    guard_s = 16.0 / float(fsk_signal.symbol_rate_hz)
+                    trace_mask = (
+                        (trace_time_s >= float(display_start_time_s) - guard_s)
+                        & (trace_time_s <= float(display_stop_time_s) + guard_s)
+                    )
+                    fsk_time_s = trace_time_s[trace_mask]
+                    fsk_frequency_hz = trace_frequency_hz[trace_mask]
+                else:
+                    fsk_time_s = trace_time_s
+                    fsk_frequency_hz = trace_frequency_hz
+            else:
+                # Compatibility fallback for results created before the RF
+                # measurement trace became part of the dedicated result model.
+                fsk_frequency_hz, fsk_time_s = prepare_fsk_display_frequency(
+                    fsk_display_result.iq,
+                    sample_rate_hz=fsk_analysis_rate_hz,
+                    symbol_rate_hz=fsk_signal.symbol_rate_hz,
+                    gaussian_bt=(
+                        fsk_signal.filter_parameter
+                        if fsk_session.demodulation.measurement_filter
+                        is MeasurementFilterMode.AUTO
+                        else None
+                    ),
+                    result_start_time_s=display_start_time_s,
+                    result_stop_time_s=display_stop_time_s,
+                )
+            symbol_time_s = np.asarray(
+                fsk_pattern.symbol_time_s if fsk_pattern is not None else (),
+                dtype=np.float64,
+            )
+            if (
+                isinstance(measurement_trace, BluetoothFMMeasurementTrace)
+                and symbol_time_s.size
+            ):
+                # RF.TS/RFPHY.TS p0 is the common timing anchor for the SIG
+                # measurement windows and dedicated FSK displays.  Decoder
+                # refinement remains internal and cannot move this grid.
+                symbol_time_s = (
+                    measurement_trace.p0_sample
+                    + (np.arange(symbol_time_s.size, dtype=np.float64) + 0.5)
+                    * measurement_trace.samples_per_symbol
+                ) / measurement_trace.sample_rate_hz
+            if (
+                result.packet.protocol_id == "bluetooth.le"
+                and fsk_session is session
+            ):
+                symbol_time_s = symbol_time_s[
+                    : int(result.metadata.get("packet_symbol_count", symbol_time_s.size))
+                ]
+            fsk_display_data = build_fsk_display_data(
+                fsk_frequency_hz,
+                fsk_time_s,
+                symbol_time_s,
+                frequency_offset_hz=(
+                    fsk_pattern.carrier_frequency_offset_hz
+                    if fsk_pattern is not None
+                    else 0.0
+                ),
+                frequency_drift_hz_per_s=(
+                    fsk_pattern.carrier_frequency_drift_hz_per_s
+                    if fsk_pattern is not None
+                    else 0.0
+                ),
+                reference_time_s=(
+                    fsk_pattern.carrier_reference_time_s
+                    if fsk_pattern is not None
+                    else 0.0
+                ),
+            )
+            self.fsk_modulation_plot.plot(
+                (
+                    fsk_display_data.time_s
+                    + recording_sample_offset / recording.sample_rate_hz
+                )
+                * 1e3,
+                fsk_display_data.corrected_frequency_hz / 1e3,
+                pen=_TRACE,
+            )
+            if self._show_symbol_points and fsk_pattern is not None:
+                symbol_count = min(
+                    fsk_display_data.symbol_time_s.size,
+                    fsk_display_data.symbol_frequency_hz.size,
+                )
+                plot_trace_symbol_points(
+                    self.fsk_modulation_plot,
+                    (
+                        fsk_display_data.symbol_time_s[:symbol_count]
+                        + recording_sample_offset / recording.sample_rate_hz
+                    )
+                    * 1e3,
+                    fsk_display_data.symbol_frequency_hz[:symbol_count] / 1e3,
+                )
+        else:
+            fsk_count = min(
+                fsk_vsa.time_s.size,
+                fsk_vsa.instantaneous_frequency_hz.size,
+            )
+            self.fsk_modulation_plot.plot(
+                (
+                    fsk_vsa.time_s[:fsk_count]
+                    + recording_sample_offset / recording.sample_rate_hz
+                )
+                * 1e3,
+                fsk_vsa.instantaneous_frequency_hz[:fsk_count] / 1e3,
+                pen=_TRACE,
+            )
+        if fsk_pattern is not None:
+            fsk_start_ms = (
+                recording_sample_offset + fsk_pattern.result_start_sample
+            ) / recording.sample_rate_hz * 1e3
+            fsk_stop_ms = (
+                recording_sample_offset + fsk_pattern.result_stop_sample
+            ) / recording.sample_rate_hz * 1e3
+            fsk_margin_ms = max((fsk_stop_ms - fsk_start_ms) * 0.10, 1e-6)
+            self.fsk_modulation_plot.setXRange(
+                fsk_start_ms - fsk_margin_ms,
+                fsk_stop_ms + fsk_margin_ms,
+                padding=0.0,
+            )
+        measured_frequency_hz = (
+            fsk_display_data.symbol_frequency_hz
+            if fsk_display_data is not None
+            else np.real(np.asarray(fsk_vsa.measured_symbols, dtype=np.complex128))
+        )
+        if is_hdt:
+            header_symbols = np.asarray(
+                hdt_evm.header_corrected_symbols if hdt_evm is not None else (),
+                dtype=np.complex128,
+            )
+            header_trajectory = np.asarray(
+                hdt_evm.header_corrected_waveform if hdt_evm is not None else (),
+                dtype=np.complex128,
+            )
+            self.fsk_modulation_plot.clear()
+            self.fsk_modulation_plot.plot(
+                header_trajectory.real, header_trajectory.imag, pen=_TRACE
+            )
+            if self._show_symbol_points and header_symbols.size:
+                plot_trace_symbol_points(
+                    self.fsk_modulation_plot,
+                    header_symbols.real,
+                    header_symbols.imag,
+                )
+            self.fsk_symbol_plot.setYLink(None)
+            self._set_frequency_constellation_x_lock(False)
+            self.fsk_symbol_plot.showAxis("bottom", True)
+            self.fsk_symbol_plot.setLabel("bottom", "I")
+            self.fsk_symbol_plot.setLabel("left", "Q")
+            self.fsk_symbol_plot.setAspectLocked(True, 1.0)
+            self._plot_symbol_vectors(
+                self.fsk_symbol_plot,
+                _hdt_pi4_qpsk_display_symbols(header_symbols),
+            )
+            self._plot_unit_circle(self.fsk_symbol_plot)
+            self._set_iq_plane_range(self.fsk_symbol_plot)
+            self._set_iq_plane_range(self.fsk_modulation_plot)
+        elif self._fsk_symbol_plot_mode == "Constellation Frequency":
+            self.fsk_symbol_plot.setAspectLocked(False)
+            self.fsk_symbol_plot.setYLink(self.fsk_modulation_plot)
+            self._set_frequency_constellation_x_lock(True)
+            self.fsk_symbol_plot.showAxis("bottom", False)
+            self.fsk_symbol_plot.setLabel("bottom", "")
+            self.fsk_symbol_plot.setLabel("left", "Frequency (kHz)")
+            limit_khz = max(
+                1.0,
+                1.5 * float(fsk_signal.frequency_deviation_hz or 0.0) / 1e3,
+            )
+            plot_frequency_symbol_distribution(
+                self.fsk_symbol_plot,
+                measured_frequency_hz / 1e3,
+                y_limit_khz=limit_khz,
+                density=self._symbol_density,
+                density_spread=self._symbol_density_spread,
+            )
+            self.fsk_symbol_plot.setXRange(
+                -_FREQUENCY_CONSTELLATION_X_LIMIT,
+                _FREQUENCY_CONSTELLATION_X_LIMIT,
+                padding=0.0,
+            )
+            self.fsk_symbol_plot.setYRange(-limit_khz, limit_khz, padding=0.0)
+        else:
+            self.fsk_symbol_plot.setYLink(None)
+            self._set_frequency_constellation_x_lock(False)
+            self.fsk_symbol_plot.showAxis("bottom", True)
+            self.fsk_symbol_plot.setLabel("bottom", "I")
+            self.fsk_symbol_plot.setLabel("left", "Q")
+            self.fsk_symbol_plot.setAspectLocked(True, 1.0)
+            symbol_rate_hz = (
+                float(br_session.signal.symbol_rate_hz)
+                if isinstance(br_session, VSASession) and br_session.signal is not None
+                else 1_000_000.0
+            )
+            phase_symbols = np.exp(
+                2j * np.pi * measured_frequency_hz / max(symbol_rate_hz, 1.0)
+            )
+            self._plot_symbol_vectors(self.fsk_symbol_plot, phase_symbols)
+            self._plot_unit_circle(self.fsk_symbol_plot)
+            self._set_iq_plane_range(self.fsk_symbol_plot)
+
+        if not is_hdt and fsk_signal is not None:
+            # The display FM demodulator deliberately includes guard samples
+            # around the result range.  Phase differences in a low-power guard
+            # can be arbitrarily large and must not control the normal Y scale.
+            # Match Generic VSA's nominal-deviation scale; View All remains
+            # available when inspection of the complete trace is wanted.
+            deviation_hz = abs(float(fsk_signal.frequency_deviation_hz or 0.0))
+            if deviation_hz > 0.0:
+                limit_khz = 1.5 * deviation_hz / 1e3
+                self.fsk_modulation_plot.setYRange(
+                    -limit_khz,
+                    limit_khz,
+                    padding=0.0,
+                )
+
+        if is_psk and is_hdt and hdt_evm is not None:
+            trajectory = np.asarray(
+                hdt_evm.payload_corrected_waveform, dtype=np.complex128
+            )
+            symbols = np.asarray(
+                hdt_evm.payload_corrected_symbols, dtype=np.complex128
+            )
+            self.psk_modulation_plot.setAspectLocked(True, 1.0)
+            self.psk_modulation_plot.setDownsampling(auto=False)
+            self.psk_modulation_plot.setClipToView(False)
+            self.psk_modulation_plot.plot(
+                trajectory.real, trajectory.imag, pen=_TRACE
+            )
+            if self._show_symbol_points and symbols.size:
+                plot_trace_symbol_points(
+                    self.psk_modulation_plot, symbols.real, symbols.imag
+                )
+            self.psk_symbol_plot.setAspectLocked(True, 1.0)
+            self._plot_symbol_vectors(
+                self.psk_symbol_plot,
+                (
+                    _hdt_pi4_qpsk_display_symbols(symbols)
+                    if payload_is_qpsk
+                    else symbols
+                ),
+            )
+            self._plot_unit_circle(self.psk_symbol_plot)
+            self._set_iq_plane_range(self.psk_symbol_plot)
+        elif is_psk:
+            psk_pattern = session.pattern_result
+            display_result = session.carrier_corrected_result or session.result
+            if display_result is None or psk_pattern is None or session.signal is None:
+                return
+            analysis_sample_rate_hz = float(
+                display_result.metadata.get(
+                    "analysis_sample_rate_hz", session.recording.sample_rate_hz
+                )
+            )
+            processed_iq, processed_time_s = prepare_psk_display_waveform(
+                display_result.iq,
+                sample_rate_hz=analysis_sample_rate_hz,
+                symbol_rate_hz=session.signal.symbol_rate_hz,
+                tx_filter=session.signal.tx_filter,
+                filter_parameter=session.signal.filter_parameter,
+                apply_measurement_filter=(
+                    session.demodulation.measurement_filter
+                    is MeasurementFilterMode.AUTO
+                ),
+                result_start_time_s=psk_pattern.result_start_time_s,
+                result_stop_time_s=psk_pattern.result_stop_time_s,
+            )
+            psk_symbol_time_s = np.asarray(
+                psk_pattern.symbol_time_s, dtype=np.float64
+            )
+            devm_centers = np.asarray(
+                result.metadata.get("edr_devm_symbol_center_samples", ()),
+                dtype=np.float64,
+            )
+            if devm_centers.size and psk_symbol_time_s.size:
+                psk_symbol_time_s = np.array(psk_symbol_time_s, copy=True)
+                coordinate_count = min(
+                    psk_symbol_time_s.size, devm_centers.size
+                )
+                psk_symbol_time_s[:coordinate_count] = (
+                    devm_centers[:coordinate_count] - analysis_sample_offset
+                ) / recording.sample_rate_hz
+            trajectory, physical_symbol_iq, symbols = normalized_psk_display(
+                processed_iq,
+                processed_time_s,
+                psk_symbol_time_s,
+                modulation=session.signal.modulation,
+                differential_symbols=psk_pattern.measured_symbols,
+                physical=self._psk_symbol_plot_mode == "Physical IQ",
+            )
+            in_result_range = (
+                (processed_time_s >= psk_pattern.result_start_time_s)
+                & (processed_time_s < psk_pattern.result_stop_time_s)
+            )
+            trajectory = trajectory[in_result_range]
+            self.psk_modulation_plot.setAspectLocked(True, 1.0)
+            # A dedicated packet result is bounded to one decoded packet and
+            # is small enough to draw sample-for-sample.  pyqtgraph's generic
+            # auto-downsampling can skip the RRC transition samples and turn
+            # the vector trajectory into misleading straight chords.
+            self.psk_modulation_plot.setDownsampling(auto=False)
+            self.psk_modulation_plot.setClipToView(False)
+            self.psk_modulation_plot.plot(np.real(trajectory), np.imag(trajectory), pen=_TRACE)
+            if self._show_symbol_points and physical_symbol_iq.size:
+                plot_trace_symbol_points(
+                    self.psk_modulation_plot,
+                    physical_symbol_iq.real,
+                    physical_symbol_iq.imag,
+                )
+            self.psk_symbol_plot.setAspectLocked(True, 1.0)
+            self._plot_symbol_vectors(self.psk_symbol_plot, symbols)
+            self._plot_unit_circle(self.psk_symbol_plot)
+            self._set_iq_plane_range(self.psk_symbol_plot)
+            diagnostic = _edr_diagnostic_plot_data(
+                result, sample_rate_hz=recording.sample_rate_hz
+            )
+            if diagnostic is not None:
+                self.psk_phase_difference_plot.plot(
+                    diagnostic.time_ms,
+                    diagnostic.measured_phase_pi,
+                    pen=_TRACE,
+                    name="Measured",
+                )
+                self.psk_phase_difference_plot.plot(
+                    diagnostic.time_ms,
+                    diagnostic.reference_phase_pi,
+                    pen=pg.mkPen(0, 220, 220, 190, width=1),
+                    name="Reference",
+                )
+                self.psk_phase_difference_plot.plot(
+                    diagnostic.time_ms,
+                    diagnostic.phase_error_pi,
+                    pen=pg.mkPen(255, 96, 192, 210, width=1),
+                    name="Phase Error",
+                )
+                if self._show_symbol_points:
+                    finite_phase = np.isfinite(diagnostic.time_ms)
+                    plot_trace_symbol_points(
+                        self.psk_phase_difference_plot,
+                        diagnostic.time_ms[finite_phase],
+                        diagnostic.measured_phase_pi[finite_phase],
+                    )
+                self.psk_phase_difference_plot.setYRange(
+                    -1.05, 1.05, padding=0.0
+                )
+                self.psk_devm_plot.plot(
+                    diagnostic.time_ms,
+                    diagnostic.devm_percent,
+                    pen=_TRACE,
+                )
+                if self._show_symbol_points:
+                    finite_devm = np.isfinite(diagnostic.time_ms)
+                    plot_trace_symbol_points(
+                        self.psk_devm_plot,
+                        diagnostic.time_ms[finite_devm],
+                        diagnostic.devm_percent[finite_devm],
+                    )
+                finite_devm_values = diagnostic.devm_percent[
+                    np.isfinite(diagnostic.devm_percent)
+                ]
+                devm_upper = (
+                    max(5.0, 1.10 * float(np.max(finite_devm_values)))
+                    if finite_devm_values.size
+                    else 5.0
+                )
+                self.psk_devm_plot.setYRange(0.0, devm_upper, padding=0.0)
+        is_edr = is_psk and not is_hdt
+        self.modulation_tabs.setTabVisible(1, is_psk)
+        self.modulation_tabs.setTabVisible(2, is_edr)
+        self.modulation_tabs.setTabVisible(3, is_edr)
+        self.symbol_tabs.setTabVisible(1, is_psk)
+        visible_modulation_tabs = {0}
+        if is_psk:
+            visible_modulation_tabs.add(1)
+        if is_edr:
+            visible_modulation_tabs.update((2, 3))
+        self.modulation_tabs.setCurrentIndex(
+            modulation_tab_index
+            if modulation_tab_index in visible_modulation_tabs
+            else 0
+        )
+        self.symbol_tabs.setCurrentIndex(
+            symbol_tab_index if is_psk and symbol_tab_index == 1 else 0
+        )
+        self._render_summary(result)
+        self._render_packet(result)
+        packet_start_sample = float(result.metadata.get("packet_start_sample", 0.0))
+        power_origin_sample = packet_start_sample - recording_sample_offset
+        if is_hdt and hdt_plot_data is not None:
+            power_origin_sample = float(hdt_plot_data.packet_sample_range[0])
+            packet_start_sample = power_origin_sample
+        relative_origins = {
+            "iq_power": power_origin_sample / recording.sample_rate_hz * 1e3,
+        }
+        if not is_hdt:
+            fsk_origin_ms = packet_start_sample / recording.sample_rate_hz * 1e3
+            relative_origins.update(
+                {
+                    "fsk_modulation": fsk_origin_ms,
+                    "psk_phase_difference": fsk_origin_ms,
+                    "psk_devm": fsk_origin_ms,
+                }
+            )
+        self._persistent_plot_ranges.finish_update(
+            contexts={
+                "fsk_modulation": "hdt_iq" if is_hdt else "fsk_time",
+                "fsk_symbol": self._fsk_symbol_plot_mode,
+                "psk_symbol": self._psk_symbol_plot_mode,
+            },
+            relative_x_origins=relative_origins,
+        )
+        self._analysis_plot_ranges = (
+            self._persistent_plot_ranges.current_defaults()
+        )
+
+    def _configure_fsk_modulation_plot(self, *, iq_plane: bool) -> None:
+        """Restore the axis contract when the first tab changes PHY role."""
+
+        if iq_plane:
+            self.fsk_modulation_plot.setLabel("bottom", "I")
+            self.fsk_modulation_plot.setLabel("left", "Q")
+            self.fsk_modulation_plot.setAspectLocked(True, 1.0)
+            self.fsk_modulation_plot.setDownsampling(auto=False)
+            self.fsk_modulation_plot.setClipToView(False)
+            return
+        self.fsk_modulation_plot.setAspectLocked(False)
+        self.fsk_modulation_plot.setLabel("bottom", "Time (ms)")
+        self.fsk_modulation_plot.setLabel("left", "Frequency (kHz)")
+        self.fsk_modulation_plot.setDownsampling(auto=True, mode="peak")
+        self.fsk_modulation_plot.setClipToView(True)
+
+    @staticmethod
+    def _set_iq_plane_range(plot: pg.PlotWidget) -> None:
+        set_iq_plane_range(plot)
+
+    @staticmethod
+    def _plot_unit_circle(plot: pg.PlotWidget) -> None:
+        plot_unit_circle(plot)
+
+    def _plot_frequency_symbols(
+        self, plot: pg.PlotWidget, frequency_khz: np.ndarray
+    ) -> None:
+        values = np.asarray(frequency_khz, dtype=np.float64)
+        finite = values[np.isfinite(values)]
+        y_limit_khz = max(
+            1.0,
+            1.2 * float(np.max(np.abs(finite))) if finite.size else 1.0,
+        )
+        plot_frequency_symbol_distribution(
+            plot,
+            values,
+            y_limit_khz=y_limit_khz,
+            density=self._symbol_density,
+            density_spread=self._symbol_density_spread,
+        )
+
+    def _plot_symbol_vectors(
+        self, plot: pg.PlotWidget, symbols: np.ndarray
+    ) -> None:
+        plot_complex_symbol_distribution(
+            plot,
+            symbols,
+            density=self._symbol_density,
+            density_spread=self._symbol_density_spread,
+        )
+
+    def _render_summary(self, result: BluetoothDedicatedResult) -> None:
+        rows: list[tuple[str | None, object | None]] = []
+        previous_group: str | None = None
+        for summary_row in result.summary_rows:
+            if summary_row.section != previous_group:
+                rows.append((summary_row.section, None))
+                previous_group = summary_row.section
+            rows.append((None, summary_row))
+        self.summary_table.clearSpans()
+        self.summary_table.setRowCount(len(rows))
+        for row, (group, metric) in enumerate(rows):
+            if group is not None:
+                item = QtWidgets.QTableWidgetItem(group)
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setBackground(QtGui.QColor("#353535"))
+                self.summary_table.setItem(row, 0, item)
+                self.summary_table.setSpan(row, 0, 1, 4)
+                continue
+            if metric is None:
+                continue
+            values = (metric.test_item, metric.value, metric.limit, metric.result)
+            for column, value in enumerate(values):
+                self.summary_table.setItem(
+                    row, column, QtWidgets.QTableWidgetItem(str(value))
+                )
+            result_color = dedicated_status_color(metric.result)
+            if result_color is not None:
+                self.summary_table.item(row, 3).setForeground(
+                    QtGui.QBrush(result_color)
+                )
+        self.summary_table.resizeRowsToContents()
+
+    def _reset_measurement_statistics(self) -> None:
+        """Discard capture-wide SIG aggregates but retain the visible packet."""
+
+        reset_results: list[BluetoothDedicatedResult] = []
+        aggregate_keys = {
+            "rf_capture_aggregate",
+            "hdt_rms_evm_packets_evaluated",
+            "hdt_rms_evm_packets_required",
+            "hdt_rms_evm_aggregate_status",
+        }
+        for result in self._results:
+            hdt_required = int(
+                result.metadata.get("hdt_rms_evm_packets_required", 1500)
+            )
+            metadata = {
+                key: value
+                for key, value in result.metadata.items()
+                if key not in aggregate_keys
+            }
+            metrics = tuple(
+                replace(metric, display=f"1 / {hdt_required}")
+                if metric.metric_id == "sig_hdt_evm_packets_evaluated"
+                else metric
+                for metric in result.metrics
+                if metric.metric_id != "sig_capture_aggregate"
+            )
+            reset_results.append(
+                replace(result, metadata=metadata, metrics=metrics)
+            )
+        self._results = tuple(reset_results)
+        if self._results:
+            index = min(self._selected_result_index, len(self._results) - 1)
+            self._selected_result_index = index
+            self._result = self._results[index]
+            self._render_summary(self._result)
+        self.statusBar().showMessage(
+            "Bluetooth measurement history cleared; current packet retained"
+        )
+
+    _field_bit_range = staticmethod(field_bit_range)
+
+    def _tree_item(self, field, *, stream, bit_offset):
+        return bluetooth_tree_item(field, stream=stream, bit_offset=bit_offset)
+
+    def _render_packet(self, result: BluetoothDedicatedResult) -> None:
+        update_export_action(self.export_vsg_action, result.packet)
+        packet = result.packet
+        self.packet_tabs.render_packet(packet)
+        listed = self._results or (result,)
+        self.packet_table.setRowCount(len(listed))
+        for row, listed_result in enumerate(listed):
+            listed_packet = listed_result.packet
+            integrity = listed_packet.integrity
+            checks = [name for name, value in (("HEC OK", integrity.hec_valid), ("CRC OK", integrity.crc_valid)) if value]
+            status = "/".join(checks) or ("Incomplete" if not integrity.complete else "Not evaluated")
+            for column, value in enumerate((row + 1, listed_packet.phy_name or "--", listed_packet.packet_type or "--", status, listed_packet.raw_bits.size)):
+                self.packet_table.setItem(row, column, QtWidgets.QTableWidgetItem(str(value)))
+        if listed:
+            self.packet_table.selectRow(self._selected_result_index)
+
+        self.air_bits_text.setPlainText(format_air_bits(packet.raw_bits))
+
+    @QtCore.Slot(int, int)
+    def _packet_row_clicked(self, row: int, _column: int) -> None:
+        if not 0 <= int(row) < len(self._results):
+            return
+        self._select_result(int(row) - self._selected_result_index)

@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from pluto_protocol.model import GeneratedPacketBits
-from pluto_sa.vsa.demod.fsk_reference import fsk_reference_frequency_levels
-from pluto_sa.vsa.profiles.bluetooth_br import (
+from pluto_vsa.demod.fsk_reference import fsk_reference_frequency_levels
+from pluto_vsa.profiles.bluetooth_br import (
     access_code_bits,
     fec13_encode,
     header_error_check,
@@ -14,7 +14,7 @@ from pluto_sa.vsa.profiles.bluetooth_br import (
     prbs9_period,
     whitening_sequence,
 )
-from pluto_sa.vsa.profiles.bluetooth_edr import (
+from pluto_vsa.profiles.bluetooth_edr import (
     EDR_SYNC_BITS_2MBPS,
     EDR_SYNC_BITS_3MBPS,
 )

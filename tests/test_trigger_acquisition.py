@@ -3,15 +3,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pluto_sa.sdr.iq_stream import IQStreamBuffer
-from pluto_sa.sdr.trigger import (
+from pluto_common.sdr.iq_stream import IQStreamBuffer
+from pluto_common.sdr.trigger import (
     AcquisitionMetadata,
     TriggerConfig,
     TriggerKind,
     TriggerRunMode,
     TriggerSlope,
 )
-from pluto_sa.sdr.trigger_acquisition import TriggerAcquisitionController
+from pluto_common.sdr.trigger_acquisition import TriggerAcquisitionController
 
 
 def metadata() -> AcquisitionMetadata:

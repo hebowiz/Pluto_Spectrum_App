@@ -6,9 +6,9 @@ import pytest
 from pluto_protocol import PacketDecodeInput, analyze_packet
 from pluto_protocol.model import BitRepresentation
 from pluto_protocol.bluetooth.hdt import HDTRate, map_hdt_symbols
-from pluto_sa.vsa.protocol import analyze_demodulated_packet_bits
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.protocol_modes.bluetooth.model import (
+from pluto_vsa.protocol import analyze_demodulated_packet_bits
+from pluto_vsa.model import IQRecording
+from pluto_vsa.protocol_modes.bluetooth.model import (
     BluetoothAnalysisProfile, analyze_bluetooth_hdt_recording,
 )
 from pluto_vsg.engine.bluetooth_hdt import BluetoothHDTWaveformEngine

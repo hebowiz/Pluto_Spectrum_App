@@ -3,11 +3,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pluto_sa.sdr.continuous_acquisition import (
+from pluto_common.sdr.continuous_acquisition import (
     ContinuousIQAcquisition,
     resolve_record_stream_block_samples,
 )
-from pluto_sa.sdr.iq_stream import IQStreamBuffer
+from pluto_common.sdr.iq_stream import IQStreamBuffer
 
 
 class _Receiver:

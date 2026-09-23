@@ -1,6 +1,6 @@
 import numpy as np
 
-from pluto_sa.vsa.ui.display_processing import (
+from pluto_vsa.ui.display_processing import (
     build_fsk_display_data,
     fit_binary_fsk_display_drift,
     sample_fsk_display_trace,

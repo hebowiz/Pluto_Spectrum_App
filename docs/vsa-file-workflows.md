@@ -122,7 +122,7 @@ against the currently loaded IQ capture. Display-only window layout is not
 measurement configuration; display trace selections are persisted separately
 inside the configuration's `display_config` section.
 
-Serialization and schema validation live in `pluto_sa/vsa/persistence.py`.
+Serialization and schema validation live in `pluto_rtsa/vsa/persistence.py`.
 
 Existing version-1 configuration files that predate multiple-match selection
 remain valid. Missing fields load as `First`, match index `1`, and
@@ -445,7 +445,7 @@ legacy values map to Measured.
 ## Result Summary item selection
 
 The Result Summary context menu and `Meas Config > Result Summary` use the same
-canonical item registry in `pluto_sa/vsa/result_summary.py`. The context menu is
+canonical item registry in `pluto_rtsa/vsa/result_summary.py`. The context menu is
 grouped into Common, PSK, FSK, and Synchronization Diagnostics submenus. The
 Config page exposes the same entries as a persistent checklist. `Show All`,
 `Measurement Results Only`, `Diagnostics Only`, and `Restore Defaults` presets

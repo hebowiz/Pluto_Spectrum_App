@@ -3,9 +3,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.analysis import VSAAnalyzer
-from pluto_sa.vsa.dc import apply_robust_dc_removal, estimate_robust_dc_offset
-from pluto_sa.vsa.model import (
+from pluto_vsa.analysis import VSAAnalyzer
+from pluto_vsa.dc import apply_robust_dc_removal, estimate_robust_dc_offset
+from pluto_vsa.model import (
     CompositeSignalDescription,
     IQRecording,
     ModulationKind,
@@ -13,8 +13,8 @@ from pluto_sa.vsa.model import (
     SignalDescription,
     VSASettings,
 )
-from pluto_sa.vsa.session import VSASession
-from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
+from pluto_vsa.session import VSASession
+from pluto_vsa.sources import FileIQSource, GeneratedIQSource
 
 
 def test_recording_owns_read_only_iq() -> None:

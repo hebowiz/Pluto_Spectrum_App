@@ -3,10 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pluto_sa.vsa.mapping import BLUETOOTH_EDR_MAPPING, psk_constellation
-from pluto_sa.vsa.model import ModulationKind
-from pluto_sa.vsa.pattern import _root_raised_cosine_taps
-from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
+from pluto_vsa.mapping import BLUETOOTH_EDR_MAPPING, psk_constellation
+from pluto_vsa.model import ModulationKind
+from pluto_vsa.pattern import _root_raised_cosine_taps
+from pluto_vsa.protocol_modes.bluetooth.rf_measurement import (
     BluetoothFMMeasurementTrace,
     BluetoothRFMeasurementFilterProfile,
     BluetoothRFMeasurementResult,
@@ -19,11 +19,11 @@ from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement import (
     measure_edr_devm,
     measure_edr_initial_carrier_frequency,
 )
-from pluto_sa.vsa.protocol_modes.bluetooth.rf_measurement.edr import (
+from pluto_vsa.protocol_modes.bluetooth.rf_measurement.edr import (
     _interpolate_complex,
 )
-from pluto_sa.vsa.profiles.bluetooth_edr import generate_edr_dh1
-from pluto_sa.vsa.protocol_modes.bluetooth.model import (
+from pluto_vsa.profiles.bluetooth_edr import generate_edr_dh1
+from pluto_vsa.protocol_modes.bluetooth.model import (
     BluetoothAnalysisProfile,
     analyze_bluetooth_classic_recording,
 )

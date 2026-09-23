@@ -8,7 +8,7 @@ from pluto_vsg.engine import BluetoothHDTWaveformEngine
 from pluto_vsg.model import ModulationKind, validate_project
 from pluto_vsg.persistence import project_from_dict, project_to_dict
 from pluto_vsg.profiles import bluetooth_hdt_fields, bluetooth_hdt_project
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.sources import FileIQSource
 
 
 def _project(rate: HDTRate, *, payload_length: int = 16):

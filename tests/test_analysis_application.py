@@ -5,7 +5,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
-from pluto_sa.vsa.ui.application_window import PlutoAnalysisWindow
+from pluto_vsa.ui.application_window import PlutoAnalysisWindow
 
 
 class _SharedPlutoSource:

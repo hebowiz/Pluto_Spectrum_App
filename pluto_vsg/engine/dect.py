@@ -15,7 +15,7 @@ from pluto_protocol.dect.rf_modulation import (
     scrambling_sequence,
 )
 from pluto_protocol.model import GeneratedPacketBits
-from pluto_sa.vsa.profiles.bluetooth_br import prbs9_period
+from pluto_vsa.profiles.bluetooth_br import prbs9_period
 from pluto_vsg.engine.base import FieldBoundary, GenerationResult
 from pluto_vsg.engine.bluetooth_br import (
     _append_field_boundaries,

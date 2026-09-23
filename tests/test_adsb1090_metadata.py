@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pluto_sa.standards.adsb1090.metadata import AircraftMetadataDatabase
+from pluto_vsa.standards.adsb1090.metadata import AircraftMetadataDatabase
 
 
 def test_opensky_csv_import_builds_persistent_icao_lookup(tmp_path: Path) -> None:

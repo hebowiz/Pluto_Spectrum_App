@@ -1,6 +1,6 @@
 import pytest
 
-from pluto_sa.config.spectrum_config import SpectrumConfig
+from pluto_common.config.spectrum_config import SpectrumConfig
 
 
 def test_time_analyzer_defaults_to_ten_milliseconds() -> None:

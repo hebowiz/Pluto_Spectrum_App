@@ -218,7 +218,7 @@ pluto_protocol/
 pluto_protocol
      ↑      ↑
      │      │
-pluto_vsg  pluto_sa.vsa
+pluto_vsg  pluto_vsa
 ```
 
 `pluto_protocol` から VSG / VSA / Qt へ依存してはいけません。
@@ -234,7 +234,7 @@ pluto_vsg  pluto_sa.vsa
 ```text
 pluto_vsg.engine.bluetooth_br
         ↓ imports
-pluto_sa.vsa.profiles.bluetooth_br
+pluto_vsa.profiles.bluetooth_br
 ```
 
 共有 Analyzer 導入時には、この依存を解消します。
@@ -1280,7 +1280,7 @@ selectionとの接続、実packet向けpayload hex表示は次の実装段階で
 ## 27. VSA Bluetooth UI integration（2026-08-30）
 
 `pluto_protocol`の最初の実利用先としてBluetooth専用VSAワークスペースを追加した。
-VSAの復調結果は`pluto_sa.vsa.protocol.analyze_demodulated_packet_bits()`を経由して
+VSAの復調結果は`pluto_vsa.protocol.analyze_demodulated_packet_bits()`を経由して
 共通`PacketAnalysisResult`へ変換される。専用UIはfield tree、summary、payload hex、
 issues、air bitsをこの共通結果だけから描画し、VSA固有のdecoderを持たない。
 

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pluto_sa.signal.measurement_filter import (
+from pluto_rtsa.signal.measurement_filter import (
     StatefulIQMeasurementFilter,
     design_iq_rbw_filter,
     reduce_filtered_iq_power,

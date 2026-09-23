@@ -1,0 +1,178 @@
+"""Shared hierarchical measurement-configuration dialog chrome."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from pyqtgraph.Qt import QtCore, QtWidgets
+from pluto_vsa.ui.setup_controls import configure_form
+
+from pluto_common.numeric_input import (
+    ensure_valid_numeric_inputs,
+    revert_invalid_numeric_inputs,
+)
+
+
+class HierarchicalMeasConfigDialog(QtWidgets.QDialog):
+    """Generic VSA-style Config Top menu shared by analysis workspaces."""
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget,
+        pages: Sequence[tuple[str, QtWidgets.QWidget]],
+        *,
+        window_title: str = "Meas Config",
+        size: tuple[int, int] = (620, 520),
+        standard_buttons: QtWidgets.QDialogButtonBox.StandardButton = (
+            QtWidgets.QDialogButtonBox.StandardButton.Close
+        ),
+    ) -> None:
+        super().__init__(parent)
+        self._is_draft = False
+        self._editor_dialog = None
+        self._transaction_owner = parent if (
+            hasattr(parent, "_meas_config_values") or hasattr(parent, "_config_values")
+        ) else None
+        self.settings_validator = None
+        self.setWindowTitle(window_title)
+        self.setModal(True)
+        self.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        self.resize(*size)
+        dialog_layout = QtWidgets.QVBoxLayout(self)
+
+        navigation_layout = QtWidgets.QHBoxLayout()
+        self.back_button = QtWidgets.QPushButton("< Config Top")
+        self.back_button.clicked.connect(lambda: self.show_page(0))
+        self.page_title = QtWidgets.QLabel()
+        title_font = self.page_title.font()
+        title_font.setBold(True)
+        title_font.setPointSize(title_font.pointSize() + 2)
+        self.page_title.setFont(title_font)
+        navigation_layout.addWidget(self.back_button)
+        navigation_layout.addWidget(self.page_title)
+        navigation_layout.addStretch(1)
+        dialog_layout.addLayout(navigation_layout)
+
+        self.stack = QtWidgets.QStackedWidget()
+        config_top = QtWidgets.QWidget()
+        config_top_layout = QtWidgets.QVBoxLayout(config_top)
+        self.top_title = QtWidgets.QLabel("Config Top Menu")
+        top_title_font = self.top_title.font()
+        top_title_font.setBold(True)
+        top_title_font.setPointSizeF(max(16.0, top_title_font.pointSizeF() + 6.0))
+        self.top_title.setFont(top_title_font)
+        config_top_layout.addWidget(self.top_title)
+        button_grid = QtWidgets.QGridLayout()
+        button_grid.setHorizontalSpacing(14)
+        button_grid.setVerticalSpacing(14)
+        self.top_buttons: dict[str, QtWidgets.QPushButton] = {}
+        self.page_names = ("Config Top Menu",) + tuple(name for name, _page in pages)
+        def scroll_page(page):
+            scroll = QtWidgets.QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            scroll.setWidget(page)
+            return scroll
+
+        self.stack.addWidget(scroll_page(config_top))
+        for index, (name, page) in enumerate(pages, start=1):
+            for form in page.findChildren(QtWidgets.QFormLayout):
+                configure_form(form)
+            self.stack.addWidget(scroll_page(page))
+            button = QtWidgets.QPushButton(name)
+            button_font = button.font()
+            button_font.setPointSizeF(max(18.0, button_font.pointSizeF() * 2.0))
+            button_font.setBold(True)
+            button.setFont(button_font)
+            button.setMinimumHeight(84)
+            button.setProperty("configPageIndex", index)
+            button.clicked.connect(
+                lambda _checked=False, value=index: self.show_page(value)
+            )
+            button_grid.addWidget(button, (index - 1) // 2, (index - 1) % 2)
+            self.top_buttons[name] = button
+        config_top_layout.addLayout(button_grid)
+        config_top_layout.addStretch(1)
+        dialog_layout.addWidget(self.stack, 1)
+
+        self.button_box = QtWidgets.QDialogButtonBox(standard_buttons)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        dialog_layout.addWidget(self.button_box)
+        self.show_page(0)
+
+    def show_page(self, index: int) -> None:
+        self.stack.setCurrentIndex(int(index))
+        is_top = int(index) == 0
+        self.back_button.setVisible(not is_top)
+        self.page_title.setText("" if is_top else self.page_names[int(index)])
+
+    def accept(self) -> None:
+        if self._editor_dialog is not None:
+            self._editor_dialog.accept()
+            return
+        for check in self.findChildren(QtWidgets.QCheckBox):
+            setup = getattr(check, "receiver_setup", None)
+            if setup is not None and check.isChecked() and not setup.bandwidth.minimum() <= setup.rate() / 1e6 <= setup.bandwidth.maximum():
+                QtWidgets.QMessageBox.warning(self, "Invalid RF Bandwidth", "Sample Rate is outside the receiver RF Bandwidth range. Disable Match Sample Rate or change Sample Rate.")
+                return
+        if not ensure_valid_numeric_inputs(self, title="Invalid Measurement Setting"):
+            return
+        if self.settings_validator is not None:
+            try:
+                self.settings_validator()
+            except (ValueError, TypeError, KeyError) as error:
+                QtWidgets.QMessageBox.warning(self, "Invalid Measurement Setting", str(error))
+                return
+        super().accept()
+
+    def reject(self) -> None:
+        if self._editor_dialog is not None:
+            self._editor_dialog.reject()
+            return
+        revert_invalid_numeric_inputs(self)
+        super().reject()
+
+    def exec(self) -> int:
+        if self._is_draft or self._transaction_owner is None:
+            return super().exec()
+        from pluto_vsa.ui.config_transaction import (
+            apply_settings, collect_settings, create_draft_editor,
+        )
+        draft, editor = create_draft_editor(self._transaction_owner)
+        self._editor_dialog = editor
+        editor.resize(self.size())
+        editor.show_page(self.stack.currentIndex())
+        editor.back_button.setVisible(not self.back_button.isHidden())
+        editor.top_title.setVisible(not self.top_title.isHidden())
+        try:
+            result = editor.exec()
+            if result == QtWidgets.QDialog.DialogCode.Accepted:
+                apply_settings(self._transaction_owner, collect_settings(draft))
+            # Emit the normal accepted/rejected/finished signals only after
+            # commit, so workspace persistence observes committed values.
+            QtWidgets.QDialog.done(self, result)
+            return result
+        finally:
+            self._editor_dialog = None
+            editor.deleteLater()
+            draft.deleteLater()
+
+    def open_top(self) -> int:
+        self.top_title.show()
+        self.show_page(0)
+        return self.exec()
+
+    def open_page(self, name: str) -> int:
+        """Open one settings page directly, without exposing Config Top chrome."""
+
+        try:
+            index = self.page_names.index(str(name))
+        except ValueError as error:
+            raise KeyError(f"unknown measurement configuration page: {name}") from error
+        if index == 0:
+            raise ValueError("Config Top is not a settings page")
+        self.show_page(index)
+        self.back_button.hide()
+        self.top_title.hide()
+        return self.exec()

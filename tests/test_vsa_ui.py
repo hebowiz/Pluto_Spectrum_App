@@ -12,7 +12,7 @@ import pyqtgraph as pg
 import pytest
 from pyqtgraph.Qt import QtCore, QtWidgets
 
-from pluto_sa.vsa.ui.main_window import (
+from pluto_vsa.ui.main_window import (
     VSAWindow,
     _FixedInteractionViewBox,
     _constellation_density,
@@ -30,15 +30,15 @@ from pluto_sa.vsa.ui.main_window import (
     _prepare_fsk_display_frequency,
     _prepare_psk_display_waveform,
 )
-from pluto_sa.vsa.demod.gfsk import prepare_fsk_frequency
-from pluto_sa.vsa.pluto_source import CaptureCancelledError
-from pluto_sa.vsa.model import IQRecording, ModulationKind, SignalDescription
-from pluto_sa.vsa.mapping import (
+from pluto_vsa.demod.gfsk import prepare_fsk_frequency
+from pluto_vsa.pluto_source import CaptureCancelledError
+from pluto_vsa.model import IQRecording, ModulationKind, SignalDescription
+from pluto_vsa.mapping import (
     BLUETOOTH_HDT_MAPPING,
     psk_constellation,
     reverse_symbol_bits,
 )
-from pluto_sa.vsa.pattern import (
+from pluto_vsa.pattern import (
     BitOrdering,
     DemodulationSettings,
     KnownPattern,
@@ -48,9 +48,9 @@ from pluto_sa.vsa.pattern import (
     SynchronizationSource,
     prepare_psk_iq,
 )
-from pluto_sa.vsa.session import VSASession
-from pluto_sa.vsa.sources import FileIQSource, GeneratedIQSource
-from pluto_sa.vsa.ui.measurement_chrome import (
+from pluto_vsa.session import VSASession
+from pluto_vsa.sources import FileIQSource, GeneratedIQSource
+from pluto_vsa.ui.measurement_chrome import (
     SymbolDensitySpread,
     make_measurement_plot,
     plot_complex_symbol_distribution,

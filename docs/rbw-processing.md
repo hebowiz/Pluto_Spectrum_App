@@ -13,13 +13,13 @@
 | WideBand RT SA | 共通Gaussian FIR係数によるFFT filter bank。chunk取得と非overlap処理は現状維持 |
 | Calibration | RealTime SAと同じGaussian FFT filter bankへ移行済み |
 
-実装は`pluto_sa/signal/measurement_filter.py`へ集約しました。指定RBWはcomplex basebandの負周波数側から正周波数側までを含む「両側3 dB bandwidth」と定義し、内部low-pass cutoffは`RBW / 2`です。
+実装は`pluto_rtsa/signal/measurement_filter.py`へ集約しました。指定RBWはcomplex basebandの負周波数側から正周波数側までを含む「両側3 dB bandwidth」と定義し、内部low-pass cutoffは`RBW / 2`です。
 
 デフォルトshapeは掃引型SAに近い裾の滑らかな選択度を優先し、linear-phase Gaussian FIRとしました。Gaussian impulseの標準偏差を`√ln(2) × Fs / (π × RBW)`とし、±4σで打ち切ってDC gainを1へ正規化します。この定義ではCWが中心から±RBW/2で約-3.0103 dB、ENBWが約`1.0645 × RBW`です。tap数、群遅延`(tap数 - 1) / 2`、有限インパルス応答全長をmetadataとして保持します。通常RBWの短いFIRはdirect filter、狭RBWで256 tapsを超える場合はFFT convolutionを使い、いずれもblock境界stateを維持します。
 
 従来の4次Butterworth IIRは比較・将来のchannel filter候補として`shape="butterworth"`を明示した場合のみ利用できます。UIのfilter shape選択はまだなく、Sweep SA/TAはGaussian固定です。Gaussianは一般的なSAらしい公称shapeを意図しますが、特定メーカーの実機RBW filterを完全再現するものではありません。
 
-RealTime SA/WideBand RT SA/Calibrationは`pluto_sa/signal/fft_filterbank.py`で、同じFIR係数をFFT長へ中央配置してゼロ埋めした解析窓を生成します。窓をIQ frameへ乗算してFFTすることで、各binは中心周波数だけが異なる同一Gaussian複素filterの出力になります。tone coherent gainを補正し、電力化後のGaussian convolutionは行いません。
+RealTime SA/WideBand RT SA/Calibrationは`pluto_rtsa/signal/fft_filterbank.py`で、同じFIR係数をFFT長へ中央配置してゼロ埋めした解析窓を生成します。窓をIQ frameへ乗算してFFTすることで、各binは中心周波数だけが異なる同一Gaussian複素filterの出力になります。tone coherent gainを補正し、電力化後のGaussian convolutionは行いません。
 
 狭いRBWではfilter supportが収まる最小の2のべき乗へFFT Sizeを自動拡張します。上限16384でも不足する場合は収まるRBWへ制限し、requested/effective RBW、ENBW、support samples、制限状態をmetadataと画面へ出します。通常RTSAは連続sampleをhopごとに解析するoverlap STFTへ移行済みです。WB RTSAとCalibrationはこの変更の対象外です。
 

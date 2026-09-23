@@ -5,13 +5,13 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from pluto_sa.config.input_frontend import InputPowerCorrection
-from pluto_sa.config.spectrum_config import SpectrumConfig
-from pluto_sa.sdr.iq_stream import IQBlock, IQStreamBuffer
-from pluto_sa.sdr.trigger import TriggerKind, TriggerSlope
-from pluto_sa.vsa.analysis import VSAAnalyzer
-from pluto_sa.vsa.model import ModulationKind, SignalDescription, VSASettings
-from pluto_sa.vsa.pluto_source import (
+from pluto_common.config.input_frontend import InputPowerCorrection
+from pluto_common.config.spectrum_config import SpectrumConfig
+from pluto_common.sdr.iq_stream import IQBlock, IQStreamBuffer
+from pluto_common.sdr.trigger import TriggerKind, TriggerSlope
+from pluto_vsa.analysis import VSAAnalyzer
+from pluto_vsa.model import ModulationKind, SignalDescription, VSASettings
+from pluto_vsa.pluto_source import (
     CaptureCancelledError,
     PlutoCaptureSettings,
     PlutoLiveSource,

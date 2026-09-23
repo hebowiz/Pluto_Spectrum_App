@@ -17,8 +17,8 @@ ADALM-Pluto / libiio
        -> VSA: 解析開始ごとに新しいcursorを作る finite-record consumer
 ```
 
-- `pluto_sa/sdr/pluto_receiver.py`: ハードウェア、RXワーカー、IQ block発行を所有する。
-- `pluto_sa/sdr/continuous_acquisition.py`: start/re-arm/stop/reconfigureとstream planを共通管理する。
+- `pluto_rtsa/sdr/pluto_receiver.py`: ハードウェア、RXワーカー、IQ block発行を所有する。
+- `pluto_rtsa/sdr/continuous_acquisition.py`: start/re-arm/stop/reconfigureとstream planを共通管理する。
 - `IQStreamBuffer`: consumerごとに独立cursorを持ち、読み出しても他consumerのデータを削除しない。
 
 ## モード別の扱い

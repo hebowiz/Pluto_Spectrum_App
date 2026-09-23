@@ -10,10 +10,10 @@ import adi
 import iio
 import numpy as np
 
-from pluto_sa.vsa.channel import extract_analysis_channel
-from pluto_sa.vsa.model import IQRecording
-from pluto_sa.vsa.profiles.bluetooth_br import BluetoothBRProfile, access_code_bits
-from pluto_sa.vsa.sources import FileIQSource
+from pluto_vsa.channel import extract_analysis_channel
+from pluto_vsa.model import IQRecording
+from pluto_vsa.profiles.bluetooth_br import BluetoothBRProfile, access_code_bits
+from pluto_vsa.sources import FileIQSource
 
 
 def _parse_hex(value: str) -> int:
