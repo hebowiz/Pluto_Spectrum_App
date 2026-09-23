@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import html
+import argparse
+import math
+import os
 import re
 from pathlib import Path
 
@@ -15,10 +18,11 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     BaseDocTemplate,
+    CondPageBreak,
     Frame,
+    Flowable,
     Image,
     KeepTogether,
-    PageBreak,
     PageTemplate,
     Paragraph,
     Preformatted,
@@ -46,9 +50,9 @@ MANUALS = (
     ("Pluto_VSA_User_Manual_JA.md", "Pluto_VSA_User_Manual_JA.pdf", "Vector Signal Analyzer"),
     ("Pluto_VSG_User_Manual_JA.md", "Pluto_VSG_User_Manual_JA.pdf", "Vector Signal Generator"),
     (
-        "Pluto_Driver_Installation_Guide_JA.md",
-        "Pluto_Driver_Installation_Guide_JA.pdf",
-        "Windows USB Driver Setup",
+        "Pluto_VSA_Analysis_Guide_JA.md",
+        "Pluto_VSA_Analysis_Guide_JA.pdf",
+        "Analysis Flow and Algorithms",
     ),
 )
 
@@ -56,6 +60,7 @@ PDF_METADATA_TITLES = {
     "Pluto_RTSA_User_Manual_JA.md": "Pluto RTSA User Manual",
     "Pluto_VSA_User_Manual_JA.md": "Pluto VSA User Manual",
     "Pluto_VSG_User_Manual_JA.md": "Pluto VSG User Manual",
+    "Pluto_VSA_Analysis_Guide_JA.md": "Pluto VSA Analysis Flow and Algorithms",
     "Pluto_Driver_Installation_Guide_JA.md": "ADALM-Pluto Windows Driver Installation Guide",
 }
 
@@ -102,8 +107,6 @@ class ManualDocTemplate(BaseDocTemplate):
         self._bookmark_index = 0
 
     def _draw_chrome(self, canvas, doc) -> None:
-        if doc.page == 1:
-            return
         canvas.saveState()
         canvas.setStrokeColor(colors.HexColor("#666666"))
         canvas.setLineWidth(0.4)
@@ -124,7 +127,8 @@ class ManualDocTemplate(BaseDocTemplate):
         key = f"heading-{self._bookmark_index}"
         self.canv.bookmarkPage(key)
         self.canv.addOutlineEntry(flowable.getPlainText(), key, level=level)
-        self.notify("TOCEntry", (level, flowable.getPlainText(), self.page, key))
+        if level == 0:
+            self.notify("TOCEntry", (level, flowable.getPlainText(), self.page, key))
 
 
 def _styles() -> dict[str, ParagraphStyle]:
@@ -145,17 +149,17 @@ def _styles() -> dict[str, ParagraphStyle]:
             "Cover",
             parent=body,
             fontName="ManualJP-Bold",
-            fontSize=28,
-            leading=38,
-            alignment=TA_CENTER,
+            fontSize=22,
+            leading=30,
+            alignment=TA_LEFT,
             textColor=colors.HexColor("#143a52"),
         ),
         "subtitle": ParagraphStyle(
             "Subtitle",
             parent=body,
-            fontSize=14,
-            leading=22,
-            alignment=TA_CENTER,
+            fontSize=11,
+            leading=17,
+            alignment=TA_LEFT,
             textColor=colors.HexColor("#52636e"),
         ),
         "h2": ParagraphStyle(
@@ -165,6 +169,7 @@ def _styles() -> dict[str, ParagraphStyle]:
             fontSize=17,
             leading=23,
             textColor=colors.HexColor("#0b607d"),
+            spaceBefore=12,
             spaceAfter=9,
             borderWidth=0,
             borderPadding=(0, 0, 4, 0),
@@ -200,7 +205,7 @@ def _styles() -> dict[str, ParagraphStyle]:
         "code": ParagraphStyle(
             "CodeJP",
             parent=body,
-            fontName="Courier",
+            fontName="ManualJP",
             fontSize=8,
             leading=11,
             leftIndent=8,
@@ -217,6 +222,10 @@ def _styles() -> dict[str, ParagraphStyle]:
             alignment=TA_CENTER,
             textColor=colors.HexColor("#555555"),
         ),
+        "table_header": ParagraphStyle(
+            "TableHeaderJP", parent=body, fontName="ManualJP-Bold",
+            textColor=colors.white, fontSize=9.3, leading=13.6,
+        ),
         "toc_title": ParagraphStyle(
             "TOCTitleJP",
             parent=body,
@@ -230,9 +239,15 @@ def _styles() -> dict[str, ParagraphStyle]:
 
 def _inline(text: str) -> str:
     value = html.escape(text.strip())
-    value = re.sub(r"`([^`]+)`", r'<font name="Courier">\1</font>', value)
+    value = re.sub(r"`([^`]+)`", r'<font name="ManualJP">\1</font>', value)
     value = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", value)
-    value = re.sub(r"\[([^]]+)\]\(([^)]+)\)", r'<font color="#006c91">\1</font>', value)
+    def link(match):
+        target = html.unescape(match.group(2))
+        if not re.match(r"https?://|mailto:|#", target):
+            pdf_names = {source: output for source, output, _ in MANUALS}
+            target = pdf_names.get(target) or Path(os.path.relpath(SOURCE_DIR / target, OUTPUT_DIR)).as_posix()
+        return f'<link href="{html.escape(target, quote=True)}" color="#006c91">{match.group(1)}</link>'
+    value = re.sub(r"\[([^]]+)\]\(([^)]+)\)", link, value)
     value = value.replace("  ", " ")
     return value
 
@@ -241,9 +256,11 @@ def _table(rows: list[list[str]], styles: dict[str, ParagraphStyle]) -> Table:
     column_count = max(len(row) for row in rows)
     data = []
     for row_index, row in enumerate(rows):
-        style = styles["h3"] if row_index == 0 else styles["body"]
+        style = styles["table_header"] if row_index == 0 else styles["body"]
         data.append([Paragraph(_inline(cell), style) for cell in row + [""] * (column_count - len(row))])
     widths = [CONTENT_WIDTH / column_count] * column_count
+    if column_count == 2:
+        widths = [CONTENT_WIDTH * 0.34, CONTENT_WIDTH * 0.66]
     table = Table(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
     table.setStyle(
         TableStyle(
@@ -271,7 +288,7 @@ def _parse_table_line(line: str) -> list[str]:
 def _image_flowable(source: Path, alt: str, styles: dict[str, ParagraphStyle]):
     image = Image(str(source))
     max_width = CONTENT_WIDTH
-    max_height = PAGE_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM - 22 * mm
+    max_height = 155 * mm
     scale = min(max_width / image.imageWidth, max_height / image.imageHeight)
     image.drawWidth = image.imageWidth * scale
     image.drawHeight = image.imageHeight * scale
@@ -279,50 +296,169 @@ def _image_flowable(source: Path, alt: str, styles: dict[str, ParagraphStyle]):
     return KeepTogether([image, Spacer(1, 2 * mm), Paragraph(_inline(alt), styles["caption"])])
 
 
+class AnalysisFlowchart(Flowable):
+    """Render the manuals' small Mermaid DAGs as indivisible PDF vectors.
+
+    Supports named rectangular/decision nodes and labelled directed edges.
+    Both source directions are arranged top-to-bottom to fit a portrait page.
+    Unsupported syntax fails explicitly instead of silently omitting content.
+    """
+
+    def __init__(self, lines: list[str], styles: dict[str, ParagraphStyle]) -> None:
+        super().__init__()
+        self.width = CONTENT_WIDTH
+        self.spaceBefore = 6
+        self.spaceAfter = 9
+        labels = {}
+        decisions = set()
+        self.edges = []
+        node_pattern = re.compile(r"([A-Za-z]\w*)(?:\[([^\]]+)\]|\{([^}]+)\})?")
+
+        def node(value):
+            match = node_pattern.fullmatch(value.strip())
+            if match is None:
+                raise ValueError(f"Unsupported flowchart node: {value}")
+            key, rectangle, decision = match.groups()
+            if rectangle or decision:
+                labels[key] = rectangle or decision
+            else:
+                labels.setdefault(key, key)
+            if decision:
+                decisions.add(key)
+            return key
+
+        for line in lines:
+            line = line.strip()
+            if not line or line in ("flowchart TD", "flowchart LR"):
+                continue
+            edge = re.fullmatch(r"(.+?)\s*-->\s*(?:\|([^|]+)\|\s*)?(.+)", line)
+            if edge is None:
+                raise ValueError(f"Unsupported flowchart statement: {line}")
+            self.edges.append((node(edge[1]), node(edge[3]), edge[2] or ""))
+        levels = {}
+        while len(levels) < len(labels):
+            progress = False
+            for key in labels:
+                parents = [a for a, b, _ in self.edges if b == key]
+                if key not in levels and all(p in levels for p in parents):
+                    levels[key] = max((levels[p] + 1 for p in parents), default=0)
+                    progress = True
+            if not progress:
+                raise ValueError("Flowchart must be acyclic")
+        node_style = ParagraphStyle(
+            "FlowNode", parent=styles["body"], fontSize=9, leading=12,
+            alignment=TA_CENTER, spaceAfter=0,
+        )
+        self.nodes = {}
+        order_positions = {}
+        y = 0
+        for level in range(max(levels.values()) + 1):
+            keys = [key for key in labels if levels[key] == level]
+            def parent_position(key):
+                parents = [a for a, b, _ in self.edges if b == key]
+                return sum(order_positions[p] for p in parents) / len(parents) if parents else 0.5
+            keys.sort(key=parent_position)
+            for i, key in enumerate(keys):
+                order_positions[key] = (i + 0.5) / len(keys)
+            usable = self.width - 44
+            width = min(320, (usable - 14 * (len(keys) - 1)) / len(keys))
+            paragraphs = [Paragraph(_inline(labels[key]), node_style) for key in keys]
+            heights = [p.wrap(width - 16, 1000)[1] for p in paragraphs]
+            height = max(heights) + 16
+            left = (self.width - len(keys) * width - (len(keys) - 1) * 14) / 2
+            for i, (key, paragraph, text_height) in enumerate(zip(keys, paragraphs, heights)):
+                self.nodes[key] = [left + i * (width + 14), y, width, height, paragraph, text_height, key in decisions]
+            y += height + 28
+        self.height = y - 28
+        for item in self.nodes.values():
+            item[1] = self.height - item[1] - item[3]
+        self.levels = levels
+        if self.height > PAGE_HEIGHT - MARGIN_TOP - MARGIN_BOTTOM:
+            raise ValueError("Flowchart exceeds one page")
+
+    def draw(self):
+        canvas = self.canv
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#52788a"))
+        canvas.setLineWidth(0.8)
+        for source, target, label in self.edges:
+            sx, sy, sw, sh, *_ = self.nodes[source]
+            tx, ty, tw, th, *_ = self.nodes[target]
+            if self.levels[target] == self.levels[source] + 1:
+                points = [(sx + sw / 2, sy), (tx + tw / 2, ty + th)]
+            else:
+                right = tx + tw / 2 >= self.width / 2
+                lane = self.width - 7 if right else 7
+                points = [(sx + (sw if right else 0), sy + sh / 2),
+                          (lane, sy + sh / 2), (lane, ty + th / 2),
+                          (tx + (tw if right else 0), ty + th / 2)]
+            path = canvas.beginPath()
+            path.moveTo(*points[0])
+            for point in points[1:]:
+                path.lineTo(*point)
+            canvas.drawPath(path)
+            x, y = points[-1]
+            px, py = points[-2]
+            angle = math.atan2(y - py, x - px)
+            arrow = canvas.beginPath()
+            arrow.moveTo(x, y)
+            for offset in (-0.5, 0.5):
+                arrow.lineTo(x - 5 * math.cos(angle + offset), y - 5 * math.sin(angle + offset))
+            arrow.close()
+            canvas.setFillColor(colors.HexColor("#52788a"))
+            canvas.drawPath(arrow, fill=1, stroke=0)
+            if label:
+                canvas.setFont("ManualJP", 8)
+                canvas.setFillColor(colors.HexColor("#174f64"))
+                canvas.drawCentredString((points[0][0] + x) / 2, (points[0][1] + y) / 2 + 3, label)
+        for x, y, width, height, paragraph, text_height, decision in self.nodes.values():
+            canvas.setFillColor(colors.HexColor("#fff4d6" if decision else "#eef5f8"))
+            canvas.roundRect(x, y, width, height, 5, fill=1, stroke=1)
+            paragraph.drawOn(canvas, x + 8, y + (height - text_height) / 2)
+        canvas.restoreState()
+
+
 def _markdown_story(path: Path, subtitle: str, styles: dict[str, ParagraphStyle]):
     lines = path.read_text(encoding="utf-8").splitlines()
     title = next(line[2:].strip() for line in lines if line.startswith("# "))
     story = [
-        Spacer(1, 42 * mm),
         Paragraph(_inline(title), styles["cover"]),
-        Spacer(1, 8 * mm),
         Paragraph(_inline(subtitle), styles["subtitle"]),
-        Spacer(1, 65 * mm),
-        Paragraph("Pluto Spectrum App Project", styles["subtitle"]),
-        PageBreak(),
-        Paragraph("目次", styles["toc_title"]),
-        Spacer(1, 6 * mm),
     ]
+    for line in lines:
+        if line.startswith(("文書版:", "対象:", "アプリ仕様の確認基準:")):
+            story.append(Paragraph(_inline(line), styles["body"]))
+    story.extend([
+        Spacer(1, 4 * mm),
+        Paragraph("目次", styles["toc_title"]),
+        Spacer(1, 2 * mm),
+    ])
     toc = TableOfContents()
     toc.levelStyles = [
         ParagraphStyle("TOC1", fontName="ManualJP", fontSize=10, leading=15, leftIndent=0),
         ParagraphStyle("TOC2", fontName="ManualJP", fontSize=8.5, leading=12, leftIndent=16),
     ]
-    story.extend([toc, PageBreak()])
+    story.extend([toc, Spacer(1, 3 * mm)])
 
     index = 0
-    first_section = True
     while index < len(lines):
         line = lines[index].rstrip()
-        if line.startswith("# ") or line.startswith("文書版:") or line.startswith("対象:"):
+        if line.startswith(("# ", "文書版:", "対象:", "アプリ仕様の確認基準:")):
             index += 1
             continue
         if not line:
             index += 1
             continue
         if line.startswith("## "):
-            if not first_section:
-                story.append(PageBreak())
-            first_section = False
             paragraph = Paragraph(_inline(line[3:]), styles["h2"])
             paragraph._toc_level = 0
-            story.append(paragraph)
+            story.extend([CondPageBreak(65), paragraph])
             index += 1
             continue
         if line.startswith("### "):
             paragraph = Paragraph(_inline(line[4:]), styles["h3"])
             paragraph._toc_level = 1
-            story.append(paragraph)
+            story.extend([CondPageBreak(50), paragraph])
             index += 1
             continue
         image_match = re.fullmatch(r"!\[([^]]*)\]\(([^)]+)\)", line)
@@ -332,12 +468,16 @@ def _markdown_story(path: Path, subtitle: str, styles: dict[str, ParagraphStyle]
             index += 1
             continue
         if line.startswith("```"):
+            language = line[3:].strip()
             code_lines = []
             index += 1
             while index < len(lines) and not lines[index].startswith("```"):
                 code_lines.append(lines[index])
                 index += 1
-            story.append(Preformatted("\n".join(code_lines), styles["code"]))
+            if language == "mermaid":
+                story.append(AnalysisFlowchart(code_lines, styles))
+            else:
+                story.append(Preformatted("\n".join(code_lines), styles["code"]))
             index += 1
             continue
         if line.startswith("|"):
@@ -376,12 +516,15 @@ def _markdown_story(path: Path, subtitle: str, styles: dict[str, ParagraphStyle]
     return title, story
 
 
-def build_all() -> list[Path]:
+def build_all(*, include_driver: bool = False) -> list[Path]:
     _register_fonts()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     styles = _styles()
     outputs = []
-    for source_name, output_name, subtitle in MANUALS:
+    manuals = MANUALS
+    if include_driver:
+        manuals += (("Pluto_Driver_Installation_Guide_JA.md", "Pluto_Driver_Installation_Guide_JA.pdf", "Windows USB Driver Setup"),)
+    for source_name, output_name, subtitle in manuals:
         source = SOURCE_DIR / source_name
         output = OUTPUT_DIR / output_name
         title, story = _markdown_story(source, subtitle, styles)
@@ -396,5 +539,8 @@ def build_all() -> list[Path]:
 
 
 if __name__ == "__main__":
-    for built in build_all():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--include-driver", action="store_true")
+    args = parser.parse_args()
+    for built in build_all(include_driver=args.include_driver):
         print(built)

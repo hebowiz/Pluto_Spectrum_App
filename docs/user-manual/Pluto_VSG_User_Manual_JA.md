@@ -1,223 +1,334 @@
 # Pluto VSG ユーザーマニュアル
 
-文書版: 1.0
-対象: Pluto VSG（IQ Waveform Generator / ADALM-Pluto TX）
+文書版: 2.0 レビュー版（2026-09-23）
 
-## 1. はじめに
+対象: Pluto VSG / アプリ仕様の確認基準: `b43f7e6`
 
-Pluto VSGは、規格別パケットを編集してIQ波形を生成し、ファイルへ保存、またはADALM-Plutoから送信するアプリケーションです。Bluetooth BR/EDR、Bluetooth LE、Bluetooth HDT、Wi-Fi、DECTのプロジェクトを作成できます。
+## 1. できることと読み方
 
-## 2. RF安全と法令
+Pluto VSGはBluetooth BR/EDR、LE、HDT、Wi-Fi、DECTのpacketからIQ波形を生成し、ファイルへ出力、またはPlutoから送信します。本書の画面は現在のアプリで波形を生成して撮影したものです。画面のPreviewは生成IQであり、実機の出力波形を受信測定したものではありません。
 
-> **警告:** RF ONは実際の送信を開始します。アンテナ接続時は使用地域の法令と免許条件を必ず確認してください。
+最初は第3章の生成・検証手順を実行してください。送信操作は第4章、全設定の個別説明は第5章以降です。右パネルの下部はスクロールし、`Back`で前のページへ戻ります。
 
-- 初回確認は、シールド環境または十分なATTを入れたケーブル接続で行ってください。
-- 受信計測器の最大入力を超えないよう、VSG出力と外部ATTを確認してください。
-- RF OFFでもハードウェア状態やLO leakageを含む完全な理想遮断を前提にしないでください。
-- 同じPlutoを別アプリのRX/TXで同時使用することはできません。
+## 2. 起動と画面
 
-## 3. 起動
+`Pluto_VSG.bat`を起動します。波形生成やExportにはPluto接続は不要です。送信時は`Device`で個体を指定し、タイトルの`TX`表示を確認します。起動だけでRF送信は開始しません。
 
-1. ADALM-PlutoをPCへ接続します。
-2. `Pluto_VSG.bat`を起動します。
-3. 必要なら`Inst Settings`で対象Plutoを選択します。
-4. タイトルバーの`[TX: …xxxx]`を確認します。
+![図1 VSGの生成IQとVerify Packet結果。送信は行っていない](../images/user-manual/pluto-vsg-overview.png)
 
-起動直後は`RF OFF`、`Mod ON`、`Continuous ON`です。アプリ起動だけでは送信しません。
-
-## 4. 画面構成
-
-![Pluto VSG画面構成](../images/user-manual/pluto-vsg-overview.png)
-
-1. **Block Library** — Fixed Data、Pattern、PRBS、Guard/Idle、Power Rampなどの構成要素。現行版では参照中心の項目があります。
-2. **Packet Composer / Field Tree** — パケット、変調、電力制御の時間配置とフィールド構造。
-3. **Inspector** — Standard、Center、Sample Rate、Packet Type、Periodなど現在値の一覧。設定編集と波形生成を実行できます。
-4. **Generated IQ Preview** — IQ Waveform、IQ Power、Instantaneous Frequency、Spectrum、Constellationを切替表示。
-5. **VSG Control** — RF、変調、連続送信、Power、Frequency、Pluto設定を操作。
-
-画面下部のステータスバーには生成sample数、時間、sample rate、送信状態、エラーが表示されます。
-
-## 5. クイックスタート
-
-### 5.1 パケットを作る
-
-1. `File > New`から規格を選択します。
-2. Inspector下の`Edit ... Settings`を押します。
-3. `RF / Timing`タブでPHY、sample rate、packet period、ramp等を設定します。
-4. `Fields`タブでAccess Address、Payload、Header等を選択または入力します。
-5. `Apply and Generate`または`Generate Waveform (F5)`を実行します。
-6. PreviewとInspectorで内容を確認します。
-
-### 5.2 Plutoから送信する
-
-1. `Inst Settings`でConnection URIとDigital Backoffを確認します。
-2. `Freq Settings`または`Frequency`で送信周波数を確認します。
-3. `Power`で目標出力を設定します。
-4. `Mod`と`Continuous`を目的に合わせます。
-5. `RF`を押します。
-6. Calibrationが必要と表示された場合は実行します。Calibration完了後も自動送信されないため、内容を再確認してからもう一度`RF`を押します。
-7. Continuous送信は`RF`を再度押して停止します。
-
-## 6. プロジェクト種類
-
-| Newメニュー | 主な設定 |
+| 領域 | 見る内容 |
 |---|---|
-| Bluetooth BR / EDR Project | DH系packet、BR GFSK、EDR 2M/3M DPSK |
-| Bluetooth LE Packet | LE 1M/2M、Access Address、PDU、CRC等 |
-| Bluetooth HDT Packet | HDT rate、Control Header、PDU |
-| Wi-Fi Packet | 対応するPHY/field構成 |
-| DECT Packet | Carrier Plan、Direction、Packet Type、Case A/B、A/B/X/Z field |
+| 1 Block Library | 波形要素の分類。表示される項目すべてが自由編集可能とは限らない |
+| 2 Packet Composer | 上段はpacket/field、下段は変調・電力制御。Field Treeで構造を確認 |
+| 3 Inspector | 規格、sample rate、payload、periodなど生成条件。下の編集ボタンから設定へ進める |
+| 4 Generated IQ Preview | I/Q、電力包絡、瞬時周波数、Spectrum、Constellation |
+| 5 右操作パネル | Calibration/RF、Mod、Continuous、Power、Frequency、Packet Settings、Project、File、Device |
+| Packet Decode | Verify PacketのDecode / Payload Hex / Issues。生成bit列を検証した結果 |
 
-パケット種別を変更すると、その規格の既定Frequency Selectionが設定されます。`Freq Settings`を再度開いた場合は、Frequency数値から逆算せず、前回選択したCarrierとOffsetを表示します。
+位置・サイズを再起動後も復元し、最小サイズは960×640です。5つのDockを移動・別窓化できます。内部配置・分割比率・選択タブは再起動時に初期化します。リサイズでは再均等化しません。
 
-## 7. パケット設定ダイアログ
+## 3. 画面を使った生成・検証・保存
 
-設定は原則として2タブに分かれています。
+### 3.1 Bluetooth packetを作る
 
-### 7.1 RF / Timing
+1. `Project > New > Bluetooth BR/EDR`を選びます。
+2. `Packet Settings`を開きます。`RF / Timing`でPacket Type / Modulation、Payload Length、Samples / Symbolを選びます。
+3. `Fields`でLAP/UAP、Header、payload、whiteningを設定します。テストパターンはRF Test Payload Presetから選べます。
+4. `Apply and Generate`で確定・生成します。不正な入力は修正してから確定します。
+5. 図1のComposerでfield順序、Previewで波形とpacket前後のidleを確認します。
+6. `Verify Packet`を押し、Packet DecodeのHEC/CRCやIssuesを確認します。
+7. `Project > Save`で`.pvsg.json`、`File > Export NPZ`でIQを保存します。
 
-- Packet Type / ModulationまたはPHY
-- Samples / Symbolと自動計算されるSample Rate
-- Repeat Count
-- Deviation、Gaussian BT、SRRC roll-off等
-- Pre Idle、Packet Period、Derived Post Idle
-- Ramp Up/Downの時間、開始位置、Shape
-- 規格固有のProlonged Preamble、Guard、Relative Power等
+![図2 Bluetooth BR/EDRのRF / Timing。symbol数と時間換算を併記](../images/user-manual/pluto-vsg-classic-settings-0.png)
 
-symbol単位の項目には、可能な場合us換算も併記されます。末尾のblank時間はPacket Periodから自動計算され、負になる設定は確定できません。
+![図3 Bluetooth BR/EDRのFields。HeaderとPayload Headerは別の領域](../images/user-manual/pluto-vsg-classic-settings-1.png)
 
-### 7.2 Fields
+Verify Packetは生成bit列をdecodeします。アナログRF出力品質、受信同期、EVMを検証する操作ではありません。変調品質を評価する場合はExportしたIQをVSAで解析するか、実機で送受信して測定します。
 
-フィールド値は、定義済みの選択肢がある場合はCombo Boxから選択します。自由入力が必要なPayload、Address、Tail等はbit数または桁数を確認してください。
+### 3.2 VSAとのファイル連携
 
-- Hex入力はフィールド幅に一致させます。
-- 桁不足や範囲外の値がある場合、確定操作は拒否されます。
-- DECT A-field Tailでは任意値に加え、`Test Burst Tx`プリセット（`0x70736E6363`）を選択できます。
+VSGでExport NPZしたファイルをVSAの`File > Import IQ`で読み込みます。Protocol/PHYとsample rateを確認します。VSAの`Export VSG Project`から受信packetをVSGへ持ち込むこともできます。ただし受信packetからは元送信機の全RF条件・ramp・periodは復元できず、テンプレート値を含みます。送信前に設定を確認してください。
 
-数値欄は編集途中の一時的な範囲超過を許容しますが、不正値を残したままApply/OKはできません。赤色表示された欄を修正してください。
+## 4. RF送信の操作と状態
 
-## 8. VSG Control
+1. `Device`でPluto、Digital Backoff等を指定します。
+2. `Freq Settings`または`Frequency`で周波数、`Power`で目標出力を設定します。
+3. `Mod`、`Continuous`、`Repeat Count`を目的に合わせます。
+4. `Calibration`表示の場合は校正操作を実行します。完了後も送信しません。
+5. `RF OFF`からRFボタンを押して送信します。Continuous送信は再度押して停止します。
 
-### 8.1 RF
+送信機と受信機をケーブルで接続する場合は外部ATTを入れ、受信側の許容入力内にします。図版作成時にはRFを送信していません。
 
-- **RF OFF**: 送信停止状態。
-- **RF ON操作、Mod ON、Continuous OFF**: ProjectのRepeat Count回を送信し、自動でOFFへ戻ります。
-- **RF ON操作、Mod ON、Continuous ON**: 1 packet periodをcyclic DMAで、再度押すまで反復します。
-- **Mod OFF**: Continuous設定に関係なくCWを連続送信します。
-
-Stopは安全停止を優先し、Gain mute、LO powerdown、DMA buffer解放を行います。USB応答待ちで表示がStoppingになる場合は、ケーブルを抜かず完了を待ってください。
-
-### 8.2 Mod
-
-- **ON**: 生成したIQ波形で変調。
-- **OFF**: 現在のFrequencyとPowerでCW送信。
-
-CWはzero-IFのため、同じ中心周波数で受信すると受信側DC/LO leakageと重なることがあります。評価時は受信側でOffset LOを使用してください。
-
-### 8.3 Continuous
-
-- **ON**: Stopまで継続。
-- **OFF**: 設定回数を有限送信。
-
-ContinuousではProjectの先頭1周期だけを反復します。周期にはPre Idle、Ramp、Packet、Derived Post Idleが含まれます。
-
-### 8.4 Power / Power Step
-
-- `Power`を押すと目標RF Output LevelをdBmで入力できます。
-- 上下矢印は`Power Step`分だけ増減します。
-- 範囲外になるStep操作は適用されません。
-- 送信中もPower変更が可能です。
-- `Estimated Peak Power`は、Digital Backoff等を含む参考値です。
-
-表示値はPluto個体差、周波数、温度、外部回路で変化します。精密なレベル設定には外部Power Meterまたは校正済み受信機を使用してください。
-
-### 8.5 Frequency / Freq Settings
-
-- `Frequency`: 任意周波数をMHz、小数点以下6桁まで入力します。送信中は変更できません。
-- `Freq Settings`: 規格別Carrier Plan/ChannelとOffsetを選び、結果をFrequencyへ反映します。
-
-Frequencyを直接編集しても、保存されたCarrier/Offset選択は上書きされません。
-
-### 8.6 Inst Settings
-
-- **Connection URI**: 使用するPluto。Refreshで再検索。
-- **Digital Backoff**: IQ full scaleからのデジタル減衰。
-- **LO Stabilization Wait (Muted)**: LOを有効にしてからGainを上げるまでの待ち時間。
-- **Finite TX Lead-in (Zero IQ)**: 有限送信前にDMAへ先行配置する無信号時間。
-- **Finite TX Minimum Hold**: DMA投入後、mute/cleanupまで送信状態を最低限保持する時間。
-
-Frequency、Sample Rate、TX RF Bandwidth、Power、Playback Modeはメイン画面またはProjectから管理されるため、このダイアログには表示しません。TX RF BandwidthはSample Rateと同じ値へ自動設定されます。
-
-## 9. Preview
-
-| タブ | 内容 |
+| 状態・項目 | 意味 |
 |---|---|
-| IQ Waveform | I/Qの時間波形とfield境界 |
-| IQ Power | dBFS電力包絡、ramp、idle |
-| Instantaneous Frequency | FSK/FMの瞬時周波数 |
-| Spectrum | 生成IQのベースバンドスペクトラム |
-| Constellation | 変調区間ごとに分離したsymbol constellation |
+| Calibration | 現在の周波数・sample rate等で送信準備が必要 |
+| Calibrating | 校正処理中。完了まで待つ |
+| RF OFF | 送信停止。押すと現在条件で送信開始 |
+| Transferring | IQ転送・開始処理中 |
+| RF ON | 送信中。押すと停止 |
+| Stopping | 停止・buffer解放中。完了を待つ |
+| Mod ON | 生成した変調IQを送信 |
+| Mod OFF | CWを連続送信。Continuousの有限回設定には従わない |
+| Continuous ON | 生成波形の先頭1 packet periodをcyclic DMAで反復 |
+| Continuous OFF | Mod ON時、Repeat Countで指定した有限回を送信 |
+| Repeat Count | 有限送信のpacket数。連続送信の周期長を増やす項目ではない |
 
-時間軸の初期表示はActive Windowに約10%以下の余白を加えた範囲です。Packet後の長いIdleは初期表示から除外されますが、パンまたはズームアウトすると確認できます。
+周波数等を変えるとPrepared状態が無効になります。校正直後は再度RFを操作して送信します。RF OFFを理想的な完全遮断や外部RFレベルの測定結果と同一視しないでください。
 
-複数変調を含むEDR等では、Constellationを変調区間ごとに区別して表示します。GFSK区間とDPSK区間を同じsymbol判定として解釈しないでください。
+## 5. 共通のRF / Timing設定
 
-ユーザーが変更したPlot範囲は再生成後も維持されます。右クリックの`Reset`で波形に基づく既定範囲へ戻ります。
+規格によって項目名・有効範囲が変わります。数値欄の単位と自動計算表示を確認します。
 
-## 10. DECT固有事項
-
-- CarrierはCarrier Planと番号から選び、Offsetを追加できます。
-- Prolonged Preambleはパケット長・Timing側で設定します。
-- Modulation Case A/Bは規格テストパターンとfield値を連動させます。
-- Ramp Up中の変調はETSI規定に従ってPreamble patternを延長します。
-- Packet末尾も規格fieldとramp位置に従って生成されます。
-- Packet Periodを設定するとPost Idleが自動決定されます。
-
-## 11. 保存、読込、Export
-
-| 操作 | 内容 |
+| 項目 | 個別説明 |
 |---|---|
-| Save / Save As | `.pvsg.json` Projectを保存 |
-| Open | Projectを読込 |
-| Export NPZ | IQとメタデータをNumPy形式で保存 |
-| Export R&S IQ TAR | R&S互換IQアーカイブを保存 |
-| Export R&S WV | R&S waveform形式を保存 |
-| Validate Project | field、timing、rangeの整合を確認 |
+| Packet Type / Modulation、PHY、Rate | packet形式と変調を選択。必要なfield、最大payload長、symbol rate等が連動 |
+| Payload Length [byte] | payloadのbyte数。packet全長ではない |
+| Packet Length | preamble/header等を含む長さの計算表示 |
+| Samples / Symbol | 1symbolを表すsample数。増やすとsample rateとIQファイル量が増える |
+| Sample Rate | symbol rateとsamples/symbolから決定。Wi-Fiは20/40 MS/sを選択 |
+| FSK Deviation / Peak Frequency Deviation | FSKの片側周波数偏移。画面のkHz/Hz単位を確認 |
+| Gaussian B*T | Gaussian送信フィルタのBT。小さくすると帯域が狭くなる一方、symbol間の影響が増える |
+| SRRC Roll-off | PSK/QAMの送信パルス整形。対応する受信側条件と揃える |
+| Pre Idle | packet開始前の無信号区間、symbol。併記のus換算で時間を確認 |
+| Packet Period | 1周期の開始から次周期開始まで。packet・ramp・idleを収める |
+| Derived Post Idle | 指定periodから自動計算された末尾idle。直接編集しない |
+| Ramp Up / Ramp Up Time | 立ち上がりに使う時間またはsymbol数 |
+| Ramp Up Start rel. Packet | packet開始基準のramp開始位置。負値はpacketより前 |
+| Ramp Down / Ramp Down Time | 立ち下がりに使う時間またはsymbol数 |
+| Ramp Down Start rel. Packet End | packet末尾基準の開始位置。packetのデータを切らないよう確認 |
+| Ramp Shape | Cosine / Linear。電力包絡の移行形状 |
+| Ramp Timing / Derived Layout | 設定から計算した境界位置・時間の確認表示 |
 
-送信機のConnection URI、Power、Digital Backoff、Continuous等はローカル機器設定で、波形ProjectやExport IQへ含まれない項目があります。別PCで開く場合は送信設定を再確認してください。
+Periodが短すぎてpacket/rampを収められない設定は確定できません。長いpost idleは初期Preview範囲から外れる場合があります。ズームアウトして周期全体を確認できます。
 
-## 12. Calibrationと送信状態
+## 6. Bluetooth BR/EDRの個別設定
 
-周波数、sample rate、bandwidth、接続Plutoなど、校正に影響する条件が変わるとPrepared状態は無効になります。RF ON時にCalibrationが必要なら確認ダイアログが表示されます。
+### 6.1 RF / Timingの追加項目
 
-```text
-RF OFF
-  -> Calibration確認
-  -> Calibration実行
-  -> READY（自動送信しない）
-  -> ユーザーが再度RF ON
-  -> TX
-```
-
-これにより、Calibration直後の意図しないRF送信を防止します。
-
-## 13. トラブルシューティング
-
-| 症状 | 確認事項 |
+| 項目 | 個別説明 |
 |---|---|
-| RF ONできない | Calibration、Project validation、接続Pluto、Frequency/Power範囲を確認 |
-| 設定欄が赤い | 空欄、範囲外、Hex桁数、Period不足を修正 |
-| 送信周波数が違う | Frequency表示、Freq SettingsのCarrier/Offset、直接編集履歴を確認 |
-| 出力が想定より低い | Power、Digital Backoff、Estimated Peak、外部ATTを確認 |
-| Continuousが止まらない | RFボタンでStopし、Stopping完了を待つ |
-| Stopが長い | USB/libiio応答、DMA cleanupを待つ。強制切断は避ける |
-| Constellationが不自然 | 対象変調区間、PHY、Samples/Symbol、生成更新を確認 |
-| Device busy | 同じPlutoを使用中のRTSA/VSA/VSGを停止または終了 |
+| Packet Type / Modulation | DH1/DH3/DH5、2-DH1/3/5、3-DH1/3/5。EDRではGFSKヘッダとDPSK payloadを生成 |
+| EDR Guard | GFSKとDPSKの間のguard長 |
+| EDR Guard Power rel. GFSK | guard区間の相対電力。基準はGFSK部 |
+| EDR Guard Ramp In | guardへ入る移行時間 |
+| EDR Guard Ramp Out | guardから出る移行時間 |
+| EDR Guard Ramp Shape | guard移行部のCosine / Linear |
+| EDR SRRC Roll-off | EDR PSK部の送信フィルタroll-off |
+| EDR Power rel. GFSK [dB] | PSK部のGFSK部に対する相対電力。正値はPSKが高い |
 
-## 14. 用語
+### 6.2 Fields
 
-- **Digital Backoff**: 量子化full scaleに対するIQ振幅の余裕。
-- **Active Window**: RampとPacketを含む、送信波形として有効な時間範囲。
-- **Packet Period**: 反復開始点から次周期開始点までの時間。
-- **Derived Post Idle**: Packet/Ramp終了から周期末尾まで自動計算されるIdle。
-- **Finite / Continuous**: 有限回のnon-cyclic DMA送信／1周期のcyclic DMA反復。
+| 項目 | 個別説明 |
+|---|---|
+| Project Name | プロジェクトの識別名 |
+| LAP [hex] | Bluetoothアドレス下位部。Access Code等の生成に使用 |
+| UAP [hex] | アドレス上位部の一部。HEC等の生成条件 |
+| CLK 6-1 [hex] | whitening等に使用するクロックbit |
+| Header / LT_ADDR | logical transportアドレス |
+| Header / FLOW | ヘッダのフロー制御bit |
+| ARQN | 受信応答bit |
+| SEQN | シーケンスbit |
+| HEC Mode | Autoはヘッダから生成、Manualは指定値を使用 |
+| HEC Value | Manual時の検査値。意図的な誤りpacketにも使用できる |
+| Payload Header / LLID | payloadの論理リンク種別 |
+| Payload Header / FLOW | payload headerのフロー制御bit。HeaderのFLOWとは別 |
+| Payload Header / LENGTH | payload headerへ載せる長さ。payload条件との整合を確認 |
+| RF Test Payload Preset | PRBS-9、Constant 0/1、1010、11110000等を一括設定 |
+| Payload Source | Constant / Repeating Bit Pattern / PRBS-9 |
+| Source Behavior | 現在のsourceの繰返し・生成方法の説明表示 |
+| Payload Data [bin] | 固定bitまたは繰返しpattern。画面のsourceと合わせて指定 |
+| Whitening | packet bit列へのwhitening適用。受信側も同じ条件にする |
+
+## 7. Bluetooth LEの個別設定
+
+![図4 LEのFields。air-order入力とhex入力を区別する](../images/user-manual/pluto-vsg-le-settings-1.png)
+
+RF / TimingではPHYをLE 1M / LE 2Mから選びます。Modulationは対応するGFSK条件の表示です。その他の取得密度・偏移・ramp・periodは第5章を参照してください。
+
+| Fields項目 | 個別説明 |
+|---|---|
+| Project Name | 識別名 |
+| RF Test Payload Preset | PRBS9、PRBS15、11110000、10101010等。選ぶとテスト同期語・header・CRC初期値・whitening OFF・periodも設定 |
+| Preamble [air-order bits] | 送出順のpreamble bit列 |
+| Access Address / Sync [air-order bits] | 送出順の同期語。整数hexの見た目とbit順を混同しない |
+| PDU Header [air-order bits] | 送出順のPDU header。packet種別・長さ等を含む |
+| Payload Source | Fixed / Pattern / PRBS9 / PRBS15 |
+| Payload Pattern [bin] | 固定データまたは繰返しpattern |
+| CRC-24 | CRC付加の選択。受信側の期待条件と揃える |
+| CRCInit [hex] | CRC初期値。RFテストpresetは0x555555 |
+| Whitening | データwhiteningの有効化。RFテストpresetではOFF |
+| Whitening Channel Index | whitening系列を決めるチャネル番号。単なるRF周波数欄ではない |
+
+Preset適用後も各fieldは編集できます。Preset名を選んだだけで、その後の手編集を含むpacketが規格条件を維持するとは限りません。
+
+## 8. Bluetooth HDTの個別設定
+
+![図5 HDTのRF / Timing。rateと変調・符号化率が連動](../images/user-manual/pluto-vsg-hdt-settings-0.png)
+
+| 項目 | 個別説明 |
+|---|---|
+| Packet Format | 実装するpacket formatの確認表示 |
+| HDT Rate / Modulation | HDT2、3、4、6、7.5。pi/4-QPSK、8PSK、16QAMと符号化率が連動 |
+| SRRC Roll-off | HDT送信パルス整形のroll-off |
+| Project Name | 識別名 |
+| Training / Preamble | 同期・参照に使うtrainingの確認表示 |
+| Packet Profile | テストpacket構成の識別表示 |
+| PCA [40-bit hex] | training/PCA条件を指定する40bit値 |
+| PCA-A / HEC Init (auto) | PCAから決まる値を表示。別々に任意入力する欄ではない |
+| NESN | 次に期待するシーケンス番号 |
+| Control Header (auto) | rate・length等から生成したheaderを確認 |
+| HEC-C Mode | 自動計算または手動HEC-Cの選択 |
+| Manual HEC-C [hex] | 手動検査値 |
+| XHP / RxPP (fixed) | 固定条件の表示 |
+| MD | 後続データの有無 |
+| SN | シーケンス番号 |
+| LLID | 論理リンク識別 |
+| Payload Source | Fixed / Pattern / PRBS-9 / PRBS-15 |
+| Payload Pattern | 固定データまたは繰返しpattern |
+| CRC-32 Init [hex] | CRC初期値 |
+| CRC-32 Mode | 自動計算または手動CRCの選択 |
+| Manual CRC-32 [hex] | 手動検査値 |
+| Generated HEC-C / CRC-32 | 現設定から生成した値の確認 |
+| Terminating Symbols (fixed) | 終端symbol条件の表示。payloadそのものと区別 |
+
+HDTのpayload長・Samples/Symbol・ramp・periodは第5章と同じ考え方です。任意の検査値を入力したpacketが正常受信されるとは限りません。負試験の場合は意図した不正値であることを記録します。
+
+## 9. Wi-Fiの個別設定
+
+現行版は20 MHzのNon-HT OFDMです。HT/VHT/HE等の波形生成として使用しないでください。
+
+![図6 Wi-FiのFields。PSDUとBeacon用情報をsourceに応じて使い分ける](../images/user-manual/pluto-vsg-wifi-settings-1.png)
+
+| 項目 | 個別説明 |
+|---|---|
+| Format | Non-HT OFDMの固定表示 |
+| Bandwidth | 20 MHzの固定表示 |
+| Data Rate / Modulation | 6/9/12/18/24/36/48/54 Mbps。変調・符号化率が連動 |
+| Sample Rate | 20 MS/sまたは2倍oversamplingの40 MS/s |
+| Pattern / PRBS Length [byte] | Pattern/PRBS sourceのPSDU長 |
+| Packet Period | packet繰返し間隔。生成されるpacket時間以上に設定 |
+| Ramp | Wi-Fi生成経路のramp条件の確認表示 |
+| Calculated PHY values | OFDM symbol数等の計算結果 |
+| Project Name | 識別名 |
+| Scrambler Seed | Auto / Fixed。scrambler初期状態の決定方法 |
+| Fixed Seed | Fixed選択時の初期値 |
+| Frame Source | Raw PSDU / Pattern / PRBS-9 / Beacon |
+| Raw PSDU [hex] | 任意PSDU byte列。入力がPHY全体のIQではない点に注意 |
+| Pattern [hex] | PSDUを作る繰返しbyte pattern |
+| SSID | Beaconのネットワーク名 |
+| BSSID | Beaconの識別アドレス |
+| Sequence Number | MAC sequence番号 |
+| Beacon Interval | Beaconに記録するinterval値。送信packet periodとは区別 |
+| FCS | FCS付加の選択 |
+
+## 10. DECTの個別設定
+
+![図7 DECTのRF / Timing。packet typeとrampを含む配置を確認](../images/user-manual/pluto-vsg-dect-settings-0.png)
+
+![図8 DECTのFields。A-field、B-field、X/Z-fieldを個別設定](../images/user-manual/pluto-vsg-dect-settings-1.png)
+
+| 項目 | 個別説明 |
+|---|---|
+| Modulation | GFSKの確認表示 |
+| Packet Type / Length | P00 / P32 / P32Z / P80 / P80Z。field構成と長さが変わる |
+| Prolonged Preamble | 延長preambleを使用。packetの前側長さが変わる |
+| Peak Frequency Deviation | GFSKの片側偏移 |
+| Gaussian B*T | Gaussian送信フィルタのBT |
+| Derived Layout | p0、packet末尾、ramp等の計算配置 |
+| Direction | RFP / PP。preamble・sync等の方向依存値を変更 |
+| Preamble (Direction-derived) | 方向から決まるpreamble表示 |
+| Packet Sync Word (Direction-derived) | 方向から決まる同期語表示 |
+| A Header / TA | A-field tailの種別。方向により選択肢の意味が変わる |
+| A Header / Q1-BCK | 指定bitの値。画面の方向・選択条件に合わせる |
+| A Header / BA | B-fieldの内容・識別。選択肢の説明を確認 |
+| A Header / Q2 | Q2 bit |
+| A Tail Preset | Custom、全0/1、交互pattern、Test Burst Tx等の40bit preset |
+| A Tail Value (40-bit) | A-field tailの値。Test Burst Tx presetは0x70736E6363 |
+| R-CRC | A-fieldの検査情報の選択 |
+| B-field Source | Constant / Repeating pattern / PRBS-9 / Case A / Case B |
+| B-field Data / Pattern | sourceに応じたbitまたは繰返しpattern |
+| RF Modulation Test Pattern | 現在のCase構成の確認表示 |
+| B-field Scrambling | None / Standard |
+| Scrambling Frame Phase | scramblingを決めるframe位相 |
+| X-field Auto | X-fieldを自動生成 |
+| X-field (4 bits) | Autoを外した場合の4bit値 |
+| Z-field Auto | Z-fieldを自動生成 |
+| Z-field (4 bits) | Autoを外した場合の4bit値 |
+
+Samples/Symbol、Sample Rate、Pre Idle、Packet Period、Derived Post Idle、ramp各項目は第5章を参照してください。Carrier Planは`Freq Settings`で設定します。Case A/Bは任意の似たpatternではなく、選択したpacketに対応する生成条件を使用します。
+
+## 11. Power・Frequency・Device
+
+### 11.1 Power
+
+| 項目 | 個別説明 |
+|---|---|
+| Power | 目標RF Output Level、dBm。内部では波形のactive RMSやbackoffを考慮してgainを設定 |
+| 上下矢印 | Power Step分だけ増減。許容範囲を超える操作は適用されない |
+| Power Step | 1回の増減量、dB |
+| Estimated Peak Power | active RMSとpeakの差等から求めた推定値。実測電力ではない |
+
+長いidleを含む波形全体の平均と、送信中のactive区間平均は異なります。Pluto個体差・周波数・温度・外部配線により実際の電力は変化するため、必要な精度に応じて外部受信機等で確認します。
+
+### 11.2 Frequency / Freq Settings
+
+| 項目 | 個別説明 |
+|---|---|
+| Frequency | MHzで周波数を直接指定。送信中は変更不可 |
+| Carrier Plan | 規格・地域の周波数プラン |
+| Carrier | プラン内の番号と公称周波数 |
+| Carrier Offset | 公称キャリアへの加算値 |
+| Generated RF Frequency | Carrier+Offsetの結果表示 |
+
+Frequencyの直接編集と、Freq Settingsで最後に選んだCarrier/Offsetは別に記憶します。直接編集後にFreq Settingsを開いても、周波数から選択肢を自動逆算しません。
+
+### 11.3 Device
+
+| 項目 | 個別説明 |
+|---|---|
+| Connection URI | 使用するPluto。再検索して対象個体を選ぶ |
+| Digital Backoff | IQ full scaleからのデジタル減衰。headroomと出力可能範囲に影響 |
+| LO Stabilization Wait (Muted) | LOを有効化してからgainを上げるまでの待ち時間 |
+| Finite TX Lead-in (Zero IQ) | 有限送信の先頭packetを保護するzero IQ先行時間 |
+| Finite TX Minimum Hold | DMA投入後に送信状態を最低限維持する時間 |
+
+TX RF Bandwidthはsample rateを元にハードウェア範囲内へ設定されます。Device画面に個別のRF帯域指定欄はありません。
+
+## 12. Preview・Project・File
+
+| 操作・項目 | 個別説明 |
+|---|---|
+| IQ Waveform | I/Q時間波形。field境界とramp位置を確認 |
+| IQ Power | dBFS電力包絡。idleとactiveの区別 |
+| Instantaneous Frequency | FSK/FMの瞬時周波数。無信号部は有効な偏移値として読まない |
+| Spectrum | 生成IQのベースバンド周波数分布 |
+| Constellation | 変調区間ごとのsymbol点。EDRのGFSK部とDPSK部を混ぜない |
+| 右クリック Reset | そのプロットを波形に基づく既定範囲へ戻す |
+| Packet Settings | 現規格のRF / TimingとFieldsを編集 |
+| Received Packet Fields | VSA等から受け取ったpacket field情報を確認する経路 |
+| Verify Packet | 生成bit列の構造・検査情報をdecode。IQ復調ではない |
+| Project > New | 規格を選んで新しいprojectを作成 |
+| Project > Open | `.pvsg.json`を読込 |
+| Project > Save | 保存先を選んでprojectを保存。既存projectでも保存先を確認 |
+| File > Export NPZ | IQとメタデータをNumPy形式で出力 |
+| Export IQ TAR | R&S IQ交換形式で出力 |
+| Export WV | R&S waveform形式で出力 |
+
+プロジェクト、NPZ、IQ TAR、WVのフォルダ履歴は独立し、再起動後も復元します。同じprojectのOpenとSaveは共有します。キャンセルは履歴を変更しません。
+
+通常起動では前回のproject・主要送信設定を復元しますが、RF送信そのものは再開しません。ローカルDevice/送信設定のすべてがprojectやIQへ含まれるわけではないため、別PCへ渡した場合は再確認します。
+
+## 13. 困ったとき
+
+| 症状 | 確認内容 |
+|---|---|
+| 設定欄が赤く確定できない | 空欄、範囲外、bit/hex桁数、payload長、period不足 |
+| 設定したのに波形が変わらない | Apply and Generate（DECTはOK）で確定したか確認 |
+| Verify Packetでエラー | 手動HEC/CRC、header length、whitening、source設定 |
+| RF ONにならない | Calibrationの完了、対象Pluto、出力範囲、生成エラー |
+| Mod OFFで止まらない | CWはContinuous OFFでも連続送信。RFで停止 |
+| 推定Powerと受信値が違う | 校正、active RMS/全体平均、ATT、backoff、周波数条件 |
+| Stopに時間がかかる | DMA・USBの終了処理を待つ |
+| 波形再生成後も拡大されたまま | ユーザーの表示範囲を保持する仕様。右クリックReset |
+
+図版の再現条件は[図版・確認記録](manual-validation.md)を参照してください。
