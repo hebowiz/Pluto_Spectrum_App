@@ -6,7 +6,7 @@
     "standard": "Bluetooth HDT",
     "sample_rate_hz": 16000000.0,
     "samples_per_symbol": 8,
-    "repeat_count": 700,
+    "repeat_count": 2000,
     "period_symbols": 2500.0,
     "center_frequency_hz": 2440000000.0,
     "fields": [

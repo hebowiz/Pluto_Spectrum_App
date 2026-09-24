@@ -6,8 +6,8 @@
     "standard": "Bluetooth LE",
     "sample_rate_hz": 16000000.0,
     "samples_per_symbol": 8,
-    "repeat_count": 1,
-    "period_symbols": null,
+    "repeat_count": 2000,
+    "period_symbols": 1250.0,
     "center_frequency_hz": 2440000000.0,
     "fields": [
       {
@@ -125,11 +125,11 @@
       "crc_init": 5592405,
       "whitening_enabled": false,
       "whitening_channel_index": 17,
-      "rf_test_interval_enabled": false,
+      "rf_test_interval_enabled": true,
       "frequency_deviation_hz": 500000.0,
       "gaussian_bt": 0.5,
       "pre_idle_symbols": 8,
-      "post_idle_symbols": 8
+      "post_idle_symbols": 0
     },
     "bluetooth_hdt": null,
     "wifi": null,
