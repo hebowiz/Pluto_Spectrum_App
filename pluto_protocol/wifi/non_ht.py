@@ -17,6 +17,7 @@ from pluto_protocol.model import (
     PacketIntegritySummary, PacketIssue, PacketSourceInfo, PacketSummaryItem,
 )
 from .mac import WiFiMACDecoder
+from .sample_rate import resolve_non_ht_sample_rate
 
 # Clause 17, Table 78 and Table 80, indexed by the four received RATE bits.
 RATES = {
@@ -144,9 +145,10 @@ def analyze_iq(iq: np.ndarray, sample_rate_hz: float, *, source: PacketSourceInf
             tuple(summary),(PacketField("wifi.phy","PHY",0,0,children=tuple(fields)),),tuple(issues),
             PacketIntegritySummary(complete=False),source,np.empty(0,dtype=np.uint8),context)
 
-    if sample_rate_hz not in (20_000_000,40_000_000):
-        return fail("wifi.sample_rate","IQ verification requires 20 or 40 MS/s")
-    factor = int(sample_rate_hz/20_000_000)
+    resolved_rate = resolve_non_ht_sample_rate(sample_rate_hz)
+    if resolved_rate is None:
+        return fail("wifi.sample_rate","IQ verification requires nominal 20 or 40 MS/s")
+    factor = resolved_rate.decimation_factor
     x = np.asarray(iq)
     if x.ndim != 1 or not np.iscomplexobj(x) or not np.all(np.isfinite(x)):
         return fail("wifi.iq","IQ must be a finite one-dimensional complex array")

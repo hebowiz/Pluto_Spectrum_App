@@ -3,6 +3,10 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from pluto_vsa.model import IQRecording
+from pluto_protocol.wifi.sample_rate import (
+    NON_HT_SAMPLE_RATE_TOLERANCE_HZ,
+    resolve_non_ht_sample_rate,
+)
 from pluto_vsa.protocol_modes.wifi.analysis import analyze_wifi_recording
 from pluto_vsa.protocol_modes.wifi.measurement import measure_region
 from pluto_vsg.engine.wifi_legacy_ofdm import WiFiLegacyOFDMWaveformEngine
@@ -15,6 +19,77 @@ def generated(rate=6, factor=1, **kwargs):
     settings = WiFiSettings(legacy_rate_mbps=rate,oversample_factor=factor,packet_period_us=1000,**kwargs)
     waveform = WiFiLegacyOFDMWaveformEngine().generate(wifi_project(settings))
     return waveform, settings
+
+
+@pytest.mark.parametrize(
+    ("sample_rate_hz", "nominal_sample_rate_hz", "decimation_factor"),
+    [
+        (20_000_000, 20_000_000, 1),
+        (19_999_999, 20_000_000, 1),
+        (40_000_000, 40_000_000, 2),
+        (39_999_999, 40_000_000, 2),
+        (20_000_000 - NON_HT_SAMPLE_RATE_TOLERANCE_HZ, 20_000_000, 1),
+        (20_000_000 + NON_HT_SAMPLE_RATE_TOLERANCE_HZ, 20_000_000, 1),
+        (40_000_000 - NON_HT_SAMPLE_RATE_TOLERANCE_HZ, 40_000_000, 2),
+        (40_000_000 + NON_HT_SAMPLE_RATE_TOLERANCE_HZ, 40_000_000, 2),
+    ],
+)
+def test_non_ht_sample_rate_resolver(
+    sample_rate_hz, nominal_sample_rate_hz, decimation_factor
+):
+    resolved = resolve_non_ht_sample_rate(sample_rate_hz)
+    assert resolved is not None
+    assert resolved.nominal_sample_rate_hz == nominal_sample_rate_hz
+    assert resolved.decimation_factor == decimation_factor
+
+
+@pytest.mark.parametrize(
+    "sample_rate_hz",
+    [
+        30_000_000,
+        20_000_000 - NON_HT_SAMPLE_RATE_TOLERANCE_HZ - 1,
+        20_000_000 + NON_HT_SAMPLE_RATE_TOLERANCE_HZ + 1,
+        40_000_000 - NON_HT_SAMPLE_RATE_TOLERANCE_HZ - 1,
+        40_000_000 + NON_HT_SAMPLE_RATE_TOLERANCE_HZ + 1,
+    ],
+)
+def test_non_ht_sample_rate_resolver_rejects_unsupported_rates(sample_rate_hz):
+    assert resolve_non_ht_sample_rate(sample_rate_hz) is None
+
+
+def test_rounded_40_msps_metadata_uses_the_same_decode_path():
+    wave, settings = generated(rate=24, factor=2)
+    exact_recording = IQRecording(wave.iq, 40_000_000, 2_437_000_000)
+    rounded_recording = IQRecording(wave.iq, 39_999_999, 2_437_000_000)
+
+    exact = analyze_wifi_recording(exact_recording)
+    rounded = analyze_wifi_recording(rounded_recording)
+
+    assert exact.counts == rounded.counts == dict(
+        detected=1,
+        complete=1,
+        measurement_eligible=1,
+        decode_success=1,
+        fcs_valid=1,
+    )
+    exact_packet = exact.packets[0].packet
+    rounded_packet = rounded.packets[0].packet
+    exact_summary = {item.key: item.value for item in exact_packet.summary}
+    rounded_summary = {item.key: item.value for item in rounded_packet.summary}
+    assert (
+        rounded_packet.decode_context["rate_mbps"]
+        == exact_packet.decode_context["rate_mbps"]
+        == 24
+    )
+    assert rounded_packet.decode_context["length"] == exact_packet.decode_context["length"]
+    assert rounded_packet.decode_context["psdu_hex"] == exact_packet.decode_context["psdu_hex"]
+    assert rounded_packet.decode_context["psdu_hex"] == build_psdu(settings).hex()
+    assert rounded_summary["frame_type"] == exact_summary["frame_type"] == 0
+    assert rounded_summary["frame_subtype"] == exact_summary["frame_subtype"] == 8
+    assert rounded_summary["ssid"] == exact_summary["ssid"] == "Pluto_Test_AP"
+    assert rounded_packet.integrity.crc_valid is exact_packet.integrity.crc_valid is True
+    assert rounded_packet.decode_context["sample_rate_hz"] == 39_999_999
+    assert rounded_recording.sample_rate_hz == 39_999_999
 
 
 @pytest.mark.parametrize("rate",[6,9,12,18,24,36,48,54])

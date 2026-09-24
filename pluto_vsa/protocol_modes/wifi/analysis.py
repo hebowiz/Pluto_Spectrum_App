@@ -4,6 +4,7 @@ import numpy as np
 from pluto_protocol.model import PacketSourceInfo
 from pluto_protocol.wifi.detection import detect_packets
 from pluto_protocol.wifi.non_ht import analyze_iq
+from pluto_protocol.wifi.sample_rate import resolve_non_ht_sample_rate
 from pluto_vsa.model import IQRecording
 from .measurement import measure_region, packet_power
 from .model import WiFiCaptureResult, WiFiPacketResult
@@ -13,14 +14,15 @@ from .measurements import capture_statistics, measurement_results
 
 def analyze_wifi_recording(recording: IQRecording, *, max_packets=128, cancelled=None, measurement_conditions=None):
     fs = recording.sample_rate_hz
-    if fs not in (20e6, 40e6):
-        return WiFiCaptureResult((), ("Non-HT analysis requires 20 or 40 MS/s IQ",))
+    resolved_rate = resolve_non_ht_sample_rate(fs)
+    if resolved_rate is None:
+        return WiFiCaptureResult((), ("Non-HT analysis requires nominal 20 or 40 MS/s IQ",))
     if not np.all(np.isfinite(recording.iq)):
         return WiFiCaptureResult((), ("Capture contains non-finite IQ",))
     candidates = detect_packets(recording.iq, fs, max_candidates=max_packets*4)
     packets = []
     covered_until = -1
-    factor = int(fs/20e6)
+    factor = resolved_rate.decimation_factor
     for candidate in candidates:
         if cancelled is not None and cancelled():
             break

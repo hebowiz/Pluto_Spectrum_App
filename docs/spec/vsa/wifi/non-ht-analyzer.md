@@ -3,7 +3,8 @@
 ## 対象と入力
 
 Analysis Mode `wifi`。Non-HT OFDM / ERP-OFDM、20 MHz、6/9/12/18/24/36/48/54 Mbps。
-保存IQは20/40 MS/s。Rate・Length・scrambler stateはIQから自動取得し、VSG metadataを使用しない。
+保存IQはnominal 20/40 MS/s。実機取得metadataの微小な丸め差はnominal rateへ分類して解析する。
+Rate・Length・scrambler stateはIQから自動取得し、VSG metadataを使用しない。
 VSAからVSGへの依存は設けず、`pluto_protocol/wifi`のPHY・MAC解析を共有する。
 
 ライブ取得の標準は40 MS/s、RF bandwidth 30 MHz、Channel 6 / 2437 MHz、10 ms。

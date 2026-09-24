@@ -2,6 +2,8 @@
 from dataclasses import dataclass
 import numpy as np
 
+from .sample_rate import resolve_non_ht_sample_rate
+
 
 @dataclass(frozen=True)
 class PacketCandidate:
@@ -11,9 +13,10 @@ class PacketCandidate:
 
 
 def detect_packets(iq, sample_rate_hz, *, threshold=0.75, max_candidates=256):
-    if sample_rate_hz not in (20e6, 40e6):
-        raise ValueError("Non-HT detection requires 20 or 40 MS/s")
-    factor = int(sample_rate_hz/20e6)
+    resolved_rate = resolve_non_ht_sample_rate(sample_rate_hz)
+    if resolved_rate is None:
+        raise ValueError("Non-HT detection requires nominal 20 or 40 MS/s")
+    factor = resolved_rate.decimation_factor
     x = np.asarray(iq)[::factor].astype(np.complex128)
     if x.ndim != 1 or not np.all(np.isfinite(x)):
         raise ValueError("Capture IQ must be finite and one dimensional")
