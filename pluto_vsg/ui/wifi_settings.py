@@ -7,7 +7,7 @@ from pyqtgraph.Qt import QtCore, QtWidgets
 from pluto_common.numeric_input import DeferredDoubleSpinBox, DeferredSpinBox, ensure_valid_numeric_inputs
 from pluto_vsg.model import WiFiPSDUSource, WiFiScramblerSeedMode, WiFiSettings, validate_project, maximum_finite_repeat_count
 from pluto_vsg.profiles.wifi import management_defaults, wifi_project
-from pluto_vsg.wifi.common import LEGACY_RATES
+from pluto_vsg.wifi.common import LEGACY_RATES, OFDM_BOUNDARY_STANDARD_REFERENCE
 from pluto_vsg.wifi.mac import MANAGEMENT_FRAME_CONTROLS, build_psdu, effective_frame_control
 from .packet_settings import carrier_selector, wifi_24ghz_carriers, packet_settings_tabs, packet_field_sections
 
@@ -63,6 +63,8 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
         self.derived_label = QtWidgets.QLabel()
         self.derived_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.derived_label.setWordWrap(True)
+        self.boundary_label = QtWidgets.QLabel("Standard / Rectangular")
+        self.boundary_label.setToolTip(OFDM_BOUNDARY_STANDARD_REFERENCE)
 
         self.source_combo = QtWidgets.QComboBox()
         for source in WiFiPSDUSource:
@@ -138,7 +140,8 @@ class WiFiSettingsDialog(QtWidgets.QDialog):
             ("Frequency Offset",self.frequency_offset_spin),("Generated RF Frequency",self.center_label),
             ("Packet Period",self.period_spin),("Beacon period helper",self.interval_period_button),
             ("Repeat Count",self.repeat_spin),("Scrambler",self.seed_mode_combo),("Fixed Seed",self.seed_spin),
-            ("Envelope",QtWidgets.QLabel("Common ramp disabled; OFDM uses cyclic prefixes, no optional overlap window.")),
+            ("OFDM Boundary Processing",self.boundary_label),
+            ("Envelope",QtWidgets.QLabel("Common RF power ramp disabled (independent of OFDM boundaries).")),
             ("Derived timing",self.derived_label)),
             (("Project Name",self.name_edit),("PSDU Source",self.source_combo),("Management defaults",self.defaults_button),("Field groups",self.field_pages)))
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel)

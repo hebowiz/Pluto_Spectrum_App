@@ -1,10 +1,10 @@
 # Pluto VSA ユーザーマニュアル
 
-文書版: 2.0 レビュー版（2026-09-23）
+文書版: 2.1（2026-09-24）
 
 対象: General VSA / Bluetooth / DECT / Wi-Fi / ADS-B 1090ES
 
-アプリ仕様の確認基準: `b43f7e6`を基準に、Wi-Fi Dedicated Analyzerの操作を追補。
+Wi-Fi Dedicated Analyzerの現行画面・測定条件・判定に対応。
 
 ## 1. 本書の使い方
 
@@ -108,9 +108,13 @@ ADS-B 1090ESを選び、Import IQまたはSingleで解析します。Packet List
 2. Packet Analysisの`Packet List`で対象packetを選びます。RateはL-SIGから自動検出されます。列順は`# | Rate | Type | SSID | Length | FCS | Power`で、BeaconのSSIDを一覧で確認できます。SSIDなしは`—`、空文字SSIDは`(empty)`です。長いSSIDは列幅に応じて折り返し、Tooltipでも全文を確認できます。
 3. DecodeでL-SIG Parity、DATA Complete、PSDU Complete、FCSを個別に確認します。欠落や異常はIssuesに表示します。
 4. Symbol Plotの`L-SIG - BPSK`／`DATA - ...`で等化後のコンスタレーションを確認します。他モードと同じFlat（点）／Density（密度）表示を選べます。
-5. Modulationは横軸OFDM symbol、縦軸subcarrier、色がEVMです。DATA EVM、Channel Magnitude/Phaseも内部tabで切り替えます。
+5. ModulationのEVMマップは横軸Subcarrier Index、縦軸OFDM Symbol Index、色がEVMです。DATA EVM / Carrier、Channel Magnitude/Phase、Spectral Flatnessも横軸Subcarrier Indexです。DATA EVM / Symbolだけは時間方向を見るため横軸OFDM Symbol Indexを維持します。
 6. RF取得ではDeviceを指定し、40 MS/s、十分なRF bandwidth（標準30 MHz）、対象中心周波数でSingleを実行します。
 7. Continuousは有限取得と解析を反復します。Stopで停止後、Refresh Analysisで保持IQを再解析できます。
+
+IQ Powerは選択packetの長さに対し前後それぞれ約10%の余白を加えて初期表示します（収録範囲内に制限）。右クリックのResetはこの範囲へ、View Allは全収録範囲へ戻します。長いidleを含む録音でも、packet区間を優先し、電力の最小・最大値を残す描画によりピークの消失を抑えます。これは表示用の処理で、解析IQや測定値を変更しません。
+
+行を選ぶとIQ Power、Spectrum、Result Summary、Modulation、Symbol Plot、Decodeが同じpacketへ追従します。Beaconに加えProbe Request/ResponseもDecodeできます。Probe Requestの空文字SSIDはwildcardです。Packet Listの`(empty)`は保存されている空文字の表示であり、SSIDなしの`—`とは区別します。
 
 100 TU間隔のBeaconでは標準10 msのcaptureにpacketが入らない場合があります。150 ms程度へ広げるか、IQ Power triggerを使用してください。
 20 MS/sは保存IQに対応しますが、Plutoライブ取得では既存の有効帯域制約により40 MS/sを使用します。
@@ -122,11 +126,11 @@ Bit Rangeは復号後のlogical bit座標です。MAC fieldと連続するIQ sam
 
 | 項目 | 個別説明 |
 |---|---|
-| Center Frequency | 要求する受信中心、MHz。General/Bluetoothで入力。DECTはCarrier選択、ADS-Bは1090 MHz固定 |
+| Center Frequency | 要求する受信中心、MHz。General/Bluetooth/Wi-Fiで入力。DECTはCarrier選択、ADS-Bは1090 MHz固定 |
 | RF Bandwidth | Pluto受信器のアナログRF帯域、MHz。解析用デジタルLPFとは別 |
 | Match Sample Rate | RF Bandwidthをsample rateに追従させる。ON時はRF Bandwidthの手入力を無効化 |
 | Applied RF Bandwidth | 最後の取得で報告された実適用値。未取得なら未表示。要求値と区別 |
-| LO Offset / Enable (Experimental) | 要求中心からハードウェアLOをずらす。General/Bluetooth/DECTで対応。Analysis Channelが必要 |
+| LO Offset / Enable (Experimental) | 要求中心からハードウェアLOをずらす。General/Bluetooth/DECT/Wi-Fiに設定欄があり、Analysis Channelと帯域条件が必要。Wi-Fiの制約は8.4節参照 |
 | Offset Frequency | LOのずらし量、MHz。DC成分を解析帯域の外へ置くために使う |
 | Resolved LO | 実際に要求するLO周波数。要求Centerと同じとは限らない |
 | Internal Gain | Pluto内部受信利得、dB。入力飽和の回避と弱信号の観測に調整 |
@@ -139,7 +143,7 @@ Bit Rangeは復号後のlogical bit座標です。MAC fieldと連続するIQ sam
 | Apply Analysis Bandwidth to Power | Power表示にAnalysis Channel後IQを使用。OFFならRaw Capture |
 | Apply Analysis Bandwidth to Spectrum | Spectrum表示にAnalysis Channel後IQを使用。OFFならRaw Capture |
 
-Analysis Channelの設定UIはGeneral/Bluetooth/DECTにあります。ADS-Bには同じ設定欄はありません。Powerへの適用は初期ON、Spectrumは初期OFFです。同期・復号に使うIQの選択と、表示への適用ON/OFFを混同しないでください。
+Analysis Channelの設定UIはGeneral/Bluetooth/DECT/Wi-Fiにあります。ADS-Bには同じ設定欄はありません。Powerへの適用は初期ON、Spectrumは初期OFFです。同期・復号に使うIQの選択と、表示への適用ON/OFFを混同しないでください。
 
 Offset LOを使う場合は、Analysis Bandwidthがsample rate未満で、LO offsetと解析帯域が取得可能帯域に収まる必要があります。またDC除外のため、offsetの絶対値はAnalysis Bandwidthの半分より大きくします。設定が成立しない場合はoffset、帯域、sample rateを見直します。
 
@@ -151,7 +155,7 @@ Offset LOを使う場合は、Analysis Bandwidthがsample rate未満で、LO off
 |---|---|
 | Capture Length | 1回の取得長。必要なパケットと前後の余白を含める。長いほどメモリ・処理量が増加 |
 | 単位 ms / Symbols | 時間またはsymbol数で入力。単位切替そのものは現在の取得時間を保持。ADS-Bはmsのみ |
-| Sample Rate | Generalは2/4/8/16/32/64/128 samples/symbol。Bluetooth/DECTは4/8/16/32。ADS-Bは8/16 MS/s |
+| Sample Rate | Generalは2/4/8/16/32/64/128 samples/symbol。Bluetooth/DECTは4/8/16/32。ADS-Bは8/16 MS/s。Wi-Fiは20/40 MS/s、ライブ取得は40 MS/s |
 | Resulting Sample Rate | symbol rate×samples/symbolなどから求めた要求sample rate |
 | Record Length | 取得時間×sample rateから求めたsample数 |
 | Usable I/Q Bandwidth | sample rateとRF Bandwidthに基づく使用可能帯域の目安 |
@@ -347,12 +351,47 @@ identity入力はProtocol/Profileに応じて非表示・無効になります�
 | Trigger | Free Run / I/Q Power、Level、Slope、Offset、Hysteresis。packet検出自体はL-STFを使用 |
 | Symbol Plot Trace | 等化後の測定点をFlat（点）／Density（密度）表示。他モードと共通の描画方法 |
 | Density Spread | None / Medium / Maximum。密度表示の広がり。解析結果には影響しない |
-| Show synchronization diagnostics | STF metric、LTF correlation、coarse/fine CFOをSummaryへ追加 |
+| Show additional decode / diagnostic results | 48 data toneの診断EVM、STF/LTF同期指標、coarse/fine CFO、校正情報等をSummaryへ追加 |
 
-EVM RMS/Peakは等化・pilot位相補正後の48 data subcarrierを測定し、L-SIGとDATAを分けます。
-RFのLimitは推測で設定せずInfo表示です。Symbol Clock Errorは未実装のためNot Availableと表示します。
-Power CalibrationがUncalibrated referenceの場合、表示dBmを実機校正済みの絶対電力として扱わないでください。
-実RFの検出・EVM・powerを確認する手順は[Wi-Fi手動受入](../verification/vsa/wifi/non-ht-hardware.md)にあります。
+保存IQは公称20/40 MS/sを扱い、メタデータの微小な丸め誤差は許容します。ライブ取得は占有帯域16.25 MHzを受信するため40 MS/sを使用します。現行の最大40 MS/sでは20 MHz解析帯域とDC回避用LO Offsetの条件を同時に満たせないため、通常はLO Offsetを0（無効）とします。
+
+`Measurement Conditions`では以下を確認し、OK後にRefresh Analysisまたは新規取得を実行します。すべて初期OFFです。チェックはユーザーによる条件確認であり、装置を校正する機能ではありません。DUTや接続経路を変更したら再確認します。
+
+![Wi-Fi Measurement Conditions。測定基準・接続・送信信号・DUTの条件を個別に確認する](../images/user-manual/pluto-vsa-wifi-measurement-conditions.png)
+
+| 確認項目 | 個別説明 |
+|---|---|
+| Receiver frequency reference verified | 受信器の周波数基準を確認済み。Carrier Frequency Error判定の前提 |
+| Receiver accuracy and conducted path verified | 受信器の測定精度と有線測定経路を確認済み。変調精度・flatness等の判定に必要 |
+| Test source uses random data | 規格測定用のランダムデータ送信源であることを確認済み。任意のBeaconを自動的にrandom dataとは扱わない |
+| DUT is not a VHT STA (center leakage test) | center leakageの対象DUTがVHT STAではないことを確認済み。Non-HT packet受信だけではこの条件は確定しない |
+
+Result SummaryではValueだけでなくLimit、Status、Tooltipの未成立理由・規格参照・集計範囲を確認します。
+
+![Wi-FiのMaskとSpectral Flatness。生成IQに対する表示例で、条件不足のStatusはPASSを意味しない](../images/user-manual/pluto-vsa-wifi-rf-results.png)
+
+| 測定項目 | 読み方と主な条件 |
+|---|---|
+| Packet Power | active PPDUの線形平均電力。後続の6 µs Signal Extensionは含めない。表示基準面・入力補正を反映。規格LimitのないInfo項目 |
+| Carrier Frequency Error | CFOのHz表示とppm。ERPは±25 ppm、5 GHz OFDMは±20 ppmを使用。周波数基準の確認が必要 |
+| Symbol Clock Frequency Error | 現行版に推定器がなくNot Measured。CFOをsymbol clock誤差へ代用しない |
+| Relative Constellation Error | DATAの48 data + 4 pilot toneを対象。選択packetと同じrate・同じcaptureで16 DATA symbols以上のpacketを集計。20 packet以上、random data、受信器・経路条件が必要 |
+| EVM RMS | 上記52 toneの相対誤差を%表示。単独の別規格判定ではなくInfo。Tooltipでpacket値かcapture内集計かを確認 |
+| Spectral Flatness | 等化前の2個のLTFの平均energyを使用。内側±1〜16を基準に内側±4 dB、外側±17〜26は−6/+4 dB。値は最小marginで、Modulationの専用tabでcarrier別偏差を確認 |
+| Transmit Center Frequency Leakage | LTFのDC電力を使用。対象DUT・受信経路・絶対電力条件を確認。未校正でも十分低い相対値なら判定できる場合があるが、絶対値条件を評価できない値を直ちにFAILとしない |
+| Transmit Spectrum Mask | Spectrumの専用tabにPSDとmaskを表示。現行20/40 MS/sでは±30 MHzの評価範囲と規定の測定条件を満たせずInsufficient Data。見えている範囲内だけで全maskのPASSとはしない |
+
+Relative Constellation Errorの上限は6/9/12/18/24/36/48/54 Mbpsの順に−5/−8/−10/−13/−16/−19/−22/−25 dBです。Continuousでも別captureをまたいで20 packetを蓄積せず、同じIQのRefreshでpacket数を水増ししません。診断用EVM RMS/Peakは48 data toneのみでL-SIGとDATAを分けるため、主測定の52 tone値とは区別します。
+
+| Status | 意味 |
+|---|---|
+| PASS / FAIL | 適用条件を満たした項目がLimit内／外 |
+| Info | 参考値。PASSの意味ではない |
+| Not Measured | 推定器がない、または必要な測定条件を確認できない |
+| Insufficient Data | packet数、区間、帯域等が不足 |
+| Not Available | 対象データから結果を利用できない |
+
+Power CalibrationがUncalibrated referenceの場合、表示dBmを実機校正済みの絶対電力として扱わないでください。詳しい計算経路は[解析補足のWi-Fi節](Pluto_VSA_Analysis_Guide_JA.md)、実RFの手順は[Wi-Fi手動受入](../verification/vsa/wifi/non-ht-hardware.md)を参照してください。
 
 ## 9. Display・プロット・パケット選択
 
@@ -408,4 +447,4 @@ DECTの変調・電力デバッグCSVは開発用の追加出力です。通常�
 | バーストが途中で切れる | Capture Length、Trigger Offset、Drop-Out Time、Active Interval制限 |
 | Device busy | 他アプリが同じPlutoを保持していないか確認 |
 
-PASS/FAILは実装した条件に対する結果です。通常パケットのCRC正常だけでRF適合性を保証せず、反対に条件不成立のN/AをRF不良と即断しないでください。
+PASS/FAILは実装条件での判定です。CRC正常や条件不足のN/Aを、RF全項目の合否と読み替えないでください。

@@ -1,6 +1,6 @@
 # Pluto計測アプリケーション ユーザーマニュアル
 
-ADALM-Plutoを使用する3アプリの操作マニュアルです。2026-09-23時点の実装（`b43f7e6`）に合わせたMarkdown版と、その内容を組版したPDF版があります。
+ADALM-Plutoを使用する3アプリの操作マニュアルです。現行仕様を説明するMarkdown版と、その内容を組版したPDF版があります。
 
 | アプリケーション | 用途 | マニュアル |
 |---|---|---|
@@ -25,21 +25,24 @@ ADALM-Plutoを使用する3アプリの操作マニュアルです。2026-09-23�
 - ウィンドウ位置・サイズ復元、960×640の最小サイズ、Dockとモード別レイアウトの保存範囲。
 - ファイル種別ごとの初期フォルダ記憶。
 - 保存済み受信IQを現在のアプリで解析した画面と、VSG・ADS-Bの生成データの画面。
+- Wi-Fi Packet ListのSSID、packet初期表示範囲、Modulation/Symbol Plotの使い分け。
+- Wi-Fiの測定条件・IEEE測定結果と診断用EVMの違い、解析フローと判定可能範囲。
+- VSGのProbe Request/Response、送信元STA情報とManagement IE、OFDM境界表示、右側Packet Settingsへの操作統一。
 
 図版作成では新たな実機送受信を行っていません。RTSAの図は開発用の再生経路を使っています。通常メニューのIQ読込手順ではありません。電力校正や規格判定に必要な条件は各本文で説明しています。
 
 ## PDF版
 
-Wi-Fi Non-HTのVSG IQ Verify・拡張Beacon設定とVSA Dedicated AnalyzerはMarkdown版を先に更新しています。下記の既存PDFにはこの追加分をまだ反映していません。
+下記PDFにもWi-Fiの現行操作・測定と解析補足を反映しています。
 
 | 資料 | PDF | ページ数 |
 |---|---|---|
 | RTSA | [PDF](../../output/pdf/Pluto_RTSA_User_Manual_JA.pdf) | 7 |
-| VSA | [PDF](../../output/pdf/Pluto_VSA_User_Manual_JA.pdf) | 18 |
-| VSG | [PDF](../../output/pdf/Pluto_VSG_User_Manual_JA.pdf) | 16 |
-| VSA解析補足 | [PDF](../../output/pdf/Pluto_VSA_Analysis_Guide_JA.pdf) | 8 |
+| VSA | [PDF](../../output/pdf/Pluto_VSA_User_Manual_JA.pdf) | 22 |
+| VSG | [PDF](../../output/pdf/Pluto_VSG_User_Manual_JA.pdf) | 22 |
+| VSA解析補足 | [PDF](../../output/pdf/Pluto_VSA_Analysis_Guide_JA.pdf) | 10 |
 
-章の開始、表紙、目次を理由にした固定改ページはありません。本文と表は続けて配置し、表がページをまたぐ場合は見出し行を繰り返します。図とキャプションは一体で配置し、1ページ内に収めます。補足資料の3つのフロー図は、MarkdownのMermaid定義からPDF内のベクター図へ変換しています。
+章の開始、表紙、目次を理由にした固定改ページはありません。本文と表は続けて配置し、表がページをまたぐ場合は見出し行を繰り返します。図とキャプションは一体で配置し、1ページ内に収めます。補足資料の4つのフロー図は、MarkdownのMermaid定義からPDF内のベクター図へ変換しています。
 
 再生成にはWindowsのメイリオフォントと、ReportLab・Pillowを利用できるPython環境が必要です。
 
@@ -47,4 +50,4 @@ Wi-Fi Non-HTのVSG IQ Verify・拡張Beacon設定とVSA Dedicated AnalyzerはMar
 python -m tools.build_user_manual_pdfs
 ```
 
-出力は`output/pdf/`です。ドライバガイドも再生成する場合は`--include-driver`を付けます。PDFは生成物であり、Git管理外です。
+出力は`output/pdf/`です。ドライバガイドも再生成する場合は`--include-driver`を付けます。配布用PDFはリポジトリで管理しています。生成後はMarkdown・画像・PDFを揃えて確認します。

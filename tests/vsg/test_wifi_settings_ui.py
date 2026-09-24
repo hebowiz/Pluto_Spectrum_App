@@ -18,6 +18,9 @@ def test_visible_rf_controls_field_groups_and_all_values_roundtrip():
         assert dialog.channel_combo.isVisible()
         assert dialog.frequency_offset_spin.isVisible()
         assert dialog.repeat_spin.isVisible()
+        assert dialog.boundary_label.text() == 'Standard / Rectangular'
+        assert '17.3.2.5' in dialog.boundary_label.toolTip()
+        assert dialog.boundary_label.isVisible()
         assert dialog.field_pages.count()==6
         dialog.channel_combo.setCurrentIndex(10)
         dialog.frequency_offset_spin.setValue(125)

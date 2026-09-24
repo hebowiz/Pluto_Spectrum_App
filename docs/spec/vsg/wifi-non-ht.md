@@ -20,8 +20,34 @@ ERP Signal Extensionの6 µsは無送信時間とし、DATA symbolやactive RMS�
 Packet PeriodはPPDU長+6 µs以上。UIと生成器の双方で検証する。
 繰り返しは同一IQの再生であり、Timestamp / Sequence Number / seed / FCSを再生成しない。
 
-OFDM境界は現在、CP付きsymbolの矩形連結。共通Power EnvelopeとOFDMの任意のwindow/overlap処理を混同しない。
-独自rampでdecodeを補う処理は追加しない。スペクトルマスクは実機測定が必要。
+### OFDM境界の標準構成
+
+IEEE Std 802.11-2024 17.3.2.5は標準波形を矩形パルスで記述する。
+本実装は`Standard / Rectangular`とし、CP付きsymbolを端点の重複なく連結する。
+同節の平滑化窓と約100 nsの遷移時間、および17.3.2.6の半値端点・overlapは実装例であり、
+固定の非矩形窓を追加する要件とはしない。拘束要件は17.3.9.3のSpectrum Maskと17.3.9.7のModulation Accuracy。
+矩形のデジタル構成に一致することだけで、RF出力のSpectrum Mask適合を保証しない。
+
+| Field / component | 時間 | 20 MS/s | 40 MS/s |
+| --- | --- | --- | --- |
+| L-STF | 8 µs（0.8 µsを10回） | 160 sample | 320 sample |
+| L-LTF | 8 µs（GI2 + LTF + LTF） | 32 + 64 + 64 | 64 + 128 + 128 |
+| L-SIG / DATA各symbol | 4 µs（GI + useful） | 16 + 64 | 32 + 128 |
+| ERP Signal Extension | 6 µs（別の無送信時間） | 120 | 240 |
+
+20 MS/sではL-STF `[0,160)`、L-LTF `[160,320)`、L-SIG `[320,400)`、
+DATA symbol n `[400+80n,480+80n)`の半開sample区間を使う。40 MS/sでは全indexを2倍する。
+CPは同じuseful symbol末尾のcyclic copy。L-LTFのGI2は32 sample相当のcyclic extension。
+各矩形区間の境界で振幅を連続にする処理や、81番目のsampleの重ね合わせは行わない。
+40 MS/sは128点IFFTとsample数を2倍にしたGIで同じ時間波形を表す。
+既存のpeak正規化では40 MS/sの中間sampleが最大値になる場合があるため、20 MS/sとの比較は
+波形全体に共通する実数gainを除いて行う。RF Levelの定義は変更しない。
+
+共通`PowerEnvelopeDefinition(enabled=False)`は維持し、packet全体のRF rampとOFDM境界を分離する。
+Window Length / Shape / Overlapのユーザー設定は設けず、RF / Timingに読み取り専用表示を置く。
+metadataの`symbol_boundary_processing`は`IEEE standard rectangular OFDM symbol boundary`、
+`windowing_standard_reference`は`IEEE Std 802.11-2024, 17.3.2.5; 17.3.2.6 (informational)`。
+スペクトル整形を追加する場合はmask達成手段として別途検討し、任意窓形状を規格必須と扱わない。
 
 ## PSDUとFCS
 

@@ -8,6 +8,7 @@ used. On Windows, use the native Qt platform so installed fonts render correctly
 from __future__ import annotations
 
 import os
+import argparse
 import json
 import time
 from types import SimpleNamespace
@@ -341,6 +342,22 @@ def _capture_vsg(app: QtWidgets.QApplication, settings_path: str) -> None:
     tree.topLevelItem(1).child(0).setExpanded(False)  # Show PHY, Beacon IEs and FCS together.
     _settle(app)
     _save_annotated(window, "pluto-vsg-wifi-verify.png", [])
+    from pluto_vsg.model import WiFiPSDUSource
+    dialog = _WiFiSettingsDialog(wifi_project(), window)
+    dialog.resize(1050, 650)
+    dialog.tabs.setCurrentIndex(1)
+    dialog.show()
+    for source, group, filename in (
+        (WiFiPSDUSource.PROBE_REQUEST, 1, "pluto-vsg-wifi-probe-request-header.png"),
+        (WiFiPSDUSource.PROBE_REQUEST, 2, "pluto-vsg-wifi-probe-request-ies.png"),
+        (WiFiPSDUSource.PROBE_RESPONSE, 3, "pluto-vsg-wifi-probe-response-fields.png"),
+    ):
+        dialog.source_combo.setCurrentIndex(dialog.source_combo.findData(source))
+        dialog.defaults_button.click()
+        dialog.field_pages.setCurrentIndex(group)
+        _settle(app)
+        _save_annotated(dialog, filename, [])
+    dialog.close()
     window.close()
     window.deleteLater()
 
@@ -372,14 +389,23 @@ def _capture_wifi(app: QtWidgets.QApplication, settings_path: str) -> None:
         workspace.packet_table.selectRow(1)
         workspace.modulation_tabs.setCurrentIndex(1)
         workspace.symbol_tabs.setCurrentIndex(1)
+        workspace.packet_tabs.setCurrentWidget(workspace.packet_table)
         _settle(app)
         _save_annotated(window,"pluto-vsa-wifi-overview.png",[])
+        workspace.spectrum_tabs.setCurrentWidget(workspace.mask_plot)
+        workspace.modulation_tabs.setCurrentWidget(workspace.flatness_plot)
+        _settle(app)
+        _save_annotated(window,"pluto-vsa-wifi-rf-results.png",[])
         dialog = workspace._meas_config_dialog
-        dialog.resize(900,850)
+        dialog.resize(900,700)
         dialog.show_page(dialog.page_names.index("Input / Frontend"))
         dialog.show()
         _settle(app)
         _save_annotated(dialog,"pluto-vsa-wifi-frontend.png",[])
+        dialog.show_page(dialog.page_names.index("Measurement Conditions"))
+        dialog.resize(900,300)
+        _settle(app)
+        _save_annotated(dialog,"pluto-vsa-wifi-measurement-conditions.png",[])
         dialog.close()
     finally:
         window.close()
@@ -387,6 +413,10 @@ def _capture_wifi(app: QtWidgets.QApplication, settings_path: str) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--only", nargs="+", choices=("rtsa", "vsa", "vsg", "wifi"),
+                        default=("rtsa", "vsa", "vsg", "wifi"))
+    args = parser.parse_args()
     iio.scan_contexts = lambda: {}
     app = pg.mkQApp("Pluto manuals screenshot generator")
     app.setFont(QtGui.QFont("Segoe UI", 10))
@@ -395,10 +425,10 @@ def main() -> int:
     QtWidgets.QMessageBox.critical = fail_dialog
     QtWidgets.QMessageBox.warning = fail_dialog
     with TemporaryDirectory(prefix="pluto-manual-") as temp_dir:
-        _capture_rtsa(app, str(Path(temp_dir) / "rtsa.ini"))
-        _capture_vsa(app, str(Path(temp_dir) / "vsa.ini"))
-        _capture_vsg(app, str(Path(temp_dir) / "vsg.ini"))
-        _capture_wifi(app, str(Path(temp_dir) / "wifi.ini"))
+        for name, capture in (("rtsa", _capture_rtsa), ("vsa", _capture_vsa),
+                              ("vsg", _capture_vsg), ("wifi", _capture_wifi)):
+            if name in args.only:
+                capture(app, str(Path(temp_dir) / f"{name}.ini"))
     inventory_path = ROOT / "tmp/manual-ui-inventory.json"
     inventory_path.parent.mkdir(parents=True, exist_ok=True)
     inventory_path.write_text(json.dumps(INVENTORY, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -1,16 +1,14 @@
 # Pluto VSA 解析フロー・アルゴリズム補足
 
-文書版: 1.0 レビュー版（2026-09-23）
+文書版: 1.1（2026-09-24）
 
 対象: General VSA / Bluetooth / DECT / Wi-Fi / ADS-B 1090ES
 
-アプリ仕様の確認基準: `b43f7e6`
+Wi-Fi Non-HTの復号・IEEE測定・表示経路を含む現行実装に対応。
 
 ## 1. 本資料の範囲
 
-Wi-Fi追補: Non-HTのSTF検出、LTF同期、CFO、channel等化、pilot補正、独立復号とEVMの定義は
-[Wi-Fi現行仕様](../spec/vsa/wifi/non-ht-analyzer.md)と[方式・検証報告](../verification/vsa/wifi/non-ht-review.md)を参照してください。
-Wi-Fiでは時間IQをPSK軌跡として扱わず、FFT後のsubcarrierを測定します。
+Wi-Fiの処理は第9章で説明します。詳細な適用条件は[Wi-Fi現行仕様](../spec/vsa/wifi/non-ht-analyzer.md)、検証範囲は[方式・検証報告](../verification/vsa/wifi/non-ht-review.md)を参照してください。
 
 本資料は現在の実装がIQから何を計算し、画面へどう出すかを説明します。操作は[VSAユーザーマニュアル](Pluto_VSA_User_Manual_JA.md)を参照してください。規格原文の代替や、全測定項目の適合認証を宣言する資料ではありません。規格に対応する計算処理と、実際に判定できる入力条件を分けて記述します。
 
@@ -254,7 +252,71 @@ Raw、3 MHz、1 MHzを同一系列として平均しません。Power-TimeとNTP
 
 実装参照: [analysis.py](../../pluto_vsa/standards/adsb1090/analysis.py)、[decoder.py](../../pluto_vsa/standards/adsb1090/decoder.py)。
 
-## 9. 解析条件を比較する際の記録
+## 9. Wi-Fi Non-HT OFDMの専用解析
+
+```mermaid
+flowchart TD
+    A[公称20/40 MS/s IQ / 入力帯域確認] --> B[STF候補 / LTF同期 / coarse・fine CFO]
+    B --> C[CP除外 / 64点FFT / LTF channel推定]
+    C --> D[等化・pilot位相補正 / L-SIG・DATA復号]
+    D --> E[PSDU・MAC・FCS / packet別結果]
+    C --> F[LTF・PPDU・DATAの項目別RF測定]
+    E --> G[選択packetと同rate集計 / 測定条件の確認]
+    F --> G
+    G --> H[Summary・Limit・Status / 各plotとDecode]
+```
+
+### 9.1 入力、検出、周波数同期
+
+対象は20 MHz Non-HT/ERP OFDMの6〜54 Mbpsです。IQの公称sample rateは20または40 MS/sで、保存メタデータの微小な丸め差を許容します。40 MS/s入力は内部の20 MS/s基準へ変換し、packet位置と表示時刻は元recordingの座標へ対応付けます。Plutoライブ取得では使用可能帯域が16.25 MHz以上必要なため40 MS/sを使います。
+
+20 MS/s基準で16 sample遅延のSTF自己相関を96 sample窓で計算し、正規化metricが0.75以上の区間が24 sample続く候補を探します。続いて2個のLTFとの一致とL-SIGを確認し、CWや雑音だけの候補を除外します。解析する候補は最大128 packetです。不完全packetのIssuesと、検出・復号成功・FCS valid・測定可能の各件数は別に保持します。
+
+STFの繰返し位相からcoarse CFO、LTF間の位相からfine CFOを推定します。表示CFOは両者を含みます。周波数同期の成立はSymbol Clock Frequency Errorを測ったことにはならず、後者は現行版でNot Measuredです。
+
+### 9.2 FFT、等化、独立復号
+
+L-LTFは32 sampleのguardと64 sampleのtraining 2個、L-SIGと各DATA symbolは16 sampleのCPと64 sampleの有効部です。FFTはCPを除いた有効64 sampleへ適用します。2個のLTFのFFTを平均し、既知の52 active toneで割ってchannel応答H[k]を推定します。受信symbolをH[k]で割る等化と、4 pilot toneからの共通位相誤差（CPE）補正を適用します。
+
+L-SIGのrate、length、parityからDATAの変調、符号化率、必要symbol数を求めます。DATAはdemap、deinterleave、depuncture、Viterbi復号、descrambleを経てPSDUを復元します。VSGが保持する生成bit列を正解として読み出す処理ではありません。MAC decoderは復元byte列からheader、Beacon/Probe Request/Probe Responseの固定fieldとIE、FCSを解析します。
+
+Packet ListのSSIDはこのMAC decode結果のsummaryを利用します。表示のためにもう一度MACを解析しません。SSID欠落、空文字、Probe Requestのwildcardという意味を区別します。Bit Rangeは復号済み論理bitの範囲で、個々のIEがIQの連続時間区間を占めるという表示ではありません。
+
+### 9.3 主測定の52 toneと診断用48 tone EVM
+
+診断用EVMは等化・CPE補正後の48 data toneを使用し、L-SIGとDATAを分けます。全constellationの平均energyが1になる理想点配置を用い、packetごとに実測振幅を自由fitしません。診断RMSは`100 × sqrt(mean(|z − s|²))`、Peakは`100 × max(|z − s|)`です。pilotの残差は別に保持します。
+
+IEEEのRelative Constellation ErrorはDATAの48 data toneに4 pilot toneを加えた52 toneで計算します。16 DATA symbols以上を持ち、同じcapture・同じrateの条件を満たすpacketを集計します。各packetのRMS誤差を求め、IEEE Std 802.11-2024式(17-28)に対応してpacket RMSを等重みで平均します。全packetの二乗誤差をまとめてから平方根を取る計算とは異なります。
+
+```text
+r_capture = mean(r_packet)
+Relative Constellation Error [dB] = 20 log10(r_capture)
+EVM RMS [%] = 100 × r_capture
+```
+
+判定には20 packet以上、random dataの送信源、受信器精度・有線測定経路の確認が必要です。6/9/12/18/24/36/48/54 Mbpsの上限は−5/−8/−10/−13/−16/−19/−22/−25 dBです。対象packetが不足する場合は値のscopeと不足理由を示し、PASSへ読み替えません。適格な集計packetがない場合の選択packet値もTooltipで区別します。FCS不正だけでPHY測定を一律に除外せず、PHYの完全性・測定適用条件を評価します。
+
+Continuousは取得ごとの解析であり、capture間のpacket数を蓄積しません。同じIQのRefreshを繰り返して20 packet条件を達成することもありません。
+
+### 9.4 電力、flatness、center leakage、mask
+
+Packet Powerはactive PPDUのsample線形電力平均からdBmへ換算します。6 µsのERP Signal Extensionを平均へ含めません。PowerのRaw/Analysis Channel選択と入力補正・校正情報を反映します。
+
+Spectral FlatnessはCFO補正後、等化前の2個のLTFのtone energyを平均します。内側のsubcarrier ±1〜16の平均energyを基準に全toneを相対dB化し、内側±4 dB、外側±17〜26は−6/+4 dBで評価します。外側だけの平均へ再正規化しません。Summaryは最小margin、専用plotはtone別偏差を示します。
+
+Center LeakageはLTFのDC energyと、DCを含む全active energyの比を使用します。絶対Limitは送信電力Pに対して`max(P − 15, −20) dBm`であり、絶対電力が分かれば相対Limitへ換算できます。未校正でも相対値が−15 dB以下なら他条件次第で上限内と判断できますが、それより大きく絶対値条件を評価できない場合はNot Measuredとし、推測でFAILにしません。DUTが非VHT STAであることの確認も必要です。
+
+Spectrum MaskはCFO補正したactive PPDUからHann窓、50% overlap、ENBW約100 kHzのWelch PSDを線形平均します。上限maskの代表点は中心から±9/11/20/30 MHzで0/−20/−28/−40 dBrです。±30 MHzより外側の絶対電力条件は校正情報も必要です。現在の20/40 MS/s入力では±30 MHzを観測できず、規定の30 kHz VBW・検波器条件も再現していないため、全mask適合判定はInsufficient Dataです。画面のmaskは比較用であり、地域別規制すべての評価ではありません。
+
+### 9.5 判定と表示の分離
+
+Measurement Conditionsの4項目は周波数基準、受信器・有線経路、random data、非VHT DUTの確認です。チェック操作で校正を実施したことにはなりません。PASS/FAIL、Info、Not Measured、Insufficient Data、Not Availableを分け、各行のTooltipに根拠と未成立理由を出します。
+
+IQ Powerは選択packet前後約10%の範囲を初期表示し、長いcaptureはpacket区間を優先したmin/max描画でピークを残します。描画点を減らしても検出・測定入力は間引きません。Modulationはsubcarrier別EVM・channel・flatnessを表示し、DATA EVM / Symbolのみ時間方向のsymbol indexを使います。Symbol PlotはFFT後のL-SIG/DATA点を他モード共通のFlat/Densityで描き、時間IQをPSK軌跡として扱いません。
+
+実装参照: [Wi-Fi解析](../../pluto_vsa/protocol_modes/wifi/analysis.py)、[RF指標の計算](../../pluto_vsa/protocol_modes/wifi/rf_metrics.py)、[測定条件・判定](../../pluto_vsa/protocol_modes/wifi/measurements.py)、[表示](../../pluto_vsa/protocol_modes/wifi/ui.py)。OFDM境界とCPの確認条件は[VSG検証記録](../verification/vsg/wifi-non-ht-review.md)を参照してください。
+
+## 10. 解析条件を比較する際の記録
 
 | 記録する項目 | 比較に必要な理由 |
 |---|---|

@@ -2,6 +2,8 @@
 
 ## 変更前レビュー
 
+以下は初回実装時の記録。OFDM境界の2024版本文による再確認は末尾の「OFDM Symbol Boundary / Windowing再確認」を参照。
+
 生成器を変更する前に、IEEE Std 802.11a-1999 Clause 17とAnnex Gの数値例を照合した。
 36 Mbps / 100 byte / seed 1011101の固定値テストを先に追加した。
 出典は [IEEE規格のMITミラー](https://pdos.csail.mit.edu/archive/decouto/papers/802.11a.pdf)。
@@ -167,3 +169,74 @@ builder/decoder相互一致だけを根拠にbyte orderを判定していない�
 Qt offscreenの実widgetを描画してRequestのMAC Header / Common IEs、Response固定fieldを確認。
 無効群、Auto FC値、送信元・宛先欄、Wildcard説明、追加IE欄が表示され、内容の欠けは認めなかった。
 今回ユーザーマニュアル・マニュアル画像・PDFは改訂しない。Probe操作説明のマニュアル追記は次回の明示依頼時に行う。
+
+## OFDM Symbol Boundary / Windowing再確認
+
+### 結論と一次資料
+
+**Case A：規格の標準波形はrectangular。現行boundary constructionは一致しており、IQ生成処理の修正は不要。**
+IEEE Std 802.11-2024のローカル本文を確認し、数式・図のページも描画して照合した。
+旧Working Group資料や1999版Annexだけからwindowの要否を判断していない。
+元PDFおよび描画した規格ページをリポジトリや配布物へ含めない。
+
+| Clause / Subclause | 確認事項 |
+| --- | --- |
+| 17.3.2.4 / Table 17-5（印刷頁3347） | useful=3.2 µs、GI=0.8 µs、GI2=1.6 µs、STF/LTF各8 µs、SIGNAL/DATA各4 µs |
+| 17.3.2.5 / (17-2)〜(17-4)（3347〜3348） | subfieldを矩形窓付き逆フーリエ和で定義し、guard分の時間シフトでcyclic prefixを構成。SIGNAL開始16 µs、DATA開始20 µs |
+| 17.3.2.5 / Figure 17-2（3348〜3349） | 非zero T_TRの窓・overlapは平滑化の実装例。約100 nsは固定必須値ではない。windowing以外のfiltering等も認める |
+| 17.3.2.6 / (17-5)（3349） | discrete implementationの説明はinformationalと明記。20 MS/sでn=0,80を半値にする例をmandatory処理としない |
+| 17.3.3 / (17-6)〜(17-10)（3350〜3351） | STF系列と10反復、LTF系列とGI2 + 2周期、両fieldの連結 |
+| 17.3.4.1（3351） | SIGNALはpreamble直後のBPSK 1/2 OFDM symbol |
+| 17.3.5.10 / (17-22)〜(17-26)（3365〜3367） | DATAのguard・pilotを含むOFDM和、symbolごとの時間シフトによる連結 |
+| 17.3.9.3（3370〜3371） | 20 MHzの送信Spectrum Maskと100 kHz RBW / 30 kHz VBW条件 |
+| 17.3.9.7〜17.3.9.8（3372〜3374） | leakage・flatness・rate依存constellation errorが拘束要件。受信機相当のFFT/channel/phase補正を用いた測定 |
+| 18.3.2.4（3392〜3393） | ERP-OFDMは17.3.2〜17.3.5のformatを利用し、6 µsの無送信Signal Extensionを別に設ける |
+
+17.3.2.5にはsidelobe低減に平滑化が必要との説明もあるが、拘束要件として指定するのはSpectrum MaskとModulation Accuracy。
+rectangularの参照波形を生成できることと、DAC・再構成filter・RFを含む送信機がmaskに適合することは別である。
+今回、cosine窓や100 ns overlap、外側RF envelopeを追加して適合を主張することはしない。
+
+### 実装判断と独立検証
+
+現行処理で正しいのは、L-SIG/DATAの16+64 sample、L-LTFの32+64+64 sample、STFの16×10 sample、
+および20 MS/sで160 / 320 / 400を境界とする連結。40 MS/sではすべて2倍になる。
+CPはuseful末尾のcyclic copyであり、boundary sampleの重複・欠落はなかった。
+矩形subfield間の振幅差は誤りではない。隣接sampleを平滑化して一致させるassertionは置かない。
+
+変更はmetadata表現・IEEE参照の追加、実装コメント、設定画面の読み取り専用表示、および回帰テスト。
+MAC/Probe/Beacon、bit生成・FEC・mapping・pilot、RF Level、ERP、backend、WV export、受信FFT位置は変更していない。
+
+`tests/vsg/test_wifi_ofdm_boundaries.py`に以下の独立確認を追加した。
+
+- 全8 rate×20/40 MS/sのfield長、CP全sample、LTF GI2/反復、STF反復、ERP無送信区間。
+- 本文の複素指数関数和を時間軸上で直接評価し、PPDU全sampleと全join前後を比較。
+  参照計算は生成器のIFFT/CP/training/pilot helperを使用しない。許容する補正は全体に共通の実数gainのみ。
+  DATA constellationは入力として使い、bit/mappingの正しさは既存の外部固定vectorテストで別途確認する。
+- 40 MS/sの偶数sampleと20 MS/sが共通gainを除いて一致。奇数sampleも直接フーリエ和との比較対象。
+- 既存IEEE Annex G.11/G.22の独立したSIGNAL/DATA binsから20/40 MS/sの時間波形を計算し、
+  最初のsampleを含めた全sampleを比較。旧informative例の半値端点は標準矩形波形へ強制しない。
+- L-SIG/DATAのCPだけを意図的にゼロへ壊しても、独立decoderの抽出constellationと復元PSDUが変わらないことを確認。
+  FFTがCPを含まず、20 MS/s換算でSIGNAL `[336,400)`、DATA `[416+80n,480+80n)`を使うことの回帰検証。
+- 直接フーリエ和と生成IQのnormalized FFT power spectrum、および観測可能帯域内の|f|≥9 MHzの積分電力比を比較。
+  デジタルspectrum regressionであり、規定RBW/VBWによるRF mask測定ではない。
+- Boundary metadata、Outer RF Envelopeとの独立性、設定画面の固定表示を確認。
+
+20/40 MS/sのNyquist範囲はそれぞれ±10/±20 MHzであり、20 MHz maskの±30 MHz以上は直接確認できない。
+有限sample rateのbaseband FFTとRF測定を同一視しない。今回filterやwindow shapeを変更する根拠はなく、
+RF mask・hardware reconstruction filtering・EVMの実測は[実機手順](wifi-non-ht-hardware.md)で別途行う。
+
+### Known limitationsと報告範囲
+
+検証結果：**関連306件PASS（43.12秒、Qt offscreen）**。
+対象はVSGの境界・IEEE参照・PHY primitives・IQ Verify・MAC/Management・設定UI・Packet Decode統合と、
+VSA Wi-Fi全テスト。今回追加したboundaryテストは59件。全リポジトリsuiteの再実行ではない。
+全8 rate×20/40 MS/sでL-SIG・PSDU復元・FCS成功を確認し、VSAのDATA EVM最大値は
+RMS **0.0000036161 %以下**、peak **0.000010455 %以下**（理想IQ、sample数やsample rateによる浮動小数点誤差を含む）。
+変更前後に同一条件（default Beacon、Fixed seed、1 ms period）で生成した16波形のcomplex64 IQは
+SHA-256が全件一致した。今回の変更によるspectrum・EVM・RF levelへの波形上の差はない。
+
+非矩形windowはnormativeな固定処理ではなく、今回追加していない。overlap/addも必須ではない。
+理想IQのdecode/EVM確認は実機のmodulation accuracy適合判定ではない。
+17.3.9.8の20 PPDU以上・DATA 16 symbol以上・random data等を満たすRF試験や、実RF spectrum maskは未実施。
+境界確認後の明示依頼に基づき、UI表示をユーザーマニュアル・画像・PDFへ反映済み。
+改訂内容とPDFの確認結果は[マニュアル確認記録](../../user-manual/manual-validation.md)を参照。

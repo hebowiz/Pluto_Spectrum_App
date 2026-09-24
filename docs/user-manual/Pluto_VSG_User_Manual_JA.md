@@ -1,8 +1,8 @@
 # Pluto VSG ユーザーマニュアル
 
-文書版: 2.0 レビュー版（2026-09-23）
+文書版: 2.1（2026-09-24）
 
-対象: Pluto VSG / アプリ仕様の確認基準: `b43f7e6`
+対象: Pluto VSG / Probe Request・Probe Response、OFDM境界表示に対応
 
 ## 1. できることと読み方
 
@@ -20,7 +20,7 @@ Pluto VSGはBluetooth BR/EDR、LE、HDT、Wi-Fi、DECTのpacketからIQ波形を
 |---|---|
 | 1 Block Library | 波形要素の分類。表示される項目すべてが自由編集可能とは限らない |
 | 2 Packet Composer | 上段はpacket/field、下段は変調・電力制御。Field Treeで構造を確認 |
-| 3 Inspector | 規格、sample rate、payload、periodなど生成条件。下の編集ボタンから設定へ進める |
+| 3 Inspector | 規格、sample rate、payload、periodなど生成条件の確認。編集は右操作パネルのPacket Settingsから行う |
 | 4 Generated IQ Preview | I/Q、電力包絡、瞬時周波数、Spectrum、Constellation |
 | 5 右操作パネル | Calibration/RF、Mod、Continuous、Power、Frequency、Packet Settings、Project、File、Device |
 | Packet Decode | Verify PacketのDecode / Payload Hex / Issues。Wi-Fiは生成IQを復調、それ以外は生成bit列を解析 |
@@ -211,30 +211,37 @@ HDTのpayload長・Samples/Symbol・ramp・periodは第5章と同じ考え方で
 | Channel / Frequency Offset | Channel 1〜13と、その中心からのRF周波数offset。Generated RF Frequencyで合計値を確認 |
 | Packet Period | L-STF開始間隔。active PPDU長 + ERP Signal Extension 6 µs以上が必要 |
 | Repeat Count | 同じIQ packetと無送信時間を繰り返す回数 |
-| Envelope | 共通rampは無効。OFDM内部はCP付きsymbolの連結。任意のoverlap windowは未適用 |
+| OFDM Boundary Processing | Standard / Rectangularの固定表示。CP付きsymbolの矩形境界処理。ユーザーが選ぶwindow設定ではない |
+| Envelope | 共通RF power rampは無効。OFDM内部の境界処理とは独立した項目 |
 | Derived timing | PSDU長、modulation/coding、N_BPSC/N_CBPS/N_DBPS、N_SYM/N_PAD、PPDU Duration、Duty Cycle、Signal Extension、Minimum/Configured Packet Period |
 | Project Name | 識別名 |
 | Scrambler Seed | Auto / Fixed。scrambler初期状態の決定方法 |
 | Fixed Seed | Fixed選択時の初期値 |
-| Frame Source | Raw PSDU / Pattern / PRBS-9 / Beacon |
+| PSDU Source | Raw PSDU / Pattern / PRBS-9 / Beacon / Probe Request / Probe Response |
 | Raw input meaning | including FCSは入力byteを保持。without FCSはMAC frameの末尾へAuto / Manual FCSを付加 |
 | Raw bytes [hex] | 選択した意味に従うoctet列。PHY preambleやL-SIGを含むIQではない |
 | Pattern [hex] | PSDUを作る繰返しbyte pattern |
-| SSID | Beaconのネットワーク名 |
-| BSSID | Beaconの識別アドレス |
-| Frame Control / Duration / ID | MAC headerの16-bit値。DefaultはBeacon / Duration 0 |
-| Destination / Source | 宛先はDefault broadcast。Source空欄はBSSIDと同じ |
+| Management defaults | 現在のSource用の初期設定を明示的に適用。Sourceの切替だけでは既存入力を初期化しない |
+| SSID | UTF-8で最大32 byte。Probe Requestでは空文字がwildcard、非空文字が特定SSID宛て。日本語等は文字数とbyte数が異なる |
+| BSSID / Address 3 | AP識別アドレス。Probe Requestの初期値はbroadcast |
+| Frame Control Mode | AutoはSourceからBeacon=0x0080、Probe Request=0x0040、Probe Response=0x0050を生成。Manualは指定した16-bit値を使用 |
+| Generated Frame Control / Manual Frame Control | 生成値の確認／Manual時の入力。Manual値はAutoや別Sourceへ切り替えても保持する。body形式はSourceで決まる |
+| Duration / ID | MAC headerの16-bit値。初期値はBeacon/Requestが0、Responseが60 µs。Rate変更時に自動追従しない |
+| Destination / Address 1 | 宛先MAC。Beacon/Requestの初期値はbroadcast、Responseは要求元STAのアドレスを指定 |
+| Source / Address 2 | 送信元MAC。Probe Requestでは自分のSTAアドレスを設定。空欄はBSSIDと同じという共通動作なので、STAアドレスは明示入力する |
 | Sequence / Fragment Number | 12-bit sequenceと4-bit fragment。cyclic replay中のsequenceはstatic |
-| Timestamp | 64-bit µs値。staticであり繰り返しごとには更新しない |
-| Beacon Interval | Beaconが通知するTU値。1 TU=1024 µs。RFタブのUse Beacon intervalボタンで周期へコピー |
-| Capability Information | Default 0x0401：ESS、short slot、open。手動編集時はIEや運用条件との整合を確認 |
+| Timestamp | Beacon/Responseの64-bit µs値。staticであり繰り返しごとには更新しない。Requestには含めない |
+| Beacon Interval | Beacon/Responseが通知するTU値。1 TU=1024 µs。BeaconのみRFタブのUse Beacon intervalボタンで送信周期へコピー可能。Responseの通知値とreplay周期は別 |
+| Capability Information | Beacon/Responseの固定field。Default 0x0401：ESS、short slot、open。Requestにはこの固定fieldがない |
 | Supported Rates | 500 kbit/s単位のoctetをhex入力。MSBはbasic rate。1〜8 octet |
+| Extended Supported Rates | 追加rateのhex octet列。空欄ならIEを省略、設定時は1〜255 octet。Requestでは送信元STAの対応rateを設定する |
 | DS Parameter Set | AutoはRF Channelに追従。ManualではIEに通知するChannelを別指定 |
-| TIM body | DTIM count / period、bitmap control、partial virtual bitmapをhex入力 |
-| ERP Information | ERP IEの1 octet値。Default 0 |
+| TIM body | Beaconのみ。DTIM count / period、bitmap control、partial virtual bitmapをhex入力。Responseには付加しない |
+| ERP Information | Beacon/ResponseのERP IEの1 octet値。Default 0。RequestではDS/ERPを標準生成しない |
+| Additional IEs | Element ID・Length・Valueを含む完全なIE列をhex入力。標準IEの後ろへ入力順で追加。構造・長さは検査するが、意味、重複、規格上の順序は自動補正しない |
 | FCS mode / Manual FCS | AutoはCRC-32を計算。Manualは送信順4 octet。Raw including FCSには二重付加しない |
 
-FieldsはSource / payload、Beacon MAC header、Beacon fixed fields / IEs、FCSのグループを切り替えます。
+FieldsはSource / payload、Management MAC Header、Common Management IEs、Beacon / Probe Response Fixed Fields、Beacon-only IEs、FCSの6グループを切り替えます。Sourceに該当しない欄は無効になります。
 L-SIG LENGTH・parityは最終PSDUからAuto生成します。Pattern / PRBS-9は指定長の合成PSDUであり、MAC headerやFCSを自動追加しません。
 
 Beaconの操作例：New Wi-Fi PacketでChannel 6 / 6 Mbps / SSID `Pluto_Test_AP`を生成し、
@@ -244,8 +251,37 @@ SSID・BSSID・DS Channel・Beacon IntervalはDecode treeで確認できます�
 
 ![Wi-Fi Beaconの生成IQから復調したVerify結果。実RF送信は行っていない](../images/user-manual/pluto-vsg-wifi-verify.png)
 
-DefaultのBeacon Intervalは100 TU、Packet Periodは102.4 msです。Timestamp / Sequenceはstaticであり、
-通常APのassociation、ACK、CSMA/CA動作は行いません。実receiverでの確認は [実機手順](../verification/vsg/wifi-non-ht-hardware.md) に従って別途実施します。
+### 9.1 Probe Requestで送信元の情報を設定する
+
+1. 右側の`Packet Settings > Fields`でPSDU SourceをProbe Requestへ変更します。
+2. 初期値から作る場合だけ`Apply Probe Request Default`を押します。Management MAC HeaderでSource / Address 2を自分のSTAアドレスへ変更します。
+3. Common Management IEsでSSIDを空欄（wildcard）または検索先SSIDへ設定します。Supported Rates / Extended Supported Ratesで自分の対応rateを指定します。
+4. 追加の能力情報が必要ならAdditional IEsへ完全なIE列を入力します。RequestにはBeacon/ResponseのCapability Information固定fieldはありません。
+5. RF / TimingでRate・Channel・Packet Periodを確認し、Apply and Generate後にVerify Packetを実行します。DecodeでProbe Request、送信元、SSID、rate IEとFCSを確認します。
+
+![Probe RequestのMAC header。Source / Address 2が送信元STAの設定](../images/user-manual/pluto-vsg-wifi-probe-request-header.png)
+
+![Probe Requestの共通IE。空文字SSIDはwildcardで、対応rateと追加IEも編集できる](../images/user-manual/pluto-vsg-wifi-probe-request-ies.png)
+
+Request初期値はDestination/BSSIDがbroadcast、Sourceが`02:11:22:33:44:66`です。Supported Ratesは`02 04 0B 16 0C 12 18 24`、Extended Supported Ratesは`30 48 60 6C`です。入力した能力は宣言する情報であり、PlutoがそのすべてのPHYを実装する意味ではありません。
+
+### 9.2 Probe Responseを生成する
+
+SourceをProbe Responseへ変更し、必要なら`Apply Probe Response Default`を押します。Destinationには要求元STA、Source/BSSIDには応答するAPのアドレスを指定します。Common Management IEsでSSID・rate・DS channel・ERP、Fixed FieldsでTimestamp・Beacon Interval・Capability Informationを設定して生成・Verifyします。
+
+![Probe Responseの固定field。Beacon Intervalは通知内容で、送信周期とは別](../images/user-manual/pluto-vsg-wifi-probe-response-fields.png)
+
+Response初期値はDestinationが`02:11:22:33:44:66`、Source/BSSIDが`02:11:22:33:44:55`、SSIDが`Pluto_Test_AP`、Durationが60 µsです。Durationは6 Mbps ERPのACK時間50 µsとSIFS 10 µsを想定した値で、条件を変える場合は手動で見直します。TIMは生成しません。
+
+Management defaultsはData Rateも6 Mbpsへ戻しますが、プロジェクト名、Channel/Offset、Sample Rate、Packet Period、Repeat Count、Scrambler設定は保持します。Source変更だけで入力を消す動作ではありません。古いプロジェクトにFrame Control Modeの情報がない場合は保存済みのFrame Control値をManualとして保持します。
+
+### 9.3 OFDM境界と生成波形の範囲
+
+Standard / RectangularはIEEE Std 802.11-2024 17.3.2.5に沿った矩形のsymbol境界です。17.3.2.6の境界重み付け・overlapの例はinformativeであり、windowを追加したことだけで適合が決まるわけではありません。送信スペクトルや変調精度は別に評価します。
+
+20 MS/sではL-STFが160 sample、L-LTFが32 + 64 + 64 sample、L-SIGおよび各DATA symbolがCP 16 + 有効64 sampleです。40 MS/sでは各sample数が2倍になります。ERP Signal Extensionの6 µsはactive PPDUの後ろに置く無送信区間で、OFDM内部のCPや共通RF rampとは異なります。
+
+DefaultのBeacon Intervalは100 TU、Packet Periodは102.4 msです。Timestamp / Sequenceはstaticです。Probe Responseも設定済みpacketの生成・replayであり、受信Requestへ自動応答しません。association、ACK送受信、CSMA/CA動作は行いません。実receiverでの確認は[実機手順](../verification/vsg/wifi-non-ht-hardware.md)に従って別途実施します。
 
 ## 10. DECTの個別設定
 

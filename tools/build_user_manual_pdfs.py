@@ -418,6 +418,17 @@ class AnalysisFlowchart(Flowable):
         canvas.restoreState()
 
 
+def _keep_heading_with_start(story: list, following_height: float) -> None:
+    """Reserve only the next figure or first table rows, never an entire chapter."""
+    if len(story) < 2 or getattr(story[-1], "_toc_level", None) is None:
+        return
+    heading = story[-1]
+    if isinstance(story[-2], CondPageBreak):
+        height = heading.wrap(CONTENT_WIDTH, PAGE_HEIGHT)[1]
+        story[-2] = CondPageBreak(height + heading.getSpaceBefore()
+                                 + heading.getSpaceAfter() + following_height)
+
+
 def _markdown_story(path: Path, subtitle: str, styles: dict[str, ParagraphStyle]):
     lines = path.read_text(encoding="utf-8").splitlines()
     title = next(line[2:].strip() for line in lines if line.startswith("# "))
@@ -464,7 +475,14 @@ def _markdown_story(path: Path, subtitle: str, styles: dict[str, ParagraphStyle]
         image_match = re.fullmatch(r"!\[([^]]*)\]\(([^)]+)\)", line)
         if image_match:
             image_path = (path.parent / image_match.group(2)).resolve()
-            story.append(_image_flowable(image_path, image_match.group(1), styles))
+            figure = _image_flowable(image_path, image_match.group(1), styles)
+            # Image and caption remain indivisible; avoid leaving their heading
+            # behind without preventing ordinary paragraph/table pagination.
+            figure_height = sum(item.wrap(CONTENT_WIDTH, PAGE_HEIGHT)[1]
+                                + item.getSpaceBefore() + item.getSpaceAfter()
+                                for item in figure._content)
+            _keep_heading_with_start(story, figure_height)
+            story.append(figure)
             index += 1
             continue
         if line.startswith("```"):
@@ -475,7 +493,10 @@ def _markdown_story(path: Path, subtitle: str, styles: dict[str, ParagraphStyle]
                 code_lines.append(lines[index])
                 index += 1
             if language == "mermaid":
-                story.append(AnalysisFlowchart(code_lines, styles))
+                figure = AnalysisFlowchart(code_lines, styles)
+                _keep_heading_with_start(story, figure.wrap(CONTENT_WIDTH, PAGE_HEIGHT)[1]
+                                         + figure.getSpaceBefore() + figure.getSpaceAfter())
+                story.append(figure)
             else:
                 story.append(Preformatted("\n".join(code_lines), styles["code"]))
             index += 1
@@ -487,7 +508,10 @@ def _markdown_story(path: Path, subtitle: str, styles: dict[str, ParagraphStyle]
                 if not all(re.fullmatch(r":?-{3,}:?", cell) for cell in row):
                     rows.append(row)
                 index += 1
-            story.extend([_table(rows, styles), Spacer(1, 3 * mm)])
+            table = _table(rows, styles)
+            table.wrap(CONTENT_WIDTH, PAGE_HEIGHT)
+            _keep_heading_with_start(story, sum(table._rowHeights[:2]))
+            story.extend([table, Spacer(1, 3 * mm)])
             continue
         if line.startswith("> "):
             story.append(Paragraph(_inline(line[2:]), styles["quote"]))

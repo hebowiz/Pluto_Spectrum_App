@@ -1,10 +1,10 @@
 # 図版・確認記録
 
-更新日: 2026-09-23 / アプリ仕様の基準: `b43f7e6`
+更新日: 2026-09-24 / アプリ仕様の基準: `cfff9f4`とOFDM境界の説明・固定表示の修正
 
-対象: RTSA・VSA・VSGユーザーマニュアルとVSA解析補足のMarkdownレビュー版
+対象: RTSA・VSA・VSGユーザーマニュアルとVSA解析補足のMarkdown・PDF版
 
-Wi-Fi Non-HT改訂ではVSGのRF / Timing・Fields画像を現在のdialogへ差し替え、生成Beacon IQを独立復調したVerify画面を追加しました。他の画像の条件は以下の記録を維持します。Wi-Fi画像も実RF送信・外部receiver受信の証拠ではありません。
+今回の改訂ではVSG全体・設定・Verify画面を更新し、Probe RequestのMAC header/IEとProbe Responseの固定field画面を追加しました。VSA Wi-FiはSSID列を表示した全体画面へ更新し、Measurement ConditionsとMask/Flatness画面を追加しました。RTSAとWi-Fi以外のVSA画像は既存の撮影条件・画像を維持します。Wi-Fi画像も実RF送信・外部receiver受信の証拠ではありません。
 
 ## 1. 図版の入力と再現条件
 
@@ -37,6 +37,8 @@ $env:QT_QPA_PLATFORM='windows'
 
 スクリプトは[generate_user_manual_screenshots.py](../../tools/generate_user_manual_screenshots.py)です。機器検索と取得を置き換え、QSettingsは一時ディレクトリに分離します。個人のRTSA校正CSVも読み込みません。RF送信は開始しません。GUIが一時的に開くため、編集中のアプリとは別に実行してください。
 
+今回の撮り直しは`--only vsg wifi`で対象を限定しました。Probe設定画像は各SourceのDefaultを適用した値です。VSAの測定条件チェックは未確認のままとし、生成IQで規格PASSを示すための操作はしていません。
+
 WindowsネイティブのQt描画を使用します。offscreenプラットフォームでは環境によりフォントが欠けるため、今回の掲載画像には使用していません。設定フォームの項目一覧は確認用の`tmp/manual-ui-inventory.json`へ出力します。
 
 ## 3. 内容の照合範囲
@@ -46,7 +48,7 @@ WindowsネイティブのQt描画を使用します。offscreenプラットフ�
 | 設定項目 | 現在のUIフォーム、選択肢、無効項目と説明表を照合。規格共通の項目は共通章から参照 |
 | メニューとファイル | 操作パネル、State/File、各読込・保存処理、フォルダ記憶の実装を確認 |
 | 起動・レイアウト | [ウィンドウ仕様](../spec/common/window-layout.md)と現行実装に合わせて保存範囲を記載 |
-| VSA解析 | 補足資料の各節から実装へリンクし、DDC、同期、FSK、EVM/DEVM、DECT電力、ADS-B復調の経路を説明 |
+| VSA解析 | 補足資料の各節から実装へリンクし、DDC、同期、FSK、EVM/DEVM、DECT電力、ADS-B復調、Wi-Fi同期・独立復号・52 tone測定と48 tone診断の経路を説明 |
 | 図版 | 現行アプリによる解析・生成、文字・波形・設定フォームの表示を確認 |
 | Markdown | 相対リンク・掲載画像の存在と整合、差分の書式を確認 |
 
@@ -68,3 +70,23 @@ WindowsネイティブのQt描画を使用します。offscreenプラットフ�
 - 画像数とページ内の描画範囲、PDFの目次・しおりを確認。
 
 生成処理は[build_user_manual_pdfs.py](../../tools/build_user_manual_pdfs.py)。今回はドライバガイドのPDFを更新していません。
+
+## 6. 現行版の改訂・PDF確認（2026-09-24）
+
+3アプリの文書版を2.1、VSA解析補足を1.1へ更新しました。RTSAは本文の現行整合を確認し、VSA/VSGはWi-Fiの変更を重点的に改訂しました。
+
+| 資料 | ページ数 | 本文のスクリーンショット数 |
+|---|---|---|
+| RTSA | 7 | 2 |
+| VSA | 22 | 13 |
+| VSG | 22 | 13 |
+| VSA解析補足 | 10 | 0（ベクターフロー図4点） |
+
+- 全61ページをPopplerで描画し、ページ構成と追加箇所の文字・表・図を確認しました。
+- Markdownの本文・表セル・キャプション・フロー図ラベルをPDF抽出テキストと照合し、欠落なしを確認しました。ページをまたぐ本文はヘッダ・フッタを除いて照合しています。
+- 画像28点の数とページ内描画範囲、リンク先ファイル、目次・しおりを確認しました。4個のフロー図も分割せずに配置しています。
+- 章単位の固定改ページは追加していません。図とキャプションを一体にし、直前の見出しだけが残る場合は図と同じページへ配置します。表は見出しと先頭行に必要な領域だけを確保し、続きは改ページ可能です。
+- 撮影ツールはVSG/Wi-Fiを実際に起動して完走し、VSAの生成IQ 2 packetのFCS validも確認しました。PDF生成はReportLabを含む既存のCodex runtime Python環境で実施しました。
+- 今回は文書・図版・生成ツールを変更し、アプリ動作は変更していません。直前のOFDM境界確認のコード差分と試験結果は[VSG検証記録](../verification/vsg/wifi-non-ht-review.md)に分離して記録しています。
+
+ドライバガイドは改訂対象外です。ローカルIEEE規格書は引き続きGit管理外であり、規格書のページ画像や本文抜粋を配布PDFへ取り込んでいません。

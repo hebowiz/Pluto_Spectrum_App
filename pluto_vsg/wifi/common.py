@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# The waveform definition uses a rectangular pulse. The 100 ns transition
+# and half-weight overlap in 17.3.2.6 are informational implementation examples.
+OFDM_BOUNDARY_PROCESSING = "IEEE standard rectangular OFDM symbol boundary"
+OFDM_BOUNDARY_STANDARD_REFERENCE = "IEEE Std 802.11-2024, 17.3.2.5; 17.3.2.6 (informational)"
+
+
 @dataclass(frozen=True)
 class LegacyRate:
     rate_bits: tuple[int, int, int, int]

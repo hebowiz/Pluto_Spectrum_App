@@ -13,7 +13,9 @@ from pluto_vsg.engine.base import (
 )
 from pluto_vsg.model import WiFiScramblerSeedMode, WaveformProject, validate_project
 from pluto_vsg.rf_level import iq_level_metadata, measure_iq_levels
-from pluto_vsg.wifi.common import LEGACY_RATES, LegacyRate
+from pluto_vsg.wifi.common import (
+    LEGACY_RATES, LegacyRate, OFDM_BOUNDARY_PROCESSING, OFDM_BOUNDARY_STANDARD_REFERENCE,
+)
 from pluto_vsg.wifi.mac import build_psdu, bytes_to_air_bits
 
 
@@ -113,6 +115,8 @@ def _pilot_polarities(count: int) -> np.ndarray:
 
 
 def _ifft_symbol(data: np.ndarray, pilot_index: int, oversample: int) -> np.ndarray:
+    # IEEE 802.11-2024 17.3.2.5 / 17.3.5.10: sample the rectangular
+    # cyclic extension over [0, 4 us). No duplicate endpoint or overlap.
     nfft = 64 * oversample
     bins = np.zeros(nfft, dtype=np.complex128)
     for carrier, value in zip(DATA_SUBCARRIERS, data, strict=True):
@@ -125,6 +129,7 @@ def _ifft_symbol(data: np.ndarray, pilot_index: int, oversample: int) -> np.ndar
 
 
 def _training_fields(oversample: int) -> tuple[np.ndarray, np.ndarray]:
+    # 17.3.3: 10 short periods; GI2 followed by two useful LTF periods.
     nfft = 64 * oversample
     stf_bins = np.zeros(nfft, dtype=np.complex128)
     for carrier, value in STF_TONES.items():
@@ -259,7 +264,8 @@ class WiFiLegacyOFDMWaveformEngine:
                 "minimum_packet_period_us": ppdu.size / expected_sample_rate * 1e6 + 6.0,
                 "configured_packet_period_us": settings.packet_period_us,
                 "beacon_timestamp_mode": "Static", "sequence_number_mode": "Static",
-                "symbol_boundary_processing": "Rectangular CP; no optional overlap window",
+                "symbol_boundary_processing": OFDM_BOUNDARY_PROCESSING,
+                "windowing_standard_reference": OFDM_BOUNDARY_STANDARD_REFERENCE,
                 **iq_level_metadata(level_metrics),
             },
         )
